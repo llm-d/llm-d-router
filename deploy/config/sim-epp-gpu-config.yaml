@@ -37,6 +37,7 @@ plugins:
 dataLayer:
   sources:
   - pluginRef: dcgm-source
+    interval: 1s
     extractors:
     - pluginRef: dcgm-extractor
 schedulingProfiles:

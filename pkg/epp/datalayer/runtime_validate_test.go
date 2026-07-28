@@ -19,6 +19,7 @@ package datalayer
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -145,4 +146,37 @@ func TestRuntimeConfigure_SourceImplementingMultipleVariants_Rejected(t *testing
 	err := r.Configure(cfg, logger)
 	require.Error(t, err, "a source that implements multiple variant interfaces must be rejected")
 	assert.Contains(t, err.Error(), "multiple variant")
+}
+
+func TestRuntimeConfigure_InvalidSourceInterval(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(50 * time.Millisecond)
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{
+			Plugin:   &mocks.MetricsDataSource{},
+			Interval: 75 * time.Millisecond,
+		}},
+	}
+
+	err := r.Configure(cfg, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple of base tick")
+}
+
+func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(50 * time.Millisecond)
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{
+			Plugin:   &mocks.MetricsDataSource{},
+			Interval: time.Second,
+		}},
+	}
+
+	require.NoError(t, r.Configure(cfg, logger))
+	scheduled := r.dispatchers.Scheduled()
+	require.Len(t, scheduled, 1)
+	assert.Equal(t, 20, scheduled[0].PeriodTicks)
 }

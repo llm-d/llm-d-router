@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -49,6 +50,9 @@ func (c *Config) String() string {
 type DataSourceConfig struct {
 	Plugin     plugin.Plugin   // the source plugin instance (DataSource or PollingDispatcher)
 	Extractors []plugin.Plugin // extractors defined for the data source
+	// Interval is the scrape period for polling sources. Zero means every
+	// Runtime base tick. Ignored for notification/endpoint sources.
+	Interval time.Duration
 }
 
 func (dsc DataSourceConfig) String() string {

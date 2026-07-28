@@ -76,14 +76,18 @@ func NewCollector() *Collector {
 }
 
 // Start launches the collection goroutine.
-// Each PollingDispatcher owns its extractors; the Collector calls Dispatch per tick.
-func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, dispatchers []fwkdl.PollingDispatcher) error {
-	if len(dispatchers) == 0 {
+// Each ScheduledDispatcher owns its extractors; the Collector invokes
+// Dispatch on a source only when its period elapses (measured in base ticks).
+func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, scheduled []ScheduledDispatcher) error {
+	if len(scheduled) == 0 {
 		return errors.New("cannot start collector with empty dispatchers")
 	}
-	for _, d := range dispatchers {
-		if d == nil {
+	for _, s := range scheduled {
+		if s.Dispatcher == nil {
 			return errors.New("cannot add nil dispatcher")
+		}
+		if s.PeriodTicks < 1 {
+			return errors.New("periodTicks must be >= 1")
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -97,7 +101,7 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
-	go c.run(ctx, ticker, ep, dispatchers)
+	go c.run(ctx, ticker, ep, scheduled)
 	return nil
 }
 
@@ -112,30 +116,40 @@ func (c *Collector) Stop() {
 	}
 }
 
-func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, dispatchers []fwkdl.PollingDispatcher) {
+func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, scheduled []ScheduledDispatcher) {
 	defer func() {
 		close(c.done)
 		ticker.Stop()
 	}()
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().GetIPAddress())
 
+	// nextDue[i] is the tick index when scheduled[i] should next Dispatch.
+	// Zero means fire on the first tick (tick == 0).
+	nextDue := make([]int, len(scheduled))
+	tick := 0
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.Channel():
-			for _, disp := range dispatchers {
+			for i, s := range scheduled {
 				if ctx.Err() != nil {
 					return
 				}
+				if tick != nextDue[i] {
+					continue
+				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
-				if err := disp.Dispatch(dispCtx, ep); err != nil {
-					tn := disp.TypedName()
+				if err := s.Dispatcher.Dispatch(dispCtx, ep); err != nil {
+					tn := s.Dispatcher.TypedName()
 					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
 				}
 				cancel()
+				nextDue[i] = tick + s.PeriodTicks
 			}
+			tick++
 		}
 	}
 }

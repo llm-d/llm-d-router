@@ -66,6 +66,9 @@ plugins:
 dataLayer:
   sources:
   - pluginRef: dcgm-source
+    # Scrape period for this source. Must be a positive multiple of
+    # --refresh-metrics-interval (default 50ms). Omit to scrape every base tick.
+    interval: 1s
     extractors:
     - pluginRef: dcgm-extractor
 ```

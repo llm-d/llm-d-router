@@ -224,6 +224,12 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
 
+Polling sources share one Collector goroutine per endpoint. The base tick is
+`--refresh-metrics-interval` (default 50ms). A polling entry under `dataLayer.sources`
+may set `interval` to a positive multiple of that base tick; when omitted, the source
+runs on every base tick. Example: `interval: 1s` with the default base tick scrapes
+that source once per second.
+
 See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc for the canonical model.
 
 ---

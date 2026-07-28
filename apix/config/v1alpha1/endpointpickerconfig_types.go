@@ -278,6 +278,13 @@ type DataLayerSource struct {
 	// this Source. The entries are references to the names of entries of the Plugins
 	// defined in the configuration's Plugins section
 	Extractors []DataLayerExtractor `json:"extractors"`
+
+	// +optional
+	// Interval is the scrape period for this polling source. It must be a
+	// positive multiple of --refresh-metrics-interval (default 50ms). When
+	// omitted, the source runs on every base tick. Ignored for
+	// notification/endpoint sources.
+	Interval *metav1.Duration `json:"interval,omitempty"`
 }
 
 func (dls DataLayerSource) String() string {
@@ -285,6 +292,9 @@ func (dls DataLayerSource) String() string {
 	parts = append(parts, "PluginRef: "+dls.PluginRef)
 	if len(dls.Extractors) > 0 {
 		parts = append(parts, fmt.Sprintf("Extractors: %v", dls.Extractors))
+	}
+	if dls.Interval != nil {
+		parts = append(parts, "Interval: "+dls.Interval.Duration.String())
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }

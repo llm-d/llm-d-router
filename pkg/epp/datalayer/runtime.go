@@ -120,7 +120,16 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 				return err
 			}
 
-			if err := r.registerSource(src, gvk); err != nil {
+			periodTicks := 1
+			if _, ok := src.(fwkdl.PollingDispatcher); ok {
+				var err error
+				periodTicks, err = PeriodTicks(srcCfg.Interval, r.pollingInterval)
+				if err != nil {
+					return fmt.Errorf("source %s: %w", srcName, err)
+				}
+			}
+
+			if err := r.registerSource(src, gvk, periodTicks); err != nil {
 				return err
 			}
 
@@ -174,7 +183,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 				}
 				return errors.New(msg)
 			}
-			if err := r.registerSource(pending.DefaultSource, gvk); err != nil {
+			if err := r.registerSource(pending.DefaultSource, gvk, 1); err != nil {
 				return fmt.Errorf("auto-register default source for %s: %w", pending.Extractor.TypedName(), err)
 			}
 			srcName = pending.DefaultSource.TypedName().Name
@@ -225,11 +234,12 @@ func (r *Runtime) Register(reg fwkdl.PendingRegistration) error {
 // registerSource dispatches src to the matching variant manager. g enforces
 // per-Configure-call GVK uniqueness for NotificationSources. src may be a
 // PollingDispatcher (not a DataSource), so the parameter is plugin.Plugin.
+// periodTicks applies only to PollingDispatchers (ignored otherwise).
 //
 // A source that implements more than one variant interface is rejected: type-
 // switch order would otherwise silently bind it to the first match, hiding the
 // ambiguity until a notification or endpoint event mismatched its handler.
-func (r *Runtime) registerSource(src fwkplugin.Plugin, g *gvk) error {
+func (r *Runtime) registerSource(src fwkplugin.Plugin, g *gvk, periodTicks int) error {
 	var variants []string
 	if _, ok := src.(fwkdl.PollingDispatcher); ok {
 		variants = append(variants, string(variantPolling))
@@ -247,7 +257,7 @@ func (r *Runtime) registerSource(src fwkplugin.Plugin, g *gvk) error {
 
 	switch s := src.(type) {
 	case fwkdl.PollingDispatcher:
-		return r.dispatchers.Register(s)
+		return r.dispatchers.Register(ScheduledDispatcher{Dispatcher: s, PeriodTicks: periodTicks})
 	case fwkdl.NotificationSource:
 		if err := g.Check(s); err != nil {
 			return err
@@ -373,11 +383,8 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 
 	endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
 
-	dispatchers := make([]fwkdl.PollingDispatcher, 0, r.dispatchers.Count())
-	for _, d := range r.dispatchers.Dispatchers() {
-		dispatchers = append(dispatchers, d)
-	}
-	if len(dispatchers) == 0 {
+	scheduled := r.dispatchers.Scheduled()
+	if len(scheduled) == 0 {
 		logger.Info("No polling sources configured, creating endpoint without collector")
 		r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
 		return endpoint
@@ -392,7 +399,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	}
 
 	ticker := NewTimeTicker(r.pollingInterval)
-	if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
+	if err := collector.Start(ctx, ticker, endpoint, scheduled); err != nil {
 		logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
 		r.collectors.Remove(key)
 		return nil

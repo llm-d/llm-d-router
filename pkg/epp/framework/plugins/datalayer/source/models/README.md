@@ -58,9 +58,12 @@ plugins:
 - type: models-data-extractor
   name: vllm-models-extractor
 # ... other plugins (filters, scorers, profile handler, picker) ...
-data:
+dataLayer:
   sources:
   - pluginRef: vllm-models-source
+    # Scrape period for this source. Must be a positive multiple of
+    # --refresh-metrics-interval (default 50ms). Omit to scrape every base tick.
+    interval: 5s
     extractors:
     - pluginRef: vllm-models-extractor
 ```

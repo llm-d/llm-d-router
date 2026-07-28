@@ -438,6 +438,9 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 				Plugin:     sourcePlugin,
 				Extractors: []fwkplugin.Plugin{},
 			}
+			if source.Interval != nil {
+				sourceConfig.Interval = source.Interval.Duration
+			}
 			for _, extractor := range source.Extractors {
 				extractorPlugin := handle.Plugin(extractor.PluginRef)
 				if extractorPlugin == nil {
