@@ -200,13 +200,16 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 		if bestStickyTTFT-bestNonStickyTTFT > p.config.MaxTTFTPenaltyMs {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
-				"penalty", bestStickyTTFT-bestNonStickyTTFT, "maxPenalty", p.config.MaxTTFTPenaltyMs)
+				"penalty", bestStickyTTFT-bestNonStickyTTFT, "maxPenalty", p.config.MaxTTFTPenaltyMs,
+				"prefillThroughput", p.config.PeakPrefillThroughput)
 			return endpoints
 		}
 	}
 
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
-		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
+		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints),
+		"bestStickyTTFT", p.bestTTFT(sticky),
+		"prefillThroughput", p.config.PeakPrefillThroughput)
 	return sticky
 }
 
