@@ -12,7 +12,7 @@
 | `area/sidecar` | `pkg/sidecar/**`, `cmd/pd-sidecar/**` | PD sidecar proxy |
 | `area/datalayer` | `pkg/epp/datalayer/**`, `pkg/epp/datastore/**` | EPP data layer and datastore |
 | `area/telemetry` | `pkg/telemetry/**`, `pkg/common/observability/**` | Telemetry and observability |
-| `area/dev` | `.github/**`, `hack/**`, `scripts/**`, `build/**`, `Makefile` | Dev tooling and CI/CD |
+| `area/dev` | `.github/**`, `hack/**`, `scripts/**`, `Makefile` | Dev tooling and CI/CD |
 | `area/docs` | `docs/**`, top-level `*.md` | Documentation |
 
 A change can span multiple areas. Apply every label that fits rather than picking one.
