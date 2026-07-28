@@ -146,3 +146,22 @@ func TestRuntimeConfigure_SourceImplementingMultipleVariants_Rejected(t *testing
 	require.Error(t, err, "a source that implements multiple variant interfaces must be rejected")
 	assert.Contains(t, err.Error(), "multiple variant")
 }
+
+func TestRuntimeConfigure_ConflictingMetricsSources_Rejected(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(1)
+
+	httpSrc := mocks.NewDataSource(fwkplugin.TypedName{Type: "metrics-data-source", Name: "metrics-data-source"})
+	zmqSrc := &mockStreamingDispatcher{kind: "zmq-metrics-data-source"}
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{Plugin: httpSrc},
+			{Plugin: zmqSrc},
+		},
+	}
+
+	err := r.Configure(cfg, logger)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConflictingMetricsSources)
+}

@@ -105,6 +105,23 @@ func TestEnsureDataLayer(t *testing.T) {
 		require.Len(t, cfg.DataLayer.Sources, 1, "no duplicate metrics source")
 	})
 
+	t.Run("existing zmq-metrics-data-source suppresses default metrics-data-source injection", func(t *testing.T) {
+		cfg := &configapi.EndpointPickerConfig{
+			DataLayer: &configapi.DataLayerConfig{
+				Sources: []configapi.DataLayerSource{
+					{PluginRef: "zmq-metrics-data-source"},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		err := ensureDataLayer(cfg, handle, metricsPlugins())
+
+		require.NoError(t, err)
+		require.Len(t, cfg.DataLayer.Sources, 1)
+		require.Equal(t, "zmq-metrics-data-source", cfg.DataLayer.Sources[0].PluginRef)
+	})
+
 	t.Run("injectDefaults: false suppresses injection", func(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{
 			DataLayer: &configapi.DataLayerConfig{
