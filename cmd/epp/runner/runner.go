@@ -560,8 +560,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(bylabel.EncodeRoleType, fwkplugin.StabilityBeta, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, fwkplugin.StabilityBeta, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, fwkplugin.StabilityBeta, bylabel.PrefillRoleFactory)
-	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityBeta, sessionaffinityfilter.Factory)
 	// Alpha
+	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityAlpha, sessionaffinityfilter.Factory)
 	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, fwkplugin.StabilityAlpha, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(activerequestfilter.ActiveRequestFilterType, fwkplugin.StabilityAlpha, activerequestfilter.Factory)
 
@@ -572,8 +572,9 @@ func (r *Runner) registerInTreePlugins() {
 	// extra scheduling scorers
 	// Beta
 	fwkplugin.Register(loadaware.LoadAwareType, fwkplugin.StabilityBeta, loadaware.Factory)
-	fwkplugin.Register(sessionaffinity.SessionAffinityType, fwkplugin.StabilityBeta, sessionaffinity.Factory)
 	fwkplugin.Register(contextlengthaware.ContextLengthAwareType, fwkplugin.StabilityBeta, contextlengthaware.Factory)
+	// Alpha
+	fwkplugin.Register(sessionaffinity.SessionAffinityType, fwkplugin.StabilityAlpha, sessionaffinity.Factory)
 
 	// data layer models source/extractor
 	// Beta
