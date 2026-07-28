@@ -1,6 +1,6 @@
-# Fails a required check while a hold label is present, so /hold (label `hold`)
-# and the release-branch auto-hold (label `do-not-merge/hold`) block
-# GitHub-native auto-merge. Re-runs on label changes.
+# Fails a required check while a hold label is present, so the `hold` label and
+# the release branch auto-hold (`do-not-merge/hold`) block GitHub native
+# auto-merge. Re-runs on label changes.
 
 name: Hold gate
 
@@ -18,5 +18,5 @@ jobs:
       - name: Block merge while held
         if: contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.labels.*.name, 'do-not-merge/hold')
         run: |
-          echo "::error::A hold label is present (hold or do-not-merge/hold). Remove it (/hold cancel) to allow merge."
+          echo "::error::A hold label is present (hold or do-not-merge/hold). Remove the label to allow merge."
           exit 1

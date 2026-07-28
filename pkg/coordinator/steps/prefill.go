@@ -99,7 +99,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	headers := reqCtx.ForwardedHeaders()
 	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPPhaseHeader] = gateway.PhasePrefill
+	headers[gateway.EPPProfileHeader] = gateway.PhasePrefill
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))

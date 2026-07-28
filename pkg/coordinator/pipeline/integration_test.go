@@ -63,7 +63,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			var capturedPrefillBody map[string]any
 
 			gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				phase := r.Header.Get(gateway.EPPPhaseHeader)
+				phase := r.Header.Get(gateway.EPPProfileHeader)
 				switch phase {
 				case gateway.PhaseEncode:
 					body, _ := io.ReadAll(r.Body)
@@ -199,7 +199,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 	defer renderServer.Close()
 
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		phase := r.Header.Get(gateway.EPPProfileHeader)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)

@@ -26,6 +26,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
@@ -101,14 +102,14 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 		return fmt.Errorf("metric %q present but has no samples for pod %q", gpuUtilMetricName, podName)
 	}
 
-	normalized := attrgpu.GPUUtilization(maxUtil / 100.0)
+	normalized := attrmetrics.ScalarMetricValue(maxUtil / 100.0)
 	in.Endpoint.GetAttributes().Put(e.dk.String(), normalized)
 	return nil
 }
 
 // Produces declares the data key this extractor publishes.
 func (e *Extractor) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{e.dk: attrgpu.GPUUtilization(0)}
+	return map[fwkplugin.DataKey]any{e.dk: attrmetrics.ScalarMetricValue(0)}
 }
 
 // sampleBelongsToPod reports whether m should contribute to this endpoint's

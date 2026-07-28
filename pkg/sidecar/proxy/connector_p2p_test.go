@@ -60,7 +60,7 @@ var _ = Describe("P2P Connector", func() {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
 
-		// Prefill leg: kv_transfer_params.decode carries only kv_request_id,
+		// Prefill leg: kv_transfer_params.remote_decoder carries only kv_request_id,
 		// with no peer address.
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
 		Expect(prefillReqs).To(HaveLen(1))
@@ -69,8 +69,8 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKey(requestFieldKVTransferParams))
 		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(prefillKVParams).ToNot(HaveKey(requestFieldP2PPrefillParams))
-		prefillDecode, ok := prefillKVParams[requestFieldP2PDecodeParams].(map[string]any)
+		Expect(prefillKVParams).ToNot(HaveKey(requestFieldRemotePrefiller))
+		prefillDecode, ok := prefillKVParams[requestFieldRemoteDecoder].(map[string]any)
 		Expect(ok).To(BeTrue())
 		prefillKVRequestID := prefillDecode[requestFieldKVRequestID]
 		Expect(prefillKVRequestID).ToNot(BeEmpty())
@@ -82,7 +82,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
 		Expect(preq[requestFieldStream]).To(BeFalse())
 
-		// Decode leg: kv_transfer_params.prefill carries the prefiller's
+		// Decode leg: kv_transfer_params.remote_prefiller carries the prefiller's
 		// OffloadingConnector P2P tier address plus the matching kv_request_id.
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
@@ -92,8 +92,8 @@ var _ = Describe("P2P Connector", func() {
 		Expect(dreq).To(HaveKey(requestFieldKVTransferParams))
 		decodeKVParams, ok := dreq[requestFieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(decodeKVParams).ToNot(HaveKey(requestFieldP2PDecodeParams))
-		decodePrefill, ok := decodeKVParams[requestFieldP2PPrefillParams].(map[string]any)
+		Expect(decodeKVParams).ToNot(HaveKey(requestFieldRemoteDecoder))
+		decodePrefill, ok := decodeKVParams[requestFieldRemotePrefiller].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodePrefill[requestFieldKVRequestID]).To(Equal(prefillKVRequestID))
 		Expect(decodePrefill[requestFieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
@@ -147,3 +147,55 @@ var _ = DescribeTable("p2pPullAvailable",
 	Entry("the flag has no effect on sglang", KVConnectorSGLang, true, false),
 	Entry("the flag has no effect on shared-storage", KVConnectorSharedStorage, true, false),
 )
+
+var _ = DescribeTable("p2pPortFor",
+	func(dpSize, dpBasePort int, target string, want int) {
+		s := &Server{
+			dpBasePort: dpBasePort,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: dpSize},
+		}
+		Expect(s.p2pPortFor(target)).To(Equal(want))
+	},
+	Entry("single DP uses the base port regardless of target", 1, 8000, "10.0.0.5:8003", 7777),
+	Entry("rank 0 target uses the base port", 4, 8000, "10.0.0.5:8000", 7777),
+	Entry("rank 2 target offsets by 2", 4, 8000, "10.0.0.5:8002", 7779),
+	Entry("last rank target offsets by dpSize-1", 4, 8000, "10.0.0.5:8003", 7780),
+	Entry("port below the base falls back to the base port", 4, 8000, "10.0.0.5:7999", 7777),
+	Entry("port beyond the rank range falls back to the base port", 4, 8000, "10.0.0.5:8004", 7777),
+	Entry("target without a port falls back to the base port", 4, 8000, "10.0.0.5", 7777),
+	Entry("unparsable port falls back to the base port", 4, 8000, "10.0.0.5:http", 7777),
+	Entry("zero base port disables derivation", 4, 0, "10.0.0.5:8002", 7777),
+	Entry("scheme-prefixed target derives the rank", 4, 8000, "http://10.0.0.5:8002", 7779),
+)
+
+var _ = Describe("p2pSourceParams", func() {
+	It("offsets remote_port by the source endpoint's DP rank", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
+		}
+		params := s.p2pSourceParams("10.0.0.9:8002")
+		Expect(params[requestFieldRemoteHost]).To(Equal("10.0.0.9"))
+		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+		Expect(params[requestFieldKVRequestID]).ToNot(BeEmpty())
+	})
+
+	It("keeps rank derivation on Clone, which rank servers rely on", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
+		}
+		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
+		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+	})
+
+	It("derives both host and port from a scheme-prefixed source", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
+		}
+		params := s.p2pSourceParams("http://10.0.0.9:8002")
+		Expect(params[requestFieldRemoteHost]).To(Equal("10.0.0.9"))
+		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+	})
+})
