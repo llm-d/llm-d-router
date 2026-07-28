@@ -1419,6 +1419,36 @@ func TestCompleteAutomaticDNSResolution(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "resolving --moriio-remote-hosts")
 	})
+
+	t.Run("local-pod-ip raw IP is passed through", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODPSize = 8
+		opts.MoRIIODPSizeLocal = 8
+		require.NoError(t, opts.Complete())
+		require.Equal(t, "10.0.1.1", opts.MoRIIODecodePodIP)
+	})
+
+	t.Run("local-pod-ip DNS name resolves to IP", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "localhost"
+		opts.MoRIIODPSize = 8
+		opts.MoRIIODPSizeLocal = 8
+		require.NoError(t, opts.Complete())
+		require.True(t, opts.MoRIIODecodePodIP == "127.0.0.1" || opts.MoRIIODecodePodIP == "::1")
+	})
+
+	t.Run("local-pod-ip unresolvable hostname errors", func(t *testing.T) {
+		opts := NewOptions()
+		opts.MoRIIOWriteMode = true
+		opts.MoRIIODecodePodIP = "unresolvable-host-xyz.invalid"
+		opts.MoRIIODPSize = 8
+		err := opts.Complete()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "resolving --moriio-local-pod-ip")
+	})
 }
 
 // TestWideEPScenarios tests both 1P1D and 2P2D Wide-EP configurations to ensure

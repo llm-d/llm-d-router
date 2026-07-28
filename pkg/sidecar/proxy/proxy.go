@@ -245,9 +245,11 @@ type Config struct {
 	MoRIIODecodeNotifyPort int
 	// MoRIIODecodeHandshakePort is the decode pod's base MoRI-IO handshake port.
 	MoRIIODecodeHandshakePort int
-	// MoRIIODecodePodIP is decode's routable pod IP, used as the prefill leg's
+	// MoRIIODecodePodIP is decode's routable address, used as the prefill leg's
 	// remote_host so prefill handshakes with decode (not itself). Must not be
-	// localhost; typically the POD_IP downward-API value.
+	// localhost; typically the POD_IP downward-API value. May be set to a
+	// Kubernetes DNS name (e.g., an LWS pod name), which is resolved to an IP at
+	// startup in Complete(); raw IPs are passed through unchanged.
 	MoRIIODecodePodIP string
 
 	// MoRIIOParallelDispatch fires the prefill and decode legs concurrently,

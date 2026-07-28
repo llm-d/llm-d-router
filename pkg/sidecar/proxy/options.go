@@ -278,7 +278,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MoRIIODecodeNotifyPort, "moriio-decode-notify-port", opts.MoRIIODecodeNotifyPort,
 		"Base MoRI-IO notify port on the decode pod.")
 	fs.StringVar(&opts.MoRIIODecodePodIP, "moriio-local-pod-ip", opts.MoRIIODecodePodIP,
-		"Decode pod's routable IP, used as the prefill leg's remote_host. "+
+		"Decode pod's routable address, used as the prefill leg's remote_host. "+
+			"Prefer a Kubernetes DNS name (e.g., 'pod-name.namespace.svc.cluster.local'), "+
+			"resolved to an IP at startup; a raw IP is accepted for backward compatibility. "+
 			"Defaults to the POD_IP env var. Required with --moriio-write-mode.")
 	fs.IntVar(&opts.MoRIIODecodeHandshakePort, "moriio-decode-handshake-port", opts.MoRIIODecodeHandshakePort,
 		"Base MoRI-IO handshake port on the decode pod.")
@@ -436,6 +438,17 @@ func (opts *Options) Complete() error {
 		return fmt.Errorf("resolving --moriio-decode-hosts: %w", resolveErr)
 	} else {
 		opts.MoRIIODecodeHosts = resolved
+	}
+
+	// Single-host counterpart: --moriio-local-pod-ip is decode's advertised
+	// remote_host on the prefill leg. Resolve it the same way so it can be an
+	// LWS DNS name instead of a raw IP (raw IPs pass through unchanged).
+	if opts.MoRIIODecodePodIP != "" {
+		if resolved, resolveErr := resolveHostsToIPs([]string{opts.MoRIIODecodePodIP}); resolveErr != nil {
+			return fmt.Errorf("resolving --moriio-local-pod-ip: %w", resolveErr)
+		} else {
+			opts.MoRIIODecodePodIP = resolved[0]
+		}
 	}
 
 	return nil

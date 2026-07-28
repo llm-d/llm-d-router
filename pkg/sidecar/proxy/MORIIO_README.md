@@ -57,7 +57,7 @@ overlapping the two legs, at the cost of pinning the rank before prefill confirm
 | `--moriio-remote-hosts` | Prefill-side pod hosts for fan-out (DNS names preferred) |
 | `--moriio-decode-hosts` | Decode-side pod hosts, emitted as the prefill leg's `remote_hosts` (DNS names preferred) |
 | `--moriio-tp-size` | Tensor parallel size |
-| `--moriio-local-pod-ip` | Local pod IP (defaults to `POD_IP` env) |
+| `--moriio-local-pod-ip` | Local pod address, DNS name or IP (defaults to `POD_IP` env); DNS names resolved to IP at startup |
 | `--moriio-decode-handshake-port` | Decode handshake port |
 | `--moriio-decode-notify-port` | Decode notify port |
 | `--moriio-prefill-handshake-port` | Prefill handshake port |
