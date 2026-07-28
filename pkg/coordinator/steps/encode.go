@@ -119,7 +119,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 			headers := reqCtx.ForwardedHeaders()
 			headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-			headers[gateway.EPPPhaseHeader] = gateway.PhaseEncode
+			headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
 
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
