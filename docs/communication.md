@@ -1072,8 +1072,8 @@ A `/inference/v1/generate` client request is already tokenized (`token_ids` in t
 1. **replace-media-urls**: no-op (no `messages` array; images arrive as `kwargs_data` tensors keyed by `mm_hashes`, not URLs)
 2. **render**: no upstream call -- parses `token_ids` and `features` from the body, validates `sampling_params` and placeholder bounds, and populates `TokenIDs` + `MultimodalEntries` (see [2.C](#2c-inferencev1generate))
 3. **conditional-decode**: forwards the original body (`token_ids` + `features`) to `/inference/v1/generate` with `EPP-Profile: decode` and `Prefer: if-available`
-4. **encode**: one request per image when `features` carry images; skipped for text-only generate requests
-5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `ec_transfer_params` and `kv_transfer_params` nested in `sampling_params.extra_args`
+4. **encode**: skipped entirely. On the generate path the prefill worker runs the vision encoder inline from `kwargs_data`, so there is no encode fan-out and no EC handoff. This removes the duplicate copy of the preprocessed pixel tensor that otherwise goes to both encode and prefill; prefill still receives the full tensor once. Shrinking that remaining copy is the subject of [vllm-project/vllm#46722](https://github.com/vllm-project/vllm/issues/46722), which proposes deferring `pixel_values` preprocessing so only the raw image travels
+5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `kv_transfer_params` nested in `sampling_params.extra_args`. No `ec_transfer_params`, since encode did not run
 6. **decode**: sends `token_ids` with `kv_transfer_params` nested in `sampling_params.extra_args`
 
 ## Questions
