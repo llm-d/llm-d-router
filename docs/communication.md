@@ -20,12 +20,17 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
 - [Text-Only Requests (no images)](#text-only-requests-no-images-v1chatcompletions)
+- [Generate Requests (/inference/v1/generate)](#generate-requests-inferencev1generate)
 - [Questions](#questions)
 
 ## Pipeline Overview
 
 ```
-Client Request (/v1/chat/completions or /v1/completions)
+Client Request (/v1/chat/completions, /v1/completions, or /inference/v1/generate)
+    |
+    |--- /inference/v1/generate (tokens-in)?
+    |        YES --> skip replace-media-urls; render parses token_ids and features
+    |                from the body directly (no upstream call), go to [conditional-decode]
     |
     |--- /v1/completions with token array prompt?
     |        YES --> skip to [conditional-decode]
@@ -314,6 +319,37 @@ The coordinator only reads `[0].token_ids`. All other fields (`request_id`, `sam
 - `reqCtx.MultimodalEntries` is left untouched (always empty for `/v1/completions`).
 
 When render is skipped because `prompt` is already a token array, `reqCtx.TokenIDs` is populated directly from the input array and `reqCtx.Body["prompt"]` is left as-is.
+
+---
+
+### 2.C `/inference/v1/generate`
+
+For a `/inference/v1/generate` client request the prompt is already tokenized, so render makes **no upstream call**. It reads the token sequence and multimodal metadata directly from the request body, validates them, and populates `RequestContext`.
+
+#### Input
+
+The client request body (tokens-in format):
+
+```json
+{
+  "model": "Qwen/Qwen3-VL-2B-Instruct",
+  "token_ids": [1, 32000, 32000, 32000, 2345, 6789],
+  "features": {
+    "mm_hashes": {"image": ["abc123hash"]},
+    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+    "kwargs_data": {"image": ["<base64-encoded-pixel-tensor>"]}
+  },
+  "sampling_params": {"max_tokens": 8}
+}
+```
+
+`features` (and each `kwargs_data.image[i]`) is optional; a text-only generate request omits it. When present, the coordinator validates that every placeholder span (`offset`, `length`) lies within `token_ids`, independently of the optional `max_total_placeholder_tokens` knob, so `encode` never allocates past the prompt.
+
+#### Output (mutates RequestContext)
+
+- `reqCtx.TokenIDs` = the `token_ids` array from the body
+- `reqCtx.MultimodalEntries` = one entry per image, populated from `features` (`Hash`, `Placeholder`, `KwargsData`), same layout as the chat-completions path
+- `reqCtx.Body` is left as-is; downstream stages read it directly
 
 ---
 
@@ -972,8 +1008,8 @@ The coordinator uses the `EPP-Phase` HTTP header to identify the pipeline stage 
 |-------------------|----------------------|---------------------------|
 | Encode            | `encode`             | `/v1/chat/completions` or `/inference/v1/generate` |
 | Prefill           | `prefill`            | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
-| Decode            | `decode`             | `/v1/chat/completions` or `/v1/completions` |
-| Conditional-Decode| `decode`             | `/v1/chat/completions` or `/v1/completions` |
+| Decode            | `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
+| Conditional-Decode| `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 
 The request path matches the user's original endpoint when using OpenAI format, or `/inference/v1/generate` when using the internal format.
 
@@ -986,10 +1022,13 @@ The `use_openai_format` setting (`pipeline.use_openai_format`, environment varia
 - **`use_openai_format: true` (default):** The request path and body format are derived from the user's original request path at runtime. A `tokens` field is added containing `token_ids` and `features` (without `kwargs_data`).
 - **`use_openai_format: false`:** Uses the internal generate format (`/inference/v1/generate`) with `token_ids` and `features` (including `kwargs_data`) directly in the body.
 
+A `/inference/v1/generate` client request always uses the generate wire format regardless of `use_openai_format`: the inbound path already carries token IDs, so there is no OpenAI body to preserve.
+
 | User's original path | Encode format | Prefill format | Decode format |
 |---------------------|---------------|----------------|---------------|
 | `/v1/chat/completions` | Per-image body + `tokens` field | Original body + `tokens` + `ec_transfer_params` + `kv_transfer_params` | Original body + `tokens` + `kv_transfer_params` |
 | `/v1/completions` | N/A (no images) | `{"prompt": [...], "max_tokens": 1, "kv_transfer_params": {...}, ...}` | `{"prompt": [...], "kv_transfer_params": {...}, ...}` |
+| `/inference/v1/generate` | `{"token_ids": [...], "features": {..., "kwargs_data": ...}, ...}` (generate format) | `token_ids` + `features` + `ec_transfer_params`/`kv_transfer_params` nested in `sampling_params.extra_args` | `token_ids` + `kv_transfer_params` nested in `sampling_params.extra_args` |
 
 When `use_openai_format: false`:
 
@@ -1023,6 +1062,19 @@ When a `/v1/chat/completions` request contains no `image_url` parts:
 - `encode`: skipped (`MultimodalEntries` is empty)
 - `prefill`: sends request with `tokens` field (token_ids only, features empty) + `kv_transfer_params`
 - `decode`: sends request with `tokens` field + `kv_transfer_params`
+
+---
+
+## Generate Requests (/inference/v1/generate)
+
+A `/inference/v1/generate` client request is already tokenized (`token_ids` in the body), optionally with multimodal `features`. Every stage uses the generate wire format, and transfer params are nested in `sampling_params.extra_args` (see [Request Format Configuration](#request-format-configuration)):
+
+1. **replace-media-urls**: no-op (no `messages` array; images arrive as `kwargs_data` tensors keyed by `mm_hashes`, not URLs)
+2. **render**: no upstream call -- parses `token_ids` and `features` from the body, validates `sampling_params` and placeholder bounds, and populates `TokenIDs` + `MultimodalEntries` (see [2.C](#2c-inferencev1generate))
+3. **conditional-decode**: forwards the original body (`token_ids` + `features`) to `/inference/v1/generate` with `EPP-Phase: decode` and `Prefer: if-available`
+4. **encode**: one request per image when `features` carry images; skipped for text-only generate requests
+5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `ec_transfer_params` and `kv_transfer_params` nested in `sampling_params.extra_args`
+6. **decode**: sends `token_ids` with `kv_transfer_params` nested in `sampling_params.extra_args`
 
 ## Questions
 - Should we include ec_transfer_params into Decode request? if we want that Decoder will provide Prefill functionality for small deltas. 

@@ -136,6 +136,13 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	return nil
 }
 
+// executeGenerate handles the tokens-in generate path. It does not tokenize:
+// the client supplies token_ids and features directly. It normalizes them into
+// reqCtx.TokenIDs and reqCtx.MultimodalEntries, the typed fields every
+// downstream step (encode/prefill/decode) reads instead of the raw body, and
+// enforces the generate-only bounds vLLM does not (validatePlaceholderBounds,
+// token/placeholder limits) before EncodeStep indexes token_ids[offset] and
+// allocates from length.
 func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
