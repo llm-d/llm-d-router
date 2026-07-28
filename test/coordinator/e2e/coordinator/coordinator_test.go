@@ -264,12 +264,12 @@ func fetchCoordinatorLogs(nsName string) string {
 // on the coordinator running at log_level 5.
 func verifyTokenLimits(logs string, wantMin, wantMax int, capLegs []string) {
 	ginkgo.By("Verifying decode leg forwards the client min_tokens/max_tokens")
-	gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-phase":"decode"`,
+	gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"decode"`,
 		fmt.Sprintf(`"min_tokens":%d`, wantMin), fmt.Sprintf(`"max_tokens":%d`, wantMax))).To(gomega.BeTrue(),
 		"coordinator logs have no decode request body carrying min_tokens=%d and max_tokens=%d", wantMin, wantMax)
 
 	for _, phase := range capLegs {
-		phaseField := `"epp-phase":"` + phase + `"`
+		phaseField := `"epp-profile":"` + phase + `"`
 
 		ginkgo.By("Verifying " + phase + " leg caps max_tokens to 1")
 		gomega.Expect(logHasLine(logs, `"msg":"request body"`, phaseField, `"max_tokens":1`)).To(gomega.BeTrue(),
