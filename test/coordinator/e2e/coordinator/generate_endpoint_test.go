@@ -26,23 +26,22 @@ import (
 )
 
 // genImage describes one image entry in a native /inference/v1/generate request.
-// Cached marks a cache-hit entry: its kwargs_data is emitted as null so the
-// encoder resolves it from its own cache by hash. Offset/Length locate the
-// image's placeholder span within token_ids.
+// Offset/Length locate the image's placeholder span within token_ids.
 type genImage struct {
 	Hash   string
 	Offset int
 	Length int
-	Cached bool
 }
 
-// generateTestKwargs is a base64 blob standing in for a real (non-cache-hit)
-// encoder kwargs payload.
+// generateTestKwargs is a base64 blob standing in for a real encoder kwargs
+// payload.
 const generateTestKwargs = "dGVuc29y"
 
-// generateSteps lists the pipeline steps a token-only generate request drives:
-// render parses token_ids locally, then prefill and decode. replace-media-urls
-// and encode run but no-op (no messages, no images), so they are not asserted.
+// generateSteps lists the pipeline steps a generate request drives that do real
+// work: render parses token_ids locally, then prefill and decode.
+// replace-media-urls no-ops (the generate wire format carries no message URLs)
+// and encode is skipped on the generate path (the prefill worker encodes inline
+// from kwargs_data), so neither is asserted.
 var generateSteps = []string{"render", "prefill", "decode"}
 
 var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
@@ -56,28 +55,15 @@ var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
 			{Hash: "e2e-gen-hash-0", Offset: 1, Length: 3},
 		}
 		runCoordinatorPipeline(gateway.DefaultGeneratePath,
-			generateBody(modelName, images), allSteps, 1)
-	})
-
-	// A cached (null kwargs_data) entry is still parsed and fanned out to the
-	// encoder: the fan-out is one sub-request per multimodal entry, so the
-	// encode count equals the number of entries (2), not the number of non-null
-	// entries (1). verifyCoordinatorSteps asserts count=2 via the
-	// "all sub-requests complete" / "merged encode response" markers.
-	ginkgo.It("routes a two-image generate with one cached (null kwargs) image end-to-end", func() {
-		images := []genImage{
-			{Hash: "e2e-gen-hash-0", Offset: 1, Length: 2},
-			{Hash: "e2e-gen-hash-1", Offset: 4, Length: 2, Cached: true},
-		}
-		runCoordinatorPipeline(gateway.DefaultGeneratePath,
-			generateBody(modelName, images), allSteps, 2)
+			generateBody(modelName, images), generateSteps, 0)
+		verifyEncodeSkipped(getNamespace())
 	})
 })
 
 // generateBody builds a native /inference/v1/generate request body. With no
 // images it is text-only (token_ids, no features). With images it adds the
 // parallel features arrays (mm_hashes, mm_placeholders, kwargs_data) keyed by
-// the image modality; a nil Kwargs marshals to JSON null (cache hit).
+// the image modality.
 func generateBody(model string, images []genImage) []byte {
 	body := map[string]any{
 		"model":           model,
@@ -92,11 +78,7 @@ func generateBody(model string, images []genImage) []byte {
 		for i, img := range images {
 			hashes[i] = img.Hash
 			placeholders[i] = map[string]any{"offset": img.Offset, "length": img.Length}
-			// A cached entry leaves kwargs[i] nil (JSON null); the encoder
-			// resolves it from its own cache by hash.
-			if !img.Cached {
-				kwargs[i] = generateTestKwargs
-			}
+			kwargs[i] = generateTestKwargs
 		}
 		body["features"] = map[string]any{
 			"mm_hashes":       map[string]any{"image": hashes},

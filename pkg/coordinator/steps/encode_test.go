@@ -441,10 +441,6 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	}
 }
 
-// TestEncodeStep_EncoderReturnsNoECParams verifies the all-missing degradation path:
-// when every encoder response omits ec_transfer_params, MergeEncodeResponse skips each
-// entry and ECTransferParams stays nil, so the prefill step forwards the request without
-// the field. The encode step must not error -- missing metadata is warn-and-continue.
 // TestEncodeStep_SkipsForGenerate verifies that Execute makes no gateway calls
 // and leaves ECTransferParams nil for a /inference/v1/generate request even when
 // multimodal entries are present: the prefill worker runs the vision encoder
@@ -484,6 +480,10 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_EncoderReturnsNoECParams verifies the all-missing degradation path:
+// when every encoder response omits ec_transfer_params, MergeEncodeResponse skips each
+// entry and ECTransferParams stays nil, so the prefill step forwards the request without
+// the field. The encode step must not error -- missing metadata is warn-and-continue.
 func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

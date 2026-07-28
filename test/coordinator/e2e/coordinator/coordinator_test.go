@@ -173,17 +173,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 func verifyCoordinatorSteps(nsName string, expectedSteps []string, expectedImages int, kvNIXL, ecNIXL bool) {
 	ginkgo.By("Verifying coordinator logs contain all pipeline steps")
 
-	args := []string{"logs", "deployment/llm-d-coordinator",
-		"-c", "coordinator", "--namespace=" + nsName}
-	if k8sContext != "" {
-		args = append(args, "--context="+k8sContext)
-	}
-
-	out, err := exec.Command("kubectl", args...).CombinedOutput()
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(),
-		"failed to fetch coordinator logs: %s", string(out))
-
-	logs := string(out)
+	logs := fetchCoordinatorLogs(nsName)
 	for _, step := range expectedSteps {
 		stepField := `"step":"` + step + `"`
 		gomega.Expect(logHasLine(logs, `"msg":"step complete"`, stepField)).To(gomega.BeTrue(),
@@ -233,6 +223,32 @@ func verifyCoordinatorSteps(nsName string, expectedSteps []string, expectedImage
 				"coordinator logs have no prefill request body carrying ec_transfer_params")
 		}
 	}
+}
+
+// fetchCoordinatorLogs returns the coordinator container's pod logs.
+func fetchCoordinatorLogs(nsName string) string {
+	args := []string{"logs", "deployment/llm-d-coordinator",
+		"-c", "coordinator", "--namespace=" + nsName}
+	if k8sContext != "" {
+		args = append(args, "--context="+k8sContext)
+	}
+
+	out, err := exec.Command("kubectl", args...).CombinedOutput()
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(),
+		"failed to fetch coordinator logs: %s", string(out))
+	return string(out)
+}
+
+// verifyEncodeSkipped asserts the coordinator skipped the encode fan-out on the
+// generate path. The skip marker is logged immediately before the step returns,
+// so its presence is dispositive: the prefill worker encodes inline from
+// kwargs_data and no encode sub-request is issued.
+func verifyEncodeSkipped(nsName string) {
+	logs := fetchCoordinatorLogs(nsName)
+
+	ginkgo.By("Verifying encode was skipped for the generate request")
+	gomega.Expect(logHasLine(logs, `"msg":"skipping encode for generate request"`)).To(gomega.BeTrue(),
+		"coordinator logs missing 'skipping encode for generate request'")
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.
