@@ -50,6 +50,8 @@ Client Request (/v1/chat/completions, /v1/completions, or /inference/v1/generate
     |
     |--- /v1/completions or /v1/chat/completions without multi media content --> skip encode, go to [prefill]
     |
+    |--- /inference/v1/generate --> skip encode (prefill encodes inline from kwargs_data), go to [prefill]
+    |
     v
 [encode] - Fan-out: one request per image, runs ViT encoder
     |
@@ -629,10 +631,6 @@ EPP-Profile: prefill
     ]},
     "kwargs_data": {"image": ["<base64-encoded-pixel-tensor-1>", "<base64-encoded-pixel-tensor-2>"]}
   },
-  "ec_transfer_params": {
-    "abc123hash": {"peer_host": "10.0.0.1", "peer_port": 5501, "size_bytes": 2359296, "nixl_agent_metadata_b64": "TklYTA..."},
-    "def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "QWdlbnQ..."}
-  },
   "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false},
   "sampling_params": {"max_tokens": 1}
 }
@@ -668,11 +666,7 @@ EPP-Profile: prefill
   "sampling_params": {
     "max_tokens": 1,
     "extra_args": {
-      "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false},
-      "ec_transfer_params": {
-        "abc123hash": {"peer_host": "10.0.0.1", "peer_port": 5501, "size_bytes": 2359296, "nixl_agent_metadata_b64": "TklYTA..."},
-        "def456hash": {"peer_host": "10.0.0.2", "peer_port": 5502, "size_bytes": 2359296, "nixl_agent_metadata_b64": "QWdlbnQ..."}
-      }
+      "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false}
     }
   }
 }
