@@ -222,21 +222,33 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 				continue
 			}
 			dependencies := consumer.Consumes()
-			if producer.Produces() != nil && dependencies.Required != nil {
-				for producedKey, producedData := range producer.Produces() {
-					if consumedData, ok := dependencies.Required[producedKey]; ok {
-						// Check types are same.
-						if reflect.TypeOf(producedData) != reflect.TypeOf(consumedData) {
-							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())
-						}
-						if pluginToLayerExecutionOrder(producer) > pluginToLayerExecutionOrder(consumer) {
-							return nil, errors.New("invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName)
-						}
-						// Consumer depends on producer, so add an edge from consumer to producer.
-						dag[cName] = append(dag[cName], pName)
-						break
-					}
+			if producer.Produces() == nil {
+				continue
+			}
+			for producedKey, producedData := range producer.Produces() {
+				consumedData, ok := dependencies.Required[producedKey]
+				optional := false
+				if !ok {
+					consumedData, ok = dependencies.Optional[producedKey]
+					optional = ok
 				}
+				if !ok {
+					continue
+				}
+				// Check types are same.
+				if reflect.TypeOf(producedData) != reflect.TypeOf(consumedData) {
+					if optional {
+						return nil, errors.New("data type mismatch between produced and optionally consumed data for key: " + producedKey.String())
+					}
+					return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())
+				}
+				if pluginToLayerExecutionOrder(producer) > pluginToLayerExecutionOrder(consumer) {
+					return nil, errors.New("invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName)
+				}
+				// Consumer depends on producer; optional dependencies only add
+				// an edge when the producer is already configured.
+				dag[cName] = append(dag[cName], pName)
+				break
 			}
 		}
 	}

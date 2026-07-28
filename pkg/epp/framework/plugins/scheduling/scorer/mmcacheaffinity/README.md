@@ -13,9 +13,11 @@ For each candidate endpoint, the scorer reads `EncoderCacheMatchInfo` and comput
 score = matchedItemSize / totalRequestItemSize
 ```
 
-For the unweighted producer path in this PR, every unique multimodal item has size
-`1`, so the score is the fraction of unique request multimodal hashes that are
-likely cached on the endpoint.
+When tokenized multimodal metadata is available, item weights come from
+multimodal placeholder lengths, so larger multimodal inputs contribute more to
+the score. Otherwise, every unique multimodal item has item weight `1`, so the
+score is the fraction of unique request multimodal hashes that are likely cached
+on the endpoint.
 
 This produces a normalized score in the range `[0, 1]`:
 
@@ -36,9 +38,13 @@ The attribute is produced by `mm-embeddings-cache-producer` before scheduling.
 
 ## Configuration
 
-This plugin does not define any plugin-specific parameters.
+- `producerName` (string, optional): scopes the consumed data key to a named
+  producer instance. Leave empty to consume from the default producer.
 
-**Configuration Example:**
+Weighting is controlled by the match data emitted by the producer; the scorer
+remains size-agnostic.
+
+**Unweighted configuration example:**
 
 ```yaml
 plugins:
@@ -53,6 +59,26 @@ schedulingProfiles:
       - pluginRef: mm-embeddings-cache-scorer
         weight: 1
       - pluginRef: max-score-picker
+```
+
+**Tokenized multimodal weight example:**
+
+```yaml
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: hf-repo/model-name
+      vllm:
+        url: http://localhost:8000
+  - type: mm-embeddings-cache-producer
+    parameters:
+      cacheSizeInMBPerServer: 2048
+  - type: mm-embeddings-cache-scorer
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: mm-embeddings-cache-scorer
+        weight: 4
 ```
 
 ## Operational Notes

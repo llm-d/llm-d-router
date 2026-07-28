@@ -38,9 +38,10 @@ import (
 const mockProducedDataKey = "mockProducedData"
 
 type mockDataProducerP struct {
-	name     string
-	produces map[fwkplugin.DataKey]any
-	consumes map[fwkplugin.DataKey]any
+	name             string
+	produces         map[fwkplugin.DataKey]any
+	consumes         map[fwkplugin.DataKey]any
+	optionalConsumes map[fwkplugin.DataKey]any
 }
 
 type mockProducedDataType struct {
@@ -60,7 +61,7 @@ func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
 }
 
 func (m *mockDataProducerP) Consumes() fwkplugin.DataDependencies {
-	return fwkplugin.DataDependencies{Required: m.consumes}
+	return fwkplugin.DataDependencies{Required: m.consumes, Optional: m.optionalConsumes}
 }
 
 func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
@@ -166,6 +167,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 	pluginC := &mockDataProducerP{name: "C", consumes: map[fwkplugin.DataKey]any{dkB: nil}}
 	pluginD := &mockDataProducerP{name: "D", consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	pluginE := &mockDataProducerP{name: "E"} // No dependencies
+	pluginF := &mockDataProducerP{name: "F", optionalConsumes: map[fwkplugin.DataKey]any{dkA: nil}}
 
 	// Cycle plugins
 	pluginX := &mockDataProducerP{name: "X", produces: map[fwkplugin.DataKey]any{dkX: nil}, consumes: map[fwkplugin.DataKey]any{dkY: nil}}
@@ -218,6 +220,15 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 				"B/mock": {"A/mock"},
 				"D/mock": {"A/mock"},
 				"E/mock": {},
+			},
+			expectedErr: "",
+		},
+		{
+			name:    "Optional dependency orders when producer is configured",
+			plugins: []fwkrc.DataProducer{pluginA, pluginF},
+			expectedDAG: map[string][]string{
+				"A/mock": {},
+				"F/mock": {"A/mock"},
 			},
 			expectedErr: "",
 		},
@@ -345,6 +356,15 @@ func TestCreateMissingDataProducers(t *testing.T) {
 			},
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
 			wantTypes:       nil,
+		},
+		{
+			name: "optional consumes does not create missing producer",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "optional-consumer", optionalConsumes: map[fwkplugin.DataKey]any{keyA: nil}},
+			},
+			defaultProducerRegistry: map[string]string{keyA.String(): producerTypeA},
+			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantTypes:               nil,
 		},
 		{
 			name: "producer already present by type - not duplicated",
@@ -480,7 +500,7 @@ func (m *mockMayConsumerPlugin) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{Optional: m.optionalConsumes}
 }
 
-// mockMixedConsumerPlugin is a plugin that has both required Consumes and optional OptionalConsumes.
+// mockMixedConsumerPlugin is a plugin that has both required and optional data dependencies.
 // This models a real plugin like prefix cache scorer — requires prefix-match data,
 // but optionally uses tokenized input and falls back to raw text if unavailable.
 type mockMixedConsumerPlugin struct {
@@ -512,7 +532,7 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 		wantErr         bool
 	}{
 		{
-			name: "OptionalConsumes key with no producer — warning only, no error",
+			name: "optional key with no producer — warning only, no error",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockMayConsumerPlugin{
 					name:             "optional-consumer",
@@ -523,7 +543,7 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 			wantErr:         false, // must NOT error
 		},
 		{
-			name: "OptionalConsumes key with a producer present — no warning, no error",
+			name: "optional key with a producer present — no warning, no error",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockDataProducerP{name: "producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&mockMayConsumerPlugin{
@@ -536,10 +556,10 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 		},
 		{
 			// Models the real prefix cache scorer — it requires prefix-match data (Consumes)
-			// but optionally uses tokenized input (OptionalConsumes), falling back to raw text.
+			// but optionally uses tokenized input, falling back to raw text.
 			// The required key has a producer. The optional key does not.
 			// Result: no error. Warning logged for the missing optional key.
-			name: "plugin with both Consumes and OptionalConsumes — required key has producer, optional does not",
+			name: "plugin with both required and optional dependencies — required key has producer, optional does not",
 			existingPlugins: []fwkplugin.Plugin{
 				&mockDataProducerP{name: "required-producer", produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&mockMixedConsumerPlugin{
