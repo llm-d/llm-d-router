@@ -115,7 +115,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		present bool
 	}
 	tokenMap, createdSamplingParams := tokenLimitMap(completionRequest, apiType)
-	var savedTokenValues [2]savedField
+	savedTokenValues := make([]savedField, len(tokenLimitFields))
 	for i, field := range tokenLimitFields {
 		if v, ok := tokenMap[field]; ok {
 			savedTokenValues[i] = savedField{field: field, val: v, present: true}
@@ -324,7 +324,7 @@ retryLoop:
 		completionRequest[requestFieldStreamOptions] = streamOptionsValue
 	}
 
-	for i := range savedTokenValues[:len(tokenLimitFields)] {
+	for i := range savedTokenValues {
 		sv := &savedTokenValues[i]
 		delete(tokenMap, sv.field)
 		if sv.present {
@@ -459,6 +459,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	maxTokensValue, maxTokensOk := completionRequest[requestFieldMaxTokens]
 	maxCompletionTokensValue, maxCompletionTokensOk := completionRequest[requestFieldMaxCompletionTokens]
 	maxOutputTokensValue, maxOutputTokensOk := completionRequest[requestFieldMaxOutputTokens]
+	minTokensValue, minTokensOk := completionRequest[requestFieldMinTokens]
 
 	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).
 	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
@@ -503,6 +504,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	completionRequest[requestFieldMaxTokens] = 1
 	completionRequest[requestFieldMaxCompletionTokens] = 1
 	completionRequest[requestFieldMaxOutputTokens] = 1
+	completionRequest[requestFieldMinTokens] = 1
 
 	pbody, err := json.Marshal(completionRequest)
 	if err != nil {
@@ -513,7 +515,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 
 	// ---------- Build decode body ----------
-	// Restore the client's streaming flags and max-token caps.
+	// Restore the client's streaming flags and token-limit fields.
 	delete(completionRequest, requestFieldStream)
 	if streamOk {
 		completionRequest[requestFieldStream] = streamValue
@@ -532,6 +534,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	delete(completionRequest, requestFieldMaxOutputTokens)
 	if maxOutputTokensOk {
 		completionRequest[requestFieldMaxOutputTokens] = maxOutputTokensValue
+	}
+	delete(completionRequest, requestFieldMinTokens)
+	if minTokensOk {
+		completionRequest[requestFieldMinTokens] = minTokensValue
 	}
 
 	// Synthesise decode-leg kv_transfer_params that the serial path would

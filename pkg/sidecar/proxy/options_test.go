@@ -43,10 +43,9 @@ func createConfigWithValidYAML(t *testing.T) string {
 	t.Helper()
 	return writeTempYAML(t, "valid.yaml", fmt.Sprintf(`
 port: 8100
-vllm-port: 8001
+model-server-port: 8001
 data-parallel-size: 5
 kv-connector: %q
-connector: %q
 ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
@@ -54,10 +53,8 @@ enable-p2p-pull: true
 enable-tls:
 - prefiller
 - decoder
-prefiller-use-tls: false
 tls-insecure-skip-verify:
 - prefiller
-decoder-tls-insecure-skip-verify: true
 secure-proxy: false
 cert-path: "/etc/certificates-file"
 inference-pool: "file-ns/inference-pool-file"
@@ -68,14 +65,14 @@ prefill-retry-backoff: "500ms"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
-`, KVConnectorNIXLV2, KVConnectorSGLang, ECExampleConnector))
+`, KVConnectorNIXLV2, ECExampleConnector))
 }
 
 func createConfigWithUnknownKeys(t *testing.T) string {
 	t.Helper()
 	return writeTempYAML(t, "valid.yaml", `
 port: 8100
-vllm-port: 8001
+model-server-port: 8001
 unknown-key: 1001
 `)
 }
@@ -92,19 +89,15 @@ func TestSidecarConfiguration(t *testing.T) {
 	// --- inline YAML for testing ---
 	inlineYAML := fmt.Sprintf(`{
 		port: 8011,
-		vllm-port: 8021,
+		model-server-port: 8021,
 		data-parallel-size: 3,
 		kv-connector: %s,
-		connector: %s,
 		ec-connector: %s,
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
 		enable-p2p-pull: true,
 		enable-tls: ['prefiller', 'decoder'],
-		prefiller-use-tls: false,
-		decoder-use-tls: true,
 		tls-insecure-skip-verify: ['decoder'],
-		prefiller-tls-insecure-skip-verify: true,
 		secure-proxy: false,
 		cert-path: '/etc/certificates-inline',
 		inference-pool: inline-ns/inference-pool-inline,
@@ -115,7 +108,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
-	}`, KVConnectorNIXLV2, KVConnectorSGLang, ECExampleConnector)
+	}`, KVConnectorNIXLV2, ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
 	// -- file YAML for testing ---
@@ -137,13 +130,12 @@ func TestSidecarConfiguration(t *testing.T) {
 			},
 			expected: func(o *Options) {
 				o.Port = "8011"
-				o.vllmPort = "8021"
+				o.modelServerPort = "8021"
 				o.DataParallelSize = 3
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
 				o.KVConnector = KVConnectorNIXLV2
-				o.connector = KVConnectorSGLang
 				o.ECConnector = ECExampleConnector
 
 				o.EnableSSRFProtection = true
@@ -155,8 +147,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.UseTLSForDecoder = true
 				o.UseTLSForEncoder = false
 
-				o.tlsInsecureSkipVerify = []string{prefillStage, decodeStage}
-				o.InsecureSkipVerifyForPrefiller = true
+				o.tlsInsecureSkipVerify = []string{decodeStage}
+				o.InsecureSkipVerifyForPrefiller = false
 				o.InsecureSkipVerifyForDecoder = true
 				o.InsecureSkipVerifyForEncoder = false
 
@@ -186,7 +178,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			},
 			expected: func(o *Options) {
 				o.Port = "8100"
-				o.vllmPort = "8001"
+				o.modelServerPort = "8001"
 				o.DataParallelSize = 5
 				o.MaxIdleConnsPerHost = 300
 				o.MooncakeBootstrapPort = 9000
@@ -203,9 +195,9 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.UseTLSForDecoder = true
 				o.UseTLSForEncoder = false
 
-				o.tlsInsecureSkipVerify = []string{prefillStage, decodeStage}
+				o.tlsInsecureSkipVerify = []string{prefillStage}
 				o.InsecureSkipVerifyForPrefiller = true
-				o.InsecureSkipVerifyForDecoder = true
+				o.InsecureSkipVerifyForDecoder = false
 				o.InsecureSkipVerifyForEncoder = false
 
 				o.SecureServing = false
@@ -231,7 +223,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			name: "flags override inline YAML",
 			inputFlags: map[string]any{
 				port:                    "8111",
-				vllmPort:                "8222",
+				modelServerPort:         "8222",
 				dataParallelSize:        2,
 				kvConnector:             KVConnectorNIXLV2,
 				ecConnector:             ECExampleConnector,
@@ -248,7 +240,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			},
 			expected: func(o *Options) {
 				o.Port = "8111"
-				o.vllmPort = "8222"
+				o.modelServerPort = "8222"
 				o.DataParallelSize = 2
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
@@ -295,7 +287,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				ecConnector: ECConnectorNIXL,
 			},
 			expected: func(o *Options) {
-				// Complete() migrates the default connector (KVConnectorNIXLV2) into KVConnector.
+				o.modelServerPort = defaultVLLMPort
 				o.KVConnector = KVConnectorNIXLV2
 				o.ECConnector = ECConnectorNIXL
 			},
@@ -305,7 +297,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			name: "flags override file YAML",
 			inputFlags: map[string]any{
 				port:                      "8111",
-				vllmPort:                  "8222",
+				modelServerPort:           "8222",
 				dataParallelSize:          2,
 				kvConnector:               KVConnectorNIXLV2,
 				ecConnector:               ECExampleConnector,
@@ -323,7 +315,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			},
 			expected: func(o *Options) {
 				o.Port = "8111"
-				o.vllmPort = "8222"
+				o.modelServerPort = "8222"
 				o.DataParallelSize = 2
 				o.MaxIdleConnsPerHost = 400
 				o.MooncakeBootstrapPort = 9002
@@ -382,6 +374,13 @@ func TestSidecarConfiguration(t *testing.T) {
 			name: "unknown keys in YAML",
 			inputFlags: map[string]any{
 				configurationFile: unknownKeysYAMLPath,
+			},
+			expectedError: errors.New("failed to unmarshal sidecar configuration"),
+		},
+		{
+			name: "removed connector key in YAML is rejected",
+			inputFlags: map[string]any{
+				inlineConfiguration: "{port: 8011, connector: nixlv2}",
 			},
 			expectedError: errors.New("failed to unmarshal sidecar configuration"),
 		},
@@ -455,7 +454,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	}
 
 	assertEqual(port, expected.Port, actual.Port)
-	assertEqual(vllmPort, expected.vllmPort, actual.vllmPort)
+	assertEqual(modelServerPort, expected.modelServerPort, actual.modelServerPort)
 	assertEqual(dataParallelSize, expected.DataParallelSize, actual.DataParallelSize)
 	assertEqual(maxIdleConnsPerHost, expected.MaxIdleConnsPerHost, actual.MaxIdleConnsPerHost)
 
@@ -466,12 +465,12 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
 	assertEqual(enableP2PPull, expected.EnableP2PPull, actual.EnableP2PPull)
 
-	assertEqual(prefillerUseTLS, expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
-	assertEqual(decoderUseTLS, expected.UseTLSForDecoder, actual.UseTLSForDecoder)
-	assertEqual(encoderUseTLS, expected.UseTLSForEncoder, actual.UseTLSForEncoder)
+	assertEqual("UseTLSForPrefiller", expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
+	assertEqual("UseTLSForDecoder", expected.UseTLSForDecoder, actual.UseTLSForDecoder)
+	assertEqual("UseTLSForEncoder", expected.UseTLSForEncoder, actual.UseTLSForEncoder)
 
-	assertEqual(prefillerTLSInsecureSkipVerify, expected.InsecureSkipVerifyForPrefiller, actual.InsecureSkipVerifyForPrefiller)
-	assertEqual(decoderTLSInsecureSkipVerify, expected.InsecureSkipVerifyForDecoder, actual.InsecureSkipVerifyForDecoder)
+	assertEqual("InsecureSkipVerifyForPrefiller", expected.InsecureSkipVerifyForPrefiller, actual.InsecureSkipVerifyForPrefiller)
+	assertEqual("InsecureSkipVerifyForDecoder", expected.InsecureSkipVerifyForDecoder, actual.InsecureSkipVerifyForDecoder)
 	assertEqual("InsecureSkipVerifyForEncoder", expected.InsecureSkipVerifyForEncoder, actual.InsecureSkipVerifyForEncoder)
 
 	assertSlice(enableTLS, expected.enableTLS, actual.enableTLS)
@@ -494,7 +493,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(inlineConfiguration, expected.inlineConfiguration, actual.inlineConfiguration)
 	assertEqual(configurationFile, expected.fileConfiguration, actual.fileConfiguration)
 
-	assertEqual("decoderURL", calculateURL(t, expected.UseTLSForDecoder, expected.vllmPort), actual.DecoderURL)
+	assertEqual("decoderURL", calculateURL(t, expected.UseTLSForDecoder, expected.modelServerPort), actual.DecoderURL)
 }
 
 // setEnv sets environment variables for testing and ensures they are cleaned up after the test finishes
@@ -628,18 +627,36 @@ func TestP2PConnectorPort(t *testing.T) {
 }
 
 func TestValidateOffloadingDP(t *testing.T) {
-	t.Run("rejects offloading with data-parallel-size > 1", func(t *testing.T) {
+	t.Run("allows offloading with data-parallel-size > 1", func(t *testing.T) {
 		opts := NewOptions()
 		opts.KVConnector = KVConnectorOffloading
 		opts.DataParallelSize = 2
 		require.NoError(t, opts.Complete())
-		require.ErrorContains(t, opts.Validate(), "--kv-connector=offloading does not support --data-parallel-size > 1")
+		require.NoError(t, opts.Validate())
 	})
 
 	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
 		opts := NewOptions()
 		opts.KVConnector = KVConnectorOffloading
 		opts.DataParallelSize = 1
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+	})
+
+	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 4
+		opts.P2PConnectorPort = 65533
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "exceeds 65535")
+	})
+
+	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = KVConnectorOffloading
+		opts.DataParallelSize = 4
+		opts.P2PConnectorPort = 65532
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
 	})
@@ -688,7 +705,7 @@ func TestValidateConnector(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := NewOptions()
-			opts.connector = tt.connector
+			opts.KVConnector = tt.connector
 			_ = opts.Complete() // Complete must be called before Validate
 			err := opts.Validate()
 			if (err != nil) != tt.wantErr {
@@ -749,6 +766,119 @@ func TestValidateSSRFProtection(t *testing.T) {
 			err := opts.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDataParallelSize(t *testing.T) {
+	tests := []struct {
+		name             string
+		dataParallelSize int
+		wantErr          bool
+	}{
+		{"default valid", 1, false},
+		{"positive valid", 2, false},
+		{"zero invalid", 0, true},
+		{"negative invalid", -5, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDataParallelPortRange(t *testing.T) {
+	tests := []struct {
+		name             string
+		port             string
+		modelServerPort  string
+		dataParallelSize int
+		wantErr          bool
+	}{
+		{"derived ports valid", "65534", "65534", 2, false},
+		{"derived sidecar port too high", "65535", "8000", 2, true},
+		{"derived vLLM port too high", "8000", "65535", 2, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.Port = tt.port
+			opts.modelServerPort = tt.modelServerPort
+			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePorts(t *testing.T) {
+	tests := []struct {
+		name            string
+		port            string
+		modelServerPort string
+		wantErr         string
+	}{
+		{"valid ports", "8000", "8001", ""},
+		{"invalid port format", "abc", "8001", `--port must be a valid integer, got "abc"`},
+		{"invalid model server port format", "8000", "xyz", `--model-server-port must be a valid integer, got "xyz"`},
+		{"port too low", "0", "8001", "--port start port 0 is out of valid range [1, 65535]"},
+		{"port too high", "65536", "8001", "--port start port 65536 is out of valid range [1, 65535]"},
+		{"model server port too low", "8000", "0", "--model-server-port start port 0 is out of valid range [1, 65535]"},
+		{"model server port too high", "8000", "65536", "--model-server-port start port 65536 is out of valid range [1, 65535]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.Port = tt.port
+			opts.modelServerPort = tt.modelServerPort
+			_ = opts.Complete()
+			err := opts.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePortRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		startPort int
+		rangeSize int
+		wantErr   string
+	}{
+		{"valid range", 1, 65534, ""},
+		{"zero range size", 1, 0, "invalid port range"},
+		{"range size at maximum", 1, 65535, "invalid port range"},
+		{"range size too large", 1, 65536, "invalid port range"},
+		{"start port too low", 0, 1, "start port 0 is out of valid range [1, 65535]"},
+		{"start port too high", 65536, 1, "start port 65536 is out of valid range [1, 65535]"},
+		{"end port too high", 65535, 2, "port range [65535, 65536] exceeds maximum port value"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePortRange(tt.startPort, tt.rangeSize)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
 			}
 		})
 	}
@@ -1019,16 +1149,67 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 	})
 }
 
+// TestModelServerPortMigration verifies that the deprecated vllm-port flag
+// migrates to model-server-port.
+// Remove when vllm-port is dropped in v0.12 (see issue 2172).
+func TestModelServerPortMigration(t *testing.T) {
+	tests := []struct {
+		name               string
+		modelServerPort    string
+		vllmPort           string
+		expectedDecoderURL string
+	}{
+		{"model-server-port set", "9000", "", "http://localhost:9000"},
+		{"deprecated vllm-port migrated", "", "9001", "http://localhost:9001"},
+		{"model-server-port wins over vllm-port when both set", "9000", "9001", "http://localhost:9000"},
+		{"no model-server-port, default falls back to vllm-port default", "", defaultVLLMPort, "http://localhost:" + defaultVLLMPort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.modelServerPort = tt.modelServerPort
+			opts.vllmPort = tt.vllmPort
+
+			require.NoError(t, opts.Complete())
+			require.NoError(t, opts.Validate())
+			require.NotNil(t, opts.DecoderURL)
+			require.Equal(t, tt.expectedDecoderURL, opts.DecoderURL.String())
+		})
+	}
+}
+
+func TestModelServerPortYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{model-server-port: 8203}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.NoError(t, opts.Validate())
+	require.Equal(t, "http://localhost:8203", opts.DecoderURL.String())
+}
+
+// A CLI flag overrides YAML config, including the deprecated --vllm-port over a
+// model-server-port key.
+func TestModelServerPortFlagBeatsYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{model-server-port: 8203}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	setFlag(t, testPFlagSet, vllmPort, "9001")
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.NoError(t, opts.Validate())
+	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
+}
+
 func TestCompleteTLSConfiguration(t *testing.T) {
 	tests := []struct {
 		name                         string
 		enableTLS                    []string
 		tlsInsecureSkipVerify        []string
-		deprecatedPrefillerUseTLS    bool
-		deprecatedDecoderUseTLS      bool
-		deprecatedPrefillerInsecure  bool
-		deprecatedDecoderInsecure    bool
-		vllmPort                     string
+		modelServerPort              string
 		expectedDecoderURL           string
 		expectedUseTLSForPrefiller   bool
 		expectedUseTLSForDecoder     bool
@@ -1039,7 +1220,7 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 			name:                         "no TLS configuration",
 			enableTLS:                    []string{},
 			tlsInsecureSkipVerify:        []string{},
-			vllmPort:                     "8001",
+			modelServerPort:              "8001",
 			expectedDecoderURL:           "http://localhost:8001",
 			expectedUseTLSForPrefiller:   false,
 			expectedUseTLSForDecoder:     false,
@@ -1050,7 +1231,7 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 			name:                         "prefiller TLS only",
 			enableTLS:                    []string{"prefiller"},
 			tlsInsecureSkipVerify:        []string{},
-			vllmPort:                     "8001",
+			modelServerPort:              "8001",
 			expectedDecoderURL:           "http://localhost:8001",
 			expectedUseTLSForPrefiller:   true,
 			expectedUseTLSForDecoder:     false,
@@ -1061,7 +1242,7 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 			name:                         "decoder TLS only",
 			enableTLS:                    []string{"decoder"},
 			tlsInsecureSkipVerify:        []string{},
-			vllmPort:                     "8001",
+			modelServerPort:              "8001",
 			expectedDecoderURL:           "https://localhost:8001",
 			expectedUseTLSForPrefiller:   false,
 			expectedUseTLSForDecoder:     true,
@@ -1072,7 +1253,7 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 			name:                         "both stages TLS",
 			enableTLS:                    []string{"prefiller", "decoder"},
 			tlsInsecureSkipVerify:        []string{},
-			vllmPort:                     "9000",
+			modelServerPort:              "9000",
 			expectedDecoderURL:           "https://localhost:9000",
 			expectedUseTLSForPrefiller:   true,
 			expectedUseTLSForDecoder:     true,
@@ -1083,39 +1264,11 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 			name:                         "TLS with insecure skip verify",
 			enableTLS:                    []string{"prefiller", "decoder"},
 			tlsInsecureSkipVerify:        []string{"prefiller", "decoder"},
-			vllmPort:                     "8001",
+			modelServerPort:              "8001",
 			expectedDecoderURL:           "https://localhost:8001",
 			expectedUseTLSForPrefiller:   true,
 			expectedUseTLSForDecoder:     true,
 			expectedInsecureForPrefiller: true,
-			expectedInsecureForDecoder:   true,
-		},
-		{
-			name:                         "deprecated flags migration",
-			enableTLS:                    []string{},
-			tlsInsecureSkipVerify:        []string{},
-			deprecatedPrefillerUseTLS:    true,
-			deprecatedDecoderUseTLS:      true,
-			deprecatedPrefillerInsecure:  true,
-			deprecatedDecoderInsecure:    true,
-			vllmPort:                     "8001",
-			expectedDecoderURL:           "https://localhost:8001",
-			expectedUseTLSForPrefiller:   true,
-			expectedUseTLSForDecoder:     true,
-			expectedInsecureForPrefiller: true,
-			expectedInsecureForDecoder:   true,
-		},
-		{
-			name:                         "mixed deprecated and new flags",
-			enableTLS:                    []string{"prefiller"},
-			tlsInsecureSkipVerify:        []string{},
-			deprecatedDecoderUseTLS:      true,
-			deprecatedDecoderInsecure:    true,
-			vllmPort:                     "8001",
-			expectedDecoderURL:           "https://localhost:8001",
-			expectedUseTLSForPrefiller:   true,
-			expectedUseTLSForDecoder:     true,
-			expectedInsecureForPrefiller: false,
 			expectedInsecureForDecoder:   true,
 		},
 	}
@@ -1125,11 +1278,7 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 			opts := NewOptions()
 			opts.enableTLS = tt.enableTLS
 			opts.tlsInsecureSkipVerify = tt.tlsInsecureSkipVerify
-			opts.prefillerUseTLS = tt.deprecatedPrefillerUseTLS
-			opts.decoderUseTLS = tt.deprecatedDecoderUseTLS
-			opts.prefillerInsecureSkipVerify = tt.deprecatedPrefillerInsecure
-			opts.decoderInsecureSkipVerify = tt.deprecatedDecoderInsecure
-			opts.vllmPort = tt.vllmPort
+			opts.modelServerPort = tt.modelServerPort
 
 			err := opts.Complete()
 			if err != nil {

@@ -119,7 +119,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 			headers := reqCtx.ForwardedHeaders()
 			headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-			headers[gateway.EPPPhaseHeader] = gateway.PhaseEncode
+			headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
 
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
@@ -201,8 +201,8 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 				},
 			},
-			"max_tokens": 1,
 		}
+		reqcommon.PrimeSingleTokenRequest(body, reqCtx.Body)
 		return body
 	default:
 		return map[string]any{
@@ -213,7 +213,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 				"kwargs_data":     map[string][]string{ModalityImage: {entry.KwargsData}},
 			},
-			"sampling_params": map[string]any{"max_tokens": 1},
+			reqcommon.FieldSamplingParams: map[string]any{reqcommon.FieldMaxTokens: 1},
 		}
 	}
 }

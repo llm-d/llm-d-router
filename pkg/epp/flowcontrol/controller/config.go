@@ -24,6 +24,13 @@ import (
 )
 
 const (
+	// defaultRequestTTL is the default Time-To-Live applied to queued requests when the configuration
+	// does not specify one. It is a queue-wait budget: a request still undispatched after this long is
+	// shed with a retryable backpressure signal instead of being served with severely degraded
+	// time-to-first-token. It is also the only bound on queue wait when neither the client nor the
+	// gateway enforces a request deadline (the well-lit guides configure no gateway request timeout);
+	// where such deadlines exist and fire sooner, context cancellation evicts the request first.
+	defaultRequestTTL = 60 * time.Second
 	// defaultExpiryCleanupInterval is the default frequency for scanning for expired items.
 	defaultExpiryCleanupInterval = 1 * time.Second
 	// defaultEnqueueChannelBufferSize is the default size of a worker's incoming request buffer.
@@ -32,9 +39,12 @@ const (
 
 // Config holds the configuration for the `FlowController`.
 type Config struct {
-	// DefaultRequestTTL is the default Time-To-Live applied to requests that do not
-	// specify their own TTL hint.
-	// Optional: If zero, no TTL is applied by default and we rely solely on request context cancellation.
+	// DefaultRequestTTL is the default Time-To-Live applied to requests that do not specify their own
+	// TTL hint. Because the admission adapter does not currently plumb a per-request hint, this value
+	// governs every request entering flow control.
+	// Optional: Defaults to `defaultRequestTTL` (60s). An explicit zero disables the TTL entirely, in
+	// which case queued requests are bounded only by request context cancellation (client disconnect
+	// or gateway timeout).
 	DefaultRequestTTL time.Duration
 
 	// ExpiryCleanupInterval is the interval at which each processor scans its queues for expired items.
@@ -76,6 +86,7 @@ func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
 // NewConfig creates a new Config with the given options, applying defaults and validation.
 func NewConfig(opts ...ConfigOption) (*Config, error) {
 	c := &Config{
+		DefaultRequestTTL:        defaultRequestTTL,
 		ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
 		EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
 	}

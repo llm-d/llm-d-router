@@ -60,13 +60,18 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
+	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
+	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
+	exttopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/topology"
+	srcdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/dcgm"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -80,6 +85,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/softreflectiveceiling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
@@ -110,6 +116,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/weightedrandom"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/dataparallel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
@@ -563,12 +570,18 @@ func (r *Runner) registerInTreePlugins() {
 	// data layer models source/extractor
 	fwkplugin.Register(srcmodels.ModelsDataSourceType, srcmodels.ModelDataSourceFactory)
 	fwkplugin.Register(attrmodels.ModelsExtractorType, extmodels.ModelServerExtractorFactory)
+	fwkplugin.Register(attrtopology.TopologyExtractorType, exttopology.Factory)
+
+	// data layer DCGM source/extractor
+	fwkplugin.Register(srcdcgm.DCGMDataSourceType, srcdcgm.DCGMDataSourceFactory)
+	fwkplugin.Register(attrgpu.DCGMExtractorType, extdcgm.DCGMExtractorFactory)
 
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(maxscore.MaxScorePickerType, maxscore.MaxScorePickerFactory)
 	fwkplugin.Register(random.RandomPickerType, random.RandomPickerFactory)
 	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, weightedrandom.WeightedRandomPickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, single.SingleProfileHandlerFactory)
+	fwkplugin.Register(headerprofile.HeaderProfileHandlerType, headerprofile.HeaderProfileHandlerFactory)
 	fwkplugin.Register(disagg.DisaggHeadersHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
 	fwkplugin.Register(disagg.PrefillHeaderHandlerType, disagg.HeadersHandlerFactory)                     //nolint:staticcheck // intentional: keep backward compatibility
 	fwkplugin.RegisterWithPluginDependencies(disagg.PdProfileHandlerType, disagg.PdProfileHandlerFactory, //nolint:staticcheck // intentional: keep backward compatibility
@@ -600,6 +613,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, usagelimits.StaticPolicyFactory)
 	fwkplugin.Register(priorityholdback.PolicyType, priorityholdback.PolicyFactory)
+	fwkplugin.Register(softreflectiveceiling.PolicyType, softreflectiveceiling.Factory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
 	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)

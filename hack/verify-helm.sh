@@ -116,6 +116,7 @@ test_cases_llm_d_router_standalone["latency-predictor"]="--set router.latencyPre
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
+test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 
 
@@ -187,13 +188,6 @@ mismatched_agentgateway_listener_target_port_command="${HELM} template ${SCRIPT_
 echo "Executing: ${mismatched_agentgateway_listener_target_port_command}"
 if eval "${mismatched_agentgateway_listener_target_port_command}"; then
   echo "Helm template unexpectedly succeeded for an agentgateway listener targetPort that does not match port"
-  exit 1
-fi
-
-unsupported_proxy_service_agentgateway_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.proxyType=agentgateway --set router.proxy.agentgateway.service.name=llm-instance-gateway --set 'router.proxy.agentgateway.service.ports[0]=8000' --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
-echo "Executing: ${unsupported_proxy_service_agentgateway_command}"
-if eval "${unsupported_proxy_service_agentgateway_command}"; then
-  echo "Helm template unexpectedly succeeded for proxy mode=service with proxyType=agentgateway"
   exit 1
 fi
 
@@ -292,5 +286,35 @@ fi
 # The proxy Deployment selector/labels must be distinct from the EPP selector.
 if ! grep -q -- 'llm-d-router-proxy: proxy-svc-proxy' "${proxy_service_render_output}"; then
   echo "Proxy service mode did not render the dedicated proxy selector label"
+  exit 1
+fi
+
+echo "Verifying llm-d-router-standalone agentgateway in service mode reaches EPP over the Service..."
+agentgateway_service_mode_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-service-render.yaml"
+agentgateway_service_mode_command="${HELM} template ag-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace ag-ns --set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' > ${agentgateway_service_mode_output}"
+echo "Executing: ${agentgateway_service_mode_command}"
+eval "${agentgateway_service_mode_command}"
+if ! grep -q -- 'name: ag-svc-proxy' "${agentgateway_service_mode_output}"; then
+  echo "Agentgateway service mode did not render the separate proxy Deployment/Service named ag-svc-proxy"
+  exit 1
+fi
+# The agentgateway container lives only in the standalone proxy Deployment, not the EPP pod.
+agentgateway_container_count=$(grep -c -- '- name: agentgateway-proxy$' "${agentgateway_service_mode_output}")
+if [ "${agentgateway_container_count}" -ne 1 ]; then
+  echo "Agentgateway service mode rendered ${agentgateway_container_count} agentgateway-proxy containers, expected exactly 1 (in the proxy Deployment)"
+  exit 1
+fi
+# endpointPicker must target the EPP Service FQDN, not loopback.
+if ! grep -q -- 'host: "ag-svc-epp.ag-ns.svc.cluster.local:9002"' "${agentgateway_service_mode_output}"; then
+  echo "Agentgateway service mode did not point endpointPicker.host at the EPP Service FQDN"
+  exit 1
+fi
+if grep -q -- 'host: "127.0.0.1:9002"' "${agentgateway_service_mode_output}"; then
+  echo "Agentgateway service mode still points endpointPicker.host at loopback"
+  exit 1
+fi
+# The agentgateway config must be mounted in the proxy Deployment.
+if ! grep -q -- 'agentgateway-config-template' "${agentgateway_service_mode_output}"; then
+  echo "Agentgateway service mode did not mount the agentgateway config in the proxy Deployment"
   exit 1
 fi

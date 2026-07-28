@@ -27,6 +27,11 @@ const (
 	// running vLLM with E/P/D (Encode/Prefill/Decode)
 	ePDDisaggDir = "../../deploy/environments/dev/e-p-d"
 
+	// encodeOnlyDir is the single-component kustomize path for encode-only pods.
+	encodeOnlyDir = "../../deploy/components/vllm-encode"
+	// prefillOnlyDir is the single-component kustomize path for prefill-only pods.
+	prefillOnlyDir = "../../deploy/components/vllm-prefill"
+
 	simplePrompt = "Hello my name is Andrew, I have a doctorate in Rocket Science, and I like interplanetary space exploration"
 	extraPrompt  = "Why is the sky sometimes blue and sometimes red close to sunset?"
 
@@ -56,10 +61,10 @@ var (
 	doubleEmbedding = []string{"First sentence to embed.", "Second sentence to embed."}
 )
 
-var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
-	ginkgo.When("Running simple non-PD configuration", func() {
+var _ = ginkgo.Describe("Run end to end tests", func() {
+	ginkgo.When("Running simple non-PD configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
 
@@ -70,11 +75,12 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 
 		ginkgo.It("should report metrics", func() {
 			numTargetPorts := 1
-			infPoolObjects = createInferencePool(numTargetPorts, true)
+			infPoolObjects := createInferencePool(numTargetPorts)
 			temp := strings.Split(infPoolObjects[0], "/")
 			infPoolName := temp[1]
 
@@ -87,15 +93,16 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running leader election", func() {
+	ginkgo.When("Running leader election", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("Should elect one leader and have other pods as not ready", func() {
 			numOfPods := 3
 			numTargetPorts := 1
 
-			infPoolObjects = createInferencePool(numTargetPorts, true)
+			infPoolObjects := createInferencePool(numTargetPorts)
 
 			modelServers := createModelServersDecode(1)
 
@@ -107,13 +114,14 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 
 		ginkgo.It("Should successfully failover and serve traffic after the leader pod is deleted", func() {
 			numOfPods := 3
 			numTargetPorts := 1
 
-			infPoolObjects = createInferencePool(numTargetPorts, true)
+			infPoolObjects := createInferencePool(numTargetPorts)
 			temp := strings.Split(infPoolObjects[0], "/")
 			infPoolName := temp[1]
 
@@ -148,13 +156,14 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 
 		})
-	})
+	}))
 
-	ginkgo.When("Running a PD configuration with nixlv2 connector(deprecated pd-profile-handler)", ginkgo.Label(metricsTestLabel, deprecatedPDTestLabel), func() {
+	ginkgo.When("Running a PD configuration with nixlv2 connector(deprecated pd-profile-handler)", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			prefillReplicas := 1
 			decodeReplicas := 4
@@ -167,7 +176,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			startEPPMetricsPortForward()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -217,22 +226,21 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
 	for _, tc := range []struct {
 		name   string
 		config string
-		label  string
 	}{
-		{"deprecated pd-profile-handler", deprecatedPdConfig, deprecatedPDTestLabel},
-		{"disagg-profile-handler", pdConfig, disaggTestLabel},
+		{"deprecated pd-profile-handler", deprecatedPdConfig},
+		{"disagg-profile-handler", pdConfig},
 	} {
 		config := tc.config // capture for closure
-		label := tc.label
-		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, ginkgo.Label(sharedStorageTestLabel, label), func() {
+		ginkgo.When("Running a PD configuration with shared-storage connector using "+tc.name, ginkgo.Ordered, testWrapper(func() {
 			ginkgo.It("should run regular (non-streaming) requests successfully", func() {
-				infPoolObjects = createInferencePool(1, true)
+				infPoolObjects := createInferencePool(1)
 
 				prefillReplicas := 1
 				decodeReplicas := 2
@@ -241,7 +249,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -268,10 +276,11 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 				testutils.DeleteObjects(testConfig, epp, nsName)
 				testutils.DeleteObjects(testConfig, modelServers, nsName)
+				testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 			})
 
 			ginkgo.It("should run streaming requests successfully", func() {
-				infPoolObjects = createInferencePool(1, true)
+				infPoolObjects := createInferencePool(1)
 
 				prefillReplicas := 1
 				decodeReplicas := 2
@@ -280,7 +289,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -301,6 +310,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 				testutils.DeleteObjects(testConfig, epp, nsName)
 				testutils.DeleteObjects(testConfig, modelServers, nsName)
+				testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 			})
 
 			ginkgo.It("should handle decode-first success scenario with cache_hit_threshold", func() {
@@ -308,7 +318,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				// When cache_hit_threshold is set and the decode succeeds (cache hit),
 				// the request should complete without falling back to P/D.
 				// IMPORTANT: The prefill pod should NOT process any requests in this scenario.
-				infPoolObjects = createInferencePool(1, true)
+				infPoolObjects := createInferencePool(1)
 
 				prefillReplicas := 1
 				decodeReplicas := 2
@@ -317,7 +327,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -349,6 +359,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 				testutils.DeleteObjects(testConfig, epp, nsName)
 				testutils.DeleteObjects(testConfig, modelServers, nsName)
+				testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 			})
 
 			ginkgo.It("should handle decode-first fallback to P/D when cache threshold not met", func() {
@@ -356,7 +367,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				// When cache_hit_threshold is set and the decode returns cache_threshold finish_reason,
 				// the sidecar should fall back to P/D disaggregation.
 				// IMPORTANT: The prefill pod SHOULD process requests in this scenario.
-				infPoolObjects = createInferencePool(1, true)
+				infPoolObjects := createInferencePool(1)
 
 				prefillReplicas := 1
 				decodeReplicas := 2
@@ -365,7 +376,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				epp := createEndPointPicker(config)
 				nsName := getNamespace()
 
-				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 				gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -401,13 +412,14 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 				testutils.DeleteObjects(testConfig, epp, nsName)
 				testutils.DeleteObjects(testConfig, modelServers, nsName)
+				testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 			})
-		})
+		}))
 	}
 
-	ginkgo.When("Running a PD configuration with mooncake connector (disagg-profile-handler)", func() {
+	ginkgo.When("Running a PD configuration with mooncake connector (disagg-profile-handler)", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run regular (non-streaming) requests successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			prefillReplicas := 1
 			decodeReplicas := 2
@@ -416,7 +428,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(pdConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -430,10 +442,11 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
 
 		ginkgo.It("should run streaming requests successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			prefillReplicas := 1
 			decodeReplicas := 2
@@ -442,7 +455,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 			epp := createEndPointPicker(pdConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -456,13 +469,14 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", ginkgo.Label(metricsTestLabel, disaggTestLabel), func() {
+	ginkgo.When("Running a PD configuration with disagg-profile-handler and metrics validation", ginkgo.Ordered, testWrapper(func() {
 
 		ginkgo.It("should run successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			prefillReplicas := 1
 			decodeReplicas := 4
@@ -475,7 +489,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			startEPPMetricsPortForward()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -525,19 +539,20 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running simple non-PD configuration with disagg-profile-handler", func() {
+	ginkgo.When("Running simple non-PD configuration with disagg-profile-handler", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
 
 			epp := createEndPointPicker(decodeOnlyConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -551,12 +566,13 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running an E/PD (Encode/Prefill-Decode) configuration", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Running an E/PD (Encode/Prefill-Decode) configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should route multimodal requests through encode and decode pods", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			encodeReplicas := 2
 			decodeReplicas := 1
@@ -570,8 +586,8 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				startEPPMetricsPortForward()
 			}
 
-			encodePods := getPodNames(encodeSelector)
-			prefillDecodePods := getPodNames(prefillDecodeSelector)
+			encodePods := getPodNames(encodeSelector, nsName)
+			prefillDecodePods := getPodNames(prefillDecodeSelector, nsName)
 			gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 			gomega.Expect(prefillDecodePods).Should(gomega.HaveLen(decodeReplicas))
 
@@ -625,12 +641,13 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running an E/P/D (encode/prefill/decode) configuration", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Running an E/P/D (encode/prefill/decode) configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should route multimodal requests through encode, prefill, and decode pods", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			encodeReplicas := 2
 			prefillReplicas := 1
@@ -645,9 +662,9 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				startEPPMetricsPortForward()
 			}
 
-			encodePods := getPodNames(encodeSelector)
-			prefillPods := getPodNames(prefillSelector)
-			decodePods := getPodNames(decodeSelector)
+			encodePods := getPodNames(encodeSelector, nsName)
+			prefillPods := getPodNames(prefillSelector, nsName)
+			decodePods := getPodNames(decodeSelector, nsName)
 			gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 			gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 			gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
@@ -709,12 +726,13 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running an EPD (no disaggregation) configuration", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Running an EPD (no disaggregation) configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should route text and multimodal requests to the single deployment", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			// Single deployment labeled encode-prefill-decode: matches encode-filter, prefill-filter,
 			// and decode-filter, so all EPD stages are handled by the same deployment.
@@ -731,7 +749,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 				startEPPMetricsPortForward()
 			}
 
-			epdPods := getPodNames(epdSingleSelector)
+			epdPods := getPodNames(epdSingleSelector, nsName)
 			gomega.Expect(epdPods).Should(gomega.HaveLen(replicas))
 
 			// Text completion: encode skipped, routes to decode profile -> single deployment
@@ -776,18 +794,19 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running simple non-PD KV enabled configuration", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Running simple non-PD KV enabled configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecodeKV(1)
 			epp := createEndPointPicker(kvConfig())
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -799,18 +818,19 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running KV configuration with external tokenizer DataProducer plugin", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Running KV configuration with external tokenizer DataProducer plugin", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecodeKV(1)
 			epp := createEndPointPicker(kvExternalTokenizerConfig())
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -833,19 +853,20 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Scaling up and down the model servers", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Scaling up and down the model servers", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should distribute inference requests across all model servers", func() {
-			infPoolObjects = createInferencePool(1, true)
+			infPoolObjects := createInferencePool(1)
 
 			modelServers := createModelServersDecode(1)
 
 			epp := createEndPointPicker(scaleConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -858,7 +879,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			scaleDeployment(nsName, modelServers, 1)
 
-			scaledUpPrefillPods, scaledUpDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			scaledUpPrefillPods, scaledUpDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(scaledUpPrefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(scaledUpDecodePods).Should(gomega.HaveLen(2))
 
@@ -876,7 +897,7 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			scaleDeployment(nsName, modelServers, -1)
 
-			scaledDownPrefillPods, scaledDownDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			scaledDownPrefillPods, scaledDownDecodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(scaledDownPrefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(scaledDownDecodePods).Should(gomega.HaveLen(1))
 			gomega.Expect(scaledDownDecodePods[0]).Should(gomega.BeElementOf(scaledUpDecodePods))
@@ -890,19 +911,20 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("Running a vLLM Data Parallel configuration", ginkgo.Label(extendedTestLabel), func() {
+	ginkgo.When("Running a vLLM Data Parallel configuration", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should schedule inference on all ranks", func() {
-			infPoolObjects = createInferencePool(2, true)
+			infPoolObjects := createInferencePool(2)
 
 			modelServers := createModelServersDecodeDP(1)
 
 			epp := createEndPointPicker(dataParallelConfig)
 			nsName := getNamespace()
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -940,8 +962,9 @@ var _ = ginkgo.Describe("Run end to end tests", ginkgo.Ordered, func() {
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
-	})
+	}))
 })
 
 func waitForReadyLeader(numOfPods int, nsName string) *corev1.Pod {

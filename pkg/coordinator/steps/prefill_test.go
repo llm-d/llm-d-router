@@ -38,8 +38,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		if r.URL.Path != "/inference/v1/generate" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -177,8 +177,8 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 		if r.URL.Path != gateway.PathCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -271,8 +271,8 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		if r.URL.Path != gateway.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -374,8 +374,8 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 		if r.URL.Path != gateway.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -415,6 +415,54 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	}
 	if _, ok := prefillBody["stream_options"]; ok {
 		t.Fatalf("expected stream_options to be stripped from prefill request, got %v", prefillBody["stream_options"])
+	}
+}
+
+// TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
+// regression test: buildPrefillBody used to clone the client's body and only
+// overwrite max_tokens, so a client-supplied max_completion_tokens survived
+// at its original, uncapped value alongside the newly-capped max_tokens=1.
+func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-4"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-max-completion-tokens",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		Body: map[string]any{
+			"model":                 "test-model",
+			"max_completion_tokens": 100,
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected prefill request max_tokens=1, got %v", prefillBody["max_tokens"])
+	}
+	if prefillBody["max_completion_tokens"] != float64(1) {
+		t.Fatalf("expected prefill request max_completion_tokens capped to 1, got %v", prefillBody["max_completion_tokens"])
 	}
 }
 

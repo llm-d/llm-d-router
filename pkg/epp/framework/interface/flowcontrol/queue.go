@@ -18,9 +18,6 @@ package flowcontrol
 
 // QueueInspectionMethods defines SafeQueue's read-only methods.
 type QueueInspectionMethods interface {
-	// Name returns a string identifier for the concrete queue implementation type (e.g., "PriorityQueue").
-	Name() string
-
 	// Len returns the current number of items in the queue.
 	Len() int
 

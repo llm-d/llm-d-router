@@ -17,6 +17,7 @@ export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
 # CI e2e jobs load image artifacts before invoking make. These toggles keep
 # image-pull from fetching runner-only images that are already loaded locally.
+PULL_EPP_IMAGE="${PULL_EPP_IMAGE:-true}"
 PULL_SIDECAR_IMAGE="${PULL_SIDECAR_IMAGE:-true}"
 PULL_VLLM_RENDER_IMAGE="${PULL_VLLM_RENDER_IMAGE:-true}"
 
@@ -53,7 +54,9 @@ echo "vLLM Render Image:   ${VLLM_RENDER_IMAGE}"
 echo "----------------------------------------------------"
 
 echo "Pulling dependencies..."
-ensure_image "${EPP_IMAGE}"
+if [ "${PULL_EPP_IMAGE}" = "true" ]; then
+  ensure_image "${EPP_IMAGE}"
+fi
 ensure_image "${VLLM_IMAGE}"
 if [ "${PULL_SIDECAR_IMAGE}" = "true" ]; then
   ensure_image "${SIDECAR_IMAGE}"

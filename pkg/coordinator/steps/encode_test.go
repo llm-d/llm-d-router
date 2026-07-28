@@ -37,8 +37,8 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount.Add(1)
 
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhaseEncode {
-			t.Errorf("expected EPP-Phase: encode, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
+			t.Errorf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -244,8 +244,8 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	var receivedBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhaseEncode {
-			t.Fatalf("expected EPP-Phase: encode, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
+			t.Fatalf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -348,6 +348,61 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 	if _, ok := receivedBody["features"]; ok {
 		t.Fatal("chat format should not have top-level features")
+	}
+}
+
+// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
+// regression test: buildEncodeBody used to always emit max_tokens=1 without
+// regard to which token-limit field the client used, so a reasoning-model
+// client's max_completion_tokens was never capped in the encoder sub-request.
+func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-b": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-max-completion-tokens",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":                 testModelName,
+			"max_completion_tokens": 100,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedBody["max_completion_tokens"] != float64(1) {
+		t.Fatalf("expected encode sub-request max_completion_tokens capped to 1, got %v", receivedBody["max_completion_tokens"])
 	}
 }
 

@@ -1,5 +1,8 @@
 {{- define "llm-d-epp.proxy-deployment" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- $proxyType := include "llm-d-router.proxyType" . | trim -}}
+{{- $proxyConfigMap := index $proxy "configMap" | default dict -}}
+{{- $proxyConfigMapName := index $proxyConfigMap "name" | default "" -}}
 {{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -62,13 +65,30 @@ spec:
           resources:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- with $proxy.volumeMounts }}
+        {{- if or (and (eq $proxyType "agentgateway") $proxyConfigMapName) $proxy.volumeMounts }}
           volumeMounts:
+          {{- if and (eq $proxyType "agentgateway") $proxyConfigMapName }}
+            - name: agentgateway-config-template
+              mountPath: /config
+              readOnly: true
+          {{- end }}
+          {{- with $proxy.volumeMounts }}
           {{- toYaml . | nindent 12 }}
+          {{- end }}
         {{- end }}
-      {{- with $proxy.volumes }}
+      {{- if or (and (eq $proxyType "agentgateway") $proxyConfigMapName) $proxy.volumes }}
       volumes:
+      {{- if and (eq $proxyType "agentgateway") $proxyConfigMapName }}
+        - name: agentgateway-config-template
+          configMap:
+            name: {{ $proxyConfigMapName }}
+            items:
+              - key: config.yaml
+                path: config.yaml
+      {{- end }}
+      {{- with $proxy.volumes }}
       {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
       {{- end }}
 ---
 {{- end -}}

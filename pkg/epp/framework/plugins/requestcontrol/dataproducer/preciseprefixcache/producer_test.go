@@ -19,8 +19,10 @@ package preciseprefixcache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -195,12 +197,14 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 	assert.Equal(t, 1, info.MatchBlocks())
 	assert.Equal(t, 1, info.TotalBlocks())
 	assert.Equal(t, 16, info.BlockSizeTokens())
+	assert.Nil(t, info.MM(), "text-only request must leave MM untracked")
 
 	raw2, ok := testEndpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
 	require.True(t, ok)
 	info2 := raw2.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 0, info2.MatchBlocks())
 	assert.Equal(t, 1, info2.TotalBlocks())
+	assert.Nil(t, info2.MM(), "text-only request must leave MM untracked")
 }
 
 // No tokens → no-op (no prompt-string fallback).
@@ -439,6 +443,68 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	assert.Empty(t, info.CachedBlocksByTier())
 }
 
+// MM match uses cachedBlocks (literal), not matchLen (tier-weighted score).
+func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 4*testBlockSize)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+	keys := []kvblock.BlockHash{0xAA, 0xBB, 0xCC, 0xDD}
+	const addr = "10.0.0.1:8080"
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return keys, nil
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				out := map[kvblock.BlockHash][]kvblock.PodEntry{}
+				for _, k := range keys {
+					out[k] = []kvblock.PodEntry{{PodIdentifier: addr}}
+				}
+				return out, nil
+			},
+		},
+	}
+	// Weighted score 3.2 gives matchLen=3, while all 4 blocks are cached.
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, _ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			return map[string]float64{addr: 3.2}, nil
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	endpoints := freshEndpoints()
+
+	// MM at block index 3: caught by cachedBlocks=4, missed by matchLen=3.
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-mm-weighted",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedPrompt: &fwkrh.TokenizedPrompt{
+				PerPromptTokens: [][]uint32{tokens},
+				MultiModalFeatures: []fwkrh.MultiModalFeature{
+					{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 48, Length: 16},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+
+	assert.Equal(t, 3, info.MatchBlocks())
+	assert.Equal(t, 4, info.CachedBlockCount())
+	require.NotNil(t, info.MM())
+	assert.Equal(t, 1, info.MM().MatchBlocks, "must use cachedBlocks, not matchLen")
+}
+
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
 func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 	ctx := utils.NewTestContext(t)
@@ -672,4 +738,100 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 			assert.Equal(t, 1, info.TotalBlocks())
 		})
 	}
+}
+
+type fakeSubscriberManager struct {
+	ids       []string
+	endpoints []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+	return nil
+}
+func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}
+func (f *fakeSubscriberManager) GetActiveSubscribers() ([]string, []string) {
+	return f.ids, f.endpoints
+}
+func (f *fakeSubscriberManager) Shutdown(_ context.Context) {}
+
+func TestDumpState(t *testing.T) {
+	// Start() is intentionally not called: NoTTL entries never expire, and the
+	// enumeration helpers work on an unstarted cache.
+	specCache := ttlcache.New[string, *speculativeEntries]()
+	specCache.Set("req-2", &speculativeEntries{}, ttlcache.NoTTL)
+	specCache.Set("req-1", &speculativeEntries{}, ttlcache.NoTTL)
+
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: "x"},
+		subscribersManager: &fakeSubscriberManager{ids: []string{"ns/pod-b", "ns/pod-a"}},
+		speculativeCache:   specCache,
+		speculativeEnabled: true,
+		blockSizeTokens:    64,
+	}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	// Subscriber pod identities and live request ids are enumerated for debugging.
+	assert.Contains(t, string(payload), "ns/pod-a")
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, precisePrefixState{
+		Subscribers:             []string{"ns/pod-a", "ns/pod-b"},
+		TotalSubscribers:        2,
+		MaxSubscribers:          maxDumpSubscribers,
+		SpeculativeIndexing:     true,
+		SpeculativeEntries:      []string{"req-1", "req-2"},
+		TotalSpeculativeEntries: 2,
+		MaxSpeculativeEntries:   maxDumpSpeculativeEntries,
+		BlockSizeTokens:         64,
+	}, state)
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	p := &Producer{}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+	// Empty lists serialize as [] not null, matching the documented response shape.
+	assert.Contains(t, string(payload), `"subscribers":[]`)
+	assert.Contains(t, string(payload), `"speculativeEntries":[]`)
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, precisePrefixState{
+		Subscribers:           []string{},
+		SpeculativeEntries:    []string{},
+		MaxSubscribers:        maxDumpSubscribers,
+		MaxSpeculativeEntries: maxDumpSpeculativeEntries,
+	}, state)
+}
+
+func TestDumpStateCaps(t *testing.T) {
+	specCache := ttlcache.New[string, *speculativeEntries]()
+	ids := make([]string, 0, maxDumpSubscribers+5)
+	for i := 0; i < maxDumpSubscribers+5; i++ {
+		ids = append(ids, fmt.Sprintf("ns/pod-%03d", i))
+	}
+	for i := 0; i < maxDumpSpeculativeEntries+7; i++ {
+		specCache.Set(fmt.Sprintf("req-%04d", i), &speculativeEntries{}, ttlcache.NoTTL)
+	}
+
+	p := &Producer{
+		subscribersManager: &fakeSubscriberManager{ids: ids},
+		speculativeCache:   specCache,
+	}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+
+	var state precisePrefixState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	// Lists are capped, but the totals report the full counts so a consumer can
+	// tell the dump is partial from totalX > maxX.
+	assert.Len(t, state.Subscribers, maxDumpSubscribers)
+	assert.Equal(t, maxDumpSubscribers+5, state.TotalSubscribers)
+	assert.Len(t, state.SpeculativeEntries, maxDumpSpeculativeEntries)
+	assert.Equal(t, maxDumpSpeculativeEntries+7, state.TotalSpeculativeEntries)
 }

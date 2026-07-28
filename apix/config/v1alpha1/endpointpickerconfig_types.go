@@ -351,7 +351,7 @@ type FlowControlConfig struct {
 	// levels. If this limit is exceeded, new requests will be rejected even if their specific
 	// priority band has capacity.
 	// Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
-	// If omitted, no global byte limit is enforced.
+	// If omitted or "0", no global byte limit is enforced.
 	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
 
 	// +optional
@@ -359,15 +359,17 @@ type FlowControlConfig struct {
 	// levels. If this limit is exceeded, new requests will be rejected even if their specific
 	// priority band has capacity.
 	// Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
-	// If omitted, no global request limit is enforced.
+	// If omitted or "0", no global request limit is enforced.
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
-	// DefaultRequestTTL serves as a fallback timeout for requests that do not specify their own
-	// deadline.
-	// It ensures that requests do not hang indefinitely in the queue.
-	// If 0 or omitted, it defaults to the client context deadline, meaning requests may wait
-	// indefinitely unless cancelled by the client.
+	// DefaultRequestTTL bounds how long a request may wait in the queue before it is evicted.
+	// If omitted, it defaults to 60s. This is a queue-wait budget: a request that cannot dispatch
+	// within it is shed with a retryable backpressure error rather than served late, and it is the
+	// only bound on queue wait when neither the client nor the gateway enforces a request deadline.
+	// Where such deadlines exist and fire sooner, they evict the request first (client disconnect).
+	// An explicit "0s" disables the TTL: requests then wait until client disconnect or controller
+	// shutdown.
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
 
 	// +optional
@@ -382,7 +384,10 @@ type FlowControlConfig struct {
 	// +optional
 	// DefaultNegativePriorityBand allows you to define a separate template for priority levels
 	// strictly below zero. This enables designating negative-priority traffic as sheddable by
-	// setting lower capacity limits (e.g., maxBytes: "0" to drop immediately).
+	// setting lower capacity limits (e.g., a small maxRequests, so that under saturation the band
+	// fills quickly and subsequent requests are rejected immediately rather than queued).
+	// Note that a value of "0" is treated as unset and receives the system default, not zero
+	// capacity.
 	// If not specified, negative priorities fall back to DefaultPriorityBand.
 	DefaultNegativePriorityBand *PriorityBandConfig `json:"defaultNegativePriorityBand,omitempty"`
 
@@ -457,13 +462,15 @@ type PriorityBandConfig struct {
 	// +optional
 	// MaxBytes is the maximum number of bytes allowed for this priority band.
 	// Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
-	// If omitted, the system default is used.
+	// If omitted or "0", the system default (1G) is used. Per-band limits are always bounded; to
+	// effectively remove the bound, set an explicit large value.
 	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
 
 	// +optional
 	// MaxRequests is the maximum number of concurrent requests allowed for this priority band.
 	// Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
-	// If omitted, no request limit is enforced.
+	// If omitted or "0", the system default (5000) is used. Per-band limits are always bounded; to
+	// effectively remove the bound, set an explicit large value.
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional

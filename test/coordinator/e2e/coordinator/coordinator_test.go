@@ -94,15 +94,12 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 // tears the workload down. expectedImages is the number of images in the
 // request; when > 0 the encoder log assertions are also verified.
 func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages int) {
+	nsName := getNamespace()
 	var (
 		coordinator  []string
 		modelServers []string
-		decodeEPP    []string
-		prefillEPP   []string
-		encodeEPP    []string
-		decodePool   []string
-		prefillPool  []string
-		encodePool   []string
+		epp          []string
+		pool         []string
 	)
 
 	// Registered first → runs last (LIFO), after the log dump below.
@@ -112,42 +109,25 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 		}
 		testutils.DeleteObjects(testConfig, coordinator, nsName)
 		testutils.DeleteObjects(testConfig, modelServers, nsName)
-		testutils.DeleteObjects(testConfig, decodeEPP, nsName)
-		testutils.DeleteObjects(testConfig, prefillEPP, nsName)
-		testutils.DeleteObjects(testConfig, encodeEPP, nsName)
-		testutils.DeleteObjects(testConfig, decodePool, nsName)
-		testutils.DeleteObjects(testConfig, prefillPool, nsName)
-		testutils.DeleteObjects(testConfig, encodePool, nsName)
+		testutils.DeleteObjects(testConfig, epp, nsName)
+		testutils.DeleteObjects(testConfig, pool, nsName)
 	})
 
-	// Dump coordinator logs on failure, or always when E2E_PRINT_COORDINATOR_LOGS is
-	// set. Registered second → runs first (LIFO), so the deployment still exists.
+	// Dump all pod logs (coordinator, EPPs, Envoy, workers) on failure, or always
+	// when E2E_PRINT_LOGS is set. Registered second → runs first (LIFO), so the
+	// pods still exist.
 	ginkgo.DeferCleanup(func() {
-		if !ginkgo.CurrentSpecReport().Failed() && !printCoordinatorLogs {
+		if !ginkgo.CurrentSpecReport().Failed() && !printLogs {
 			return
 		}
-		args := []string{"logs", "deployment/llm-d-coordinator",
-			"-c", "coordinator", "--namespace=" + nsName}
-		if k8sContext != "" {
-			args = append(args, "--context="+k8sContext)
-		}
-		out, err := exec.Command("kubectl", args...).CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- coordinator logs (kubectl error: %v) ---\n%s\n---\n", err, string(out))
-		} else {
-			fmt.Fprintf(ginkgo.GinkgoWriter, "\n--- coordinator logs ---\n%s\n---\n", string(out))
-		}
+		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
 	})
 
-	// Pools first so each EPP can resolve its --pool-name.
-	encodePool = createInferencePool("encode", true)
-	prefillPool = createInferencePool("prefill", true)
-	decodePool = createInferencePool("decode", true)
-	expectAllPoolsExist()
+	// Pool first so the EPP can resolve its --pool-name.
+	pool = createInferencePool(true)
+	expectPoolExists()
 
-	encodeEPP = createEndPointPicker("encode", encodeEPPConfig)
-	prefillEPP = createEndPointPicker("prefill", prefillEPPConfig)
-	decodeEPP = createEndPointPicker("decode", decodeEPPConfig)
+	epp = createEndPointPicker(eppConfig)
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
 	modelServers = createModelServers(encodeReplicas, prefillReplicas, decodeReplicas)
@@ -162,7 +142,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 	coordinator = createCoordinator(coordinatorConfigNIXL)
 
 	req, err := http.NewRequest(http.MethodPost,
-		gatewayBaseURL+"/v1/chat/completions",
+		gatewayBaseURL()+"/v1/chat/completions",
 		bytes.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
@@ -178,7 +158,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"coordinator returned non-200: body=%s", string(raw))
 	gomega.Expect(raw).NotTo(gomega.BeEmpty(), "coordinator returned empty body")
-	verifyCoordinatorSteps(expectedSteps, expectedImages, true, true)
+	verifyCoordinatorSteps(nsName, expectedSteps, expectedImages, true, true)
 }
 
 // verifyCoordinatorSteps fetches the coordinator pod logs and asserts that
@@ -188,7 +168,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages 
 // sub-requests, plus, when ecNIXL is set, the ec_transfer_params total via the
 // "merged encode response" marker. The kv/ec params surface in the logs only
 // for the NIXL connectors, so those checks are gated accordingly.
-func verifyCoordinatorSteps(expectedSteps []string, expectedImages int, kvNIXL, ecNIXL bool) {
+func verifyCoordinatorSteps(nsName string, expectedSteps []string, expectedImages int, kvNIXL, ecNIXL bool) {
 	ginkgo.By("Verifying coordinator logs contain all pipeline steps")
 
 	args := []string{"logs", "deployment/llm-d-coordinator",
@@ -219,7 +199,7 @@ func verifyCoordinatorSteps(expectedSteps []string, expectedImages int, kvNIXL, 
 		// never sees, so the kv connector's "preparing decode kv params" trace,
 		// which always sets do_remote_prefill=true, is where the decode leg surfaces.
 		ginkgo.By("Verifying kv_transfer_params forwarded on the prefill request")
-		gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-phase":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
 			"coordinator logs have no prefill request body carrying kv_transfer_params")
 
 		ginkgo.By("Verifying kv_transfer_params in the prefill response")
@@ -247,7 +227,7 @@ func verifyCoordinatorSteps(expectedSteps []string, expectedImages int, kvNIXL, 
 				"coordinator logs missing merged encode response with total=%d", expectedImages)
 
 			ginkgo.By("Verifying ec_transfer_params forwarded on the prefill request")
-			gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-phase":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
+			gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
 				"coordinator logs have no prefill request body carrying ec_transfer_params")
 		}
 	}

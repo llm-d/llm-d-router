@@ -59,7 +59,9 @@ func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.Inferenc
 	}
 	for _, pod := range pods {
 		initObjs = append(initObjs, pod)
-		ds.PodUpdateOrAddIfNotExist(ctx, pod)
+		if err := ds.PodUpdateOrAddIfNotExist(ctx, pod); err != nil {
+			t.Fatalf("failed to add pod %s to datastore: %v", pod.Name, err)
+		}
 	}
 
 	scheme := runtime.NewScheme()
