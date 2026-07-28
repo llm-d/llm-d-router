@@ -1,5 +1,4 @@
-# Consolidated router configuration for optimized-baseline guide
-
+# Router configuration for Prefill/Decode (P/D) disaggregation with session affinity using llm-d-sim.
 router:
   extraServicePorts:
     - name: http
@@ -18,30 +17,41 @@ router:
       v: 4
       enable-pprof: "true"
       tracing: "false"
+      ha-enable-leader-election: "false"
+      allow-experimental-plugins: "true"
     pluginsConfigFile: "optimized-baseline-plugins.yaml"
     pluginsCustomConfig:
       optimized-baseline-plugins.yaml: |
         apiVersion: llm-d.ai/v1alpha1
         kind: EndpointPickerConfig
         plugins:
-        - type: queue-scorer
-        - type: kv-cache-utilization-scorer
-        - type: approx-prefix-cache-producer
+        - type: passthrough-parser
+        - type: always-disagg-pd-decider
+        - type: disagg-profile-handler
           parameters:
-            maxPrefixTokensToMatch: 100000
-        - type: prefix-cache-scorer
-        - type: no-hit-lru-scorer
+            deciders:
+              prefill: always-disagg-pd-decider
+        - type: session-affinity-filter
+          name: session-affinity-decode
+        - type: session-affinity-filter
+          name: session-affinity-prefill
+          parameters:
+            profileName: prefill
+            encodedEndpointHeaderConfig:
+              header: x-session-token-prefill
+        - type: random-picker
+        requestHandler:
+          parsers:
+          - pluginRef: passthrough-parser
         schedulingProfiles:
-        - name: default
+        - name: prefill
           plugins:
-          - pluginRef: queue-scorer
-            weight: 2
-          - pluginRef: kv-cache-utilization-scorer
-            weight: 2
-          - pluginRef: prefix-cache-scorer
-            weight: 3
-          - pluginRef: no-hit-lru-scorer
-            weight: 2
+          - pluginRef: session-affinity-prefill
+          - pluginRef: random-picker
+        - name: decode
+          plugins:
+          - pluginRef: session-affinity-decode
+          - pluginRef: random-picker
 
   inferencePool:
     failureMode: "FailOpen"
