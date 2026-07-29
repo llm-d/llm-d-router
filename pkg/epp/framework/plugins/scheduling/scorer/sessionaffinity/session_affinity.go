@@ -59,6 +59,10 @@ type parameters struct {
 	// EvictionSweepSeconds is how often expired bindings are swept.
 	// session_id_header only.
 	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
+	// MissThreshold is the number of consecutive requests a session's bound pod
+	// may be absent from the candidate set before the session migrates.
+	// Defaults to 3 when unset (non-positive). session_id_header only.
+	MissThreshold int `json:"missThreshold"`
 }
 
 // defaultParameters returns the parameters used when a field is not set.
@@ -83,6 +87,9 @@ func (p *parameters) validate() error {
 	}
 	if p.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
+	}
+	if p.MissThreshold < 0 {
+		return fmt.Errorf("missThreshold must be >= 0, got %v", p.MissThreshold)
 	}
 	return nil
 }

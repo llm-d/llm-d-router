@@ -7,7 +7,7 @@ Scores candidate pods by giving a higher score to the pod that was previously us
 Supports two algorithms, selected by the `algorithm` parameter:
 
 - `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the scorer writes that same header on the response so the client can echo it back on the next request.
-- `session_id_header`: stateful. The client supplies an opaque session identifier (in the same header, or via an agent-identity request attribute if the header is absent), and the scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client.
+- `session_id_header`: stateful. The client supplies an opaque session identifier (in the same header, or via an agent-identity request attribute if the header is absent), and the scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session is placed on the pod currently bound by the fewest sessions. A bound session whose pod is absent from the candidate set stays pinned until the pod has been absent for `missThreshold` consecutive requests, then migrates to the least-loaded present pod.
 
 ## Parameters
 
@@ -18,6 +18,7 @@ Supports two algorithms, selected by the `algorithm` parameter:
 | `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult`. When empty, it defaults to the primary (decode) pod. |
 | `evictionTtlSeconds` | float | `600` | How long a session binding survives unused. `session_id_header` only. |
 | `evictionSweepSeconds` | float | `30` | How often expired bindings are swept. `session_id_header` only. |
+| `missThreshold` | int | `3` | Number of consecutive requests a session's bound pod may be absent from the candidate set before the session migrates. `session_id_header` only. |
 
 ### Default Configuration (without PD disaggregation)
 
