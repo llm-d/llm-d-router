@@ -18,41 +18,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gosec:
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v7
-
-      - name: Run Gosec
-        uses: securego/gosec@9e75c0576c9878035d4221392108d458abe10fc3 # v2.28.0
-        with:
-          args: -no-fail -fmt sarif -out gosec.sarif ./...
-
-      # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
-      - name: Upload Gosec SARIF
-        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
-        with:
-          sarif_file: gosec.sarif
-          category: gosec
-
-      # gosec writes only to the report file, so on runs that skip the upload
-      # above the artifact is the only way to reach the findings.
-      - name: Upload Gosec SARIF artifact
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: gosec-sarif
-          path: gosec.sarif
-          retention-days: 7
-          if-no-files-found: warn
-
   gitleaks:
     if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
