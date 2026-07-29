@@ -402,7 +402,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		saturation = p.saturationDetector.Saturation(ctx, pool)
 	}
 
-	metrics.RecordFlowControlPoolSaturation(p.poolName, "global", saturation)
+	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
 
 	priorities := p.registry.AllOrderedPriorityLevels()
 	ceilings := p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities)
