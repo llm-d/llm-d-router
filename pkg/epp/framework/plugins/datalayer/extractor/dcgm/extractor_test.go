@@ -28,6 +28,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
@@ -215,7 +216,7 @@ func TestExtractorExtract(t *testing.T) {
 				if diff := cmp.Diff(before, after); diff == "" {
 					t.Error("expected attribute to be updated, but no change detected")
 				}
-				val, ok := attrgpu.ReadGPUUtilization(attr, key)
+				val, ok := attrmetrics.ReadScalarMetricValue(attr, key)
 				if !ok {
 					t.Fatal("GPU utilization not found in attributes after extract")
 				}
@@ -247,7 +248,23 @@ func TestFactory_SetsName(t *testing.T) {
 func TestProduces_DeclaresGPUUtilization(t *testing.T) {
 	ext := NewDCGMExtractor()
 	produced := ext.Produces()
-	if _, ok := produced[attrgpu.GPUUtilizationDataKey]; !ok {
+	val, ok := produced[attrgpu.GPUUtilizationDataKey]
+	if !ok {
 		t.Error("Produces must declare GPUUtilizationDataKey")
+	}
+	if _, isScalar := val.(attrmetrics.ScalarMetricValue); !isScalar {
+		t.Errorf("Produces value type = %T, want ScalarMetricValue", val)
+	}
+}
+
+// TestAttributeKeyContract verifies that the attribute key string stored by
+// the extractor matches the value that generic endpoint-attribute-filter and
+// endpoint-attribute-scorer expect in their YAML config. A mismatch means
+// the filter/scorer silently skip all endpoints (attribute not found).
+func TestAttributeKeyContract(t *testing.T) {
+	const expectedKey = "GPUUtilization/dcgm-extractor"
+	got := attrgpu.GPUUtilizationDataKey.String()
+	if got != expectedKey {
+		t.Errorf("GPUUtilizationDataKey.String() = %q, want %q (must match YAML attribute config)", got, expectedKey)
 	}
 }

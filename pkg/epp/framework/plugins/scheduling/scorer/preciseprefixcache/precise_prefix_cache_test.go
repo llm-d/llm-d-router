@@ -37,6 +37,65 @@ import (
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
+func TestAnyMMHit(t *testing.T) {
+	const producerName = "test-producer"
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	makeEndpoint := func(name string, info *attrprefix.PrefixCacheMatchInfo) scheduling.Endpoint {
+		ep := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}}, fwkdl.NewMetrics(), nil)
+		if info != nil {
+			ep.Put(key, info)
+		}
+		return ep
+	}
+
+	tests := []struct {
+		name        string
+		endpoints   []scheduling.Endpoint
+		wantHit     bool
+		wantTracked bool
+	}{
+		{name: "no endpoints", endpoints: nil},
+		{
+			name: "no match info attached",
+			endpoints: []scheduling.Endpoint{
+				makeEndpoint("a", nil),
+				makeEndpoint("b", nil),
+			},
+		},
+		{
+			name: "no producer tracked mm",
+			endpoints: []scheduling.Endpoint{
+				makeEndpoint("a", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16)),
+				makeEndpoint("b", attrprefix.NewPrefixCacheMatchInfo(8, 10, 16)),
+			},
+		},
+		{
+			name: "tracked but zero mm matches",
+			endpoints: []scheduling.Endpoint{
+				makeEndpoint("a", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16)),
+				makeEndpoint("b", attrprefix.NewPrefixCacheMatchInfo(8, 10, 16).WithMM(attrprefix.MMMatchInfo{MatchBlocks: 0})),
+			},
+			wantTracked: true,
+		},
+		{
+			name: "one endpoint reports mm match",
+			endpoints: []scheduling.Endpoint{
+				makeEndpoint("a", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16)),
+				makeEndpoint("b", attrprefix.NewPrefixCacheMatchInfo(8, 10, 16).WithMM(attrprefix.MMMatchInfo{MatchBlocks: 2})),
+			},
+			wantHit: true, wantTracked: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hit, tracked := anyMMHit(tt.endpoints, key)
+			assert.Equal(t, tt.wantHit, hit, "hit")
+			assert.Equal(t, tt.wantTracked, tracked, "tracked")
+		})
+	}
+}
+
 // In self-host mode the plugin satisfies Scorer, DataProducer, PreRequest,
 // and EndpointExtractor.
 func TestPluginFactory_SelfHostInterfaces(t *testing.T) {

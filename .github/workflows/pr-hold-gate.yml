@@ -10,13 +10,24 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   hold:
     runs-on: ubuntu-latest
     steps:
       - name: Block merge while held
-        if: contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.labels.*.name, 'do-not-merge/hold')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          echo "::error::A hold label is present (hold or do-not-merge/hold). Remove it (/hold cancel) to allow merge."
-          exit 1
+          blocking_labels=(hold do-not-merge/hold)
+
+          # fetch current labels
+          labels=$(gh pr view "$PR_URL" --json labels -q '.labels[].name')
+          for label in "${blocking_labels[@]}"; do
+            if grep -qxF "$label" <<< "$labels"; then
+              echo "::error::Blocking label '$label' is present. Remove it to allow merge (e.g., /hold cancel for hold)."
+              exit 1
+            fi
+          done

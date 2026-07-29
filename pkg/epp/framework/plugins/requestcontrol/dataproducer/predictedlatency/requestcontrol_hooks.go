@@ -194,6 +194,8 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 					now,
 					0,
 					0,
+					0,
+					0,
 				)
 				entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatch
 				entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
@@ -260,11 +262,12 @@ func processFirstTokenForLatencyPrediction(
 		prefillMetrics, err := getLatestMetricsForProfile(predictedLatencyCtx, ExperimentalDefaultPrefillProfile)
 		if err == nil {
 			prefillPrefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[prefillTargetMetadata.NamespacedName.Name]
+			prefillEncoderMatchedSize := predictedLatencyCtx.encoderMatchedSizeForEndpoints[prefillTargetMetadata.NamespacedName.Name]
 			logger.V(logutil.DEBUG).Info("Recording prefill TTFT training data",
 				"ttft_ms", predictedLatencyCtx.ttft,
 				"prefillPod", prefillTargetMetadata.NamespacedName.Name,
 				"prefixCacheScore", prefillPrefixCacheScore)
-			recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, prefillMetrics, prefillTargetMetadata, now, prefillPrefixCacheScore)
+			recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, prefillMetrics, prefillTargetMetadata, now, prefillPrefixCacheScore, prefillEncoderMatchedSize)
 		}
 	} else {
 		m, err := getLatestMetricsForProfile(predictedLatencyCtx, "")
@@ -274,8 +277,9 @@ func processFirstTokenForLatencyPrediction(
 		}
 		targetEndpointMetadata := predictedLatencyCtx.targetMetadata
 		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[targetEndpointMetadata.NamespacedName.Name]
+		encoderMatchedSize := predictedLatencyCtx.encoderMatchedSizeForEndpoints[targetEndpointMetadata.NamespacedName.Name]
 		logger.V(logutil.DEBUG).Info("Recording TTFT training data", "ttft_ms", predictedLatencyCtx.ttft, "predicted_ttft_ms", predictedLatencyCtx.predictedTTFT, "prefixCacheScore", prefixCacheScore)
-		recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, m, targetEndpointMetadata, now, prefixCacheScore)
+		recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, m, targetEndpointMetadata, now, prefixCacheScore, encoderMatchedSize)
 	}
 
 	if streamingMode {
@@ -354,6 +358,8 @@ func processTokenForLatencyPrediction(
 			m,
 			predictedLatencyCtx.inputTokenCount,
 			predictedLatencyCtx.generatedTokenCount,
+			0,
+			0,
 			0,
 		)
 		start := time.Now()
