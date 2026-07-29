@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 )
 
 // DefaultHeader is the default request/response header carrying the session
@@ -81,6 +82,31 @@ func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, 
 	}
 
 	response.Headers[sessionHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.ID.String()))
+}
+
+// SessionID resolves a request's session identifier from the first source that
+// yields one: the named header, then the agent-identity attribute. An empty
+// headerName selects DefaultHeader.
+//
+// Empty means the request expresses no session preference. No identifier is
+// generated: a router-minted value is unique per request, so it could never match
+// a stored binding.
+func SessionID(request *scheduling.InferenceRequest, headerName string) string {
+	if request == nil {
+		return ""
+	}
+
+	if id := strings.TrimSpace(request.Headers[NormalizeHeader(headerName)]); id != "" {
+		return id
+	}
+
+	// agent-identity is a RequestHeaderProcessor, so it has already published by
+	// the time scheduling runs.
+	id, ok := scheduling.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(id)
 }
 
 // ResolvePodToWrite looks up the target pod from the scheduling results if profileName is set.
