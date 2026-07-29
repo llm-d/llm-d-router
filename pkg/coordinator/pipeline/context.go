@@ -34,7 +34,7 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var internalForwardingHeaders = map[string]bool{
-	"epp-phase": true,
+	"epp-profile": true,
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding

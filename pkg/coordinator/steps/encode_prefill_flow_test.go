@@ -34,7 +34,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	var prefillBody map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		phase := r.Header.Get(gateway.EPPProfileHeader)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
@@ -173,7 +173,7 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 	var prefillBody map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		phase := r.Header.Get(gateway.EPPProfileHeader)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)

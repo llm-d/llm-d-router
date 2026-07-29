@@ -54,6 +54,8 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	prefixCacheScores := make([]float64, len(candidateEndpoints))
 	prefillTokensInFlights := make([]int64, len(candidateEndpoints))
 	numRequestRunnings := make([]int, len(candidateEndpoints))
+	encoderInputSizes := make([]int, len(candidateEndpoints))
+	encoderMatchedSizes := make([]int, len(candidateEndpoints))
 
 	for i, endpoint := range candidateEndpoints {
 		logger.V(logutil.TRACE).Info("Candidate pod for scheduling", "endpoint", endpoint.GetMetadata().String(), "metrics", endpoint.GetMetrics().String())
@@ -68,6 +70,8 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		inputTokenLengths[i] = predictedLatencyCtx.inputTokenCount
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
+		encoderInputSizes[i] = predictedLatencyCtx.encoderInputSize
+		encoderMatchedSizes[i] = predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().NamespacedName.Name]
 
 		// Reuse the in-flight load captured for this endpoint earlier in Produce,
 		// so the prediction features are identical to the dispatch-time training
@@ -81,7 +85,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	}
 
 	// Bulk predict
-	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights, numRequestRunnings)
+	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights, numRequestRunnings, encoderInputSizes, encoderMatchedSizes)
 	if err != nil {
 		logger.V(logutil.DEBUG).Error(err, "Bulk prediction failed")
 		return nil, err

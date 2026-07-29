@@ -13,11 +13,11 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-chi/chi/v5 v5.3.1
-	github.com/go-logr/logr v1.4.3
+	github.com/go-logr/logr v1.4.4
 	github.com/go-logr/stdr v1.2.2
 	github.com/go-logr/zapr v1.3.0
 	github.com/go-zeromq/zmq4 v0.17.0
-	github.com/google/cel-go v0.26.1
+	github.com/google/cel-go v0.29.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -46,13 +46,13 @@ require (
 	golang.org/x/time v0.15.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa
 	google.golang.org/grpc v1.82.1
-	google.golang.org/protobuf v1.36.11
-	k8s.io/api v0.35.6
-	k8s.io/apiextensions-apiserver v0.35.6
-	k8s.io/apimachinery v0.35.6
-	k8s.io/client-go v0.35.6
-	k8s.io/code-generator v0.35.6
-	k8s.io/component-base v0.35.6
+	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
+	k8s.io/api v0.35.7
+	k8s.io/apiextensions-apiserver v0.35.7
+	k8s.io/apimachinery v0.35.7
+	k8s.io/client-go v0.35.7
+	k8s.io/code-generator v0.35.7
+	k8s.io/component-base v0.35.7
 	k8s.io/utils v0.0.0-20260108192941-914a6e750570
 	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/controller-tools v0.20.1
@@ -66,7 +66,7 @@ require (
 	cel.dev/expr v0.25.1 // indirect
 	cloud.google.com/go/longrunning v0.9.0 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
-	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -112,7 +112,6 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
-	github.com/stoewer/go-strcase v1.3.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
@@ -144,7 +143,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiserver v0.35.6 // indirect
+	k8s.io/apiserver v0.35.7 // indirect
 	k8s.io/gengo/v2 v2.0.0-20250922181213-ec3ebc5fd46b // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260127142750-a19766b6e2d4 // indirect
