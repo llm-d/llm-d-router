@@ -18,7 +18,9 @@ package sessionaffinity
 
 import (
 	"context"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -32,7 +34,10 @@ import (
 )
 
 // sessionIDHeaderStrategy maps an opaque client-supplied session identifier to
-// a pod via a bounded, TTL-evicted binding store.
+// a pod via a bounded, TTL-evicted binding store. An unbound session is placed
+// on the pod with the fewest bound sessions; a session whose bound pod is
+// absent from the candidate set migrates to the least-loaded present pod
+// immediately, no retry wait.
 type sessionIDHeaderStrategy struct {
 	sessionHeader string
 	profileName   string
@@ -42,6 +47,10 @@ type sessionIDHeaderStrategy struct {
 	sweepInterval time.Duration
 	// bindings maps a session identifier to the pod serving it.
 	bindings sync.Map
+	// podCount maps a pod key to the number of sessions currently bound to it.
+	podCount sync.Map
+	// rrCursor rotates the least-loaded tie-break so new sessions spread round-robin.
+	rrCursor atomic.Int64
 }
 
 // newSessionIDHeaderStrategy builds the session_id_header strategy and starts
@@ -65,14 +74,75 @@ type binding struct {
 
 func (s *sessionIDHeaderStrategy) score(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
+	if len(endpoints) == 0 {
+		return scoredEndpoints
+	}
+
 	podName := s.boundPod(sessionutil.SessionID(request, s.sessionHeader))
-	for _, endpoint := range endpoints {
-		scoredEndpoints[endpoint] = 0.0 // initial value
-		if endpoint.GetMetadata().ID.String() == podName {
-			scoredEndpoints[endpoint] = 1.0
+
+	var target scheduling.Endpoint
+	if podName != "" {
+		for _, endpoint := range endpoints {
+			scoredEndpoints[endpoint] = 0.0
+			if endpoint.GetMetadata().ID.String() == podName {
+				target = endpoint
+			}
+		}
+	} else {
+		for _, endpoint := range endpoints {
+			scoredEndpoints[endpoint] = 0.0
 		}
 	}
+	if target == nil {
+		// Unbound, or the bound pod is absent from this request's candidate set.
+		// Prefer the least-loaded present pod without changing any binding here.
+		target = s.leastLoadedPod(endpoints)
+	}
+	scoredEndpoints[target] = 1.0
+
 	return scoredEndpoints
+}
+
+// leastLoadedPod returns the candidate pod bound by the fewest sessions,
+// breaking ties with a rotating cursor so new sessions spread round-robin
+// across equally loaded pods.
+func (s *sessionIDHeaderStrategy) leastLoadedPod(endpoints []scheduling.Endpoint) scheduling.Endpoint {
+	keys := make([]string, len(endpoints))
+	byKey := make(map[string]scheduling.Endpoint, len(endpoints))
+	for i, endpoint := range endpoints {
+		k := endpoint.GetMetadata().ID.String()
+		keys[i] = k
+		byKey[k] = endpoint
+	}
+	sort.Strings(keys) // deterministic order independent of candidate-slice ordering
+
+	minCount := -1
+	candidates := make([]string, 0, len(keys))
+	for _, k := range keys {
+		c := s.podSessionCount(k)
+		switch {
+		case minCount == -1 || c < minCount:
+			minCount = c
+			candidates = append(candidates[:0], k)
+		case c == minCount:
+			candidates = append(candidates, k)
+		}
+	}
+	cursor := s.rrCursor.Add(1)
+	return byKey[candidates[cursor%int64(len(candidates))]]
+}
+
+// podSessionCount returns the number of sessions currently bound to podKey.
+func (s *sessionIDHeaderStrategy) podSessionCount(podKey string) int {
+	v, ok := s.podCount.Load(podKey)
+	if !ok {
+		return 0
+	}
+	c, ok := v.(int)
+	if !ok {
+		return 0
+	}
+	return c
 }
 
 // boundPod returns the pod bound to sessionID, or "" when unbound. Expiry is
@@ -94,7 +164,7 @@ func (s *sessionIDHeaderStrategy) boundPod(sessionID string) string {
 
 // preRequest binds this request's session to the pod that served it, so subsequent
 // requests in the session prefer it. It runs after the pick because only then is
-// that pod known.
+// that pod known. podCount is adjusted here, and only here, to match the commit.
 func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	sessionID := sessionutil.SessionID(request, s.sessionHeader)
 	if sessionID == "" {
@@ -105,9 +175,50 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 		return
 	}
 
+	existing := s.boundPod(sessionID)
 	s.bindings.Store(sessionID, binding{podName: podName, lastSeen: time.Now()})
+	if existing == podName {
+		return
+	}
+
+	if existing != "" {
+		s.decrementPodCount(existing)
+	}
+	s.incrementPodCount(podName)
 	log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - bound session to pod",
 		"plugin", SessionAffinityType, "pod", podName)
+}
+
+// incrementPodCount records one more session bound to podKey.
+func (s *sessionIDHeaderStrategy) incrementPodCount(podKey string) {
+	for {
+		v, _ := s.podCount.LoadOrStore(podKey, 0)
+		c, _ := v.(int)
+		if s.podCount.CompareAndSwap(podKey, c, c+1) {
+			return
+		}
+	}
+}
+
+// decrementPodCount records one fewer session bound to podKey, removing the
+// entry once it reaches zero.
+func (s *sessionIDHeaderStrategy) decrementPodCount(podKey string) {
+	for {
+		v, ok := s.podCount.Load(podKey)
+		if !ok {
+			return
+		}
+		c, _ := v.(int)
+		if c <= 1 {
+			if s.podCount.CompareAndDelete(podKey, v) {
+				return
+			}
+			continue
+		}
+		if s.podCount.CompareAndSwap(podKey, c, c-1) {
+			return
+		}
+	}
 }
 
 // pickedPodName returns the pod chosen for this instance's profile, or "" when
@@ -153,8 +264,12 @@ func (s *sessionIDHeaderStrategy) runEviction(ctx context.Context, interval time
 		case <-ticker.C:
 			now := time.Now()
 			s.bindings.Range(func(key, value any) bool {
-				if b, ok := value.(binding); !ok || s.expired(b.lastSeen, now) {
+				b, ok := value.(binding)
+				if !ok || s.expired(b.lastSeen, now) {
 					s.bindings.Delete(key)
+					if ok {
+						s.decrementPodCount(b.podName)
+					}
 				}
 				return true
 			})
