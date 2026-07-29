@@ -344,6 +344,8 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 		"llm_d_epp_request_running",
 		"llm_d_epp_ready_endpoints",
 		"llm_d_epp_info",
+		"llm_d_epp_request_processing_duration_seconds",
+		"llm_d_epp_response_processing_duration_seconds",
 	}
 	expectedMetrics := make([]string, 0, len(preset)+len(decodePods)*numTargetPorts*2)
 	expectedMetrics = append(expectedMetrics, preset...)

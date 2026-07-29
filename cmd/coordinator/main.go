@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/version"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -47,6 +48,8 @@ func main() {
 
 	logutil.InitSetupLogging()
 	log := ctrl.Log.WithName("coordinator")
+
+	log.Info("coordinator build", "commit-sha", version.CommitSHA, "build-ref", version.BuildRef)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
