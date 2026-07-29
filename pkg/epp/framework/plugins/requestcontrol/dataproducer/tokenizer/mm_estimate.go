@@ -157,7 +157,7 @@ func imageDimensionsFromBase64(url string) (width, height int, ok bool) {
 // returns its pixel dimensions.
 func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool) {
 	// Image decoding is streamed to reduce memory overhead, since
-	// only headers are necessary
+	// only headers are necessary.
 	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(rawB64))
 	cfg, _, err := image.DecodeConfig(r)
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
