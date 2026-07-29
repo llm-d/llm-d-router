@@ -18,6 +18,7 @@ package loader
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -625,104 +626,59 @@ func computeLimits(t *testing.T, p fwkfc.UsageLimitPolicy, saturation float64, p
 	return ceilings
 }
 
-type mockExplicitPolicy struct {
+type mockValidatorPolicy struct {
 	fwkfc.UsageLimitPolicy
-	domain   string
-	ceilings map[int]float64
+	err        error
+	called     bool
+	calledWith fwkfc.ConfigInfo
 }
 
-func (m *mockExplicitPolicy) Domain() string {
-	return m.domain
+func (m *mockValidatorPolicy) ValidateConfig(info fwkfc.ConfigInfo) error {
+	m.called = true
+	m.calledWith = info
+	return m.err
 }
 
-func (m *mockExplicitPolicy) Ceilings() map[int]float64 {
-	return m.ceilings
-}
-
-func TestBuildFlowControlConfig_ExplicitDomainValidation(t *testing.T) {
+func TestBuildFlowControlConfig_ConfigValidator(t *testing.T) {
 	t.Parallel()
-	
-	const policyName = "mock-explicit"
-	
-	t.Run("Success - Config is valid", func(t *testing.T) {
+
+	const policyName = "mock-validator"
+
+	t.Run("Success - ConfigValidator returns no error", func(t *testing.T) {
 		t.Parallel()
 		handle := newFlowControlTestHandle(t)
-		handle.AddPlugin(policyName, &mockExplicitPolicy{
-			domain:   "explicit",
-			ceilings: map[int]float64{0: 1.0, 100: 0.8},
-		})
-		
+		mockPolicy := &mockValidatorPolicy{}
+		handle.AddPlugin(policyName, mockPolicy)
+
 		apiConfig := &configapi.FlowControlConfig{
 			UsageLimitPolicyPluginRef: policyName,
 			PriorityBands: []configapi.PriorityBandConfig{
 				{Priority: 100},
 			},
 		}
-		
+
 		cfg, err := buildFlowControlConfig(apiConfig, handle)
 		require.NoError(t, err)
 		assert.NotNil(t, cfg)
+		assert.True(t, mockPolicy.called)
+		assert.ElementsMatch(t, []int{0, 100}, mockPolicy.calledWith.StaticPriorities)
 	})
 
-	t.Run("Error - Dynamic templates configured", func(t *testing.T) {
+	t.Run("Error - ConfigValidator error is propagated", func(t *testing.T) {
 		t.Parallel()
 		handle := newFlowControlTestHandle(t)
-		handle.AddPlugin(policyName, &mockExplicitPolicy{
-			domain:   "explicit",
-			ceilings: map[int]float64{0: 1.0, 100: 0.8},
-		})
-		
-		apiConfig := &configapi.FlowControlConfig{
-			UsageLimitPolicyPluginRef: policyName,
-			DefaultPriorityBand:       &configapi.PriorityBandConfig{Priority: 0},
-			PriorityBands: []configapi.PriorityBandConfig{
-				{Priority: 100},
-			},
+		mockPolicy := &mockValidatorPolicy{
+			err: errors.New("custom validation error"),
 		}
-		
-		_, err := buildFlowControlConfig(apiConfig, handle)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot be used with dynamic priority band templates")
-	})
+		handle.AddPlugin(policyName, mockPolicy)
 
-	t.Run("Error - Priority 0 missing from ceilings", func(t *testing.T) {
-		t.Parallel()
-		handle := newFlowControlTestHandle(t)
-		handle.AddPlugin(policyName, &mockExplicitPolicy{
-			domain:   "explicit",
-			ceilings: map[int]float64{100: 0.8},
-		})
-		
 		apiConfig := &configapi.FlowControlConfig{
 			UsageLimitPolicyPluginRef: policyName,
-			PriorityBands: []configapi.PriorityBandConfig{
-				{Priority: 100},
-			},
 		}
-		
-		_, err := buildFlowControlConfig(apiConfig, handle)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "priority band 0 must have a configured ceiling")
-	})
 
-	t.Run("Error - Configured priority band missing from ceilings", func(t *testing.T) {
-		t.Parallel()
-		handle := newFlowControlTestHandle(t)
-		handle.AddPlugin(policyName, &mockExplicitPolicy{
-			domain:   "explicit",
-			ceilings: map[int]float64{0: 1.0},
-		})
-		
-		apiConfig := &configapi.FlowControlConfig{
-			UsageLimitPolicyPluginRef: policyName,
-			PriorityBands: []configapi.PriorityBandConfig{
-				{Priority: 100},
-			},
-		}
-		
 		_, err := buildFlowControlConfig(apiConfig, handle)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "priority band 100 must have a configured ceiling")
+		assert.Contains(t, err.Error(), "usage limit policy config validation failed: custom validation error")
 	})
 >>>>>>> 3ec97bb8 (feat(priority-holdback): enforce explicit domain priority band constraints)
 }
