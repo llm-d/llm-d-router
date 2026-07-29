@@ -41,6 +41,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -76,6 +77,7 @@ type PredictedLatency struct {
 	config                       Config
 	prefixMatchDataKey           plugin.DataKey
 	inFlightLoadDataKey          plugin.DataKey
+	encoderCacheDataKey          plugin.DataKey
 	latencyPredictionInfoDataKey plugin.DataKey
 }
 
@@ -241,6 +243,16 @@ type Config struct {
 	// load to read for the prefill-tokens-in-flight and active-request-count
 	// features. Empty defaults to the auto-created producer.
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
+	// UseEncoderCacheFeatures enables the multimodal encoder-cache features
+	// (encoder_input_size, encoder_matched_size). When true, the multimodal
+	// encoder-cache match data is consumed as a required dependency, so a
+	// producer is auto-created when none is configured. When false, both
+	// features are always 0. Default: false.
+	UseEncoderCacheFeatures bool `json:"useEncoderCacheFeatures,omitempty"`
+	// EncoderCacheMatchInfoProducerName selects which multimodal encoder-cache
+	// producer's match data to read. Empty defaults to the auto-created producer.
+	// Ignored unless UseEncoderCacheFeatures is true.
+	EncoderCacheMatchInfoProducerName string `json:"encoderCacheMatchInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -307,6 +319,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		encoderCacheDataKey:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(config.EncoderCacheMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
@@ -378,6 +391,13 @@ type predictedLatencyCtx struct {
 
 	prefixCacheScoresForEndpoints map[string]float64
 
+	// encoderInputSize is the request's total multimodal encoder item size;
+	// encoderMatchedSizeForEndpoints is the per-endpoint portion likely present
+	// in that endpoint's encoder cache, keyed by endpoint name. Both stay 0
+	// when encoder-cache features are disabled or the request is text-only.
+	encoderInputSize               int
+	encoderMatchedSizeForEndpoints map[string]int
+
 	// inFlightLoadForEndpoints holds the in-flight load captured for every
 	// candidate endpoint during Produce, keyed by NamespacedName.String().
 	// Produce is DAG-ordered, so capturing here (rather than re-reading the live
@@ -406,12 +426,13 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		}
 	}
 	return &predictedLatencyCtx{
-		schedulingRequest:             *request,
-		inputTokenCount:               inputTokenCount,
-		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
-		prefixCacheScoresForEndpoints: make(map[string]float64),
-		inFlightLoadForEndpoints:      make(map[string]inFlightLoadSnapshot),
-		predictionsForScheduling:      make(map[string]endpointPredictionResult),
+		schedulingRequest:              *request,
+		inputTokenCount:                inputTokenCount,
+		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
+		prefixCacheScoresForEndpoints:  make(map[string]float64),
+		encoderMatchedSizeForEndpoints: make(map[string]int),
+		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
+		predictionsForScheduling:       make(map[string]endpointPredictionResult),
 	}
 }
 

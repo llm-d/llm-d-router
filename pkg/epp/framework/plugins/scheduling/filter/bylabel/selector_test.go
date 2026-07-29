@@ -349,6 +349,32 @@ func TestLabelSelectorFilterEdgeCases(t *testing.T) {
 	})
 }
 
+// TestLabelSelectorFilterHasNoAllowsNoLabelEscapeHatch documents and verifies the
+// property a role-scoped deployment relies on when it shares one InferencePool
+// across roles (rather than one InferencePool per role): unlike the decode-filter
+// shorthand (NewDecodeRole, allowsNoLabel=true), label-selector-filter's
+// matchExpressions has no "endpoint without the label passes anyway" exception. A
+// role-scoped InferencePool selector makes decode-filter's allowsNoLabel safe,
+// since an unlabeled pod is never a candidate in the first place; a shared
+// InferencePool selector removes that guarantee, so the decode role must be
+// scoped with label-selector-filter instead to reject unlabeled/mislabeled pods.
+func TestLabelSelectorFilterHasNoAllowsNoLabelEscapeHatch(t *testing.T) {
+	rawParams := json.RawMessage(`{"matchExpressions": [{"key": "llm-d.ai/role", "operator": "In", "values": ["decode", "prefill-decode"]}]}`)
+	plugin, err := bylabel.SelectorFactory("decode-filter", fwkplugin.StrictDecoder(rawParams), nil)
+	require.NoError(t, err)
+	blf, ok := plugin.(*bylabel.Selector)
+	require.True(t, ok)
+
+	ctx := utils.NewTestContext(t)
+	decodeEndpoint := createEndpoint(k8stypes.NamespacedName{Name: "decode-0"}, "10.0.0.1", map[string]string{"llm-d.ai/role": "decode"})
+	encodeEndpoint := createEndpoint(k8stypes.NamespacedName{Name: "encode-0"}, "10.0.0.2", map[string]string{"llm-d.ai/role": "encode"})
+	unlabeledEndpoint := createEndpoint(k8stypes.NamespacedName{Name: "mystery-0"}, "10.0.0.3", map[string]string{})
+
+	result := blf.Filter(ctx, nil, []scheduling.Endpoint{decodeEndpoint, encodeEndpoint, unlabeledEndpoint})
+	assert.Equal(t, []scheduling.Endpoint{decodeEndpoint}, result,
+		"only the decode-labeled endpoint should pass; the mislabeled and unlabeled endpoints must not")
+}
+
 // Example for setting Prefill/Decode roles using a LabelSelector filter.
 // Definition of labels is based on https://github.com/llm-d/llm-d-router/issues/220.
 func ExamplePrefillDecodeRolesInLWS() {

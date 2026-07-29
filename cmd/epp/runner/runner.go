@@ -111,6 +111,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
+	utilizationfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/weightedrandom"
@@ -558,6 +559,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(bylabel.PrefillRoleType, bylabel.PrefillRoleFactory)
 	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, sessionaffinityfilter.Factory)
+	fwkplugin.Register(utilizationfilter.UtilizationFilterType, utilizationfilter.Factory)
 
 	// dataparallel profile handler
 	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, dataparallel.ProfileHandlerFactory)
@@ -911,7 +913,7 @@ func (r *Runner) initAdmissionControl(
 			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
 		},
 	)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates), registry
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.

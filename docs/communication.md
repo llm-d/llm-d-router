@@ -16,7 +16,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [Stage 4: encode (fan-out, one per image)](#stage-4-encode-fan-out-one-per-image)
 - [Stage 5: prefill](#stage-5-prefill)
 - [Stage 6: decode](#stage-6-decode)
-- [EPP-Phase Header and Routing](#epp-phase-header-and-routing)
+- [EPP-Profile Header and Routing](#epp-profile-header-and-routing)
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
 - [Text-Only Requests (no images)](#text-only-requests-no-images-v1chatcompletions)
@@ -55,7 +55,7 @@ Client Request (/v1/chat/completions or /v1/completions)
 [decode] - Forwards to decode worker, streams response back to client
 ```
 
-All requests from the coordinator to workers include the `EPP-Phase` HTTP header indicating the pipeline stage (see [EPP-Phase Header and Routing](#epp-phase-header-and-routing)).
+All requests from the coordinator to workers include the `EPP-Profile` HTTP header indicating the pipeline stage (see [EPP-Profile Header and Routing](#epp-profile-header-and-routing)).
 
 ---
 
@@ -329,7 +329,7 @@ The coordinator adds the `Prefer: if-available` HTTP header to signal that the d
 POST <gateway>/v1/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: decode
+EPP-Profile: decode
 Prefer: if-available
 ```
 
@@ -353,7 +353,7 @@ If the original `prompt` is a string, it is replaced by the `token_ids` from the
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: decode
+EPP-Profile: decode
 Prefer: if-available
 ```
 
@@ -386,7 +386,7 @@ The original request body is sent with a `tokens` field containing `token_ids` a
 ```
 
 **Notes:**
-- The `EPP-Phase: decode` header identifies this request as a decode attempt for routing
+- The `EPP-Profile: decode` header identifies this request as a decode attempt for routing
 - The `Prefer: if-available` header signals to the decode worker that this is a conditional request - it should only proceed if the KV cache is already available
 - For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response
 - For `/v1/chat/completions`: the original request body is preserved and a `tokens` field is added containing `token_ids` and `features` (without `kwargs_data`)
@@ -428,7 +428,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 POST <gateway>/inference/v1/generate
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: encode
+EPP-Profile: encode
 ```
 
 For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder token):
@@ -475,7 +475,7 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: encode
+EPP-Profile: encode
 ```
 
 Each request contains a single image from the original message (without text content), plus a `tokens` field with per-image token_ids and features (without `kwargs_data` -- the worker extracts pixel data from the image_url directly):
@@ -574,7 +574,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 POST <gateway>/inference/v1/generate
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: prefill
+EPP-Profile: prefill
 ```
 
 ```json
@@ -610,7 +610,7 @@ EPP-Phase: prefill
 POST <gateway>/inference/v1/generate
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: prefill
+EPP-Profile: prefill
 ```
 
 ```json
@@ -658,7 +658,7 @@ EPP-Phase: prefill
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: prefill
+EPP-Profile: prefill
 ```
 
 ```json
@@ -729,7 +729,7 @@ For `/v1/completions` requests (no images, no encode stage):
 POST <gateway>/v1/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: prefill
+EPP-Profile: prefill
 ```
 
 ```json
@@ -810,7 +810,7 @@ Forwards the original client request body (enriched with `tokens`, `kv_transfer_
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: decode
+EPP-Profile: decode
 ```
 
 ```json
@@ -867,7 +867,7 @@ EPP-Phase: decode
 POST <gateway>/v1/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Phase: decode
+EPP-Profile: decode
 ```
 
 ```json
@@ -895,7 +895,7 @@ EPP-Phase: decode
 - `image_url` retains the original base64 data URI from the replace-media-urls step so the decode worker can process images and produce the correct token sequence (matching what prefill computed)
 - `kv_transfer_params` is injected at the top level of the request body
 - `do_remote_decode: false, do_remote_prefill: true` is added by the coordinator to signal the decode worker to fetch KV from the remote prefill worker
-- The `EPP-Phase: decode` header is used for routing (replaces the old `/decode/` path prefix)
+- The `EPP-Profile: decode` header is used for routing (replaces the old `/decode/` path prefix)
 
 ### Response (non-streaming)
 
@@ -944,11 +944,11 @@ data: [DONE]
 
 ---
 
-## EPP-Phase Header and Routing
+## EPP-Profile Header and Routing
 
-The coordinator uses the `EPP-Phase` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway uses this header for routing to the correct worker pool.
+The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway forwards the request to the EPP, which reads the header to run the matching scheduling profile and pick the correct pod.
 
-| Stage             | EPP-Phase Header Value | Request Path              |
+| Stage             | EPP-Profile Header Value | Request Path              |
 |-------------------|----------------------|---------------------------|
 | Encode            | `encode`             | `/v1/chat/completions` or `/inference/v1/generate` |
 | Prefill           | `prefill`            | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
@@ -988,7 +988,7 @@ Requests to `/v1/completions` follow a simplified pipeline:
 
 1. **replace-media-urls**: skipped (completions cannot contain multimedia content)
 2. **render**: skipped if `prompt` is already a token array (array of integers); otherwise runs to tokenize the text prompt
-3. **conditional-decode**: runs normally (with `EPP-Phase: decode` header)
+3. **conditional-decode**: runs normally (with `EPP-Profile: decode` header)
 4. **encode**: skipped (no images)
 5. **prefill**: sends request with `prompt` field containing the token array
 6. **decode**: sends request with `prompt` field containing the token array + `kv_transfer_params`

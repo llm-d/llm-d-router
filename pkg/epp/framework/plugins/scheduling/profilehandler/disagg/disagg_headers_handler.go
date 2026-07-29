@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
@@ -115,6 +116,7 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
 	}
 	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header
 	delete(request.Headers, routing.PrefillEndpointHeader) // clear header, if already set
