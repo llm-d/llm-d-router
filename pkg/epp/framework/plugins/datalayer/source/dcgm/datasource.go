@@ -45,6 +45,9 @@ type dcgmDatasourceParams struct {
 	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
 	// UseNodeAddress scrapes the node IP (DaemonSet) instead of the pod IP (sidecar).
 	UseNodeAddress bool `json:"useNodeAddress"`
+	// Interval is the scrape period (e.g. "1s"). Must be a positive multiple of
+	// --refresh-metrics-interval. Empty or omitted means every base tick.
+	Interval string `json:"interval"`
 }
 
 // NewHTTPDCGMDataSource constructs a DCGMDataSource with the given parameters.
@@ -70,6 +73,11 @@ func DCGMDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Handl
 	opts := []http.Option{http.WithPortOverride(cfg.Port)}
 	if cfg.UseNodeAddress {
 		opts = append(opts, http.WithUseNodeAddress())
+	}
+	if intervalOpt, err := http.ParseIntervalOption(cfg.Interval); err != nil {
+		return nil, err
+	} else if intervalOpt != nil {
+		opts = append(opts, intervalOpt)
 	}
 
 	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path, http.TLSOptions{SkipVerify: cfg.InsecureSkipVerify},

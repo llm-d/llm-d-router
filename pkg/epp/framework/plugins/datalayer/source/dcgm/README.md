@@ -30,6 +30,9 @@ server port via `HTTPDataSource` options.
 - `insecureSkipVerify` (bool, optional, default: `true`): Skip TLS certificate verification.
 - `useNodeAddress` (bool, optional, default: `false`): When true, scrape
   `NodeAddress:port` (DaemonSet). When false, scrape `PodIP:port` (sidecar).
+- `interval` (string, optional): Scrape period (e.g. `"1s"`). Must be a positive
+  multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
+  base tick.
 
 DaemonSet deployments require `DCGM_EXPORTER_KUBERNETES=true` on the exporter
 so metrics include a `pod` label (GPU Operator sets this by default).
@@ -60,15 +63,13 @@ plugins:
   parameters:
     port: 9400
     useNodeAddress: true
+    interval: "1s"
 - type: dcgm-extractor
   name: dcgm-extractor
 # ... other plugins (filters, scorers, profile handler, picker) ...
 dataLayer:
   sources:
   - pluginRef: dcgm-source
-    # Scrape period for this source. Must be a positive multiple of
-    # --refresh-metrics-interval (default 50ms). Omit to scrape every base tick.
-    interval: 1s
     extractors:
     - pluginRef: dcgm-extractor
 ```

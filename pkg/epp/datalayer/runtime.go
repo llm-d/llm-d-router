@@ -121,9 +121,9 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 			}
 
 			periodTicks := 1
-			if _, ok := src.(fwkdl.PollingDispatcher); ok {
+			if disp, ok := src.(fwkdl.PollingDispatcher); ok {
 				var err error
-				periodTicks, err = PeriodTicks(srcCfg.Interval, r.pollingInterval)
+				periodTicks, err = PeriodTicks(disp.Interval(), r.pollingInterval)
 				if err != nil {
 					return fmt.Errorf("source %s: %w", srcName, err)
 				}

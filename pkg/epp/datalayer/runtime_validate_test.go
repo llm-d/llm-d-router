@@ -123,6 +123,7 @@ func (m *multiVariantSource) TypedName() fwkplugin.TypedName                    
 func (m *multiVariantSource) GVK() schema.GroupVersionKind                       { return m.gvk }
 func (m *multiVariantSource) Dispatch(_ context.Context, _ fwkdl.Endpoint) error { return nil }
 func (m *multiVariantSource) AppendExtractor(_ fwkplugin.Plugin) error           { return nil }
+func (m *multiVariantSource) Interval() time.Duration                            { return 0 }
 func (m *multiVariantSource) Notify(_ context.Context, event fwkdl.NotificationEvent) (*fwkdl.NotificationEvent, error) {
 	// Body never runs in this test. Configure rejects the source for
 	// implementing multiple variants before any Notify call. Echo the
@@ -148,14 +149,21 @@ func TestRuntimeConfigure_SourceImplementingMultipleVariants_Rejected(t *testing
 	assert.Contains(t, err.Error(), "multiple variant")
 }
 
+// intervalMockSource wraps MetricsDataSource with a configurable Interval.
+type intervalMockSource struct {
+	mocks.MetricsDataSource
+	interval time.Duration
+}
+
+func (s *intervalMockSource) Interval() time.Duration { return s.interval }
+
 func TestRuntimeConfigure_InvalidSourceInterval(t *testing.T) {
 	logger := newTestLogger(t)
 	r := NewRuntime(50 * time.Millisecond)
 
 	cfg := &Config{
 		Sources: []DataSourceConfig{{
-			Plugin:   &mocks.MetricsDataSource{},
-			Interval: 75 * time.Millisecond,
+			Plugin: &intervalMockSource{interval: 75 * time.Millisecond},
 		}},
 	}
 
@@ -170,8 +178,7 @@ func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
 
 	cfg := &Config{
 		Sources: []DataSourceConfig{{
-			Plugin:   &mocks.MetricsDataSource{},
-			Interval: time.Second,
+			Plugin: &intervalMockSource{interval: time.Second},
 		}},
 	}
 

@@ -90,6 +90,7 @@ func (fds *MetricsDataSource) Dispatch(_ context.Context, ep fwkdl.Endpoint) err
 // AppendExtractor is a no-op: this mock sets endpoint metrics directly in
 // Dispatch instead of running extractors.
 func (fds *MetricsDataSource) AppendExtractor(_ plugin.Plugin) error { return nil }
+func (fds *MetricsDataSource) Interval() time.Duration               { return 0 }
 
 // NotificationSource implements DataSource + NotificationSource for testing.
 type NotificationSource struct {
