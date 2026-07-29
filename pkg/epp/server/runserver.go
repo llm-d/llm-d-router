@@ -63,6 +63,8 @@ type ExtProcServerRunner struct {
 	HealthChecking                   bool
 	CertPath                         string
 	EnableCertReload                 bool
+	TLSMinVersion                    uint16
+	TLSCipherSuites                  []uint16
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
@@ -183,17 +185,21 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 				if err != nil {
 					return fmt.Errorf("failed to create cert reloader: %w", err)
 				}
-				creds = credentials.NewTLS(&tls.Config{
+				tlsCfg := &tls.Config{
 					GetCertificate: func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 						return reloader.Get(), nil
 					},
 					NextProtos: []string{"h2"},
-				})
+				}
+				r.applyTLSOverrides(tlsCfg)
+				creds = credentials.NewTLS(tlsCfg)
 			} else {
-				creds = credentials.NewTLS(&tls.Config{
+				tlsCfg := &tls.Config{
 					Certificates: []tls.Certificate{cert},
 					NextProtos:   []string{"h2"},
-				})
+				}
+				r.applyTLSOverrides(tlsCfg)
+				creds = credentials.NewTLS(tlsCfg)
 			}
 		}
 
@@ -238,4 +244,14 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		return runnable.GRPCServer("ext-proc", srv, r.GrpcPort).Start(ctx)
 	}))
+}
+
+// applyTLSOverrides sets MinVersion and CipherSuites on cfg when configured.
+func (r *ExtProcServerRunner) applyTLSOverrides(cfg *tls.Config) {
+	if r.TLSMinVersion != 0 {
+		cfg.MinVersion = r.TLSMinVersion
+	}
+	if len(r.TLSCipherSuites) > 0 {
+		cfg.CipherSuites = r.TLSCipherSuites
+	}
 }
