@@ -1000,7 +1000,7 @@ The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stag
 
 | Stage             | EPP-Profile Header Value | Request Path              |
 |-------------------|----------------------|---------------------------|
-| Encode            | `encode`             | `/v1/chat/completions` or `/inference/v1/generate` |
+| Encode            | `encode`             | `/v1/chat/completions` |
 | Prefill           | `prefill`            | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 | Decode            | `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 | Conditional-Decode| `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
@@ -1066,7 +1066,7 @@ A `/inference/v1/generate` client request is already tokenized (`token_ids` in t
 1. **replace-media-urls**: no-op (no `messages` array; images arrive as `kwargs_data` tensors keyed by `mm_hashes`, not URLs)
 2. **render**: no upstream call -- parses `token_ids` and `features` from the body, validates `sampling_params` and placeholder bounds, and populates `TokenIDs` + `MultimodalEntries` (see [2.C](#2c-inferencev1generate))
 3. **conditional-decode**: forwards the original body (`token_ids` + `features`) to `/inference/v1/generate` with `EPP-Profile: decode` and `Prefer: if-available`
-4. **encode**: skipped entirely. The prefill worker runs the vision encoder inline from `kwargs_data`, so there is no encode fan-out and no EC handoff, the preprocessed pixel tensor is shipped once (to prefill) instead of twice (to a separate encoder and then to prefill). That remaining copy still carries the full preprocessed tensor; shrinking it by sending the raw image for prefill to preprocess is proposed in [vllm-project/vllm#46722](https://github.com/vllm-project/vllm/issues/46722)
+4. **encode**: skipped entirely. We choose not to use encoder disaggregation (a separate encode stage that produces embeddings and hands them to prefill via EC handoff) for `/inference/v1/generate` due to [vllm-project/vllm#46722](https://github.com/vllm-project/vllm/issues/46722). Instead the prefill worker runs the vision encoder inline from `kwargs_data`, so there is no encode fan-out and no EC handoff, and the preprocessed pixel tensor is shipped once (to prefill) instead of twice (to a separate encoder and then to prefill). That remaining copy still carries the full preprocessed tensor; shrinking it by sending the raw image for prefill to preprocess is proposed in the same issue
 5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `kv_transfer_params` nested in `sampling_params.extra_args`. No `ec_transfer_params`, since encode did not run
 6. **decode**: sends `token_ids` with `kv_transfer_params` nested in `sampling_params.extra_args`
 
