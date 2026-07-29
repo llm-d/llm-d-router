@@ -31,7 +31,9 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -375,9 +377,31 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
 	p.poolEmpty = len(pool) == 0
-	saturation := p.saturationDetector.Saturation(ctx, pool)
 
-	// Record pool saturation metric
+	prefillPool, decodePool, interleavedPool := partitionEndpoints(pool)
+
+	saturation := -1.0
+	for _, part := range []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+	}{
+		{"prefill", prefillPool},
+		{"decode", decodePool},
+		{"interleaved", interleavedPool},
+	} {
+		if len(part.endpoints) == 0 {
+			continue
+		}
+		stageSat := p.saturationDetector.Saturation(ctx, part.endpoints)
+		metrics.RecordFlowControlPoolSaturation(p.poolName, part.name, stageSat)
+		if stageSat > saturation {
+			saturation = stageSat
+		}
+	}
+	if saturation < 0 {
+		saturation = p.saturationDetector.Saturation(ctx, pool)
+	}
+
 	metrics.RecordFlowControlPoolSaturation(p.poolName, "global", saturation)
 
 	priorities := p.registry.AllOrderedPriorityLevels()
@@ -421,6 +445,34 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		return true
 	}
 	return false
+}
+
+// partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets
+// based on the llm-d.ai/role pod label. Endpoints without a role label, without metadata,
+// or with an unrecognized role value default to the decode bucket for monolithic deployment safety.
+func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+		meta := ep.GetMetadata()
+		if meta == nil || meta.Labels == nil {
+			decode = append(decode, ep)
+			continue
+		}
+		role := meta.Labels[bylabel.RoleLabel]
+		switch role {
+		case bylabel.RolePrefill, bylabel.RoleEncodePrefill:
+			prefill = append(prefill, ep)
+		case bylabel.RoleDecode:
+			decode = append(decode, ep)
+		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode:
+			interleaved = append(interleaved, ep)
+		default:
+			decode = append(decode, ep)
+		}
+	}
+	return
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
