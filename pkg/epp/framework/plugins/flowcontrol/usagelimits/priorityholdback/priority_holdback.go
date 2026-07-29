@@ -31,6 +31,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // PolicyType is the registration type for the priority holdback usage limit policy.
@@ -56,7 +57,7 @@ func PolicyFactory(name string, params *json.Decoder, _ plugin.Handle) (plugin.P
 type priorityHoldbackPolicy struct {
 	name      string
 	cMax      float64
-	computeFn func(priorities []int) (ceilings []float64)
+	computeFn func(ctx context.Context, priorities []int) (ceilings []float64)
 	// enableSinglePriorityBypass controls whether a single active priority skips holdback
 	// and receives cMax directly. This optimization applies to algorithmic domains (rank, value)
 	// where the interpolation math degenerates with one input. The explicit domain does not use it
@@ -79,18 +80,18 @@ func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
 	switch cfg.domain {
 	case DomainRank:
 		p.enableSinglePriorityBypass = true
-		p.computeFn = func(priorities []int) []float64 {
+		p.computeFn = func(_ context.Context, priorities []int) []float64 {
 			return computeLimitStepwiseSpread(cfg.minCeiling, cfg.maxCeiling, priorities)
 		}
 	case DomainValue:
 		p.enableSinglePriorityBypass = true
-		p.computeFn = func(priorities []int) []float64 {
+		p.computeFn = func(_ context.Context, priorities []int) []float64 {
 			return computeLimitLinearProportional(cfg.minCeiling, cfg.maxCeiling, priorities)
 		}
 	case DomainExplicit:
 		p.enableSinglePriorityBypass = false
-		p.computeFn = func(priorities []int) []float64 {
-			return computeLimitExplicit(cfg.ceilings, priorities)
+		p.computeFn = func(ctx context.Context, priorities []int) []float64 {
+			return computeLimitExplicit(ctx, cfg.ceilings, priorities)
 		}
 	}
 	return p
@@ -109,6 +110,20 @@ func (p *priorityHoldbackPolicy) Ceilings() map[int]float64 {
 		out[k] = v
 	}
 	return out
+}
+
+func (p *priorityHoldbackPolicy) ValidateConfig(info flowcontrol.ConfigInfo) error {
+	if p.domain != DomainExplicit {
+		return nil
+	}
+
+	for _, prio := range info.StaticPriorities {
+		if _, ok := p.ceilings[prio]; !ok {
+			return fmt.Errorf("priority band %d has no configured ceiling in explicit domain", prio)
+		}
+	}
+
+	return nil
 }
 
 func (p *priorityHoldbackPolicy) withName(name string) *priorityHoldbackPolicy {
@@ -132,7 +147,7 @@ func (p *priorityHoldbackPolicy) TypedName() plugin.TypedName {
 // ComputeLimit returns an admission ceiling for each priority. With a single active priority,
 // algorithmic domains bypass holdback (ceiling = cMax) to preserve work-conserving behavior.
 // The explicit domain always uses the configured map value regardless of input length.
-func (p *priorityHoldbackPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int) (ceilings []float64) {
+func (p *priorityHoldbackPolicy) ComputeLimit(ctx context.Context, _ float64, priorities []int) (ceilings []float64) {
 	if len(priorities) == 0 {
 		return []float64{}
 	}
@@ -141,7 +156,7 @@ func (p *priorityHoldbackPolicy) ComputeLimit(_ context.Context, _ float64, prio
 	}
 	// Ceilings are monotonically decreasing as priorities are ordered from highest to lowest per UsageLimitPolicy contract.
 	// New strategies (e.g. sigmoid/static definition) could require explicit monotizing sweep.
-	return p.computeFn(priorities)
+	return p.computeFn(ctx, priorities)
 }
 
 // computeLimitStepwiseSpread divides [cMin, cMax] into equal steps by rank.
@@ -181,12 +196,19 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int) (ceili
 }
 
 // computeLimitExplicit looks up each configured priority ceiling.
-// Precondition: configuration validation guarantees that every active
-// priority band has a corresponding ceiling entry.
-func computeLimitExplicit(ceilings map[int]float64, priorities []int) []float64 {
+// Precondition: configuration validation guarantees that every statically
+// configured priority band has a corresponding ceiling entry. Dynamically
+// provisioned bands might fall back to 0.0 with an error log.
+func computeLimitExplicit(ctx context.Context, ceilings map[int]float64, priorities []int) []float64 {
 	result := make([]float64, len(priorities))
+	logger := log.FromContext(ctx)
 	for i, p := range priorities {
-		result[i] = ceilings[p]
+		if c, ok := ceilings[p]; ok {
+			result[i] = c
+		} else {
+			logger.Error(nil, "Missing explicit ceiling for dynamically provisioned priority band", "priority", p)
+			result[i] = 0.0
+		}
 	}
 	return result
 }

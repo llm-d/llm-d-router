@@ -17,11 +17,13 @@ limitations under the License.
 package priorityholdback
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -596,7 +598,7 @@ func TestPolicyFactory_ExplicitDomain(t *testing.T) {
 func TestComputeLimitExplicit_TwoPriorities(t *testing.T) {
 	t.Parallel()
 	m := map[int]float64{100: 0.95, 10: 0.30}
-	ceilings := computeLimitExplicit(m, []int{100, 10})
+	ceilings := computeLimitExplicit(context.Background(), m, []int{100, 10})
 	require.Len(t, ceilings, 2)
 	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.30, ceilings[1], 1e-9)
@@ -605,7 +607,7 @@ func TestComputeLimitExplicit_TwoPriorities(t *testing.T) {
 func TestComputeLimitExplicit_ThreePriorities(t *testing.T) {
 	t.Parallel()
 	m := map[int]float64{100: 0.95, 50: 0.70, 10: 0.30}
-	ceilings := computeLimitExplicit(m, []int{100, 50, 10})
+	ceilings := computeLimitExplicit(context.Background(), m, []int{100, 50, 10})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.70, ceilings[1], 1e-9)
@@ -615,7 +617,7 @@ func TestComputeLimitExplicit_ThreePriorities(t *testing.T) {
 func TestComputeLimitExplicit_SinglePriority(t *testing.T) {
 	t.Parallel()
 	m := map[int]float64{100: 0.80}
-	ceilings := computeLimitExplicit(m, []int{100})
+	ceilings := computeLimitExplicit(context.Background(), m, []int{100})
 	require.Len(t, ceilings, 1)
 	assert.InDelta(t, 0.80, ceilings[0], 1e-9)
 }
@@ -662,6 +664,51 @@ func TestComputeLimit_ExplicitDomain_EmptyPriorities(t *testing.T) {
 	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{})
 	assert.Empty(t, ceilings)
 	assert.NotNil(t, ceilings, "should return empty slice, not nil")
+}
+
+func TestPriorityHoldbackPolicy_ValidateConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Non-explicit domain passes validation regardless of static priorities", func(t *testing.T) {
+		t.Parallel()
+		policy := newPriorityHoldbackPolicy(config{
+			domain: DomainRank,
+		})
+		err := policy.ValidateConfig(flowcontrol.ConfigInfo{
+			StaticPriorities: []int{0, 100},
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("Explicit domain passes validation when all static priorities are configured", func(t *testing.T) {
+		t.Parallel()
+		policy := newPriorityHoldbackPolicy(config{
+			domain: DomainExplicit,
+			ceilings: map[int]float64{
+				0:   1.0,
+				100: 0.8,
+			},
+		})
+		err := policy.ValidateConfig(flowcontrol.ConfigInfo{
+			StaticPriorities: []int{0, 100},
+		})
+		assert.NoError(t, err)
+	})
+
+	t.Run("Explicit domain fails validation when a static priority is missing", func(t *testing.T) {
+		t.Parallel()
+		policy := newPriorityHoldbackPolicy(config{
+			domain: DomainExplicit,
+			ceilings: map[int]float64{
+				0: 1.0,
+			},
+		})
+		err := policy.ValidateConfig(flowcontrol.ConfigInfo{
+			StaticPriorities: []int{0, 100},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "priority band 100 has no configured ceiling in explicit domain")
+	})
 }
 
 // ---------------------------------------------------------------------------
