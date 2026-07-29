@@ -341,12 +341,18 @@ func (s *sessionIDHeaderStrategy) runEviction(ctx context.Context, interval time
 			now := time.Now()
 			s.bindings.Range(func(key, value any) bool {
 				b, ok := value.(binding)
-				if !ok || s.expired(b.lastSeen, now) {
-					s.bindings.Delete(key)
+				if !ok {
+					s.bindings.CompareAndDelete(key, value)
+					return true
+				}
+				if !s.expired(b.lastSeen, now) {
+					return true
+				}
+				// Guard against a concurrent PreRequest refreshing or migrating this
+				// binding between Range's snapshot and this delete.
+				if s.bindings.CompareAndDelete(key, value) {
 					s.misses.Delete(key)
-					if ok {
-						s.decrementPodCount(b.podName)
-					}
+					s.decrementPodCount(b.podName)
 				}
 				return true
 			})
