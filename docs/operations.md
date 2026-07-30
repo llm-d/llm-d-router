@@ -147,3 +147,45 @@ To apply these values during deployment, run the Helm install or upgrade command
 ```bash
 helm install optimize-baseline ./config/charts/llm-d-router-standalone -f resource_overrides.yaml
 ```
+
+---
+
+## 4. High Availability (HA)
+
+### Priority Routing
+
+The router uses [Envoy Priority Routing](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/priority) to organize EPP endpoints into distinct priority tiers:
+* **Priority 0 (Primary / Active)**: Handles 100% of steady-state scheduling traffic.
+* **Priority 1 (Standby / Passive)**: Warm standby pods ready to accept failover traffic immediately upon primary pod failure.
+
+#### Architecture and Failover Mechanics
+
+1. **Deterministic Endpoint Discovery**: EPP pods run as a StatefulSet with a headless Service (`publishNotReadyAddresses: true`). Envoy targets individual pod DNS entries (`<release>-epp-0`, `<release>-epp-1`, etc.) mapped to distinct priority levels.
+2. **Active Health Probing**: Envoy actively probes EPP Port 9002 via gRPC health check (`grpc.health.v1.Health`).
+3. **Outlier Detection Failover**: When a primary pod fails or crashes, Envoy's Outlier Detection detects TCP connection failure and ejects the primary host, shifting traffic to Priority 1 standbys in sub-second time without lease expiration delays.
+4. **Safe Failback**: When a replacement primary pod is rescheduled, `healthy_threshold: 3` requires 3 consecutive passing health probes (~15s) before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
+
+#### Helm Configuration
+
+```yaml
+router:
+  proxy:
+    mode: service
+    priorityRouting:
+      enabled: true
+      primaryReplicas: 1
+      standbyReplicas: 1
+```
+
+#### Tuning Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `router.proxy.priorityRouting.healthyPanicThreshold` | `10.0` | Threshold percentage to prevent panic routing during primary ejection. |
+| `router.proxy.priorityRouting.dnsRefreshRate` | `5s` | DNS resolution refresh rate for headless EPP endpoints. |
+| `router.proxy.healthCheckInterval` | `5s` | Active gRPC health check probe interval. |
+| `router.proxy.healthCheckTimeout` | `1s` | Health check probe timeout. |
+| `router.proxy.healthCheckUnhealthyThreshold` | `2` | Number of failed probes before marking an endpoint unhealthy. |
+| `router.proxy.healthCheckHealthyThreshold` | `3` | Number of passing probes required before admitting recreated pods. |
+| `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
+

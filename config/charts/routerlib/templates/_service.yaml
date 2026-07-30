@@ -64,5 +64,24 @@ spec:
     {{- . | toYaml | nindent 4 }}
     {{- end }}
   type: ClusterIP
+{{- if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-headless" (include "llm-d-router.name" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "llm-d-router.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+{{- end }}
 {{- end }}
 {{- end }}
