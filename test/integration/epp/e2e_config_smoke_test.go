@@ -168,6 +168,8 @@ schedulingProfiles:
 `,
 	"gpuUtilConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
+featureGates:
+- experimentalPlugins
 plugins:
 - type: dcgm-data-source
   name: dcgm-source

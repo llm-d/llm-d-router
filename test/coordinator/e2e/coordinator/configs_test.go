@@ -70,6 +70,8 @@ pipeline:
 // candidate; label-selector-filter's matchExpressions has no such exception.
 const eppConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
+featureGates:
+- experimentalPlugins
 plugins:
 - type: openai-parser
 - type: vllmhttp-parser
