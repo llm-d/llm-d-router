@@ -195,7 +195,7 @@ plugins:
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
-      blockSize: 16
+      blockSizeTokens: 16
       hashSeed: "42"
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
@@ -230,7 +230,7 @@ plugins:
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
-      blockSize: 16
+      blockSizeTokens: 16
       hashSeed: "42"
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
