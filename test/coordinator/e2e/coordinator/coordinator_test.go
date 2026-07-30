@@ -61,6 +61,13 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		)), allSteps, 1, 3, 5)
 	})
 
+	ginkgo.It("forwards min_tokens/max_tokens to decode and caps them on prefill and encode with OpenAI passthrough disabled", func() {
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5}`,
+			modelName, inlineImageDataURI,
+		)), allSteps, 1, 3, 5, coordinatorConfigNIXLGenerate)
+	})
+
 	ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
 		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
@@ -105,7 +112,9 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 // contract is additionally asserted: decode forwards the client's
 // min_tokens/max_tokens unchanged, while prefill (and encode, for multimodal
 // requests) cap max_tokens to 1 and strip min_tokens.
-func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int) {
+// coordinatorConfig, when supplied, overrides the default coordinatorConfigNIXL
+// pipeline config for the coordinator deployment.
+func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int, coordinatorConfig ...string) {
 	nsName := getNamespace()
 	var (
 		coordinator  []string
@@ -151,7 +160,11 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 	gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
-	coordinator = createCoordinator(coordinatorConfigNIXL)
+	cfg := coordinatorConfigNIXL
+	if len(coordinatorConfig) > 0 {
+		cfg = coordinatorConfig[0]
+	}
+	coordinator = createCoordinator(cfg)
 
 	req, err := http.NewRequest(http.MethodPost,
 		gatewayBaseURL()+path,
