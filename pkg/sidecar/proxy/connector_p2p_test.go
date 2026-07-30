@@ -199,3 +199,20 @@ var _ = Describe("p2pSourceParams", func() {
 		Expect(params[requestFieldRemotePort]).To(Equal(7779))
 	})
 })
+
+var _ = Describe("addP2PPullToPrefill", func() {
+	It("injects a pull when source and prefiller are different ranks on the same pod", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
+		}
+		params := map[string]any{}
+
+		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8007")
+
+		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.0.6.107"))
+		Expect(p2p[requestFieldRemotePort]).To(Equal(7780))
+	})
+})

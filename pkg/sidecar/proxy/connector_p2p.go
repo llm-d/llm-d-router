@@ -226,13 +226,15 @@ func (s *Server) p2pPullAvailable() bool {
 // addP2PPullToPrefill adds the OffloadingConnector P2P pull block to a prefill
 // leg's kv_transfer_params so the prefiller pulls cached prefix from
 // kvCacheSource while keeping its own computed blocks available for the
-// decoder. It is a no-op when no source is set or the source resolves to the
-// prefiller itself, since there is nothing to pull from oneself. The
+// decoder. It is a no-op when no source is set or the source is the selected
+// prefill endpoint, since there is nothing to pull from oneself. The
 // remote_kv_source key composes with NIXL params: vLLM's MultiConnector
 // routes it to the OffloadingConnector and the NIXL fields to the
 // NixlConnector.
 func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
-	if kvCacheSource != "" && extractHost(kvCacheSource) != extractHost(prefillPodHostPort) {
+	source, _ := strings.CutPrefix(kvCacheSource, "http://")
+	prefiller, _ := strings.CutPrefix(prefillPodHostPort, "http://")
+	if source != "" && source != prefiller {
 		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(kvCacheSource)
 	}
 }
