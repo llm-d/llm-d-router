@@ -105,7 +105,13 @@ func (s *sessionIDHeaderStrategy) score(_ context.Context, request *scheduling.I
 		}
 	}
 
-	if sessionID != "" && podName != "" {
+	// No session identifier means no affinity preference: every candidate stays
+	// at zero so this scorer abstains from the weighted decision.
+	if sessionID == "" {
+		return scoredEndpoints
+	}
+
+	if podName != "" {
 		s.pluginState.Write(request.RequestID, plugin.StateKey(SessionAffinityType), &boundPodPresence{present: target != nil})
 	}
 

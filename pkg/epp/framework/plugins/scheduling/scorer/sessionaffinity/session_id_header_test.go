@@ -139,6 +139,24 @@ func TestSessionIDHeaderStrategy_Score_NoEndpoints(t *testing.T) {
 	}
 }
 
+func TestSessionIDHeaderStrategy_Score_NoSessionAbstains(t *testing.T) {
+	s := newTestSessionIDHeaderStrategy(t, nil)
+	endpointA := newTestEndpoint("pod-a")
+	endpointB := newTestEndpoint("pod-b")
+	endpoints := []scheduling.Endpoint{endpointA, endpointB}
+
+	// A prior session is bound so a least-loaded pod exists: the no-session
+	// request must still not pick it. No session means no preference.
+	s.preRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
+
+	noSession := &scheduling.InferenceRequest{RequestID: "req-no-session"}
+	got := s.score(context.Background(), noSession, endpoints)
+	want := map[scheduling.Endpoint]float64{endpointA: 0.0, endpointB: 0.0}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("unexpected scores (-want +got):\n%s", diff)
+	}
+}
+
 func TestSessionIDHeaderStrategy_PreRequest_FirstBind(t *testing.T) {
 	s := newTestSessionIDHeaderStrategy(t, nil)
 	endpointA := newTestEndpoint("pod-a")
