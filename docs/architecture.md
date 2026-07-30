@@ -226,7 +226,7 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
 
 Polling sources share one Collector goroutine per endpoint. The base tick is
 `--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
-`interval` parameter (e.g. `"1s"`) that must be a positive multiple of the base tick;
+`interval` parameter (e.g. `"1s"`) that is rounded to the nearest multiple of the base tick;
 when omitted, the source runs on every base tick. The runtime converts each source's
 interval to base-tick multiples and schedules dispatches accordingly.
 

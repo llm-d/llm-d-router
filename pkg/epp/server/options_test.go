@@ -255,6 +255,7 @@ func TestValidateDirectValues(t *testing.T) {
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
 	}
+
 }
 
 func TestDrainTimeoutFlag(t *testing.T) {

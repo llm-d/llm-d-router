@@ -51,8 +51,8 @@ type metricsDatasourceParams struct {
 	// target authenticates this scraper by certificate instead of a bearer token. Both set together.
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
-	// Interval is the scrape period (e.g. "1s"). Must be a positive multiple of
-	// --refresh-metrics-interval. Empty or omitted means every base tick.
+	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
+	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
 }
 
@@ -75,11 +75,9 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		}
 	}
 
-	var opts []http.Option
-	if intervalOpt, err := http.ParseIntervalOption(cfg.Interval); err != nil {
+	intervalOpt, err := http.ParseIntervalOption(cfg.Interval)
+	if err != nil {
 		return nil, err
-	} else if intervalOpt != nil {
-		opts = append(opts, intervalOpt)
 	}
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
@@ -89,7 +87,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MetricsDataSourceType, name, parseMetrics, opts...)
+		MetricsDataSourceType, name, parseMetrics, intervalOpt)
 }
 
 func defaultDataSourceConfigParams() *metricsDatasourceParams {

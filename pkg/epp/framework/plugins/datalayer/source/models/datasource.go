@@ -34,8 +34,8 @@ type modelsDatasourceParams struct {
 	// target can require+verify the client.
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
-	// Interval is the scrape period (e.g. "5s"). Must be a positive multiple of
-	// --refresh-metrics-interval. Empty or omitted means every base tick.
+	// Interval is the scrape period (e.g. "5s"). Rounded to the nearest multiple
+	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
 }
 
@@ -60,11 +60,9 @@ func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Hand
 		return nil, fmt.Errorf("unsupported scheme: %s", cfg.Scheme)
 	}
 
-	var opts []http.Option
-	if intervalOpt, err := http.ParseIntervalOption(cfg.Interval); err != nil {
+	intervalOpt, err := http.ParseIntervalOption(cfg.Interval)
+	if err != nil {
 		return nil, err
-	} else if intervalOpt != nil {
-		opts = append(opts, intervalOpt)
 	}
 
 	ds, err := http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
@@ -74,7 +72,7 @@ func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Hand
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		ModelsDataSourceType, name, parseModels, opts...)
+		ModelsDataSourceType, name, parseModels, intervalOpt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP data source: %w", err)
 	}

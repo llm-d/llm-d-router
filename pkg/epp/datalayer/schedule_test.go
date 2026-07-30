@@ -38,8 +38,10 @@ func TestPeriodTicks(t *testing.T) {
 		{name: "equal to base", interval: base, base: base, want: 1},
 		{name: "1s is 20 ticks", interval: time.Second, base: base, want: 20},
 		{name: "5s is 100 ticks", interval: 5 * time.Second, base: base, want: 100},
-		{name: "not a multiple", interval: 75 * time.Millisecond, base: base, wantErr: true},
-		{name: "smaller than base", interval: 25 * time.Millisecond, base: base, wantErr: true},
+		{name: "not a multiple rounds to nearest", interval: 75 * time.Millisecond, base: base, want: 2},
+		{name: "not a multiple rounds up", interval: 130 * time.Millisecond, base: base, want: 3},
+		{name: "not a multiple rounds down", interval: 120 * time.Millisecond, base: base, want: 2},
+		{name: "smaller than base clamps to 1", interval: 25 * time.Millisecond, base: base, want: 1},
 		{name: "non-positive base", interval: time.Second, base: 0, wantErr: true},
 	}
 	for _, tt := range tests {

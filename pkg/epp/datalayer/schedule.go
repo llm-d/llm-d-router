@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -32,8 +33,7 @@ type ScheduledDispatcher struct {
 
 // PeriodTicks converts a configured scrape interval into a positive number of
 // base ticks. interval <= 0 means every base tick (backward-compatible default).
-// A non-zero interval must be a positive multiple of base so cadences stay on
-// the Collector's single ticker (no arbitrary durations such as 53ms).
+// Non-exact multiples are rounded to the nearest base-tick multiple (minimum 1).
 func PeriodTicks(interval, base time.Duration) (int, error) {
 	if base <= 0 {
 		return 0, fmt.Errorf("base tick must be positive, got %s", base)
@@ -41,8 +41,9 @@ func PeriodTicks(interval, base time.Duration) (int, error) {
 	if interval <= 0 {
 		return 1, nil
 	}
-	if interval < base || interval%base != 0 {
-		return 0, fmt.Errorf("interval %s must be a positive multiple of base tick %s", interval, base)
+	ticks := int(math.Round(float64(interval) / float64(base)))
+	if ticks < 1 {
+		ticks = 1
 	}
-	return int(interval / base), nil
+	return ticks, nil
 }

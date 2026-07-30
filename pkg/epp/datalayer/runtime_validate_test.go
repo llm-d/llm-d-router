@@ -157,7 +157,7 @@ type intervalMockSource struct {
 
 func (s *intervalMockSource) Interval() time.Duration { return s.interval }
 
-func TestRuntimeConfigure_InvalidSourceInterval(t *testing.T) {
+func TestRuntimeConfigure_NonMultipleIntervalRounds(t *testing.T) {
 	logger := newTestLogger(t)
 	r := NewRuntime(50 * time.Millisecond)
 
@@ -167,9 +167,10 @@ func TestRuntimeConfigure_InvalidSourceInterval(t *testing.T) {
 		}},
 	}
 
-	err := r.Configure(cfg, logger)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multiple of base tick")
+	require.NoError(t, r.Configure(cfg, logger))
+	scheduled := r.dispatchers.Scheduled()
+	require.Len(t, scheduled, 1)
+	assert.Equal(t, 2, scheduled[0].PeriodTicks) // 75ms rounds to 100ms = 2 ticks
 }
 
 func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
@@ -186,4 +187,9 @@ func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
 	scheduled := r.dispatchers.Scheduled()
 	require.Len(t, scheduled, 1)
 	assert.Equal(t, 20, scheduled[0].PeriodTicks)
+}
+
+func TestNewRuntime_ClampsPollingIntervalToMinimum(t *testing.T) {
+	r := NewRuntime(10 * time.Millisecond)
+	assert.Equal(t, defaultRefreshInterval, r.pollingInterval)
 }

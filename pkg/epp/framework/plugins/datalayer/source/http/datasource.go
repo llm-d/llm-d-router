@@ -119,11 +119,11 @@ func WithInterval(d time.Duration) Option {
 }
 
 // ParseIntervalOption parses a duration string from plugin parameters and
-// returns a WithInterval Option. Returns (nil, nil) when raw is empty so
-// callers can simply append the non-nil result to their option slice.
+// returns a WithInterval Option. An empty string returns a no-op Option
+// so callers can always append the result.
 func ParseIntervalOption(raw string) (Option, error) {
 	if raw == "" {
-		return nil, nil
+		return func(*options) {}, nil
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil {
