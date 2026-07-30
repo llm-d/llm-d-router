@@ -236,7 +236,7 @@ func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSour
 	source := normalizeEndpoint(kvCacheSource)
 	prefiller := normalizeEndpoint(prefillPodHostPort)
 	if source != "" && source != prefiller {
-		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(kvCacheSource)
+		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(source)
 	}
 }
 
@@ -275,13 +275,15 @@ func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 
 // p2pPortFor resolves the P2P tier control port on the target endpoint. The
 // sidecar serves rank r on <base port>+r (data_parallel.go), so the routed
-// endpoint's port encodes the pod-local rank. vLLM binds the tier at
-// <p2p-connector-port> + the global data_parallel_index, so the mapping is
-// correct when each pod is its own DP group (local rank == global index).
-// Multi-pod DP groups (e.g. LWS wide-EP) need the source's global rank
-// supplied per request instead; this derivation is the per-pod fallback. A
-// port outside the rank range (or unparsable) falls back to the base P2P
-// port, which is rank 0's tier.
+// endpoint's port encodes the pod-local rank. vLLM binds the tier at the
+// engine's configured P2P base + the global data_parallel_index, so the
+// mapping is correct when each pod is its own DP group (local rank ==
+// global index). Multi-pod DP groups (e.g. LWS wide-EP) preserve it by
+// compensating the engine's per-pod base (P2P_BASE = <p2p-connector-port>
+// - START_RANK; see docs/disaggregation.md), so every pod binds local rank
+// r at <p2p-connector-port>+r and this pod-local derivation is the
+// contract there too. A port outside the rank range (or unparsable) falls
+// back to the base P2P port, which is rank 0's tier.
 func (s *Server) p2pPortFor(targetHostPort string) int {
 	base := s.config.P2PConnectorPort
 	if s.config.DataParallelSize <= 1 || s.dpBasePort == 0 {
@@ -316,28 +318,32 @@ func (s *Server) p2pPortFor(targetHostPort string) int {
 // cached prefix blocks from the peer at sourceHostPort instead of recomputing
 // them. It replaces any client-supplied kv_transfer_params (the sidecar owns
 // that field) and routes through dispatchDecode so chunked decode still
-// applies. When sourceHostPort resolves to this pod, injecting would tell the
-// engine to pull the prefix it is already computing, so it decodes normally.
+// applies. When sourceHostPort resolves to this rank's own serving endpoint,
+// injecting would tell the engine to pull the prefix it is already
+// computing, so it decodes normally; another rank on the same pod is a
+// valid peer and does get the injection.
 func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sourceHostPort string) {
 	raw, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
 
-	if extractHost(sourceHostPort) == os.Getenv("POD_IP") {
-		s.logger.V(logging.DEBUG).Info("KV cache source is the local pod, skipping p2p injection",
-			"source", sourceHostPort)
+	source := normalizeEndpoint(sourceHostPort)
+	self := normalizeEndpoint(net.JoinHostPort(os.Getenv("POD_IP"), s.config.Port))
+	if source == self {
+		s.logger.V(logging.DEBUG).Info("KV cache source is this rank's endpoint, skipping p2p injection",
+			"source", sourceHostPort, "self", self)
 		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), requestData)
 		return
 	}
 
-	p2pParams := s.p2pSourceParams(sourceHostPort)
+	p2pParams := s.p2pSourceParams(source)
 	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
 	// client-supplied keys are dropped rather than forwarded to vLLM.
 	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
 
 	s.logger.Info("running P2P source protocol",
-		"source_host", extractHost(sourceHostPort),
+		"source_host", extractHost(source),
 		"kv_request_id", p2pParams[requestFieldKVRequestID],
 		"p2p_connector_port", p2pParams[requestFieldRemotePort])
 

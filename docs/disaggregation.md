@@ -578,10 +578,11 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 }
 ```
 
-`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
+`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`) when each pod is a complete DP group; wide-EP worker pods instead set the compensated `P2P_BASE` (see the wide-EP paragraph below). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
 **Data parallelism:** the P2P tier supports `--data-parallel-size` N > 1 when
-each pod is a complete DP group (the per-pod DP deployment).
+each pod is a complete DP group (the per-pod DP deployment), or a multi-pod
+(wide-EP) group with compensated socket bases (below).
 
 - vLLM gives each DP replica its own P2P listener and offload region:
   replica `i` serves on `<p2p-connector-port>+i`, where `i` is the

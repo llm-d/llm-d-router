@@ -247,10 +247,13 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "http://10.0.6.107:8003", "10.0.6.107:8007")
+		// https exercises the normalized passthrough: the injected params must
+		// derive from the bare host:port, not the scheme-qualified original.
+		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8007")
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
+		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.0.6.107"))
 		Expect(p2p[requestFieldRemotePort]).To(Equal(7780))
 	})
 })
