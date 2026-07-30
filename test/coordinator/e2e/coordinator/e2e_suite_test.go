@@ -56,18 +56,23 @@ const (
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
 	eppName      = "e2e-epp"
 
-	eppManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pool/epp.yaml"
-	poolManifest = "../../../../deploy/coordinator/components/inference-gateway/epd-pool/inference-pool.yaml"
+	// EPP resources are the shared inference-gateway component's split files.
+	// Gateway/HTTPRoute manifests in that component are unused: the coordinator
+	// e2e fronts the EPP with a hand-rolled Envoy, matching the router e2e.
+	eppManifest               = "../../../../deploy/components/inference-gateway/deployment.yaml"
+	poolManifest              = "../../../../deploy/components/inference-gateway/inference-pools.yaml"
+	eppRbacManifest           = "../../../../deploy/components/inference-gateway/rbac.yaml"
+	eppServiceAccountManifest = "../../../../deploy/components/inference-gateway/service-accounts.yaml"
+	eppServicesManifest       = "../../../../deploy/components/inference-gateway/services.yaml"
 
-	epdPoolsKustomizeDir    = "../../../../deploy/coordinator/environments/dev/epd-pools"
-	coordinatorComponentDir = "../../../../deploy/coordinator/components/coordinator"
-	rendererComponentDir    = "../../../../deploy/coordinator/components/vllm-render"
+	epdPoolsKustomizeDir    = "../../../../deploy/environments/dev/coordinator-epd"
+	coordinatorComponentDir = "../../../../deploy/coordinator"
+	rendererManifest        = "../../../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
-	envoyManifest = "../../../../deploy/coordinator/environments/dev/e2e-infra/envoy.yaml"
+	envoyManifest    = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml"
+	servicesManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/services.yaml"
 
 	crdGIEPath = "../../../../deploy/components/crds-gie"
-
-	baseRbacManifest = "../../../../deploy/coordinator/components/inference-gateway/base/rbac.yaml"
 )
 
 var (
@@ -81,7 +86,7 @@ var (
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
 	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.2", ginkgo.GinkgoLogr)
-	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", vllmSimImage, ginkgo.GinkgoLogr)
+	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	coordinatorImage = env.GetEnvString("COORDINATOR_IMAGE", "", ginkgo.GinkgoLogr)
 	modelName        = env.GetEnvString("MODEL_NAME", "Qwen/Qwen3-VL-2B-Instruct", ginkgo.GinkgoLogr)

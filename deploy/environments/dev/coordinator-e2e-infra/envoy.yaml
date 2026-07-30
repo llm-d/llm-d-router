@@ -1,19 +1,19 @@
-# Hand-rolled Envoy manifest for the e-p-d-pool e2e test.
+# Hand-rolled Envoy manifest for the coordinator e-p-d-pool e2e test.
 #
 # Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes any
 # request carrying an EPP-Profile header (encode | prefill | decode) to the
 # single EPP's ext_proc cluster; the EPP itself picks the scheduling profile
-# named by that header value (see header-profile-handler). The chosen
-# EPP picks an endpoint and Envoy forwards the request to it via the
-# ORIGINAL_DST cluster (just like the single-pool e2e Envoy).
+# named by that header value (see header-profile-handler). The chosen EPP picks
+# an endpoint and Envoy forwards the request to it via the ORIGINAL_DST cluster
+# (just like the single-pool e2e Envoy).
 #
 # A request without an EPP-Profile header is the external client request: it
 # matches the default route and is forwarded to the coordinator, the pipeline
 # entry point. The coordinator then re-enters the gateway once per phase with
 # the EPP-Profile header set, hitting the phase route above.
 #
-# Placeholders ${NAMESPACE} and ${EPP_NAME} are substituted by the suite
-# before apply (mirrors single_pool/createEnvoy substitution pattern).
+# Placeholders ${NAMESPACE} and ${EPP_NAME} are substituted by the suite before
+# apply. The envoy Service lives alongside in services.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -352,20 +352,3 @@ spec:
             items:
               - key: envoy.yaml
                 path: envoy.yaml
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app: envoy
-  name: envoy
-spec:
-  ports:
-    - name: http-8081
-      port: 8081
-      protocol: TCP
-      targetPort: 8081
-      nodePort: 30080
-  selector:
-    app: envoy
-  type: NodePort

@@ -19,6 +19,7 @@ package coordinate2e
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -55,22 +56,22 @@ func setupNameSpace() {
 }
 
 // setupInfra installs the base infra shared across tests: Gateway API + GIE
-// CRDs, the epp-reader Role, and Envoy. Runs only on suite-owned kind clusters;
-// with K8S_CONTEXT set the caller is responsible for having base infra in place.
-// The per-test workload (EPPs, InferencePools, vLLM workers, coordinator) is
-// created in the test body.
+// CRDs and Envoy. Runs only on suite-owned kind clusters; with K8S_CONTEXT set
+// the caller is responsible for having base infra in place. The per-test
+// workload (EPPs, InferencePools, vLLM workers, coordinator) is created in the
+// test body; the EPP's RBAC/ServiceAccount/Service come from createStableInfra.
 func setupInfra() {
 	nsName := getNamespace()
 	createCRDs()
 
-	ginkgo.By("Applying shared Role/epp-reader from " + baseRbacManifest)
-	_ = testutils.CreateObjsFromYaml(testConfig, testutils.ReadYaml(baseRbacManifest), nsName)
-
-	ginkgo.By("Applying Envoy from " + envoyManifest)
-	applyManifest(envoyManifest, map[string]string{
+	infraSubs := map[string]string{
 		"${NAMESPACE}": nsName,
 		"${EPP_NAME}":  eppName,
-	})
+	}
+	ginkgo.By("Applying Envoy from " + envoyManifest)
+	applyManifest(envoyManifest, infraSubs)
+	ginkgo.By("Applying Envoy services from " + servicesManifest)
+	applyManifest(servicesManifest, infraSubs)
 }
 
 // createCRDs installs the GIE CRDs used for testing.
@@ -90,9 +91,9 @@ func createEndPointPicker(config string) []string {
 
 	objects := make([]string, 1, 8)
 	objects[0] = "ConfigMap/" + cmName
-	// The Service, ServiceAccount, and RoleBinding are created once by
-	// createStableInfra; recreate only the Deployment per spec.
-	objects = append(objects, applyManifest(eppManifest, eppSubstitutions(), "Service", "ServiceAccount", "RoleBinding")...)
+	// eppManifest is the EPP Deployment only; its Service, ServiceAccount, and
+	// RBAC are created once by createStableInfra.
+	objects = append(objects, applyManifest(eppManifest, eppSubstitutions())...)
 	podsInDeploymentsReady(objects)
 	return objects
 }
@@ -107,8 +108,13 @@ func createInferencePool(toDelete bool) []string {
 		deletePoolIfExists(poolNameBase)
 	}
 
+	subs := eppSubstitutions()
+	// TARGET_PORTS is a YAML block-sequence fragment for inference-pools.yaml's
+	// targetPorts field, at that field's 2-space indentation. The coordinator's
+	// vLLM workers all listen on 8000.
+	subs["${TARGET_PORTS}"] = "\n  - number: 8000"
 	docs := testutils.ReadYaml(poolManifest)
-	docs = e2eutil.SubstituteMany(docs, eppSubstitutions())
+	docs = e2eutil.SubstituteMany(docs, subs)
 	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
 }
 
@@ -128,7 +134,7 @@ func deletePoolIfExists(name string) {
 }
 
 // createModelServers deploys the vLLM encode/prefill/decode workers from the
-// epd-pools kustomize environment with the given per-type replica counts and
+// coordinator-epd kustomize environment with the given per-type replica counts and
 // waits for their Deployments to be ready.
 func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []string {
 	subs := allSubstitutions()
@@ -219,11 +225,15 @@ func createEPPConfigMap(name, content string) {
 	}
 }
 
-func applyManifest(path string, subs map[string]string, excludeKinds ...string) []string {
+// applyManifest reads a manifest, substitutes vars, and creates the objects.
+// It does not strip empty args: the manifests it applies (Envoy, the EPP's
+// Deployment/RBAC/ServiceAccount/Service) carry no empty ${VLLM_EXTRA_ARGS_*}
+// placeholders, and rbac.yaml's core API group ("") is a legitimate `- ""` that
+// RemoveEmptyArgs would wrongly drop. The vLLM workers, which do need arg
+// stripping, go through createModelServers instead.
+func applyManifest(path string, subs map[string]string) []string {
 	docs := testutils.ReadYaml(path)
 	docs = e2eutil.SubstituteMany(docs, subs)
-	docs = e2eutil.RemoveEmptyArgs(docs)
-	docs = e2eutil.FilterKinds(docs, excludeKinds...)
 	return testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
 }
 
@@ -241,22 +251,42 @@ func createStableInfra() {
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	stableInfraObjects = append(stableInfraObjects, testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())...)
 
-	stableInfraObjects = append(stableInfraObjects, applyManifest(eppManifest, eppSubstitutions(), "Deployment")...)
+	// The EPP's RBAC, ServiceAccount, and Service come from the shared
+	// inference-gateway component's split files; the Deployment is recreated per
+	// spec in createEndPointPicker.
+	for _, manifest := range []string{eppRbacManifest, eppServiceAccountManifest, eppServicesManifest} {
+		stableInfraObjects = append(stableInfraObjects, applyManifest(manifest, eppSubstitutions())...)
+	}
 }
 
 func eppSubstitutions() map[string]string {
 	return map[string]string{
-		"${EPP_NAME}":              eppName,
-		"${POOL_NAME}":             poolNameBase,
-		"${EPP_IMAGE}":             eppImage,
-		"${NAMESPACE}":             getNamespace(),
-		"${METRICS_ENDPOINT_AUTH}": "false",
+		"${EPP_NAME}":               eppName,
+		"${POOL_NAME}":              poolNameBase,
+		"${EPP_IMAGE}":              eppImage,
+		"${NAMESPACE}":              getNamespace(),
+		"${METRICS_ENDPOINT_AUTH}":  "false",
+		"${EPP_REPLICA_COUNT}":      "1",
+		"${ENABLE_LEADER_ELECTION}": "false",
 	}
 }
 
-// allSubstitutions returns the substitution map for the epd-pools kustomize
+// vllmExtraArgs formats one or more flags to fill a single `- ${VLLM_EXTRA_ARGS_*}`
+// list item in the kustomize-rendered worker manifests. SubstituteMany does raw
+// text replacement, so each extra flag is emitted as its own list item at the
+// placeholder's 8-space indent, yielding a distinct argv element.
+func vllmExtraArgs(flags ...string) string {
+	return strings.Join(flags, "\n        - ")
+}
+
+// allSubstitutions returns the substitution map for the coordinator-epd kustomize
 // environment (vLLM workers only).
 func allSubstitutions() map[string]string {
+	// The pipeline base64-inlines each image into the request body, and the dummy
+	// tokenizer counts that blob as text: the largest test image is ~97k tokens,
+	// far past the simulator's default 1024-token context. Every vLLM role raises
+	// --max-model-len so the encode sub-request is not rejected as over-length.
+	vllmArgs := vllmExtraArgs("--force-dummy-tokenizer", "--max-model-len=131072")
 	return map[string]string{
 		"${POOL_NAME}":               poolNameBase,
 		"${MODEL_NAME}":              modelName,
@@ -265,9 +295,9 @@ func allSubstitutions() map[string]string {
 		"${VLLM_REPLICA_COUNT_E}":    "1",
 		"${VLLM_REPLICA_COUNT_P}":    "1",
 		"${VLLM_REPLICA_COUNT_D}":    "1",
-		"${VLLM_EXTRA_ARGS_E}":       "",
-		"${VLLM_EXTRA_ARGS_P}":       "",
-		"${VLLM_EXTRA_ARGS_D}":       "",
+		"${VLLM_EXTRA_ARGS_E}":       vllmArgs,
+		"${VLLM_EXTRA_ARGS_P}":       vllmArgs,
+		"${VLLM_EXTRA_ARGS_D}":       vllmArgs,
 		"${KV_CONNECTOR_TYPE}":       "",
 		"${EC_CONNECTOR_TYPE}":       "",
 		"${CONNECTOR_TYPE}":          "",
@@ -301,7 +331,7 @@ func rendererSubstitutions() map[string]string {
 // createRenderer deploys the vllm-render component and waits for readiness.
 func createRenderer() []string {
 	ginkgo.By("Deploying vllm-render")
-	docs := e2eutil.RunKustomize(rendererComponentDir)
+	docs := testutils.ReadYaml(rendererManifest)
 	docs = e2eutil.SubstituteMany(docs, rendererSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	objects := testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
