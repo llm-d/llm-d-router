@@ -421,6 +421,16 @@ var (
 		},
 		[]string{"source_type", "extractor_type"},
 	)
+
+	// LlmdDataLayerTLSReloadErrorsTotal records scrape-client TLS reload failures per material.
+	LlmdDataLayerTLSReloadErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_tls_reload_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("Scrape-client TLS reload failures per material (ca, cert).", compbasemetrics.ALPHA),
+		},
+		[]string{"material"},
+	)
 )
 
 var (
