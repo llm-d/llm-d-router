@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -231,5 +233,32 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 	rec := postInferenceWithRequestID(t, newTestServer(stepErr), overlong)
 	if strings.Contains(rec.Body.String(), overlong) {
 		t.Fatalf("overlong request_id must not leak to the client: %q", rec.Body.String())
+	}
+}
+
+func TestRoutesRegistered(t *testing.T) {
+	const inferenceBody = `{"model":"m","token_ids":[1,2,3]}`
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"chat completions", http.MethodPost, gateway.PathChatCompletions, inferenceBody},
+		{"completions", http.MethodPost, gateway.PathCompletions, inferenceBody},
+		{"generate", http.MethodPost, gateway.DefaultGeneratePath, inferenceBody},
+		{"healthz", http.MethodGet, "/healthz", ""},
+		{"readyz", http.MethodGet, "/readyz", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(nil)
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
+				t.Fatalf("route %s %s not registered: got HTTP %d", tt.method, tt.path, rec.Code)
+			}
+		})
 	}
 }

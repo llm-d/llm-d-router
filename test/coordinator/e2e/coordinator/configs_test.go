@@ -72,6 +72,7 @@ const eppConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
+- type: vllmhttp-parser
 - type: encode-filter
 - type: prefill-filter
 - type: label-selector-filter
@@ -87,6 +88,7 @@ plugins:
 requestHandler:
   parsers:
   - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: encode
   plugins:

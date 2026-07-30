@@ -28,6 +28,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -47,42 +48,42 @@ var (
 
 var _ = ginkgo.Describe("Coordinator pipeline", func() {
 	ginkgo.It("routes a text only chat completion end-to-end", func() {
-		runCoordinatorPipeline([]byte(fmt.Sprintf(
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`,
 			modelName,
 		)), textOnlySteps, 0, 0, 0)
 	})
 
 	ginkgo.It("forwards the client min_tokens/max_tokens to decode and caps them on prefill and encode", func() {
-		runCoordinatorPipeline([]byte(fmt.Sprintf(
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5}`,
 			modelName, inlineImageDataURI,
 		)), allSteps, 1, 3, 5)
 	})
 
 	ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
-		runCoordinatorPipeline([]byte(fmt.Sprintf(
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 			modelName, testImageURL,
 		)), allSteps, 1, 0, 0)
 	})
 
 	ginkgo.It("routes a multimodal chat completion with two images end-to-end", func() {
-		runCoordinatorPipeline([]byte(fmt.Sprintf(
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"What is in these two images?"}]}],"max_tokens":150}`,
 			modelName, testImageURL, testImageURL2,
 		)), allSteps, 2, 0, 0)
 	})
 
 	ginkgo.It("routes a multimodal chat completion with an inline base64 image end-to-end", func() {
-		runCoordinatorPipeline([]byte(fmt.Sprintf(
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 			modelName, inlineImageDataURI,
 		)), allSteps, 1, 0, 0)
 	})
 
 	ginkgo.It("routes a multimodal chat completion with one inline and one remote image end-to-end", func() {
-		runCoordinatorPipeline([]byte(fmt.Sprintf(
+		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"Describe what you see in both images."}]}],"max_tokens":150}`,
 			modelName, inlineImageDataURI, testImageURL,
 		)), allSteps, 2, 0, 0)
@@ -96,14 +97,15 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAaUlEQVR4nOzPUQkAIRQAweMwx+sfxViG8GMQdhLsrj3zvezXAbca0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0E4AAAD//9Q1AYfjlntsAAAAAElFTkSuQmCC"
 
 // runCoordinatorPipeline deploys the e-p-d topology and coordinator, posts the
-// given chat-completion body, asserts a 200 with a non-empty body, verifies
-// that the coordinator logs show all expected pipeline steps completed, then
-// tears the workload down. expectedImages is the number of images in the
-// request; when > 0 the encoder log assertions are also verified. When
-// wantMaxTokens > 0 the token-limit contract is additionally asserted: decode
-// forwards the client's min_tokens/max_tokens unchanged, while prefill (and
-// encode, for multimodal requests) cap max_tokens to 1 and strip min_tokens.
-func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int) {
+// given body to path (e.g. /v1/chat/completions or /inference/v1/generate),
+// asserts a 200 with a non-empty body, verifies that the coordinator logs show
+// all expected pipeline steps completed, then tears the workload down.
+// expectedImages is the number of images in the request; when > 0 the encoder
+// log assertions are also verified. When wantMaxTokens > 0 the token-limit
+// contract is additionally asserted: decode forwards the client's
+// min_tokens/max_tokens unchanged, while prefill (and encode, for multimodal
+// requests) cap max_tokens to 1 and strip min_tokens.
+func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int) {
 	nsName := getNamespace()
 	var (
 		coordinator  []string
@@ -152,7 +154,7 @@ func runCoordinatorPipeline(body []byte, expectedSteps []string, expectedImages,
 	coordinator = createCoordinator(coordinatorConfigNIXL)
 
 	req, err := http.NewRequest(http.MethodPost,
-		gatewayBaseURL()+"/v1/chat/completions",
+		gatewayBaseURL()+path,
 		bytes.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
@@ -243,7 +245,7 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 	}
 }
 
-// fetchCoordinatorLogs returns the coordinator container logs for the current spec.
+// fetchCoordinatorLogs returns the coordinator container's pod logs.
 func fetchCoordinatorLogs(nsName string) string {
 	args := []string{"logs", "deployment/llm-d-coordinator",
 		"-c", "coordinator", "--namespace=" + nsName}
@@ -279,6 +281,18 @@ func verifyTokenLimits(logs string, wantMin, wantMax int, capLegs []string) {
 		gomega.Expect(logHasLine(logs, `"msg":"request body"`, phaseField, `"min_tokens"`)).To(gomega.BeFalse(),
 			"%s request body must not carry min_tokens", phase)
 	}
+}
+
+// verifyEncodeSkipped asserts the coordinator skipped the encode fan-out on the
+// generate path. The skip marker is logged immediately before the step returns,
+// so its presence is dispositive: the prefill worker encodes inline from
+// kwargs_data and no encode sub-request is issued.
+func verifyEncodeSkipped(nsName string) {
+	logs := fetchCoordinatorLogs(nsName)
+
+	ginkgo.By("Verifying encode was skipped for the generate request")
+	gomega.Expect(logHasLine(logs, `"msg":"skipping encode for generate request"`)).To(gomega.BeTrue(),
+		"coordinator logs missing 'skipping encode for generate request'")
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.

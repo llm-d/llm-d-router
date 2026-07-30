@@ -193,6 +193,75 @@ func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_GenerateFormat_NestsKVInExtraArgs verifies that for the
+// /inference/v1/generate format the decode step places kv_transfer_params
+// inside sampling_params.extra_args (the only place the engine reads them)
+// rather than at the top level, and preserves the client's sampling_params so
+// the decode generation honors the requested max_tokens.
+func TestDecodeStep_GenerateFormat_NestsKVInExtraArgs(t *testing.T) {
+	var parsed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"text": "ok"}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false, ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantBlockID := "block-gen-1"
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-gen",
+		OriginalPath:     gateway.DefaultGeneratePath,
+		Model:            "test-model",
+		TokenIDs:         []int{1, 2, 3, 4, 5},
+		KVTransferParams: map[string]any{"block_id": wantBlockID, "peer_host": "10.0.0.42", "peer_port": 7777},
+		Body: map[string]any{
+			"model":           "test-model",
+			"token_ids":       []int{1, 2, 3, 4, 5},
+			"sampling_params": map[string]any{"max_tokens": 50},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// kv_transfer_params must not be at the top level in generate format.
+	if _, ok := parsed["kv_transfer_params"]; ok {
+		t.Fatal("generate format should not have top-level kv_transfer_params")
+	}
+
+	sampling, ok := parsed["sampling_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected sampling_params in decode body")
+	}
+	// Client sampling fields are preserved (decode honors the real max_tokens).
+	if sampling["max_tokens"] != float64(50) {
+		t.Fatalf("expected sampling_params.max_tokens=50 preserved, got %v", sampling["max_tokens"])
+	}
+	extraArgs, ok := sampling["extra_args"].(map[string]any)
+	if !ok {
+		t.Fatal("expected sampling_params.extra_args in generate format")
+	}
+	kvParams, ok := extraArgs["kv_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_transfer_params in sampling_params.extra_args")
+	}
+	if kvParams["block_id"] != wantBlockID {
+		t.Errorf("kv_transfer_params.block_id = %v, want %v", kvParams["block_id"], wantBlockID)
+	}
+	if kvParams["do_remote_prefill"] != true {
+		t.Errorf("kv_transfer_params.do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+	}
+}
+
 func TestDecodeStep_Streaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
