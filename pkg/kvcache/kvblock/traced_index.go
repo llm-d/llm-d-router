@@ -41,6 +41,7 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
+	ctx = tracing.LoggerWithSpanContext(ctx, span)
 
 	span.SetAttributes(
 		attribute.Int("llm_d.kv_cache.index.add.engine_key_count", len(engineKeys)),
@@ -64,6 +65,7 @@ func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
+	ctx = tracing.LoggerWithSpanContext(ctx, span)
 
 	span.SetAttributes(
 		attribute.String("llm_d.kv_cache.index.evict.key_type", keyTypeLabel(keyType)),
@@ -90,6 +92,7 @@ func (t *tracedIndex) Lookup(
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
+	ctx = tracing.LoggerWithSpanContext(ctx, span)
 
 	span.SetAttributes(
 		attribute.Int("llm_d.kv_cache.index.lookup.block_count", len(requestKeys)),
