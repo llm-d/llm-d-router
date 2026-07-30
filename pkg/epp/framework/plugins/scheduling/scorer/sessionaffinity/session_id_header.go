@@ -43,6 +43,11 @@ type sessionIDHeaderStrategy struct {
 	ttl time.Duration
 	// sweepInterval is how often expired bindings are swept.
 	sweepInterval time.Duration
+	// mu serializes the bind, migrate, and evict sequences so that a binding's
+	// insertion or removal and the matching podCount adjustment are atomic with
+	// respect to each other. Without it a first-bind's increment can land after
+	// a concurrent sweep's decrement, stranding a count with no live binding.
+	mu sync.Mutex
 	// bindings maps a session identifier to the pod serving it.
 	bindings sync.Map
 	// podCount maps a pod key to the number of sessions currently bound to it.
@@ -168,6 +173,9 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 		return
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	fresh := binding{podName: podName, lastSeen: time.Now()}
 	existingValue, loaded := s.bindings.LoadOrStore(sessionID, fresh)
 	if !loaded {
@@ -187,9 +195,11 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 		return
 	}
 
-	// Only a genuine absence migrates the pin; losing to another scorer doesn't.
-	present, _ := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, request.RequestID, plugin.StateKey(SessionAffinityType))
-	if present != nil && present.present {
+	// Migrate only on a confirmed absence recorded by this request's own Score
+	// call. A missing record (e.g. a concurrent first-bind race) is not treated
+	// as absence, so it never forces a migration.
+	present, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, request.RequestID, plugin.StateKey(SessionAffinityType))
+	if err != nil || present == nil || present.present {
 		return
 	}
 
@@ -279,15 +289,22 @@ func (s *sessionIDHeaderStrategy) runEviction(ctx context.Context, interval time
 			s.bindings.Range(func(key, value any) bool {
 				b, ok := value.(binding)
 				if !ok {
+					s.mu.Lock()
 					s.bindings.CompareAndDelete(key, value)
+					s.mu.Unlock()
 					return true
 				}
 				if !s.expired(b.lastSeen, now) {
 					return true
 				}
+				// Re-check under the lock: a concurrent preRequest may have
+				// refreshed this binding since Range snapshotted it, in which
+				// case CompareAndDelete correctly declines to remove it.
+				s.mu.Lock()
 				if s.bindings.CompareAndDelete(key, value) {
 					s.decrementPodCount(b.podName)
 				}
+				s.mu.Unlock()
 				return true
 			})
 		}

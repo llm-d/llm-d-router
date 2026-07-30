@@ -32,19 +32,19 @@ const (
 	// SessionAffinityType is the type of the SessionAffinity scorer.
 	SessionAffinityType = "session-affinity-scorer"
 
-	// AlgorithmEncodedEndpointHeader echoes the picked pod back to the client,
+	// StrategyEncodedEndpointHeader echoes the picked pod back to the client,
 	// which resends it on subsequent requests.
-	AlgorithmEncodedEndpointHeader = "encoded_endpoint_header"
+	StrategyEncodedEndpointHeader = "encoded_endpoint_header"
 
-	// AlgorithmSessionIDHeader maps an opaque client-supplied session identifier
+	// StrategySessionIDHeader maps an opaque client-supplied session identifier
 	// to a pod.
-	AlgorithmSessionIDHeader = "session_id_header"
+	StrategySessionIDHeader = "session_id_header"
 )
 
 type parameters struct {
-	// Algorithm is AlgorithmEncodedEndpointHeader (the default) or
-	// AlgorithmSessionIDHeader.
-	Algorithm string `json:"algorithm"`
+	// Strategy is StrategyEncodedEndpointHeader (the default) or
+	// StrategySessionIDHeader.
+	Strategy string `json:"strategy"`
 	// HeaderName overrides the default x-session-token header used to read and
 	// write the session token. When empty the default is used.
 	HeaderName string `json:"headerName"`
@@ -62,19 +62,19 @@ type parameters struct {
 
 func defaultParameters() parameters {
 	return parameters{
-		Algorithm:            AlgorithmEncodedEndpointHeader,
+		Strategy:             StrategyEncodedEndpointHeader,
 		EvictionTTLSeconds:   300,
 		EvictionSweepSeconds: 10,
 	}
 }
 
 // validate rejects only what would change behavior. Fields belonging to the other
-// algorithm are ignored, not rejected: they change nothing.
+// strategy are ignored, not rejected: they change nothing.
 func (p *parameters) validate() error {
-	switch p.Algorithm {
-	case AlgorithmEncodedEndpointHeader, AlgorithmSessionIDHeader:
+	switch p.Strategy {
+	case StrategyEncodedEndpointHeader, StrategySessionIDHeader:
 	default:
-		return fmt.Errorf("algorithm must be %q or %q, got %q", AlgorithmEncodedEndpointHeader, AlgorithmSessionIDHeader, p.Algorithm)
+		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionIDHeader, p.Strategy)
 	}
 	if p.EvictionTTLSeconds <= 0 {
 		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", p.EvictionTTLSeconds)
@@ -128,7 +128,7 @@ type strategy interface {
 }
 
 func newStrategy(params parameters, handle plugin.Handle) strategy {
-	if params.Algorithm == AlgorithmSessionIDHeader {
+	if params.Strategy == StrategySessionIDHeader {
 		return newSessionIDHeaderStrategy(params, handle)
 	}
 	return newEncodedEndpointHeaderStrategy(params)
