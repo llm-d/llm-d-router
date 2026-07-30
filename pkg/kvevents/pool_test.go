@@ -56,6 +56,73 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 	return keys
 }
 
+type sourceEndpointAdapter struct{}
+
+func (a *sourceEndpointAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
+	return "10.0.0.1:8000", "test-model", EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: []uint64{uint64(msg.Payload[0])},
+				Tokens:      makeTokens(16),
+			},
+		},
+	}, nil
+}
+
+func (a *sourceEndpointAdapter) ShardingKey(*RawMessage) string {
+	return "10.0.0.1:8000"
+}
+
+func TestProcessRawMessage_UsesSubscriberSourceEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+
+	for i, sourceEndpoint := range []string{"10.0.0.1:8000", "10.0.0.1:8003"} {
+		pool.processRawMessage(ctx, &RawMessage{
+			Topic:          "kv@10.0.0.1:8000@test-model",
+			Payload:        []byte{byte(i + 1)},
+			SourceEndpoint: sourceEndpoint,
+		})
+	}
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 2)
+
+	got := []string{
+		result[keys[0]][0].PodIdentifier,
+		result[keys[0]][1].PodIdentifier,
+	}
+	assert.ElementsMatch(t, []string{"10.0.0.1:8000", "10.0.0.1:8003"}, got)
+}
+
+func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:   "kv@10.0.0.1:8000@test-model",
+		Payload: []byte{1},
+	})
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 1)
+	assert.Equal(t, "10.0.0.1:8000", result[keys[0]][0].PodIdentifier)
+}
+
 // TestCanonicalWritePath_FallbackLegacy verifies that when BlockSize equals
 // the engine block size, the pool takes the 1:1 path: engine keys are passed
 // directly to Index.Add with 1:1 mapping.

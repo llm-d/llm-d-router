@@ -73,7 +73,11 @@ var (
 // subscriberManager is the subset of kvevents.SubscriberManager the producer
 // relies on, narrowed so tests can substitute a fake.
 type subscriberManager interface {
-	EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, topicFilter string, remoteSocket bool) error
+	EnsureSubscriber(
+		ctx context.Context,
+		podIdentifier, sourceEndpoint, endpoint, topicFilter string,
+		remoteSocket bool,
+	) error
 	RemoveSubscriber(ctx context.Context, podIdentifier string)
 	GetActiveSubscribers() ([]string, []string)
 	Shutdown(ctx context.Context)
@@ -183,7 +187,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
-		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber",
+		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
 		}

@@ -33,21 +33,23 @@ const (
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
-	pool          *Pool
-	podIdentifier string
-	endpoint      string
-	remote        bool
-	topicFilter   string
+	pool           *Pool
+	podIdentifier  string
+	sourceEndpoint string
+	endpoint       string
+	remote         bool
+	topicFilter    string
 }
 
 // newZMQSubscriber creates a new ZMQ subscriber.
-func newZMQSubscriber(pool *Pool, podIdentifier, endpoint, topicFilter string, remote bool) *zmqSubscriber {
+func newZMQSubscriber(pool *Pool, podIdentifier, sourceEndpoint, endpoint, topicFilter string, remote bool) *zmqSubscriber {
 	return &zmqSubscriber{
-		pool:          pool,
-		podIdentifier: podIdentifier,
-		endpoint:      endpoint,
-		remote:        remote,
-		topicFilter:   topicFilter,
+		pool:           pool,
+		podIdentifier:  podIdentifier,
+		sourceEndpoint: sourceEndpoint,
+		endpoint:       endpoint,
+		remote:         remote,
+		topicFilter:    topicFilter,
 	}
 }
 
@@ -148,9 +150,10 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			"payloadSize", len(payload))
 
 		z.pool.AddTask(&RawMessage{
-			Topic:    topic,
-			Sequence: seq,
-			Payload:  payload,
+			Topic:          topic,
+			Sequence:       seq,
+			Payload:        payload,
+			SourceEndpoint: z.sourceEndpoint,
 		})
 	}
 }

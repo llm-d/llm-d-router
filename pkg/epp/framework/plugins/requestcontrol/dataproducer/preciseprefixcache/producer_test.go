@@ -741,11 +741,19 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 }
 
 type fakeSubscriberManager struct {
-	ids       []string
-	endpoints []string
+	ids             []string
+	sourceEndpoints []string
+	endpoints       []string
 }
 
-func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+func (f *fakeSubscriberManager) EnsureSubscriber(
+	_ context.Context,
+	id, sourceEndpoint, endpoint, _ string,
+	_ bool,
+) error {
+	f.ids = append(f.ids, id)
+	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
+	f.endpoints = append(f.endpoints, endpoint)
 	return nil
 }
 func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}
