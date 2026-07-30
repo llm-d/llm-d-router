@@ -108,12 +108,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
-	activerequestfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
+	utilizationfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/random"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/weightedrandom"
@@ -143,15 +143,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
-	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
 	"github.com/llm-d/llm-d-router/version"
-)
-
-const (
-	// enableExperimentalFlowControlLayer defines the environment variable used as a feature flag for the pluggable flow
-	// control layer.
-	// DEPRECATION NOTICE - this env var will be removed in the next version as we switch to configuring the EPP using FeatureGates in the config file.
-	enableExperimentalFlowControlLayer = "ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER"
 )
 
 var (
@@ -564,6 +556,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityAlpha, sessionaffinityfilter.Factory)
 	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, fwkplugin.StabilityAlpha, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(activerequestfilter.ActiveRequestFilterType, fwkplugin.StabilityAlpha, activerequestfilter.Factory)
+	fwkplugin.Register(utilizationfilter.UtilizationFilterType, fwkplugin.StabilityAlpha, utilizationfilter.Factory)
 
 	// dataparallel profile handler
 	// Beta
@@ -755,8 +748,6 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
-	applyDeprecatedEnvFeatureGate(enableExperimentalFlowControlLayer, "Flow Control layer", flowcontrol.FeatureGate, rawConfig)
-
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
@@ -799,18 +790,6 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
-}
-
-func applyDeprecatedEnvFeatureGate(envVar, featureName, featureGate string, rawConfig *configapi.EndpointPickerConfig) {
-	if _, ok := os.LookupEnv(envVar); ok {
-		setupLog.Info(fmt.Sprintf("Enabling the experimental %s using environment variables is deprecated and will be removed in next version", featureName))
-		if env.GetEnvBool(envVar, false, setupLog) {
-			if rawConfig.FeatureGates == nil {
-				rawConfig.FeatureGates = make(configapi.FeatureGates, 0)
-			}
-			rawConfig.FeatureGates = append(rawConfig.FeatureGates, featureGate)
-		}
-	}
 }
 
 func (r *Runner) configureAndStartDatalayer(ctx context.Context, cfg *datalayer.Config, mgr ctrl.Manager) error {
@@ -947,7 +926,7 @@ func (r *Runner) initAdmissionControl(
 			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
 		},
 	)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName), registry
+	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates), registry
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.

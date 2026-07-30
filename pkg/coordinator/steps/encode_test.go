@@ -441,6 +441,45 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_SkipsForGenerate verifies that Execute makes no gateway calls
+// and leaves ECTransferParams nil for a /inference/v1/generate request even when
+// multimodal entries are present: the prefill worker runs the vision encoder
+// inline, so the encode fan-out and EC handoff are skipped.
+func TestEncodeStep_SkipsForGenerate(t *testing.T) {
+	gatewayCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gatewayCallCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-generate",
+		Model:        "test-model",
+		OriginalPath: gateway.DefaultGeneratePath,
+		TokenIDs:     []int{1, 32000, 32000, 2},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gatewayCallCount != 0 {
+		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
+	}
+	if reqCtx.ECTransferParams != nil {
+		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+	}
+}
+
 // TestEncodeStep_EncoderReturnsNoECParams verifies the all-missing degradation path:
 // when every encoder response omits ec_transfer_params, MergeEncodeResponse skips each
 // entry and ECTransferParams stays nil, so the prefill step forwards the request without
