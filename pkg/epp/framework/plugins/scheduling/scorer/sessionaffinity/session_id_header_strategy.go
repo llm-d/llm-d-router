@@ -34,10 +34,8 @@ import (
 // sessionIDHeaderStrategy maps an opaque client-supplied session identifier to
 // a pod via a bounded, TTL-evicted binding store. An unbound session is placed
 // on the pod with the fewest bound sessions. A session whose bound pod is
-// absent from the candidate set stays pinned until it has been absent for
-// missThreshold consecutive requests, then migrates to the least-loaded
-// present pod; this absorbs a transient candidate-set blip the same way
-// program-aware-scorer does.
+// absent from the candidate set migrates to the least-loaded present pod
+// immediately, no retry wait.
 type sessionIDHeaderStrategy struct {
 	sessionHeader string
 	profileName   string
@@ -45,16 +43,10 @@ type sessionIDHeaderStrategy struct {
 	ttl time.Duration
 	// sweepInterval is how often expired bindings are swept.
 	sweepInterval time.Duration
-	// missThreshold is the number of consecutive requests a session's bound pod
-	// may be absent from the candidate set before the session migrates.
-	missThreshold int
 	// bindings maps a session identifier to the pod serving it.
 	bindings sync.Map
 	// podCount maps a pod key to the number of sessions currently bound to it.
 	podCount sync.Map
-	// misses maps a session identifier to the count of consecutive requests
-	// during which its bound pod was absent from the candidate set.
-	misses sync.Map
 	// pluginState carries the score->preRequest handoff of whether the bound
 	// pod was present in this request's candidate set.
 	pluginState *plugin.PluginState
@@ -71,21 +63,14 @@ func (b *boundPodPresence) Clone() plugin.StateData {
 	return &boundPodPresence{present: b.present}
 }
 
-const defaultMissThreshold = 3
-
 // newSessionIDHeaderStrategy builds the session_id_header strategy and starts
 // its eviction sweep for the plugin's lifetime.
 func newSessionIDHeaderStrategy(params parameters, handle plugin.Handle) strategy {
-	missThreshold := defaultMissThreshold
-	if params.MissThreshold > 0 {
-		missThreshold = params.MissThreshold
-	}
 	s := &sessionIDHeaderStrategy{
 		sessionHeader: sessionutil.NormalizeHeader(params.HeaderName),
 		profileName:   params.ProfileName,
 		ttl:           time.Duration(params.EvictionTTLSeconds * float64(time.Second)),
 		sweepInterval: time.Duration(params.EvictionSweepSeconds * float64(time.Second)),
-		missThreshold: missThreshold,
 		pluginState:   plugin.NewPluginState(handle.Context()),
 	}
 	go s.runEviction(handle.Context(), s.sweepInterval)
@@ -116,14 +101,10 @@ func (s *sessionIDHeaderStrategy) score(_ context.Context, request *scheduling.I
 	}
 
 	if sessionID != "" && podName != "" {
-		// Record whether the bound pod was actually a candidate, so PreRequest can
-		// tell a genuine absence from the picker merely choosing a different pod.
 		s.pluginState.Write(request.RequestID, plugin.StateKey(SessionAffinityType), &boundPodPresence{present: target != nil})
 	}
 
 	if target == nil {
-		// Unbound, or the bound pod is absent from this request's candidate set.
-		// Prefer the least-loaded present pod without changing any binding here.
 		target = s.leastLoadedPod(endpoints)
 	}
 	scoredEndpoints[target] = 1.0
@@ -175,11 +156,8 @@ func (s *sessionIDHeaderStrategy) boundPod(sessionID string) string {
 	return b.podName
 }
 
-// preRequest commits this request's outcome for its session: a first-seen
-// session binds to the pod picked; an existing binding is kept sticky until its
-// pod has been absent from the candidate set for missThreshold consecutive
-// requests, then migrates to the pod picked. podCount is adjusted here, and
-// only here, to match the commit.
+// preRequest is the only place podCount and bindings are mutated. A session
+// migrates only when its bound pod is absent from the candidate set.
 func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	sessionID := sessionutil.SessionID(request, s.sessionHeader)
 	if sessionID == "" {
@@ -193,9 +171,7 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 	fresh := binding{podName: podName, lastSeen: time.Now()}
 	existingValue, loaded := s.bindings.LoadOrStore(sessionID, fresh)
 	if !loaded {
-		// First time we see this session: bind it to the pod picked.
 		s.incrementPodCount(podName)
-		s.misses.Delete(sessionID)
 		log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - bound session to pod",
 			"plugin", SessionAffinityType, "pod", podName)
 		return
@@ -207,21 +183,13 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 	}
 
 	if existing.podName == podName {
-		// Pin honored (or the picker re-selected it): refresh recency and reset misses.
 		s.bindings.CompareAndSwap(sessionID, existingValue, fresh)
-		s.misses.Delete(sessionID)
 		return
 	}
 
+	// Only a genuine absence migrates the pin; losing to another scorer doesn't.
 	present, _ := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, request.RequestID, plugin.StateKey(SessionAffinityType))
 	if present != nil && present.present {
-		// The bound pod was a candidate but the picker chose otherwise: leave the
-		// pin untouched. Only a genuine absence counts toward migration.
-		return
-	}
-
-	misses := s.recordMiss(sessionID)
-	if misses < s.missThreshold {
 		return
 	}
 
@@ -230,20 +198,8 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 	}
 	s.decrementPodCount(existing.podName)
 	s.incrementPodCount(podName)
-	s.misses.Delete(sessionID)
 	log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - session migrated pod",
 		"plugin", SessionAffinityType, "from", existing.podName, "to", podName)
-}
-
-// recordMiss increments and returns sessionID's consecutive-absence counter.
-func (s *sessionIDHeaderStrategy) recordMiss(sessionID string) int {
-	for {
-		v, _ := s.misses.LoadOrStore(sessionID, 0)
-		c, _ := v.(int)
-		if s.misses.CompareAndSwap(sessionID, c, c+1) {
-			return c + 1
-		}
-	}
 }
 
 // incrementPodCount records one more session bound to podKey.
@@ -329,10 +285,7 @@ func (s *sessionIDHeaderStrategy) runEviction(ctx context.Context, interval time
 				if !s.expired(b.lastSeen, now) {
 					return true
 				}
-				// Guard against a concurrent PreRequest refreshing or migrating this
-				// binding between Range's snapshot and this delete.
 				if s.bindings.CompareAndDelete(key, value) {
-					s.misses.Delete(key)
 					s.decrementPodCount(b.podName)
 				}
 				return true

@@ -44,7 +44,7 @@ func (e *encodedEndpointHeaderStrategy) score(ctx context.Context, request *sche
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 	podName := sessionutil.DecodePodName(ctx, request.Headers[e.sessionHeader])
 	for _, endpoint := range endpoints {
-		scoredEndpoints[endpoint] = 0.0 // initial value
+		scoredEndpoints[endpoint] = 0.0
 		if endpoint.GetMetadata().ID.String() == podName {
 			scoredEndpoints[endpoint] = 1.0
 		}

@@ -41,7 +41,6 @@ const (
 	AlgorithmSessionIDHeader = "session_id_header"
 )
 
-// parameters configures the SessionAffinity scorer.
 type parameters struct {
 	// Algorithm is AlgorithmEncodedEndpointHeader (the default) or
 	// AlgorithmSessionIDHeader.
@@ -59,18 +58,13 @@ type parameters struct {
 	// EvictionSweepSeconds is how often expired bindings are swept.
 	// session_id_header only.
 	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
-	// MissThreshold is the number of consecutive requests a session's bound pod
-	// may be absent from the candidate set before the session migrates.
-	// Defaults to 3 when unset (non-positive). session_id_header only.
-	MissThreshold int `json:"missThreshold"`
 }
 
-// defaultParameters returns the parameters used when a field is not set.
 func defaultParameters() parameters {
 	return parameters{
 		Algorithm:            AlgorithmEncodedEndpointHeader,
-		EvictionTTLSeconds:   600,
-		EvictionSweepSeconds: 30,
+		EvictionTTLSeconds:   300,
+		EvictionSweepSeconds: 10,
 	}
 }
 
@@ -88,18 +82,13 @@ func (p *parameters) validate() error {
 	if p.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
 	}
-	if p.MissThreshold < 0 {
-		return fmt.Errorf("missThreshold must be >= 0, got %v", p.MissThreshold)
-	}
 	return nil
 }
 
-// compile-time type assertion
 var _ scheduling.Scorer = &SessionAffinity{}
 var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
 var _ requestcontrol.PreRequest = &SessionAffinity{}
 
-// Factory defines the factory function for SessionAffinity scorer.
 func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	params := defaultParameters()
 	if rawParameters != nil {
@@ -138,7 +127,6 @@ type strategy interface {
 	responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata)
 }
 
-// newStrategy builds the strategy selected by params.Algorithm.
 func newStrategy(params parameters, handle plugin.Handle) strategy {
 	if params.Algorithm == AlgorithmSessionIDHeader {
 		return newSessionIDHeaderStrategy(params, handle)
@@ -146,37 +134,29 @@ func newStrategy(params parameters, handle plugin.Handle) strategy {
 	return newEncodedEndpointHeaderStrategy(params)
 }
 
-// SessionAffinity is a routing scorer that routes subsequent
-// requests in a session to the same pod as the first request in the
-// session was sent to, by giving that pod the specified weight and assigning
-// zero score to the rest of the targets
+// SessionAffinity is a routing scorer that routes a session's requests to the
+// same pod, per whichever algorithm strategy implements.
 type SessionAffinity struct {
 	typedName plugin.TypedName
 	strategy  strategy
 }
 
-// TypedName returns the typed name of the plugin.
 func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
 }
 
-// Category returns the preference the scorer applies when scoring candidate endpoints.
 func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
 }
 
-// Score assign a high score to the pod used in previous requests and zero to others
 func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	return s.strategy.score(ctx, request, endpoints)
 }
 
-// PreRequest records the pod chosen for this request so a future request in
-// the same session can prefer it.
 func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	s.strategy.preRequest(ctx, request, schedulingResult)
 }
 
-// ResponseHeader sets the session header on the response sent to the client.
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
 	s.strategy.responseHeader(ctx, request, response, targetPod)
 }
