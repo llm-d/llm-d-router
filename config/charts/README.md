@@ -52,6 +52,7 @@ helm install my-standalone-router ./config/charts/llm-d-router-standalone \
   --set router.proxy.mode=service \
   --set router.proxy.replicas=3
 ```
+
 ---
 
 ### 2. Gateway Mode (`llm-d-router-gateway`)
@@ -513,7 +514,7 @@ httpRoute:
 
 ### Standalone Mode Configuration
 
-Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that intercepts and routes client traffic directly to model servers (exclusive to `llm-d-router-standalone`). The proxy runs as a sidecar in the EPP pod by default, or as a separate horizontally scalable service when `router.proxy.mode=service` (Envoy only).
+Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that intercepts and routes client traffic directly to model servers (exclusive to `llm-d-router-standalone`). The proxy runs as a sidecar in the EPP pod by default, or as a separate horizontally scalable service when `router.proxy.mode=service`.
 
 #### Proxy Sidecar Parameters
 
@@ -521,9 +522,9 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | :--- | :--- | :--- |
 | `router.proxy.enabled` | Enable the proxy (Envoy or Agentgateway) in front of EPP. | `false` |
 | `router.proxy.proxyType` | Type of proxy. Options: `[envoy, agentgateway]`. | `envoy` |
-| `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service (Envoy only). | `sidecar` |
+| `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. | `2` |
-| `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. | `true` |
+| `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
 | `router.proxy.image` | Sidecar container image. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |

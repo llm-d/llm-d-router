@@ -378,8 +378,15 @@ func (fc *FlowController) tryDistribution(
 	return item, finalErr
 }
 
+func finalizeOnControllerShutdown(item *internal.FlowItem) (types.QueueOutcome, error) {
+	item.Finalize(types.ErrFlowControllerNotRunning)
+
+	finalState := item.FinalState()
+	return finalState.Outcome, finalState.Err
+}
+
 // awaitFinalization blocks until an item is finalized, either by the processor (synchronously) or by the controller
-// itself due to context expiry (asynchronously).
+// itself due to context expiry or shutdown (asynchronously).
 func (fc *FlowController) awaitFinalization(
 	reqCtx context.Context,
 	item *internal.FlowItem,
@@ -388,12 +395,19 @@ func (fc *FlowController) awaitFinalization(
 	case <-reqCtx.Done():
 		// Asynchronous Finalization (Controller-initiated):
 		// The request Context expired (Cancellation/TTL) while the item was being processed.
+		if fc.parentCtx.Err() != nil {
+			return finalizeOnControllerShutdown(item)
+		}
+
 		cause := context.Cause(reqCtx)
 		item.Finalize(cause)
 
 		// The processor will eventually discard this "zombie" item during its cleanup sweep.
 		finalState := item.FinalState()
 		return finalState.Outcome, finalState.Err
+
+	case <-fc.parentCtx.Done():
+		return finalizeOnControllerShutdown(item)
 
 	case finalState := <-item.Done():
 		// Synchronous Finalization (Processor-initiated):

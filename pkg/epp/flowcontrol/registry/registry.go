@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,8 +30,9 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/queue"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // propagateStatsDeltaFunc defines the callback function used to propagate statistics changes (deltas) up the hierarchy
@@ -472,6 +474,14 @@ func (fr *FlowRegistry) gcFlows() {
 		}
 
 		fr.cleanupFlowResources(keysToClean)
+
+		// Prune the flows' metric series. Fairness IDs come from client input, so without pruning the
+		// per-flow metric vectors grow monotonically with every fairness ID ever observed. Done after
+		// cleanupFlowResources and outside fr.mu: DeletePartialMatch scans whole metric vectors, which
+		// must not run under the registry write lock.
+		for _, key := range keysToClean {
+			metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
+		}
 	}
 }
 

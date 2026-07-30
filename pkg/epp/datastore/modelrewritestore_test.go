@@ -197,3 +197,30 @@ func TestModelRewriteStore(t *testing.T) {
 		})
 	}
 }
+
+func TestConfiguredModelNames(t *testing.T) {
+	rewrite := &v1alpha2.InferenceModelRewrite{
+		ObjectMeta: metav1.ObjectMeta{Name: "rewrite", Namespace: "default"},
+		Spec: v1alpha2.InferenceModelRewriteSpec{Rules: []v1alpha2.InferenceModelRewriteRule{
+			{
+				Matches: []v1alpha2.Match{{Model: &v1alpha2.ModelMatch{Value: "model1"}}},
+				Targets: []v1alpha2.TargetModel{{ModelRewrite: "model1-v1"}, {ModelRewrite: "model1-v2"}},
+			},
+			{
+				// Generic rule: no exact-match source to enumerate, target only.
+				Targets: []v1alpha2.TargetModel{{ModelRewrite: "generic-fallback"}},
+			},
+			{
+				// Duplicate names collapse.
+				Matches: []v1alpha2.Match{{Model: &v1alpha2.ModelMatch{Value: "model1"}}},
+				Targets: []v1alpha2.TargetModel{{ModelRewrite: "model1-v2"}},
+			},
+		}},
+	}
+
+	got := configuredModelNames(rewrite)
+	want := []string{"generic-fallback", "model1", "model1-v1", "model1-v2"}
+	if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+		t.Errorf("configuredModelNames() mismatch (-want +got):\n%s", diff)
+	}
+}

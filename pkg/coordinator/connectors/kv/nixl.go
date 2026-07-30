@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -35,12 +36,12 @@ func (nixlKV) Name() string { return NIXL }
 
 func (nixlKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{
-		"do_remote_decode":  true,
-		"do_remote_prefill": false,
-		"remote_engine_id":  nil,
-		"remote_block_ids":  nil,
-		"remote_host":       nil,
-		"remote_port":       nil,
+		reqcommon.FieldDoRemoteDecode:  true,
+		reqcommon.FieldDoRemotePrefill: false,
+		reqcommon.FieldRemoteEngineID:  nil,
+		reqcommon.FieldRemoteBlockIDs:  nil,
+		reqcommon.FieldRemoteHost:      nil,
+		reqcommon.FieldRemotePort:      nil,
 	}
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
@@ -51,8 +52,8 @@ func (nixlKV) PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.Reques
 	for k, v := range reqCtx.KVTransferParams {
 		out[k] = v
 	}
-	out["do_remote_decode"] = false
-	out["do_remote_prefill"] = true
+	out[reqcommon.FieldDoRemoteDecode] = false
+	out[reqcommon.FieldDoRemotePrefill] = true
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
 }

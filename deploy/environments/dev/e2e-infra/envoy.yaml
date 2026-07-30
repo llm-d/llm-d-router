@@ -299,7 +299,7 @@ spec:
     port: 8081
     protocol: TCP
     targetPort: 8081
-    nodePort: 30080
+    nodePort: ${ENVOY_NODE_PORT}
   selector:
     app: envoy
   type: NodePort

@@ -41,6 +41,18 @@ func TestNewConfig(t *testing.T) {
 			opts:      nil,
 			expectErr: false,
 			expectedCfg: Config{
+				DefaultRequestTTL:        defaultRequestTTL,
+				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
+			},
+		},
+		{
+			name: "ZeroDefaultRequestTTL_ShouldDisableTTL",
+			opts: []ConfigOption{
+				WithDefaultRequestTTL(0),
+			},
+			expectErr: false,
+			expectedCfg: Config{
 				DefaultRequestTTL:        0,
 				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
@@ -136,7 +148,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 					"ExpiryCleanupInterval should be defaulted")
 				assert.Equal(t, defaultEnqueueChannelBufferSize, cfg.EnqueueChannelBufferSize,
 					"EnqueueChannelBufferSize should be defaulted")
-				assert.Equal(t, time.Duration(0), cfg.DefaultRequestTTL, "DefaultRequestTTL should default to 0 (disabled)")
+				assert.Equal(t, defaultRequestTTL, cfg.DefaultRequestTTL, "DefaultRequestTTL should be defaulted when unset")
 			},
 		},
 		{

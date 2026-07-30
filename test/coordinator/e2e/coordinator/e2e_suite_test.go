@@ -15,10 +15,11 @@ limitations under the License.
 */
 
 // Package coordinate2e runs end-to-end tests for the coordinator service
-// against the e-p-d-pools topology: one InferencePool per phase (encode,
-// prefill, decode), each with its own EPP, a hand-rolled standalone Envoy
-// routing on EPP-Phase header, and the coordinator deployed as a pod.
-// No Istio, no Gateway/HTTPRoute CRDs.
+// against the e-p-d-pools topology: a single InferencePool covering the
+// encode, prefill, and decode worker pods, served by one EPP that runs the
+// scheduling profile named by each request's EPP-Profile header, behind a
+// hand-rolled standalone Envoy routing on that same header, and the
+// coordinator deployed as a pod. No Istio, no Gateway/HTTPRoute CRDs.
 package coordinate2e
 
 import (
@@ -55,18 +56,14 @@ const (
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
 	eppName      = "e2e-epp"
 
-	encodeEPPManifest   = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/epp.yaml"
-	encodePoolManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/encode/inference-pool.yaml"
-	prefillEPPManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/epp.yaml"
-	prefillPoolManifest = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/prefill/inference-pool.yaml"
-	decodeEPPManifest   = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/epp.yaml"
-	decodePoolManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pools/decode/inference-pool.yaml"
+	eppManifest  = "../../../../deploy/coordinator/components/inference-gateway/epd-pool/epp.yaml"
+	poolManifest = "../../../../deploy/coordinator/components/inference-gateway/epd-pool/inference-pool.yaml"
 
 	epdPoolsKustomizeDir    = "../../../../deploy/coordinator/environments/dev/epd-pools"
 	coordinatorComponentDir = "../../../../deploy/coordinator/components/coordinator"
 	rendererComponentDir    = "../../../../deploy/coordinator/components/vllm-render"
 
-	envoyManifest = "testdata/envoy.yaml"
+	envoyManifest = "../../../../deploy/coordinator/environments/dev/e2e-infra/envoy.yaml"
 
 	crdGIEPath = "../../../../deploy/components/crds-gie"
 
@@ -79,7 +76,7 @@ var (
 	testConfig *testutils.TestConfig
 
 	keepClusterOnFailure = env.GetEnvBool("E2E_KEEP_CLUSTER_ON_FAILURE", false, ginkgo.GinkgoLogr)
-	printCoordinatorLogs = env.GetEnvBool("E2E_PRINT_COORDINATOR_LOGS", false, ginkgo.GinkgoLogr)
+	printLogs            = env.GetEnvBool("E2E_PRINT_LOGS", false, ginkgo.GinkgoLogr)
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
@@ -99,6 +96,7 @@ var (
 
 	portForwardSessions []*gexec.Session
 	rendererObjects     []string
+	stableInfraObjects  []string
 	createdNameSpace    bool
 )
 
@@ -131,6 +129,10 @@ var _ = ginkgo.BeforeSuite(func() {
 	}
 
 	rendererObjects = createRenderer()
+
+	// Coordinator and EPP Services/RBAC are created once and kept stable across
+	// specs (see createStableInfra).
+	createStableInfra()
 })
 
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
@@ -147,6 +149,9 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	nsName := getNamespace()
 	if len(rendererObjects) > 0 {
 		testutils.DeleteObjects(testConfig, rendererObjects, nsName)
+	}
+	if len(stableInfraObjects) > 0 {
+		testutils.DeleteObjects(testConfig, stableInfraObjects, nsName)
 	}
 	for _, session := range portForwardSessions {
 		session.Terminate()

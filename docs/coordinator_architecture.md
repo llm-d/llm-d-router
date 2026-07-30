@@ -50,9 +50,9 @@ absorb further processing modes as they are added.
 - [Components](#components)
 - [Request lifecycle](#request-lifecycle)
   - [RequestContext](#requestcontext)
-  - [EPP-Phase routing](#epp-phase-routing)
+  - [EPP-Profile routing](#epp-profile-routing)
 - [EPP integration](#epp-integration)
-  - [Per-phase model](#per-phase-model)
+  - [Per-phase scheduling profiles](#per-phase-scheduling-profiles)
   - [Decode disaggregation deciders](#decode-disaggregation-deciders)
   - [Conditional decode handshake](#conditional-decode-handshake)
   - [KV and EC transfer protocols](#kv-and-ec-transfer-protocols)
@@ -82,48 +82,43 @@ absorb further processing modes as they are added.
 
 A client sends an inference request to the coordinator. The coordinator pre-processes the
 request (media download, tokenization) against side services, then makes one inference
-call per phase to the Inference Gateway. The Gateway consults the per-phase EPP
-(Encode / Prefill / Decode), which picks a vLLM pod from that phase's pool. State that
-must survive across phases (token IDs, multimodal hashes, KV/EC transfer descriptors)
-lives on a per-request context held by the coordinator, not in a sidecar on the decode
-pod.
+call per phase to the Inference Gateway. The Gateway consults a single EPP that covers
+one InferencePool spanning all three worker roles; the EPP runs the scheduling profile
+named by the call's phase and picks a vLLM pod from that role. State that must survive
+across phases (token IDs, multimodal hashes, KV/EC transfer descriptors) lives on a
+per-request context held by the coordinator, not in a sidecar on the decode pod.
 
 ```
         Client
           |
           |  inference request (OpenAI-compatible API)
           v
+     Inference Gateway  --- no EPP-Profile header: default route to coordinator
+          |
+          v
    Coordinator Service  ------------>  side services
           |                            (media download, render / tokenize)
           |
-          |  one call per phase, tagged EPP-Phase: encode | prefill | decode
+          |  one call per phase, tagged EPP-Profile: encode | prefill | decode
+          |  (re-enters the same Inference Gateway)
           v
-     Inference Gateway
-          |  endpoint picker protocol
+     Inference Gateway  <-- endpoint picker protocol --> EPP
+          |                            (single endpoint picker, one scheduling
+          |                             profile per phase, selected by EPP-Profile)
+          |
+          v
           +-------------------+-------------------+
           v                   v                   v
-      Encode EPP          Prefill EPP         Decode EPP    (per-phase endpoint picker)
-          |                   |                   |
-          v                   v                   v
-      Encode vLLM         Prefill vLLM        Decode vLLM   (worker pools)
-        pool                pool                pool
+      Encode vLLM         Prefill vLLM        Decode vLLM   (one InferencePool)
+        worker              workers              workers
 ```
 
-In short:
 
-```
-                         one request+response per phase (encode, prefill, decode)
-                        +---------------------------------------------------------+
-                        |                                                         v
-Client  <-->  Coordinator  -->  Inference Gateway  -->  EPP -->  vLLM worker pool
-                        ^                                                         |
-                        +---------------------------------------------------------+
-                                          response streamed/returned
-```
-
-The client opens a single connection to the coordinator. Behind it, the coordinator
-issues several requests to the Inference Gateway and consumes each response before issuing
-the next: it is an active client of the Gateway, not a one-shot proxy. A single step
+The client opens a single connection through the Inference Gateway to the coordinator
+(the gateway's default route, taken when a request carries no `EPP-Profile` header).
+Behind it, the coordinator issues several requests back to that same Gateway and
+consumes each response before issuing the next: it is an active client of the Gateway,
+not a one-shot proxy. A single step
 can also fan out into several parallel requests: `replace-media-urls` downloads media
 concurrently (to the source URLs), and `encode` issues one Gateway request per
 multimodal item in parallel. The number and shape of these requests depend on the input
@@ -131,8 +126,89 @@ multimodal item in parallel. The number and shape of these requests depend on th
 steps are enabled and how they are parameterized); text-only requests need no media
 download or encode at all. Across phases the coordinator sequences the round-trips
 (prefill and decode are one each), threading state from each response into the next
-request. Each Gateway call routes it by the `EPP-Phase` header to
-the matching per-phase EPP and then to a pod in that phase's pool.
+request. Each Gateway call routes it by the `EPP-Profile` header to the EPP, which runs
+the matching scheduling profile and picks a pod matching that phase's role.
+
+Every call the Coordinator makes for a phase (`conditional-decode`, `encode`, `prefill`,
+`decode`) goes through the same Gateway and the same EPP, which picks the pod for that
+phase via the [Endpoint Picker protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol)
+(`ext_proc`). `conditional-decode` tries decode first, optimistically, before running
+encode or prefill at all: if the chosen decode pod already has what it needs (e.g. the
+prompt is already cached), it serves the request directly and the full pipeline never
+runs. Only if decode responds `412 Precondition Failed` does the Coordinator fall back
+to the full `encode → prefill → decode` cascade — which is also how a request with
+multiple multimedia entries fans encode out in parallel, one call per entry.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway
+    participant Coordinator
+    participant EPP
+    participant Media as External Media Service
+    participant Render as Render (side service)
+    participant Encode as Encode pool
+    participant Prefill as Prefill pool
+    participant Decode as Decode pool
+
+    Client->>Gateway: Request
+    Gateway->>Coordinator: Forward request
+
+    opt replace-media-urls step configured and request has media entries
+        par one call per media entry
+            Coordinator->>Media: Fetch / cache media URL
+            Media-->>Coordinator: Resolved reference
+        end
+    end
+
+    opt render step configured
+        Coordinator->>Render: Normalize multimodal input
+        Render-->>Coordinator: Normalized tensors
+    end
+
+    Note over Coordinator,Decode: conditional-decode — try decode alone first
+    Coordinator->>Gateway: Call (EPP-Profile: decode)
+    Gateway->>EPP: ext_proc: pick pod (profile=decode)
+    EPP-->>Gateway: Chosen decode pod
+    Gateway->>Decode: Forward request
+
+    alt Decode can serve the request
+        Decode-->>Gateway: 200 OK (tokens)
+        Gateway-->>Coordinator: Response
+        Coordinator-->>Client: Final response
+    else Decode cannot serve it (e.g. no KV cache for this prompt)
+        Decode-->>Gateway: 412 Precondition Failed
+        Gateway-->>Coordinator: 412
+        Note over Coordinator: Fall back to the full pipeline
+
+        opt request has multimodal entries
+            par one call per media entry
+                Coordinator->>Gateway: Call (EPP-Profile: encode)
+                Gateway->>EPP: ext_proc: pick pod (profile=encode)
+                EPP-->>Gateway: Chosen encode pod
+                Gateway->>Encode: Forward request
+                Encode-->>Gateway: Embeddings
+                Gateway-->>Coordinator: Embeddings
+            end
+        end
+
+        Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang) transfer KV differently - see KV and EC transfer protocols.
+        Coordinator->>Gateway: Call (EPP-Profile: prefill)
+        Gateway->>EPP: ext_proc: pick pod (profile=prefill)
+        EPP-->>Gateway: Chosen prefill pod
+        Gateway->>Prefill: Forward request
+        Prefill-->>Gateway: KV transfer descriptor
+        Gateway-->>Coordinator: Response
+
+        Coordinator->>Gateway: Call (EPP-Profile: decode)
+        Gateway->>EPP: ext_proc: pick pod (profile=decode)
+        EPP-->>Gateway: Chosen decode pod
+        Gateway->>Decode: Forward request (pulls KV via NIXL)
+        Decode-->>Gateway: 200 OK (tokens)
+        Gateway-->>Coordinator: Response
+        Coordinator-->>Client: Final response
+    end
+```
 
 Steps are skipped at runtime when they do not apply (for example, `encode` is a no-op
 when the request has no multimodal entries, and `render` short-circuits when the
@@ -146,7 +222,7 @@ completions prompt is already a token array). See
 | Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi HTTP server. Accepts `/v1/chat/completions` and `/v1/completions`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
-| Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Phase` header constants. |
+| Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
 | Connectors | [pkg/coordinator/connectors/](../pkg/coordinator/connectors/) | KV and EC transfer protocols. Selected by name at config time; control the `kv_transfer_params` / `ec_transfer_params` wire shapes. |
 | Config | [pkg/coordinator/config/](../pkg/coordinator/config/) | Viper-backed YAML + env loader. |
 | Entrypoint | [cmd/coordinator/](../cmd/coordinator/) | Wires config to the pipeline: builds each step, merges connector defaults, injects the gateway client. |
@@ -193,12 +269,12 @@ steps read and mutate. The load-bearing fields:
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Phase`.
+it as the base header set, then stamp the request ID and `EPP-Profile`.
 
-### EPP-Phase routing
+### EPP-Profile routing
 
-Every coordinator-to-worker call carries an `EPP-Phase` header (`encode`, `prefill`, or
-`decode`) so the gateway routes to the correct pool. The constants live in
+Every coordinator-to-worker call carries an `EPP-Profile` header (`encode`, `prefill`, or
+`decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
 [pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). The request path is either the client's
 original OpenAI path or the internal `/inference/v1/generate` path, depending on
 `use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other
@@ -208,19 +284,30 @@ paths can be added later as new protocols are supported.
 
 The Endpoint Picker (EPP) selects the concrete vLLM pod for a request through the GAIE
 [endpoint picker protocol](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol). The coordinator never addresses pods directly: it sends each
-phase call to the configured gateway, and the per-phase EPP picks the pod from that
-phase's pool.
+phase call to the configured gateway, and the EPP picks the pod for that phase.
 
-### Per-phase model
+### Per-phase scheduling profiles
 
-Each Gateway route maps to a dedicated EPP instance configured for a single phase. The
-coordinator drives the cascade across phases; each EPP call is single-phase scheduling.
+One EPP instance and one InferencePool cover all three worker roles (encode, prefill,
+decode); the pods differ only by their `llm-d.ai/role` label. The Gateway routes every
+coordinator-to-worker call to that EPP, which runs the scheduling profile named by the
+call's `EPP-Profile` header (see [EPP-Profile routing](#epp-profile-routing)) via the
+`header-profile-handler` plugin. The coordinator drives the cascade across phases;
+each EPP call is single-phase scheduling.
 
-| Phase | EPP instance | Role |
+| Phase | Scheduling profile | Role |
 | :---- | :---- | :---- |
-| `decode` | EPP-D | Selects a decode pod. Also evaluates whether the request needs disaggregation (encode and/or prefill). |
-| `prefill` | EPP-P | Selects a prefill pod. |
-| `encode` | EPP-E | Load-balances across encoder pods. |
+| `decode` | `decode` | Selects a decode pod. Also evaluates whether the request needs disaggregation (encode and/or prefill). |
+| `prefill` | `prefill` | Selects a prefill pod. |
+| `encode` | `encode` | Load-balances across encoder pods. |
+
+Each profile filters the shared pod pool down to its own role with a `by-label` role
+filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
+`schedulingProfiles`/role-filter pattern used in
+[deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
+That file targets the sidecar model, though, so it picks profiles via
+`disagg-profile-handler` deciders rather than the `EPP-Profile` header; header-based
+selection swaps in `header-profile-handler` for that one plugin.
 
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
@@ -228,9 +315,9 @@ for the comparison.
 
 ### Decode disaggregation deciders
 
-EPP-D runs a scheduling cycle that, in addition to picking a decode pod, decides whether
-the request can be served by decode alone or needs earlier phases. The decision is made
-by decider plugins (EPP-side configuration):
+The `decode` profile runs a scheduling cycle that, in addition to picking a decode pod,
+decides whether the request can be served by decode alone or needs earlier phases. The
+decision is made by decider plugins (EPP-side configuration):
 
 | Decider | Stage | Logic |
 | :---- | :---- | :---- |
@@ -334,7 +421,7 @@ service in front of the Inference Gateway:
 
 1. The client request reaches the **coordinator**.
 2. The coordinator tokenizes once via the render service, then makes **one
-   EPP-mediated call per phase** to the gateway, tagging each with the `EPP-Phase` header.
+   EPP-mediated call per phase** to the gateway, tagging each with the `EPP-Profile` header.
    Each EPP call is single-phase scheduling, not a one-cycle selection of all phases.
 3. Cross-phase state (token IDs, multimodal hashes, EC and KV transfer descriptors)
    lives on the coordinator's per-request `RequestContext`, not in headers handed to a
@@ -351,7 +438,7 @@ service in front of the Inference Gateway:
 | Pipeline versatility | Fixed E/P/D orchestration baked into the sidecar | Configurable pipeline of independent, reorderable plugin steps; new stages added without touching existing ones |
 | EPP scheduling | One cycle selects all phases (`disagg-profile-handler`) | One EPP call per phase, coordinator drives the cascade |
 | vLLM pod selection | All phase pods chosen up front in one scheduling cycle | Deferred per phase: each pod is selected only when that phase's call is made, at the point its destination becomes relevant |
-| Phase selection signal | EPP request headers `x-prefiller-host-port`, `x-encoder-hosts-ports` read by the sidecar | `EPP-Phase` header per call; per-phase EPP picks the pod |
+| Phase selection signal | EPP request headers `x-prefiller-host-port`, `x-encoder-hosts-ports` read by the sidecar | `EPP-Profile` header per call; the EPP runs the matching profile and picks the pod |
 | Tokenization | On the workers | Once, in the coordinator's render step; token IDs reused downstream (experimental path) |
 | Cross-phase state | Held by the sidecar | Held on the coordinator `RequestContext` |
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,7 +36,7 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${VLLM_EXTRA_ARGS_E}":       "--force-dummy-tokenizer",
 		"${VLLM_EXTRA_ARGS_P}":       "--force-dummy-tokenizer",
 		"${VLLM_EXTRA_ARGS_D}":       "--force-dummy-tokenizer",
-		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", nsName, vllmRenderPort),
+		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", baseNsName, vllmRenderPort),
 		"${VLLM_RENDER_PORT}":        vllmRenderPort,
 	}
 	for k, v := range extra {
@@ -212,5 +213,80 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 		return append(objects, testutils.CreateObjsFromYaml(testConfig, eppYamls, nsName)...)
 	}
 	objs := testutils.CreateUnstructuredObjs(testConfig, eppYamls)
-	return append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
+	objects = append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
+
+	gomega.Eventually(func() error {
+		_, _, err := tryCompletion(simplePrompt, simModelName)
+		return err
+	}, readyTimeout, 1*time.Second).Should(gomega.Succeed())
+
+	return objects
+}
+
+// testWrapper wraps tests with the setup and teardown code needed.
+// It is used as a wrapper of the function passed to ginkgo.When calls that
+// setup the tests. It is important that the ginkgo.Ordered decorator is used
+// to enable the use of the ginkgo.BeforeAll and ginkgo.AfterAll functions
+// to inject the setup and teardown code.
+func testWrapper(test func()) func() {
+	var (
+		nsName           string
+		createdNameSpace bool
+
+		rbacObjects           []string
+		serviceAccountObjects []string
+		serviceObjects        []string
+		envoyObjects          []string
+		portForwardSession    *gexec.Session
+	)
+	return func() {
+		ginkgo.BeforeAll(func() {
+			nsName = getNamespace()
+			createdNameSpace = setupNameSpace()
+
+			envoyObjects, portForwardSession = createEnvoy(nsName)
+
+			infraSubs := map[string]string{
+				"${EPP_NAME}":          "e2e-epp",
+				"${METRICS_NODE_PORT}": strconv.Itoa(getMetricsPort()),
+			}
+			rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
+			rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)
+			saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
+			serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
+			svcYamls := substituteMany(testutils.ReadYaml(servicesManifest), infraSubs)
+			serviceObjects = testutils.CreateObjsFromYaml(testConfig, svcYamls, nsName)
+		})
+
+		ginkgo.AfterEach(func() {
+			// The starting of the EPP can launch a port-forwarder to access the metrics port.
+			if eppPortForwardSession != nil {
+				eppPortForwardSession.Terminate()
+				eppPortForwardSession = nil
+			}
+		})
+
+		ginkgo.AfterAll(func() {
+			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
+				// The test failed
+				testutils.DumpPodsAndLogs(testConfig, nsName)
+			} else {
+				// Only cleanup if the test succeeded
+				testutils.DeleteObjects(testConfig, rbacObjects, nsName)
+				testutils.DeleteObjects(testConfig, serviceObjects, nsName)
+				testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
+				if portForwardSession != nil {
+					portForwardSession.Terminate()
+					portForwardSession = nil
+				}
+				testutils.DeleteObjects(testConfig, envoyObjects, nsName)
+
+				if createdNameSpace {
+					deleteNameSpace(nsName)
+				}
+			}
+		})
+
+		test()
+	}
 }
