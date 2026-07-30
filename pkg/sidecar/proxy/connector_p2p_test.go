@@ -215,4 +215,16 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.0.6.107"))
 		Expect(p2p[requestFieldRemotePort]).To(Equal(7780))
 	})
+
+	It("skips the pull when source and prefiller are the same endpoint", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
+		}
+		params := map[string]any{}
+
+		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8003")
+
+		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
+	})
 })
