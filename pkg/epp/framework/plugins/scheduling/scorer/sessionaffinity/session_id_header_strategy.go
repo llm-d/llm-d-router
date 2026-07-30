@@ -18,9 +18,7 @@ package sessionaffinity
 
 import (
 	"context"
-	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -57,8 +55,6 @@ type sessionIDHeaderStrategy struct {
 	// misses maps a session identifier to the count of consecutive requests
 	// during which its bound pod was absent from the candidate set.
 	misses sync.Map
-	// rrCursor rotates the least-loaded tie-break so new sessions spread round-robin.
-	rrCursor atomic.Int64
 	// pluginState carries the score->preRequest handoff of whether the bound
 	// pod was present in this request's candidate set.
 	pluginState *plugin.PluginState
@@ -135,33 +131,18 @@ func (s *sessionIDHeaderStrategy) score(_ context.Context, request *scheduling.I
 	return scoredEndpoints
 }
 
-// leastLoadedPod returns the candidate pod bound by the fewest sessions,
-// breaking ties with a rotating cursor so new sessions spread round-robin
-// across equally loaded pods.
+// leastLoadedPod returns the candidate pod bound by the fewest sessions.
 func (s *sessionIDHeaderStrategy) leastLoadedPod(endpoints []scheduling.Endpoint) scheduling.Endpoint {
-	keys := make([]string, len(endpoints))
-	byKey := make(map[string]scheduling.Endpoint, len(endpoints))
-	for i, endpoint := range endpoints {
-		k := endpoint.GetMetadata().ID.String()
-		keys[i] = k
-		byKey[k] = endpoint
-	}
-	sort.Strings(keys) // deterministic order independent of candidate-slice ordering
-
-	minCount := -1
-	candidates := make([]string, 0, len(keys))
-	for _, k := range keys {
-		c := s.podSessionCount(k)
-		switch {
-		case minCount == -1 || c < minCount:
+	best := endpoints[0]
+	minCount := s.podSessionCount(best.GetMetadata().ID.String())
+	for _, endpoint := range endpoints[1:] {
+		c := s.podSessionCount(endpoint.GetMetadata().ID.String())
+		if c < minCount {
 			minCount = c
-			candidates = append(candidates[:0], k)
-		case c == minCount:
-			candidates = append(candidates, k)
+			best = endpoint
 		}
 	}
-	cursor := s.rrCursor.Add(1)
-	return byKey[candidates[cursor%int64(len(candidates))]]
+	return best
 }
 
 // podSessionCount returns the number of sessions currently bound to podKey.
