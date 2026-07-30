@@ -60,8 +60,15 @@ type TokenProcessorConfig struct {
 	HashSeed string `json:"hashSeed"`
 	// HashAlgorithm selects the block hashing chain: HashAlgorithmCBORFNV
 	// (the default when empty) or HashAlgorithmXXHash. Block keys are
-	// internal to the index, so the choice only needs to be consistent
-	// within a single deployment, not with vLLM.
+	// internal to the index and need not match vLLM's hashes, but they must
+	// be consistent across the index's whole lifetime: like HashSeed, the
+	// algorithm must not change while a persisted or shared index (e.g. the
+	// Redis backend) holds keys, or while engines still hold blocks whose
+	// stored engine-to-request mappings were built under the old keys —
+	// parent-chain resolution would then mix algorithms and produce request
+	// keys lookups can never match. Change it only together with an index
+	// flush and engine cache reset, and roll all replicas sharing an index
+	// to the same value.
 	HashAlgorithm string `json:"hashAlgorithm"`
 	initHash      uint64 // cache once
 }
