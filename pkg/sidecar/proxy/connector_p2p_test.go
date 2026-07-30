@@ -227,4 +227,42 @@ var _ = Describe("addP2PPullToPrefill", func() {
 
 		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
 	})
+
+	It("skips the pull when the endpoints differ only by scheme", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
+		}
+		params := map[string]any{}
+
+		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8003")
+
+		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
+	})
+
+	It("still injects across ranks when the source is scheme-qualified", func() {
+		s := &Server{
+			dpBasePort: 8000,
+			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
+		}
+		params := map[string]any{}
+
+		s.addP2PPullToPrefill(params, "http://10.0.6.107:8003", "10.0.6.107:8007")
+
+		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(p2p[requestFieldRemotePort]).To(Equal(7780))
+	})
 })
+
+var _ = DescribeTable("normalizeEndpoint",
+	func(in, want string) {
+		Expect(normalizeEndpoint(in)).To(Equal(want))
+	},
+	Entry("bare host:port unchanged", "10.0.6.107:8003", "10.0.6.107:8003"),
+	Entry("http scheme stripped", "http://10.0.6.107:8003", "10.0.6.107:8003"),
+	Entry("https scheme stripped", "https://10.0.6.107:8003", "10.0.6.107:8003"),
+	Entry("IPv6 literal canonicalized", "[::1]:8003", "[::1]:8003"),
+	Entry("portless value returned as-is", "10.0.6.107", "10.0.6.107"),
+	Entry("portless URL reduced to host", "http://10.0.6.107", "10.0.6.107"),
+)

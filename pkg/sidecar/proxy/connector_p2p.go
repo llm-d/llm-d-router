@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -232,11 +233,33 @@ func (s *Server) p2pPullAvailable() bool {
 // routes it to the OffloadingConnector and the NIXL fields to the
 // NixlConnector.
 func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
-	source, _ := strings.CutPrefix(kvCacheSource, "http://")
-	prefiller, _ := strings.CutPrefix(prefillPodHostPort, "http://")
+	source := normalizeEndpoint(kvCacheSource)
+	prefiller := normalizeEndpoint(prefillPodHostPort)
 	if source != "" && source != prefiller {
 		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(kvCacheSource)
 	}
+}
+
+// normalizeEndpoint canonicalizes an endpoint for equality comparison.
+// Scheme-qualified values (any scheme, not only http) are parsed as URLs
+// and reduced to their host:port; bare values are treated as host:port
+// directly. Both forms are re-joined through the net package so IPv6
+// literals compare consistently; values without a parseable port are
+// returned scheme-stripped, matching extractHost's fallback.
+func normalizeEndpoint(s string) string {
+	hostport := s
+	if scheme, rest, ok := strings.Cut(s, "://"); ok && scheme != "" {
+		if u, err := url.Parse(s); err == nil && u.Host != "" {
+			hostport = u.Host
+		} else {
+			hostport = rest
+		}
+	}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return hostport
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // p2pSourceParams builds the kv_transfer_params.remote_kv_source block for a
