@@ -212,36 +212,22 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 		"plugin", SessionAffinityType, "from", existing.podName, "to", podName)
 }
 
-// incrementPodCount records one more session bound to podKey.
+// incrementPodCount records one more session bound to podKey. Callers hold
+// s.mu, so the read-modify-write needs no CAS retry; sync.Map is still
+// required for the unlocked reader in podSessionCount.
 func (s *sessionIDHeaderStrategy) incrementPodCount(podKey string) {
-	for {
-		v, _ := s.podCount.LoadOrStore(podKey, 0)
-		c, _ := v.(int)
-		if s.podCount.CompareAndSwap(podKey, c, c+1) {
-			return
-		}
-	}
+	s.podCount.Store(podKey, s.podSessionCount(podKey)+1)
 }
 
 // decrementPodCount records one fewer session bound to podKey, removing the
-// entry once it reaches zero.
+// entry once it reaches zero. Callers hold s.mu.
 func (s *sessionIDHeaderStrategy) decrementPodCount(podKey string) {
-	for {
-		v, ok := s.podCount.Load(podKey)
-		if !ok {
-			return
-		}
-		c, _ := v.(int)
-		if c <= 1 {
-			if s.podCount.CompareAndDelete(podKey, v) {
-				return
-			}
-			continue
-		}
-		if s.podCount.CompareAndSwap(podKey, c, c-1) {
-			return
-		}
+	c := s.podSessionCount(podKey)
+	if c <= 1 {
+		s.podCount.Delete(podKey)
+		return
 	}
+	s.podCount.Store(podKey, c-1)
 }
 
 // pickedPodName returns the pod chosen for this instance's profile, or "" when

@@ -52,6 +52,8 @@ type parameters struct {
 	// When empty, the plugin defaults to the primary (decode) pod.
 	// Selects which pod of the SchedulingResult this instance pins.
 	ProfileName string `json:"profileName"`
+
+	// StrategySessionIDHeader specific parameters
 	// EvictionTTLSeconds is how long a session binding survives unused.
 	// session_id_header only.
 	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
@@ -68,21 +70,24 @@ func defaultParameters() parameters {
 	}
 }
 
-// validate rejects only what would change behavior. Fields belonging to the other
-// strategy are ignored, not rejected: they change nothing.
+// validate rejects only what would change behavior for the selected strategy.
+// Eviction fields are meaningless for StrategyEncodedEndpointHeader and are
+// left unchecked there.
 func (p *parameters) validate() error {
 	switch p.Strategy {
-	case StrategyEncodedEndpointHeader, StrategySessionIDHeader:
+	case StrategyEncodedEndpointHeader:
+		return nil
+	case StrategySessionIDHeader:
+		if p.EvictionTTLSeconds <= 0 {
+			return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", p.EvictionTTLSeconds)
+		}
+		if p.EvictionSweepSeconds <= 0 {
+			return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
+		}
+		return nil
 	default:
 		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionIDHeader, p.Strategy)
 	}
-	if p.EvictionTTLSeconds <= 0 {
-		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", p.EvictionTTLSeconds)
-	}
-	if p.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
-	}
-	return nil
 }
 
 var _ scheduling.Scorer = &SessionAffinity{}
