@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -43,26 +45,26 @@ const (
 
 	defaultMaxIdleConnsPerHost = 1024
 
-	requestHeaderRequestID = "x-request-id"
+	requestHeaderRequestID = reqcommon.RequestIDHeaderKey
 
-	requestFieldKVTransferParams     = "kv_transfer_params"
-	requestFieldECTransferParams     = "ec_transfer_params"
-	requestFieldMaxTokens            = "max_tokens"
-	requestFieldMaxCompletionTokens  = "max_completion_tokens"
-	requestFieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
-	requestFieldMinTokens            = "min_tokens"
-	requestFieldSamplingParams       = "sampling_params"
-	requestFieldDoRemotePrefill      = "do_remote_prefill"
-	requestFieldDoRemoteDecode       = "do_remote_decode"
-	requestFieldRemoteBlockIDs       = "remote_block_ids"
-	requestFieldRemoteEngineID       = "remote_engine_id"
-	requestFieldRemoteHost           = "remote_host"
-	requestFieldRemotePort           = "remote_port"
-	requestFieldStream               = "stream"
-	requestFieldStreamOptions        = "stream_options"
-	requestFieldCacheHitThreshold    = "cache_hit_threshold"
-	requestFieldContinueFinalMessage = "continue_final_message"
-	requestFieldAddGenerationPrompt  = "add_generation_prompt"
+	requestFieldKVTransferParams     = reqcommon.FieldKVTransferParams
+	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
+	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
+	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
+	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
+	requestFieldMinTokens            = reqcommon.FieldMinTokens
+	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
+	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill
+	requestFieldDoRemoteDecode       = reqcommon.FieldDoRemoteDecode
+	requestFieldRemoteBlockIDs       = reqcommon.FieldRemoteBlockIDs
+	requestFieldRemoteEngineID       = reqcommon.FieldRemoteEngineID
+	requestFieldRemoteHost           = reqcommon.FieldRemoteHost
+	requestFieldRemotePort           = reqcommon.FieldRemotePort
+	requestFieldStream               = reqcommon.FieldStream
+	requestFieldStreamOptions        = reqcommon.FieldStreamOptions
+	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
+	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
+	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both legs of a disagg pair (see pickDPRank).
@@ -91,11 +93,13 @@ const (
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
 	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
-	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
-	requestFieldP2PDecodeParams  = "decode"
-	requestFieldP2PPrefillParams = "prefill"
-	requestFieldP2PParams        = "p2p"
-	requestFieldKVRequestID      = "kv_request_id"
+	// nesting key, named for the remote party it describes: "remote_decoder" on
+	// the prefiller leg, "remote_prefiller" on the decoder leg, "remote_kv_source"
+	// for a symmetric cached-prefix pull.
+	requestFieldRemoteDecoder   = "remote_decoder"
+	requestFieldRemotePrefiller = "remote_prefiller"
+	requestFieldRemoteKVSource  = "remote_kv_source"
+	requestFieldKVRequestID     = "kv_request_id"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
@@ -135,7 +139,7 @@ func (a APIType) String() string {
 // JSON request field names used for token limits in prefill/decode staging.
 // Do not mutate these slices.
 var (
-	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens}
+	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens, requestFieldMinTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
 	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
 )
@@ -207,6 +211,8 @@ type Config struct {
 
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
 	// injected as remote_port on the decode leg so the decoder can pull KV from it.
+	// With data parallelism it is the rank-0 port: rank r's tier listens on
+	// P2PConnectorPort+r and the injected port is offset by the target's rank.
 	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
 	P2PConnectorPort int
 
@@ -329,6 +335,11 @@ type Server struct {
 
 	prefillSamplerFn func(n int) int // allow test override
 
+	// dpBasePort is the rank-0 proxy port. Rank clones override config.Port
+	// (data_parallel.go), so rank derivation from a routed endpoint's port
+	// needs the pre-clone base. 0 disables derivation.
+	dpBasePort int
+
 	config Config
 }
 
@@ -349,6 +360,9 @@ func NewProxy(config Config) *Server {
 		dataParallelProxies: map[string]http.Handler{},
 		forwardDataParallel: true,
 		prefillSamplerFn:    rand.IntN,
+	}
+	if basePort, err := strconv.Atoi(config.Port); err == nil {
+		server.dpBasePort = basePort
 	}
 
 	server.setKVConnector()
@@ -418,6 +432,7 @@ func (s *Server) Clone() *Server {
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
+		dpBasePort:          s.dpBasePort,
 		config:              s.config,
 	}
 }

@@ -4,14 +4,14 @@
 
 - [Overview](#overview)
 - [Core Goals](#core-goals)
-- [Filters, Scorers, and Scrapers](#filters-scorers-and-scrapers)
+- [Filters, Scorers, and the Data Layer](#filters-scorers-and-the-data-layer)
   - [Core Design Principles](#core-design-principles)
   - [Routing Flow](#routing-flow)
 - [Configuration](#configuration)
   - [`Plugins` Configuration](#plugins-configuration)
   - [`SchedulingProfiles` Configuration](#schedulingprofiles-configuration)
   - [Available plugins](#available-plugins)
-- [Metric Scraping](#metric-scraping)
+- [Metric Scraping and the Data Layer](#metric-scraping-and-the-data-layer)
 - [Disaggregated Encode/Prefill/Decode (E/P/D)](#disaggregated-encodeprefilldecode-epd)
 - [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design)
   - [Current Assumptions](#current-assumptions)
@@ -31,7 +31,7 @@ The design enables:
 **model metadata**
 - Disaggregated **Prefill/Decode (P/D)** execution
   - We have introduced experimental **Encode/Prefill/Decode (E/P/D and all its permutations)** execution. For a detailed explanation, see [Disaggregated Inference Serving](./disaggregation.md)
-- Pluggable **filters**, **scorers**, and **scrapers** for extensible scheduling
+- Pluggable **filters** and **scorers**, backed by a pluggable **data layer**, for extensible scheduling
 
 ---
 
@@ -42,12 +42,12 @@ The design enables:
   - KV cache reuse
   - Load balancing
 - Support multi-model deployments on heterogeneous hardware
-- Enable runtime extensibility with pluggable logic (filters, scorers, scrapers)
+- Enable runtime extensibility with pluggable logic (filters, scorers, data layer)
 - Community-aligned implementation using GIE and Envoy + External Processing (EPP)
 
 ---
 
-## Filters, Scorers, and Scrapers
+## Filters, Scorers, and the Data Layer
 
 ### Core Design Principles
 
@@ -58,6 +58,8 @@ The design enables:
 
 ### Routing Flow
 
+See the upstream [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/scheduling.md) doc for the canonical scheduling model.
+
 1. **Filtering**
    - Pods in an `InferencePool` go through a sequential chain of filters
    - Pods may be excluded based on criteria like model compatibility, resource usage, or custom logic
@@ -65,7 +67,7 @@ The design enables:
 2. **Scoring**
    - Filtered pods are scored using a weighted set of scorers
    - Scorers currently run sequentially (future: parallel execution)
-   - Scorers access a shared datastore populated by scrapers
+   - Scorers access a shared datastore populated by the data layer
 
 3. **Pod Selection**
    - The highest-scored pod is selected
@@ -76,6 +78,8 @@ The design enables:
 ## Configuration
 
 The llm-d Endpoint Picker relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
+
+See the upstream [Configuration](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/configuration.md) doc for the canonical schema.
 
 Specifically, this configuration establishes the following components:
 
@@ -210,11 +214,17 @@ To learn more about the available plugins, check the plugins [README.md](../pkg/
 
 ---
 
-## Metric Scraping
+## Metric Scraping and the Data Layer
 
-- Scrapers collect metrics (e.g., memory usage, active adapters)
-- Data is injected into the shared datastore for scorers
+The data layer follows a Source -> Extract -> Attribute lifecycle:
+
+- Data sources collect per-endpoint data. Some poll pods periodically, for metrics (e.g., memory
+  usage, active adapters) or served models and LoRA adapters (via `/v1/models`); others react to
+  endpoint or Kubernetes object change notifications
+- Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+
+See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc for the canonical model.
 
 ---
 
@@ -307,3 +317,14 @@ Enable chunked decode via the pd-sidecar flag:
 - [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
 - [EPP Container Sizing Guide](./operations.md)
+
+### Canonical llm-d architecture (upstream)
+
+- [Router overview](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/README.md)
+- [Proxy](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/proxy.md)
+- [Endpoint Picker (EPP)](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/README.md)
+- [Configuration](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/configuration.md)
+- [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/scheduling.md)
+- [Request Handler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/request-handling.md)
+- [Flow Control](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/flow-control.md)
+- [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md)

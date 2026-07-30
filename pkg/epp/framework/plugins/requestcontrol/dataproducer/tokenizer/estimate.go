@@ -22,12 +22,14 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // bytesPerToken matches the scorer's averageCharactersPerToken, so a block of N
@@ -41,6 +43,69 @@ const blockTypeText = "text"
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
 type estimateBackend struct {
 	img imageEstimator
+	vid videoEstimator
+}
+
+// parseMMMetadataHeaders reads the x-llm-d-* request headers into an mmMetadata.
+// Only video is populated today; image and audio parsing slot in here later.
+func parseMMMetadataHeaders(headers map[string]string) mmMetadata {
+	return mmMetadata{video: parseVideoMetadataHeaders(headers)}
+}
+
+// mmMetadataCtxKey keys the request-scoped mmMetadata on the context, carrying it
+// from Plugin.Produce (which holds request.Headers) to the estimate backend
+// without widening the shared tokenInputProducer.produce signature.
+type mmMetadataCtxKey struct{}
+
+// withMMMetadata returns ctx carrying meta.
+func withMMMetadata(ctx context.Context, meta mmMetadata) context.Context {
+	return context.WithValue(ctx, mmMetadataCtxKey{}, meta)
+}
+
+// mmMetadataFromContext returns the mmMetadata on ctx, or the zero value.
+func mmMetadataFromContext(ctx context.Context) mmMetadata {
+	meta, _ := ctx.Value(mmMetadataCtxKey{}).(mmMetadata)
+	return meta
+}
+
+// parseVideoMetadataHeaders reads the x-llm-d-video- request headers into a
+// videoMetadata, using metadata.GetLowerCaseHeaderValue so aliases resolve the
+// same way as the SLO headers. Missing or malformed values leave their field zero
+// so the estimator falls back per field to config and then defaults.
+func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
+	var meta videoMetadata
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoFPSHeaderKey); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+			meta.fps = v
+		}
+	}
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoDurationHeaderKey); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+			meta.duration = v
+		}
+	}
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoResolutionHeaderKey); ok {
+		meta.width, meta.height = parseResolution(s)
+	}
+	return meta
+}
+
+// parseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
+// zeros when the value is empty or malformed.
+func parseResolution(s string) (width, height int) {
+	i := strings.IndexAny(s, "xX")
+	if i <= 0 {
+		return 0, 0
+	}
+	w, err := strconv.Atoi(strings.TrimSpace(s[:i]))
+	if err != nil || w <= 0 {
+		return 0, 0
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(s[i+1:]))
+	if err != nil || h <= 0 {
+		return 0, 0
+	}
+	return w, h
 }
 
 func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
@@ -62,7 +127,7 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	// Chat and Anthropic messages fold multimodal placeholders into the stream
 	// and report them as features.
 	if body.ChatCompletions != nil {
-		raw, features := b.chatCompletionsBytes(body.ChatCompletions)
+		raw, features := b.chatCompletionsBytes(body.ChatCompletions, mmMetadataFromContext(ctx))
 		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}, MultiModalFeatures: features}, nil
 	}
 	if body.Messages != nil {
@@ -128,7 +193,7 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 // multimodal assets in on aligned boundaries. Each asset occupies N placeholder
 // pseudo-tokens (its content hash repeated N times) so it carries weight in the
 // stream, and is reported as a MultiModalFeature with its token offset and span.
-func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest) ([]byte, []fwkrh.MultiModalFeature) {
+func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
 	if len(chat.Tools) > 0 {
@@ -137,14 +202,14 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 		}
 	}
 	for _, msg := range chat.Messages {
-		out, features = b.appendChatMessage(out, features, msg)
+		out, features = b.appendChatMessage(out, features, msg, meta)
 	}
 	return out, features
 }
 
 // appendChatMessage flattens a single chat-completions message into the byte
 // stream, recording multimodal placeholders on aligned boundaries.
-func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message) ([]byte, []fwkrh.MultiModalFeature) {
+func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
 	if msg.Role != "" {
 		out = append(out, []byte(msg.Role)...)
 	}
@@ -159,7 +224,7 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 		case "image_url":
 			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, assetPlaceholderCount(len(block.VideoURL.URL)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
 		case "input_audio", "audio_url":
 			data := block.InputAudio.Data + block.InputAudio.Format
 			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))

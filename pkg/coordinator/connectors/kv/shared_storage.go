@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -33,13 +34,13 @@ type sharedStorageKV struct{}
 func (sharedStorageKV) Name() string { return SharedStorage }
 
 func (sharedStorageKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
-	params := map[string]any{"do_remote_decode": true, "do_remote_prefill": false}
+	params := map[string]any{reqcommon.FieldDoRemoteDecode: true, reqcommon.FieldDoRemotePrefill: false}
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
 }
 
 func (sharedStorageKV) PrepareDecodeKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
-	params := map[string]any{"do_remote_decode": false, "do_remote_prefill": true}
+	params := map[string]any{reqcommon.FieldDoRemoteDecode: false, reqcommon.FieldDoRemotePrefill: true}
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", params)
 	return params
 }

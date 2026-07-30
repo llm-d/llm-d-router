@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -394,6 +395,31 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 	}
 }
 
+func TestRenderStep_PlaceholderLimitOverflow(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{"max_total_placeholder_tokens": 5})
+	if err != nil {
+		t.Fatalf("NewRenderStep: %v", err)
+	}
+	rs := step.(*RenderStep)
+
+	// Two lengths whose sum overflows int and wraps negative. Without the
+	// overflow guard, total > max is false and the limit is silently bypassed.
+	entries := []pipeline.MultimodalEntry{
+		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+	}
+	err = rs.checkPlaceholderLimit(entries)
+	if err == nil {
+		t.Fatal("expected error for overflowing placeholder length sum")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "too many placeholder tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRenderStep_RejectsNegativeLimits(t *testing.T) {
 	if _, err := NewRenderStep(nil, map[string]any{"max_total_tokens": -1}); err == nil {
 		t.Fatal("expected error for negative max_total_tokens")
@@ -422,5 +448,233 @@ func TestRenderStep_ServiceError(t *testing.T) {
 	err := step.Execute(context.Background(), reqCtx)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestRenderStep_GenerateFormat_TextOnly(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(2345), float64(6789)},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.TokenIDs) != 3 {
+		t.Fatalf("expected 3 token IDs, got %d: %v", len(reqCtx.TokenIDs), reqCtx.TokenIDs)
+	}
+	if reqCtx.TokenIDs[0] != 1 || reqCtx.TokenIDs[1] != 2345 || reqCtx.TokenIDs[2] != 6789 {
+		t.Fatalf("unexpected token IDs: %v", reqCtx.TokenIDs)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestRenderStep_GenerateFormat_Multimodal(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(32000), float64(2)},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []any{"abc123"}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": float64(1), "length": float64(3)},
+				}},
+				"kwargs_data": map[string]any{"image": []any{"dGVuc29y"}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.TokenIDs) != 5 {
+		t.Fatalf("expected 5 token IDs, got %d", len(reqCtx.TokenIDs))
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	e := reqCtx.MultimodalEntries[0]
+	if e.Hash != "abc123" || e.Placeholder.Offset != 1 || e.Placeholder.Length != 3 || e.KwargsData != "dGVuc29y" {
+		t.Errorf("unexpected entry: %+v", e)
+	}
+}
+
+func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(3), float64(41000), float64(41000), float64(2)},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []any{"abc123", "def456"}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": float64(1), "length": float64(2)},
+					map[string]any{"offset": float64(4), "length": float64(2)},
+				}},
+				"kwargs_data": map[string]any{"image": []any{"dGVuc29yMA==", "dGVuc29yMQ=="}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 2 {
+		t.Fatalf("expected 2 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	want := []pipeline.MultimodalEntry{
+		{Index: 0, Hash: "abc123", KwargsData: "dGVuc29yMA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		{Index: 1, Hash: "def456", KwargsData: "dGVuc29yMQ==", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},
+	}
+	for i, w := range want {
+		if reqCtx.MultimodalEntries[i] != w {
+			t.Errorf("entry %d: expected %+v, got %+v", i, w, reqCtx.MultimodalEntries[i])
+		}
+	}
+}
+
+func TestRenderStep_GenerateFormat_MalformedFeatures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features any
+	}{
+		{"string", "not-an-object"},
+		{"array", []any{"a", "b"}},
+		{"number", float64(42)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, _ := NewRenderStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: gateway.DefaultGeneratePath,
+				Body: map[string]any{
+					"model":     "test-model",
+					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"features":  tc.features,
+				},
+			}
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for malformed features")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderStep_GenerateFormat_PlaceholderOutOfBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset float64
+		length float64
+	}{
+		{"offset_out_of_range", 5, 1},
+		{"length_exceeds_prompt", 1, 9007199254740992},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, _ := NewRenderStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: gateway.DefaultGeneratePath,
+				Body: map[string]any{
+					"model":     "test-model",
+					"token_ids": []any{float64(1), float64(32000), float64(32000), float64(2)},
+					"features": map[string]any{
+						"mm_hashes": map[string]any{"image": []any{"abc123"}},
+						"mm_placeholders": map[string]any{"image": []any{
+							map[string]any{"offset": tc.offset, "length": tc.length},
+						}},
+						"kwargs_data": map[string]any{"image": []any{"dGVuc29y"}},
+					},
+				},
+			}
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for out-of-bounds placeholder")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderStep_GenerateFormat_InvalidSamplingParams(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		samplingParams any
+	}{
+		{"array", []any{float64(1), float64(2)}},
+		{"string", "greedy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, _ := NewRenderStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: gateway.DefaultGeneratePath,
+				Body: map[string]any{
+					"model":           "test-model",
+					"token_ids":       []any{float64(1), float64(2), float64(3)},
+					"sampling_params": tc.samplingParams,
+				},
+			}
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for non-object sampling_params")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderStep_GenerateFormat_NullFeatures(t *testing.T) {
+	step, _ := NewRenderStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(2), float64(3)},
+			"features":  nil,
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error for null features: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
+	step, _ := NewRenderStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body:         map[string]any{"model": "test-model"},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for missing token_ids")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("expected ErrBadRequest, got %v", err)
 	}
 }
