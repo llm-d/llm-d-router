@@ -188,16 +188,17 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int, ceilin
 }
 
 // computeLimitExplicit looks up each configured priority ceiling.
-// Precondition: configuration validation guarantees that every statically
-// configured priority band has a corresponding ceiling entry. Dynamically
-// provisioned bands might fall back to 0.0 with an error log.
+//
+// Precondition: every priority in priorities is expected to have a
+// corresponding ceiling entry in ceilings. Priorities without a configured
+// ceiling receive a value of 0.0.
 func computeLimitExplicit(ctx context.Context, ceilings map[int]float64, priorities []int, out []float64) {
 	logger := log.FromContext(ctx)
 	for i, p := range priorities {
 		if c, ok := ceilings[p]; ok {
 			out[i] = c
 		} else {
-			logger.Error(nil, "Missing explicit ceiling for dynamically provisioned priority band", "priority", p)
+			logger.Error(nil, "Missing explicit ceiling for priority band, ceiling set to 0.0", "priority", p)
 			out[i] = 0.0
 		}
 	}

@@ -53,7 +53,9 @@ Use when hand-tuned, per-band ceiling values are required and the algorithmic do
 - `ceilings` (map of integer priority to float64) is required.
 - Each ceiling must be in `[0.0, 1.0]`.
 - Ceilings must be monotonically non-increasing when priorities are sorted highest-first.
-- `shape`, `minCeiling`, and `maxCeiling` must not be set; they are rejected at config load time.
+- `shape`, `minCeiling`, and `maxCeiling` must not be set when `domain` is `explicit`; they are rejected during configuration validation.
+
+**Limitation:** The `explicit` domain is intended for statically configured priority bands. If a priority without a configured ceiling reaches the policy (for example, due to dynamic priority band provisioning), the policy logs an error and falls back to a ceiling of `0.0` for that priority. If dynamic priority band provisioning is required, consider using the `rank` or `value` domains until explicit support is added.
 
 **Parameters:**
 
