@@ -17,6 +17,9 @@ limitations under the License.
 package datalayer
 
 import (
+	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,7 +49,7 @@ func TestPeriodTicks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := PeriodTicks(tt.interval, tt.base)
+			got, err := periodTicks(tt.interval, tt.base)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -55,4 +58,57 @@ func TestPeriodTicks(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestIntervalDispatcher(t *testing.T) {
+	tests := []struct {
+		name      string
+		period    int
+		ticks     int
+		wantCalls int64
+	}{
+		{name: "period 1 fires every tick", period: 1, ticks: 5, wantCalls: 5},
+		{name: "period 2 fires every other tick", period: 2, ticks: 6, wantCalls: 3},
+		{name: "period 3 fires every third tick", period: 3, ticks: 7, wantCalls: 3},
+		{name: "period 0 returns unwrapped", period: 0, ticks: 4, wantCalls: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := &errSource{kind: "test", err: nil}
+			d := newIntervalDispatcher(inner, tt.period)
+			for i := 0; i < tt.ticks; i++ {
+				_ = d.Dispatch(context.Background(), defaultEndpoint())
+			}
+			assert.Equal(t, tt.wantCalls, atomic.LoadInt64(&inner.CallCount))
+		})
+	}
+}
+
+func TestIntervalDispatcher_PropagatesError(t *testing.T) {
+	wantErr := errors.New("boom")
+	inner := &errSource{kind: "test", err: wantErr}
+	d := newIntervalDispatcher(inner, 1)
+	err := d.Dispatch(context.Background(), defaultEndpoint())
+	assert.ErrorIs(t, err, wantErr)
+}
+
+func TestIntervalDispatcher_IndependentCounters(t *testing.T) {
+	inner := &errSource{kind: "test", err: nil}
+	original := newIntervalDispatcher(inner, 3)
+
+	clone := newIntervalDispatcher(
+		original.(*intervalDispatcher).PollingDispatcher,
+		original.(*intervalDispatcher).period,
+	)
+
+	ep := defaultEndpoint()
+	ctx := context.Background()
+
+	// Fire original once (remaining 1->0, fires, remaining=3)
+	_ = original.Dispatch(ctx, ep)
+	assert.Equal(t, int64(1), atomic.LoadInt64(&inner.CallCount))
+
+	// Clone should also fire on its first call (independent counter)
+	_ = clone.Dispatch(ctx, ep)
+	assert.Equal(t, int64(2), atomic.LoadInt64(&inner.CallCount))
 }

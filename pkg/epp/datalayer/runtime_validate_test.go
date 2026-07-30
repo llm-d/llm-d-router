@@ -168,9 +168,13 @@ func TestRuntimeConfigure_NonMultipleIntervalRounds(t *testing.T) {
 	}
 
 	require.NoError(t, r.Configure(cfg, logger))
-	scheduled := r.dispatchers.Scheduled()
-	require.Len(t, scheduled, 1)
-	assert.Equal(t, 2, scheduled[0].PeriodTicks) // 75ms rounds to 100ms = 2 ticks
+	dispatchers := r.dispatchers.Dispatchers()
+	require.Len(t, dispatchers, 1)
+	for _, d := range dispatchers {
+		id, ok := d.(*intervalDispatcher)
+		require.True(t, ok, "expected intervalDispatcher wrapper")
+		assert.Equal(t, 2, id.period) // 75ms rounds to 100ms = 2 ticks
+	}
 }
 
 func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
@@ -184,12 +188,47 @@ func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
 	}
 
 	require.NoError(t, r.Configure(cfg, logger))
-	scheduled := r.dispatchers.Scheduled()
-	require.Len(t, scheduled, 1)
-	assert.Equal(t, 20, scheduled[0].PeriodTicks)
+	dispatchers := r.dispatchers.Dispatchers()
+	require.Len(t, dispatchers, 1)
+	for _, d := range dispatchers {
+		id, ok := d.(*intervalDispatcher)
+		require.True(t, ok, "expected intervalDispatcher wrapper")
+		assert.Equal(t, 20, id.period) // 1s / 50ms = 20 ticks
+	}
 }
 
 func TestNewRuntime_ClampsPollingIntervalToMinimum(t *testing.T) {
 	r := NewRuntime(10 * time.Millisecond)
 	assert.Equal(t, defaultRefreshInterval, r.pollingInterval)
+}
+
+func TestRuntimeConfigure_LowersBaseTickToSmallestInterval(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(5 * time.Second)
+
+	fast := &intervalMockSource{
+		MetricsDataSource: *mocks.NewDataSource(fwkplugin.TypedName{Type: "test", Name: "fast-src"}),
+		interval:          time.Second,
+	}
+	slow := &intervalMockSource{
+		MetricsDataSource: *mocks.NewDataSource(fwkplugin.TypedName{Type: "test", Name: "slow-src"}),
+		interval:          5 * time.Second,
+	}
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{Plugin: fast},
+			{Plugin: slow},
+		},
+	}
+
+	require.NoError(t, r.Configure(cfg, logger))
+	assert.Equal(t, time.Second, r.pollingInterval)
+
+	dispatchers := r.dispatchers.Dispatchers()
+	d, ok := dispatchers["slow-src"]
+	require.True(t, ok)
+	id, ok := d.(*intervalDispatcher)
+	require.True(t, ok, "slow source should be wrapped")
+	assert.Equal(t, 5, id.period) // 5s / 1s base = 5 ticks
 }

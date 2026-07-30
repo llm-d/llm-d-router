@@ -49,17 +49,8 @@ func defaultEndpoint() fwkdl.Endpoint {
 
 var (
 	endpoint = defaultEndpoint()
-	sources  = scheduleEveryTick([]fwkdl.PollingDispatcher{&datasourcemocks.MetricsDataSource{}})
+	sources  = []fwkdl.PollingDispatcher{&datasourcemocks.MetricsDataSource{}}
 )
-
-// scheduleEveryTick wraps each dispatcher with PeriodTicks=1 for collector tests.
-func scheduleEveryTick(dispatchers []fwkdl.PollingDispatcher) []ScheduledDispatcher {
-	out := make([]ScheduledDispatcher, len(dispatchers))
-	for i, d := range dispatchers {
-		out[i] = ScheduledDispatcher{Dispatcher: d, PeriodTicks: 1}
-	}
-	return out
-}
 
 // Mock PollingDispatchers for collector tests. Each tracks its own
 // invocation count and (for dataSource) runs bound extractors with metric
@@ -106,6 +97,7 @@ func (d *dataSource) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	}
 	return nil
 }
+func (d *dataSource) Interval() time.Duration { return 0 }
 func (d *dataSource) AppendExtractor(p fwkplugin.Plugin) error {
 	s, ok := p.(*stubExtractor)
 	if !ok {
@@ -116,7 +108,6 @@ func (d *dataSource) AppendExtractor(p fwkplugin.Plugin) error {
 	d.mu.Unlock()
 	return nil
 }
-func (d *dataSource) Interval() time.Duration { return 0 }
 
 type stubExtractor struct {
 	kind string
@@ -132,14 +123,13 @@ func TestCollectorStartInputs(t *testing.T) {
 	tests := []struct {
 		name        string
 		ctxCanceled bool
-		sources     []ScheduledDispatcher
+		sources     []fwkdl.PollingDispatcher
 		wantErr     bool
 		wantErrIs   error
 	}{
 		{name: "valid sources, live ctx", sources: sources},
-		{name: "empty sources", sources: []ScheduledDispatcher{}, wantErr: true},
-		{name: "nil source", sources: []ScheduledDispatcher{{Dispatcher: nil, PeriodTicks: 1}}, wantErr: true},
-		{name: "periodTicks zero", sources: []ScheduledDispatcher{{Dispatcher: &datasourcemocks.MetricsDataSource{}, PeriodTicks: 0}}, wantErr: true},
+		{name: "empty sources", sources: []fwkdl.PollingDispatcher{}, wantErr: true},
+		{name: "nil source", sources: []fwkdl.PollingDispatcher{nil}, wantErr: true},
 		{name: "cancelled parent ctx", ctxCanceled: true, sources: sources, wantErr: true, wantErrIs: context.Canceled},
 	}
 
@@ -194,7 +184,7 @@ func TestCollectorStop(t *testing.T) {
 			setup: func(t *testing.T) *Collector {
 				c := NewCollector()
 				ticker := mocks.NewTicker()
-				_ = c.Start(context.Background(), ticker, endpoint, []ScheduledDispatcher{})
+				_ = c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{})
 				return c
 			},
 		},
@@ -225,7 +215,7 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 	c := NewCollector()
 	ticker := mocks.NewTicker()
 
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, scheduleEveryTick([]fwkdl.PollingDispatcher{source})))
+	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{source}))
 	defer c.Stop()
 
 	ticker.Tick()
@@ -234,30 +224,6 @@ func TestCollectorCollectsOnTicks(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt64(&source.CallCount) == 2
 	}, 1*time.Second, 2*time.Millisecond, "expected 2 collections")
-}
-
-// TestCollectorRespectsPeriodTicks confirms slower sources skip ticks.
-func TestCollectorRespectsPeriodTicks(t *testing.T) {
-	fast := &errSource{kind: "fast"}
-	slow := &errSource{kind: "slow"}
-
-	c := NewCollector()
-	ticker := mocks.NewTicker()
-	require.NoError(t, c.Start(context.Background(), ticker, endpoint, []ScheduledDispatcher{
-		{Dispatcher: fast, PeriodTicks: 1},
-		{Dispatcher: slow, PeriodTicks: 4},
-	}))
-	defer c.Stop()
-
-	for i := 0; i < 8; i++ {
-		ticker.Tick()
-	}
-
-	require.Eventually(t, func() bool {
-		return atomic.LoadInt64(&fast.CallCount) == 8 && atomic.LoadInt64(&slow.CallCount) == 2
-	}, 1*time.Second, 2*time.Millisecond,
-		"fast=%d slow=%d want fast=8 slow=2",
-		atomic.LoadInt64(&fast.CallCount), atomic.LoadInt64(&slow.CallCount))
 }
 
 // TestCollectorErrorMetrics confirms Poll/Extract errors increment per-event
@@ -321,7 +287,7 @@ func TestCollectorErrorMetrics(t *testing.T) {
 
 			c := NewCollector()
 			ticker := mocks.NewTicker()
-			require.NoError(t, c.Start(context.Background(), ticker, endpoint, scheduleEveryTick([]fwkdl.PollingDispatcher{src})))
+			require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
 			defer c.Stop()
 
 			for i := 0; i < tt.ticks; i++ {
@@ -360,7 +326,7 @@ func TestCollectorRapidStartStopRaceFree(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c := NewCollector()
 		ticker := mocks.NewTicker()
-		require.NoError(t, c.Start(context.Background(), ticker, endpoint, scheduleEveryTick([]fwkdl.PollingDispatcher{src})))
+		require.NoError(t, c.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{src}))
 		ticker.Tick()
 		c.Stop()
 	}

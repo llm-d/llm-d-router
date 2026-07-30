@@ -128,34 +128,28 @@ func (m *variantSourceMap[T]) findFirst(matches func(fwkplugin.Plugin) bool) sou
 	return found
 }
 
-// pollingDispatchers stores scheduled PollingDispatchers keyed by source name.
-// Each dispatcher owns its own extractors; PeriodTicks is how often the
-// Collector should invoke it (in base ticks).
+// pollingDispatchers stores PollingDispatchers keyed by source name. Each
+// dispatcher owns its own extractors internally; the framework treats them
+// as opaque dispatch units.
 type pollingDispatchers struct {
 	mu sync.RWMutex
-	m  map[string]ScheduledDispatcher
+	m  map[string]fwkdl.PollingDispatcher
 }
 
 func newPollingDispatchers() *pollingDispatchers {
-	return &pollingDispatchers{m: make(map[string]ScheduledDispatcher)}
+	return &pollingDispatchers{m: make(map[string]fwkdl.PollingDispatcher)}
 }
 
-// Register installs s under its TypedName.Name. Duplicate names fail loudly
+// Register installs disp under its TypedName.Name. Duplicate names fail loudly
 // so a config error surfaces at startup instead of silently shadowing telemetry.
-func (p *pollingDispatchers) Register(s ScheduledDispatcher) error {
-	if s.Dispatcher == nil {
-		return fmt.Errorf("cannot register nil %s dispatcher", variantPolling)
-	}
-	if s.PeriodTicks < 1 {
-		return fmt.Errorf("periodTicks must be >= 1 for source %q", s.Dispatcher.TypedName().Name)
-	}
+func (p *pollingDispatchers) Register(disp fwkdl.PollingDispatcher) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	name := s.Dispatcher.TypedName().Name
+	name := disp.TypedName().Name
 	if _, exists := p.m[name]; exists {
 		return fmt.Errorf("duplicate %s source name %q", variantPolling, name)
 	}
-	p.m[name] = s
+	p.m[name] = disp
 	return nil
 }
 
@@ -163,31 +157,17 @@ func (p *pollingDispatchers) Register(s ScheduledDispatcher) error {
 func (p *pollingDispatchers) Get(name string) (fwkdl.PollingDispatcher, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	s, ok := p.m[name]
-	if !ok {
-		return nil, false
-	}
-	return s.Dispatcher, true
+	d, ok := p.m[name]
+	return d, ok
 }
 
-// Dispatchers returns a snapshot of all dispatchers (without schedule metadata).
+// Dispatchers returns a snapshot of all dispatchers.
 func (p *pollingDispatchers) Dispatchers() map[string]fwkdl.PollingDispatcher {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	out := make(map[string]fwkdl.PollingDispatcher, len(p.m))
 	for k, v := range p.m {
-		out[k] = v.Dispatcher
-	}
-	return out
-}
-
-// Scheduled returns a snapshot of all scheduled dispatchers.
-func (p *pollingDispatchers) Scheduled() []ScheduledDispatcher {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	out := make([]ScheduledDispatcher, 0, len(p.m))
-	for _, v := range p.m {
-		out = append(out, v)
+		out[k] = v
 	}
 	return out
 }
