@@ -740,12 +740,36 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 	}
 }
 
-type fakeSubscriberManager struct {
-	ids       []string
-	endpoints []string
+func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "unsupported"
+
+	_, err = New(ctx, "unsupported-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
 }
 
-func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+type fakeSubscriberManager struct {
+	ids             []string
+	sourceEndpoints []string
+	endpoints       []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(
+	_ context.Context,
+	id, sourceEndpoint, endpoint, _ string,
+	_ bool,
+) error {
+	f.ids = append(f.ids, id)
+	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
+	f.endpoints = append(f.endpoints, endpoint)
 	return nil
 }
 func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}

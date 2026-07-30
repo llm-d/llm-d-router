@@ -16,6 +16,8 @@ limitations under the License.
 
 package coordinate2e
 
+import "strings"
+
 // coordinatorConfigNIXL is the coordinator pipeline config for the e-p-d-pools topology.
 // ${NAMESPACE} and ${VLLM_RENDER_PORT} are substituted by createCoordinator before the ConfigMap is built.
 const coordinatorConfigNIXL = `log_level: 5
@@ -55,6 +57,14 @@ pipeline:
     - type: decode
 `
 
+// coordinatorConfigNIXLGenerate is coordinatorConfigNIXL with OpenAI passthrough
+// disabled. With use_openai_format: false a chat/completions request collapses to
+// the native generate wire format on the encode and prefill legs, which build a
+// fresh sampling_params carrying only max_tokens: 1. This exercises a different
+// min_tokens-stripping path than the OpenAI clone-and-cap path.
+var coordinatorConfigNIXLGenerate = strings.Replace(
+	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false", 1)
+
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its
 // EPP-Profile header value (see header-profile-handler); the role filters
@@ -72,6 +82,7 @@ const eppConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
+- type: vllmhttp-parser
 - type: encode-filter
 - type: prefill-filter
 - type: label-selector-filter
@@ -87,6 +98,7 @@ plugins:
 requestHandler:
   parsers:
   - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
 schedulingProfiles:
 - name: encode
   plugins:
