@@ -128,30 +128,12 @@ schedulingProfiles:
 // openai-parser/vllmhttp-parser request handler matches the single-EPP config so
 // the generate path (vllm-http wire format) is parsed the same way.
 
-// eppConfigEncode and eppConfigDecode both pick the least-busy endpoint
-// (active-request-scorer): encode has no prefix-cache affinity to exploit, and
-// decode is bound by concurrent in-flight requests, not prefill throughput.
-const eppConfigEncode = `apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- type: openai-parser
-- type: vllmhttp-parser
-- type: inflight-load-producer
-- type: active-request-scorer
-- type: max-score-picker
-- type: single-profile-handler
-requestHandler:
-  parsers:
-  - pluginRef: openai-parser
-  - pluginRef: vllmhttp-parser
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: active-request-scorer
-  - pluginRef: max-score-picker
-`
-
-const eppConfigDecode = `apiVersion: llm-d.ai/v1alpha1
+// eppConfigLeastBusy backs both the encode and decode EPPs: both pick the
+// least-busy endpoint (active-request-scorer). Encode has no prefix-cache
+// affinity to exploit, and decode is bound by concurrent in-flight requests,
+// not prefill throughput, so neither needs the prefill config's cache-affinity
+// filter or token-load scorer.
+const eppConfigLeastBusy = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser

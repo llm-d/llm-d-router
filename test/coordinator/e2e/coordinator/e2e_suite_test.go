@@ -145,20 +145,23 @@ type roleEPP struct {
 func eppsToCreate() []roleEPP {
 	if threeEPP {
 		return []roleEPP{
-			{role: "encode", eppName: eppNameEncode, poolName: poolNameEncode, config: eppConfigEncode},
+			{role: "encode", eppName: eppNameEncode, poolName: poolNameEncode, config: eppConfigLeastBusy},
 			{role: "prefill", eppName: eppNamePrefill, poolName: poolNamePrefill, config: eppConfigPrefill},
-			{role: "decode", eppName: eppNameDecode, poolName: poolNameDecode, config: eppConfigDecode},
+			{role: "decode", eppName: eppNameDecode, poolName: poolNameDecode, config: eppConfigLeastBusy},
 		}
 	}
 	return []roleEPP{{eppName: eppName, poolName: poolNameBase, config: eppConfig}}
 }
 
-// poolNames returns the InferencePool names for the active topology.
+// poolNames returns the InferencePool names for the active topology, derived
+// from eppsToCreate so the topology branch lives in one place.
 func poolNames() []string {
-	if threeEPP {
-		return []string{poolNameEncode, poolNamePrefill, poolNameDecode}
+	epps := eppsToCreate()
+	names := make([]string, len(epps))
+	for i, e := range epps {
+		names[i] = e.poolName
 	}
-	return []string{poolNameBase}
+	return names
 }
 
 func TestCoordinatorE2E(t *testing.T) {

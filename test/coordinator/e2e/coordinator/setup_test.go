@@ -157,7 +157,7 @@ func createInferencePool(toDelete bool) []string {
 		}
 	}
 
-	subs := eppSubstitutions()
+	subs := eppSubstitutionsFor(eppName, poolNameBase)
 	// TARGET_PORTS is a YAML block-sequence fragment for the pool manifest's
 	// targetPorts field, at that field's 2-space indentation. The coordinator's
 	// vLLM workers all listen on 8000.
@@ -319,10 +319,6 @@ func createStableInfra() {
 			stableInfraObjects = append(stableInfraObjects, applyManifest(manifest, subs)...)
 		}
 	}
-}
-
-func eppSubstitutions() map[string]string {
-	return eppSubstitutionsFor(eppName, poolNameBase)
 }
 
 func eppSubstitutionsFor(name, pool string) map[string]string {
