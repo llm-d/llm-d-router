@@ -356,22 +356,14 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	aggregatedScores := make(map[string]float64)
 	totalBlocks := 0
 	lookups := make([]promptLookup, 0, len(perPromptKeys))
+	confirmed := make(map[string]struct{}, endpointSet.Len())
 	for _, blockKeys := range perPromptKeys {
 		keyToPods, err := p.kvCacheIndexer.KVBlockIndex().Lookup(ctx, blockKeys, endpointSet)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to lookup block keys: %w", err)
 		}
-		// Confirmed (non-speculative) entries in the lookup result mean KV events
-		// for those endpoints are flowing — surface that to the health monitor so
-		// it can distinguish broken pipelines from genuine idle.
-		for _, pods := range keyToPods {
-			for _, pod := range pods {
-				if !pod.Speculative {
-					p.healthMonitor.RecordConfirmedEntry(pod.PodIdentifier)
-				}
-			}
-		}
+		p.recordConfirmedEndpoints(keyToPods, confirmed, endpointSet.Len())
 		scores, err := p.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())

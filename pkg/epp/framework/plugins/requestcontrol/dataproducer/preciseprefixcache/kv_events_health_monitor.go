@@ -3,6 +3,9 @@ package preciseprefixcache
 import (
 	"sync"
 	"time"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
 // KVEventsHealthMonitor tracks per-endpoint KV events pipeline health.
@@ -82,6 +85,49 @@ func (m *KVEventsHealthMonitor) HasKVEventsConfig() bool {
 // RemoveEndpoint cleans up health state for a removed endpoint.
 func (m *KVEventsHealthMonitor) RemoveEndpoint(endpointKey string) {
 	m.state.Delete(endpointKey)
+}
+
+// recordRouting notes that the primary profile's target endpoint was routed to.
+func (p *Producer) recordRouting(schedulingResult *scheduling.SchedulingResult) {
+	if schedulingResult == nil {
+		return
+	}
+	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
+	if primary == nil || len(primary.TargetEndpoints) == 0 {
+		return
+	}
+	meta := primary.TargetEndpoints[0].GetMetadata()
+	if meta == nil {
+		return
+	}
+	p.healthMonitor.RecordRouting(endpointIdentifier(meta.Address, meta.Port))
+}
+
+// recordConfirmedEndpoints notes the endpoints holding confirmed
+// (non-speculative) entries in a lookup result, at most once per endpoint per
+// request. The monitor keeps a single timestamp per endpoint, so recording
+// every matching block entry would repeat the same write once per block per
+// endpoint on the request path. Recording stops as soon as every candidate
+// endpoint has been seen; candidates of 0 means the lookup was unfiltered, so
+// the endpoint count is unknown and every entry is inspected.
+func (p *Producer) recordConfirmedEndpoints(keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
+	confirmed map[string]struct{}, candidates int,
+) {
+	for _, pods := range keyToPods {
+		if candidates > 0 && len(confirmed) == candidates {
+			return
+		}
+		for _, pod := range pods {
+			if pod.Speculative {
+				continue
+			}
+			if _, seen := confirmed[pod.PodIdentifier]; seen {
+				continue
+			}
+			confirmed[pod.PodIdentifier] = struct{}{}
+			p.healthMonitor.RecordConfirmedEntry(pod.PodIdentifier)
+		}
+	}
 }
 
 // getOrCreate returns the health state for an endpoint, creating it if needed.

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
 func TestHealthMonitor_RecordConfirmedEntry(t *testing.T) {
@@ -48,6 +50,37 @@ func TestHealthMonitor_RemoveEndpoint(t *testing.T) {
 	m.RemoveEndpoint("10.0.0.1:8000")
 	_, _, known = m.GetHealthStatus("10.0.0.1:8000")
 	assert.False(t, known)
+}
+
+// Each endpoint holds a different block key, so whichever key the scan reaches
+// first leaves the candidate set unfilled and it has to keep going. That holds
+// for any map iteration order.
+func TestProducer_RecordConfirmedEndpoints_ReachesEndpointsOnLaterKeys(t *testing.T) {
+	p := &Producer{healthMonitor: NewKVEventsHealthMonitor(true)}
+
+	keyToPods := map[kvblock.BlockHash][]kvblock.PodEntry{
+		1: {{PodIdentifier: "10.0.0.1:8000"}},
+		2: {{PodIdentifier: "10.0.0.2:8000"}},
+	}
+
+	p.recordConfirmedEndpoints(keyToPods, map[string]struct{}{}, 2)
+
+	for _, id := range []string{"10.0.0.1:8000", "10.0.0.2:8000"} {
+		lastConfirmed, _, known := p.healthMonitor.GetHealthStatus(id)
+		assert.True(t, known, id)
+		assert.False(t, lastConfirmed.IsZero(), id)
+	}
+}
+
+func TestProducer_RecordConfirmedEndpoints_IgnoresSpeculativeEntries(t *testing.T) {
+	p := &Producer{healthMonitor: NewKVEventsHealthMonitor(true)}
+
+	p.recordConfirmedEndpoints(map[kvblock.BlockHash][]kvblock.PodEntry{
+		1: {{PodIdentifier: "10.0.0.1:8000", Speculative: true}},
+	}, map[string]struct{}{}, 1)
+
+	_, _, known := p.healthMonitor.GetHealthStatus("10.0.0.1:8000")
+	assert.False(t, known, "a speculative entry is this EPP's own guess, not engine confirmation")
 }
 
 func TestHealthMonitor_HasKVEventsConfig(t *testing.T) {

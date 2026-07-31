@@ -33,11 +33,19 @@ var _ fwkdl.EndpointExtractor = &Producer{}
 // subscriber, delete tears one down. No-op unless per-pod discovery is
 // enabled.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
-	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
-		return nil
-	}
 	meta := event.Endpoint.GetMetadata()
 	if meta == nil || meta.NamespacedName.Name == "" {
+		return nil
+	}
+
+	// Health state is keyed by endpoint identifier, not by namespaced name, and
+	// is collected in both global-socket and per-pod discovery modes, so it is
+	// dropped here rather than in the discovery-only switch below.
+	if event.Type == fwkdl.EventDelete && meta.Address != "" {
+		p.healthMonitor.RemoveEndpoint(endpointIdentifier(meta.Address, meta.Port))
+	}
+
+	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
 	}
 
@@ -52,9 +60,8 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 		logger.V(logging.DEBUG).Info("Adding subscriber", "endpoint", endpointKey)
 	case fwkdl.EventDelete:
 		p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
-		p.healthMonitor.RemoveEndpoint(endpointKey)
 		if meta.Address != "" {
-			if err := p.kvCacheIndexer.KVBlockIndex().Clear(ctx, fmt.Sprintf("%s:%s", meta.Address, meta.Port)); err != nil {
+			if err := p.kvCacheIndexer.KVBlockIndex().Clear(ctx, endpointIdentifier(meta.Address, meta.Port)); err != nil {
 				logger.Error(err, "Failed to clear index entries for removed endpoint",
 					"endpoint", endpointKey, "address", meta.Address, "port", meta.Port)
 			}
