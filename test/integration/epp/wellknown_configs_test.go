@@ -377,8 +377,6 @@ schedulingProfiles:
 		yaml: `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-- experimentalPlugins
 plugins:
 - type: passthrough-parser
 - type: active-request-scorer

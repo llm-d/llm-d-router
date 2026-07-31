@@ -28,9 +28,6 @@ const (
 	StabilityStable StabilityLevel = "Stable"
 )
 
-// ExperimentalPluginsFeatureGate is the feature gate name used to enable Alpha plugins.
-const ExperimentalPluginsFeatureGate = "experimentalPlugins"
-
 // PluginMetadata holds stability and lifecycle metadata for a registered plugin type.
 type PluginMetadata struct {
 	Type               string

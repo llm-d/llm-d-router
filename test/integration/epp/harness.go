@@ -314,6 +314,7 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	eppOptions.GRPCHealthPort = 0
 	eppOptions.EndpointTargetPorts = []int{8000}
 	eppOptions.SecureServing = false
+	eppOptions.AllowExperimentalPlugins = true
 	return eppOptions
 }
 

@@ -148,6 +148,7 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 func InstantiateAndConfigure(
 	rawConfig *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
+	allowExperimentalPlugins bool,
 	logger logr.Logger,
 ) (*config.Config, error) {
 	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
@@ -159,7 +160,7 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	if err := instantiatePlugins(rawConfig.Plugins, handle, featureGates, logger); err != nil {
+	if err := instantiatePlugins(rawConfig.Plugins, handle, allowExperimentalPlugins, logger); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
 	}
 
@@ -226,7 +227,7 @@ func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error
 	return cfg, nil
 }
 
-func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle, featureGates map[string]bool, logger logr.Logger) error {
+func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle, allowExperimentalPlugins bool, logger logr.Logger) error {
 	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
 	if err != nil {
 		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
@@ -234,8 +235,8 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 
 	for _, spec := range orderedPlugins {
 		stability := fwkplugin.GetPluginStability(spec.Type)
-		if stability == fwkplugin.StabilityAlpha && !featureGates[fwkplugin.ExperimentalPluginsFeatureGate] {
-			return fmt.Errorf("plugin '%s' (type: '%s') has %s stability level, but feature gate '%s' is not enabled", spec.Name, spec.Type, stability, fwkplugin.ExperimentalPluginsFeatureGate)
+		if stability == fwkplugin.StabilityAlpha && !allowExperimentalPlugins {
+			return fmt.Errorf("plugin '%s' (type: '%s') has %s stability level, but command line flag --allow-experimental-plugins is not set", spec.Name, spec.Type, stability)
 		}
 
 		if meta, ok := fwkplugin.RegistryMetadata[spec.Type]; ok && meta.Deprecated {

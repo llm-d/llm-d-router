@@ -42,8 +42,6 @@ func TestSessionAffinityFilter_RequestFlow(t *testing.T) {
 	configText := `
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-  - experimentalPlugins
 plugins:
   - type: openai-parser
   - type: queue-scorer
@@ -127,8 +125,6 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 const pdConfigBase = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
-featureGates:
-  - experimentalPlugins
 plugins:
   - type: openai-parser
   - type: always-disagg-pd-decider

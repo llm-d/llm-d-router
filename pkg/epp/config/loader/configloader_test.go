@@ -81,7 +81,6 @@ func TestLoadRawConfiguration(t *testing.T) {
 	// Register known feature gates for validation.
 	RegisterFeatureGate(testFeatureGate, true)
 	RegisterFeatureGate(flowcontrol.FeatureGate, false)
-	RegisterFeatureGate(fwkplugin.ExperimentalPluginsFeatureGate, false)
 
 	queueScorerWeight := 2.0
 	kvCacheUtilizationScorerWeight := 2.0
@@ -130,9 +129,8 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 			},
 			wantFeatures: map[string]bool{
-				testFeatureGate:                          true,
-				flowcontrol.FeatureGate:                  true,
-				fwkplugin.ExperimentalPluginsFeatureGate: false,
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: true,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -190,9 +188,8 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 			},
 			wantFeatures: map[string]bool{
-				testFeatureGate:                          false,
-				flowcontrol.FeatureGate:                  false,
-				fwkplugin.ExperimentalPluginsFeatureGate: false,
+				testFeatureGate:         false,
+				flowcontrol.FeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -259,9 +256,8 @@ func TestLoadRawConfiguration(t *testing.T) {
 				},
 			},
 			wantFeatures: map[string]bool{
-				testFeatureGate:                          true,
-				flowcontrol.FeatureGate:                  false,
-				fwkplugin.ExperimentalPluginsFeatureGate: false,
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
 			},
 			wantErr:    false,
 			deprecated: false,
@@ -433,8 +429,7 @@ func TestPluginsWithDependencies(t *testing.T) {
 
 			// 2. Instantiate
 			handle := testutils.NewTestHandle(context.Background())
-			featureGates, _ := loadFeatureConfig(rawConfig.FeatureGates)
-			err = instantiatePlugins(rawConfig.Plugins, handle, featureGates, logger)
+			err = instantiatePlugins(rawConfig.Plugins, handle, false, logger)
 			if tc.wantErr {
 				require.Error(t, err, "Expected instantiatePlugins to fail")
 				return
@@ -840,7 +835,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 
 			// 2. Instantiate & Configure
 			handle := testutils.NewTestHandle(context.Background())
-			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
+			cfg, err := InstantiateAndConfigure(rawConfig, handle, false, logger)
 
 			if tc.wantErr {
 				require.Error(t, err, "Expected InstantiateAndConfigure to fail")
@@ -1272,9 +1267,7 @@ func TestFilterExecutionOrderFromYAML(t *testing.T) {
 		"Plugins slice must preserve YAML declaration order")
 }
 
-func TestExperimentalPluginsFeatureGate(t *testing.T) {
-	RegisterFeatureGate(fwkplugin.ExperimentalPluginsFeatureGate, false)
-
+func TestAllowExperimentalPluginsFlag(t *testing.T) {
 	const alphaPluginType = "test-alpha-plugin"
 	fwkplugin.Register(alphaPluginType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockPlugin{t: fwkplugin.TypedName{Name: name, Type: alphaPluginType}}, nil
@@ -1287,19 +1280,7 @@ func TestExperimentalPluginsFeatureGate(t *testing.T) {
 	handle := testutils.NewTestHandle(context.Background())
 	logger := logging.NewTestLogger()
 
-	// 1. Without feature gate enabled -> should fail
-	rawConfigNoGate := &configapi.EndpointPickerConfig{
-		Plugins: []configapi.PluginSpec{
-			{Name: "alpha-inst", Type: alphaPluginType},
-		},
-	}
-	_, err := InstantiateAndConfigure(rawConfigNoGate, handle, logger)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "has Alpha stability level, but feature gate 'experimentalPlugins' is not enabled")
-
-	// 2. With feature gate enabled -> should succeed (given required profile handler)
-	rawConfigWithGate := &configapi.EndpointPickerConfig{
-		FeatureGates: configapi.FeatureGates{fwkplugin.ExperimentalPluginsFeatureGate},
+	rawConfig := &configapi.EndpointPickerConfig{
 		Plugins: []configapi.PluginSpec{
 			{Name: "alpha-inst", Type: alphaPluginType},
 			{Name: "ph", Type: single.SingleProfileHandlerType},
@@ -1313,6 +1294,12 @@ func TestExperimentalPluginsFeatureGate(t *testing.T) {
 		},
 	}
 
-	_, err = InstantiateAndConfigure(rawConfigWithGate, testutils.NewTestHandle(context.Background()), logger)
+	// 1. Without flag enabled (allowExperimentalPlugins = false) -> should fail
+	_, err := InstantiateAndConfigure(rawConfig, handle, false, logger)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
+
+	// 2. With flag enabled (allowExperimentalPlugins = true) -> should succeed
+	_, err = InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(context.Background()), true, logger)
 	require.NoError(t, err)
 }
