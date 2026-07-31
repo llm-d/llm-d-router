@@ -64,12 +64,22 @@ func setupInfra() {
 	nsName := getNamespace()
 	createCRDs()
 
+	manifest := envoyManifest
 	infraSubs := map[string]string{
 		"${NAMESPACE}": nsName,
 		"${EPP_NAME}":  eppName,
 	}
-	ginkgo.By("Applying Envoy from " + envoyManifest)
-	applyManifest(envoyManifest, infraSubs)
+	if threeEPP {
+		manifest = envoy3EPPManifest
+		infraSubs = map[string]string{
+			"${NAMESPACE}":        nsName,
+			"${EPP_NAME_ENCODE}":  eppNameEncode,
+			"${EPP_NAME_PREFILL}": eppNamePrefill,
+			"${EPP_NAME_DECODE}":  eppNameDecode,
+		}
+	}
+	ginkgo.By("Applying Envoy from " + manifest)
+	applyManifest(manifest, infraSubs)
 	ginkgo.By("Applying Envoy services from " + servicesManifest)
 	applyManifest(servicesManifest, infraSubs)
 }
@@ -81,39 +91,87 @@ func createCRDs() {
 	_ = testutils.CreateObjsFromYaml(testConfig, gieCRDs, "")
 }
 
-// createEndPointPicker creates the scheduling ConfigMap and EPP Deployment from
-// the supplied EPP config and waits for the EPP Deployment to become ready. Its
+// createEndPointPickers creates each EPP's scheduling ConfigMap and Deployment
+// for the active topology and waits for the Deployments to become ready. The
+// single-EPP topology creates one EPP from eppConfig; the 3-EPP topology creates
+// one per role, each from its role config with a per-role ConfigMap. Each EPP's
 // ServiceAccount, RoleBinding, and Service are created once by createStableInfra.
-// Returns the created object ids for cleanup.
-func createEndPointPicker(config string) []string {
-	const cmName = "epp-config"
-	createEPPConfigMap(cmName, config)
+// Returns all created object ids for cleanup.
+func createEndPointPickers() []string {
+	var objects []string
+	for _, e := range eppsToCreate() {
+		objects = append(objects, createOneEndPointPicker(e)...)
+	}
+	return objects
+}
+
+// createOneEndPointPicker creates a single EPP's ConfigMap and Deployment. In
+// the 3-EPP topology each role gets its own ConfigMap (epp-config-<role>) and the
+// shared Deployment's config volume is retargeted to it (see renameEPPConfigVolume),
+// so the three EPPs do not share one ConfigMap.
+func createOneEndPointPicker(e roleEPP) []string {
+	cmName := "epp-config"
+	if threeEPP {
+		cmName = "epp-config-" + e.role
+	}
+	createEPPConfigMap(cmName, e.config)
 
 	objects := make([]string, 1, 8)
 	objects[0] = "ConfigMap/" + cmName
 	// eppManifest is the EPP Deployment only; its Service, ServiceAccount, and
 	// RBAC are created once by createStableInfra.
-	objects = append(objects, applyManifest(eppManifest, eppSubstitutions())...)
+	docs := testutils.ReadYaml(eppManifest)
+	docs = e2eutil.SubstituteMany(docs, eppSubstitutionsFor(e.eppName, e.poolName))
+	if threeEPP {
+		docs = renameEPPConfigVolume(docs, cmName)
+	}
+	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())...)
 	podsInDeploymentsReady(objects)
 	return objects
 }
 
-// createInferencePool creates the InferencePool covering all three worker
-// roles. When toDelete is set, the existing pool is removed first so the test
-// starts clean.
+// renameEPPConfigVolume retargets the EPP Deployment's config volume, volume
+// mount, and ConfigMap reference from the shared "epp-config" name to cmName so
+// each 3-EPP role mounts its own ConfigMap. It matches only the "name: epp-config"
+// line endings, leaving the "/etc/epp/epp-config.yaml" mount path and ConfigMap
+// key (still keyed "epp-config.yaml") untouched.
+func renameEPPConfigVolume(docs []string, cmName string) []string {
+	out := make([]string, len(docs))
+	for i, d := range docs {
+		out[i] = strings.ReplaceAll(d, "name: epp-config\n", "name: "+cmName+"\n")
+	}
+	return out
+}
+
+// createInferencePool creates the InferencePool(s) for the active topology: one
+// pool covering all three worker roles (single-EPP), or one role-scoped pool per
+// role (3-EPP). When toDelete is set, the existing pool(s) are removed first so
+// the test starts clean.
 func createInferencePool(toDelete bool) []string {
 	nsName := getNamespace()
 
 	if toDelete {
-		deletePoolIfExists(poolNameBase)
+		for _, name := range poolNames() {
+			deletePoolIfExists(name)
+		}
 	}
 
 	subs := eppSubstitutions()
-	// TARGET_PORTS is a YAML block-sequence fragment for inference-pools.yaml's
+	// TARGET_PORTS is a YAML block-sequence fragment for the pool manifest's
 	// targetPorts field, at that field's 2-space indentation. The coordinator's
 	// vLLM workers all listen on 8000.
 	subs["${TARGET_PORTS}"] = "\n  - number: 8000"
-	docs := testutils.ReadYaml(poolManifest)
+	manifest := poolManifest
+	if threeEPP {
+		manifest = pool3EPPManifest
+		subs["${EPP_NAME_ENCODE}"] = eppNameEncode
+		subs["${EPP_NAME_PREFILL}"] = eppNamePrefill
+		subs["${EPP_NAME_DECODE}"] = eppNameDecode
+		subs["${POOL_NAME_ENCODE}"] = poolNameEncode
+		subs["${POOL_NAME_PREFILL}"] = poolNamePrefill
+		subs["${POOL_NAME_DECODE}"] = poolNameDecode
+	}
+	docs := testutils.ReadYaml(manifest)
 	docs = e2eutil.SubstituteMany(docs, subs)
 	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
 }
@@ -251,18 +309,25 @@ func createStableInfra() {
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	stableInfraObjects = append(stableInfraObjects, testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())...)
 
-	// The EPP's RBAC, ServiceAccount, and Service come from the shared
+	// Each EPP's RBAC, ServiceAccount, and Service come from the shared
 	// inference-gateway component's split files; the Deployment is recreated per
-	// spec in createEndPointPicker.
-	for _, manifest := range []string{eppRbacManifest, eppServiceAccountManifest, eppServicesManifest} {
-		stableInfraObjects = append(stableInfraObjects, applyManifest(manifest, eppSubstitutions())...)
+	// spec in createEndPointPickers. In the 3-EPP topology this runs once per role.
+	for _, e := range eppsToCreate() {
+		subs := eppSubstitutionsFor(e.eppName, e.poolName)
+		for _, manifest := range []string{eppRbacManifest, eppServiceAccountManifest, eppServicesManifest} {
+			stableInfraObjects = append(stableInfraObjects, applyManifest(manifest, subs)...)
+		}
 	}
 }
 
 func eppSubstitutions() map[string]string {
+	return eppSubstitutionsFor(eppName, poolNameBase)
+}
+
+func eppSubstitutionsFor(name, pool string) map[string]string {
 	return map[string]string{
-		"${EPP_NAME}":               eppName,
-		"${POOL_NAME}":              poolNameBase,
+		"${EPP_NAME}":               name,
+		"${POOL_NAME}":              pool,
 		"${EPP_IMAGE}":              eppImage,
 		"${NAMESPACE}":              getNamespace(),
 		"${METRICS_ENDPOINT_AUTH}":  "false",
@@ -287,6 +352,12 @@ func allSubstitutions() map[string]string {
 	// far past the simulator's default 1024-token context. Every vLLM role raises
 	// --max-model-len so the encode sub-request is not rejected as over-length.
 	vllmArgs := vllmExtraArgs("--force-dummy-tokenizer", "--max-model-len=131072")
+	// ${EPP_NAME} is the zmq endpoint the decode workers publish KV events to. In
+	// the 3-EPP topology that is the decode EPP's Service.
+	workerEPPName := eppName
+	if threeEPP {
+		workerEPPName = eppNameDecode
+	}
 	return map[string]string{
 		"${POOL_NAME}":               poolNameBase,
 		"${MODEL_NAME}":              modelName,
@@ -304,7 +375,7 @@ func allSubstitutions() map[string]string {
 		"${VLLM_SIM_MODE}":           "echo",
 		"${KV_CACHE_ENABLED}":        "false",
 		"${HF_TOKEN}":                "",
-		"${EPP_NAME}":                eppName,
+		"${EPP_NAME}":                workerEPPName,
 		"${NAMESPACE}":               getNamespace(),
 		"${DECODE_ROLE}":             "decode",
 	}

@@ -116,7 +116,7 @@ endif
 # Env vars forwarded into the e2e test container.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
                E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
-               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME
+               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -204,6 +204,10 @@ test-e2e-coordinator-run: image-pull ## Run coordinator e2e tests against pre-lo
 .PHONY: test-e2e-coordinator
 test-e2e-coordinator: image-build-builder image-build-coordinator image-build-epp ## Build images and run coordinator e2e tests
 	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run
+
+.PHONY: test-e2e-coordinator-3epp
+test-e2e-coordinator-3epp: image-build-builder image-build-coordinator image-build-epp ## Build images and run coordinator e2e tests in the 3-EPP (per-role EPP + InferencePool) topology
+	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run E2E_EPP_TOPOLOGY=3epp
 
 .PHONY: build
 build: image-build-builder ## Build the coordinator binary

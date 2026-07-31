@@ -148,7 +148,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	pool = createInferencePool(true)
 	expectPoolExists()
 
-	epp = createEndPointPicker(eppConfig)
+	epp = createEndPointPickers()
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
 	modelServers = createModelServers(encodeReplicas, prefillReplicas, decodeReplicas)

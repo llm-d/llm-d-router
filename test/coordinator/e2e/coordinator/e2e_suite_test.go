@@ -56,6 +56,17 @@ const (
 	poolNameBase = "qwen3-vl-2b-instruct-inference-pool"
 	eppName      = "e2e-epp"
 
+	// 3-EPP topology (E2E_EPP_TOPOLOGY=3epp): one role-scoped EPP and
+	// InferencePool per phase. Each EPP name doubles as its Service and
+	// InferencePool endpointPickerRef name.
+	eppNameEncode  = "e2e-epp-encode"
+	eppNamePrefill = "e2e-epp-prefill"
+	eppNameDecode  = "e2e-epp-decode"
+
+	poolNameEncode  = "qwen3-vl-2b-instruct-encode-pool"
+	poolNamePrefill = "qwen3-vl-2b-instruct-prefill-pool"
+	poolNameDecode  = "qwen3-vl-2b-instruct-decode-pool"
+
 	// EPP resources are the shared inference-gateway component's split files.
 	// Gateway/HTTPRoute manifests in that component are unused: the coordinator
 	// e2e fronts the EPP with a hand-rolled Envoy, matching the router e2e.
@@ -72,6 +83,11 @@ const (
 	envoyManifest    = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml"
 	servicesManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/services.yaml"
 
+	// 3-EPP topology manifests: the Envoy that fans EPP-Profile out to three
+	// role-scoped ext_proc clusters, and the three role-scoped InferencePools.
+	envoy3EPPManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml"
+	pool3EPPManifest  = "../../../../deploy/environments/dev/coordinator-e2e-infra/inference-pools-3-epp.yaml"
+
 	crdGIEPath = "../../../../deploy/components/crds-gie"
 )
 
@@ -82,6 +98,11 @@ var (
 
 	keepClusterOnFailure = env.GetEnvBool("E2E_KEEP_CLUSTER_ON_FAILURE", false, ginkgo.GinkgoLogr)
 	printLogs            = env.GetEnvBool("E2E_PRINT_LOGS", false, ginkgo.GinkgoLogr)
+
+	// threeEPP selects the 3-EPP topology (one role-scoped EPP + InferencePool per
+	// phase) instead of the default single-EPP topology. See envoy3EPPManifest and
+	// the eppConfig{Encode,Prefill,Decode} configs.
+	threeEPP = env.GetEnvString("E2E_EPP_TOPOLOGY", "single", ginkgo.GinkgoLogr) == "3epp"
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
@@ -104,6 +125,37 @@ var (
 	stableInfraObjects  []string
 	createdNameSpace    bool
 )
+
+// roleEPP describes one EPP to create: its EPP/Service name, the InferencePool
+// it backs, and its scheduling config. The single-EPP topology has one entry
+// (all three roles, eppConfig); the 3-EPP topology has one per role.
+type roleEPP struct {
+	role     string
+	eppName  string
+	poolName string
+	config   string
+}
+
+// eppsToCreate returns the EPPs for the active topology, in encode/prefill/decode
+// order for 3-EPP.
+func eppsToCreate() []roleEPP {
+	if threeEPP {
+		return []roleEPP{
+			{role: "encode", eppName: eppNameEncode, poolName: poolNameEncode, config: eppConfigEncode},
+			{role: "prefill", eppName: eppNamePrefill, poolName: poolNamePrefill, config: eppConfigPrefill},
+			{role: "decode", eppName: eppNameDecode, poolName: poolNameDecode, config: eppConfigDecode},
+		}
+	}
+	return []roleEPP{{eppName: eppName, poolName: poolNameBase, config: eppConfig}}
+}
+
+// poolNames returns the InferencePool names for the active topology.
+func poolNames() []string {
+	if threeEPP {
+		return []string{poolNameEncode, poolNamePrefill, poolNameDecode}
+	}
+	return []string{poolNameBase}
+}
 
 func TestCoordinatorE2E(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
