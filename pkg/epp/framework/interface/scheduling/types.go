@@ -167,7 +167,7 @@ type ProfileRunResult struct {
 	// ScoredCandidates carries the weighted score of every endpoint the profile
 	// scored, including candidates the picker did not select. TargetEndpoints is
 	// a subset of these, so the two are not parallel. Ordering is unspecified;
-	// consumers key by endpoint. Nil when the profile ran no scorers.
+	// consumers key by endpoint.
 	ScoredCandidates []ScoredEndpoint
 }
 
