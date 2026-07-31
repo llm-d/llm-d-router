@@ -29,7 +29,7 @@ import (
 
 func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningReqs int) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{
 			KVCacheUsagePercent: kvCache,
 			WaitingQueueSize:    queueSize,
@@ -179,7 +179,7 @@ func TestScoreHierarchicalBuckets(t *testing.T) {
 	// All should have non-zero scores (they're all in the negative tier).
 	for _, ep := range endpoints {
 		if scores[ep] == 0 {
-			t.Errorf("%s should have non-zero score", ep.GetMetadata().NamespacedName.Name)
+			t.Errorf("%s should have non-zero score", ep.GetMetadata().ID.Name)
 		}
 	}
 

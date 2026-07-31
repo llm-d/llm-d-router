@@ -51,8 +51,8 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 	assert.NoError(t, r.Configure(cfg, logger))
 
 	pod := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
-		Address:        "1.2.3.4:5678",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "1.2.3.4:5678",
 	}
 
 	endpoint := r.NewEndpoint(context.Background(), pod)
@@ -86,12 +86,12 @@ func TestUpdateEndpointDispatchesEvent(t *testing.T) {
 	require.NoError(t, r.Configure(cfg, logger))
 
 	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
-		Address:        "1.2.3.4",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "1.2.3.4",
 	}, nil)
 	endpoint.UpdateMetadata(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
-		Address:        "5.6.7.8",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "5.6.7.8",
 	})
 
 	r.UpdateEndpoint(context.Background(), endpoint)

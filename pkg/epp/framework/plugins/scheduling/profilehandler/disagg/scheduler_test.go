@@ -48,26 +48,26 @@ func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 func TestPDSchedule(t *testing.T) {
 	endpoint1 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "endpoint1"},
-			Address:        "1.2.3.4",
-			Labels:         map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+			ID:      k8stypes.NamespacedName{Name: "endpoint1"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
 		},
 		&fwkdl.Metrics{WaitingQueueSize: 0},
 		fwkdl.NewAttributes(),
 	)
 	endpoint2 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "endpoint2"},
-			Address:        "5.6.7.8",
-			Labels:         map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+			ID:      k8stypes.NamespacedName{Name: "endpoint2"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
 		},
 		&fwkdl.Metrics{WaitingQueueSize: 0},
 		fwkdl.NewAttributes(),
 	)
 	noRoleEndpoint1 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "noRoleEndpoint1"},
-			Address:        "1.1.1.1",
+			ID:      k8stypes.NamespacedName{Name: "noRoleEndpoint1"},
+			Address: "1.1.1.1",
 		},
 		&fwkdl.Metrics{WaitingQueueSize: 2},
 		fwkdl.NewAttributes(),

@@ -74,7 +74,7 @@ func (p *stubPlugin) TypedName() plugin.TypedName {
 // newCold returns an endpoint without any prefix-cache match info (cold).
 func newCold(name string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{},
 		nil,
 	)
@@ -83,7 +83,7 @@ func newCold(name string) scheduling.Endpoint {
 // newColdNS returns a cold endpoint in the "default" namespace.
 func newColdNS(name string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
 		&fwkdl.Metrics{},
 		nil,
 	)
@@ -243,7 +243,7 @@ func TestNoHitLRUBasicFunctionality(t *testing.T) {
 
 	for endpoint, score := range scores {
 		if score < 0 || score > 1 {
-			t.Errorf("Invalid score %f for endpoint %s", score, endpoint.GetMetadata().NamespacedName.String())
+			t.Errorf("Invalid score %f for endpoint %s", score, endpoint.GetMetadata().ID.String())
 		}
 	}
 
@@ -283,7 +283,7 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 	// The NamespacedName matches the cold endpoints, so LRU tracking is shared.
 	warmEndpoints := func() []scheduling.Endpoint {
 		w := scheduling.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-a", Namespace: "default"}},
+			&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-a", Namespace: "default"}},
 			&fwkdl.Metrics{},
 			nil,
 		)
@@ -316,10 +316,10 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 			}
 		}
 
-		if highestEndpoint.GetMetadata().NamespacedName.String() != expectedEndpoint.GetMetadata().NamespacedName.String() {
+		if highestEndpoint.GetMetadata().ID.String() != expectedEndpoint.GetMetadata().ID.String() {
 			t.Fatalf("expected %s to have highest score for LRU behavior, but %s had highest score (%f). All scores: %+v",
-				expectedEndpoint.GetMetadata().NamespacedName.String(),
-				highestEndpoint.GetMetadata().NamespacedName.String(),
+				expectedEndpoint.GetMetadata().ID.String(),
+				highestEndpoint.GetMetadata().ID.String(),
 				highestScore,
 				scores)
 		}

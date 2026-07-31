@@ -80,7 +80,7 @@ func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, 
 		response.Headers = make(map[string]string)
 	}
 
-	response.Headers[sessionHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+	response.Headers[sessionHeader] = base64.StdEncoding.EncodeToString([]byte(targetPod.ID.String()))
 }
 
 // ResolvePodToWrite looks up the target pod from the scheduling results if profileName is set.

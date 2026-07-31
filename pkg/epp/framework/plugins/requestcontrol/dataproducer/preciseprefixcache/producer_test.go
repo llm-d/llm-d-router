@@ -106,15 +106,15 @@ func (f *fakeKVBlockScorer) Score(ctx context.Context, keys []kvblock.BlockHash,
 var testEndpoints = []scheduling.Endpoint{
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-			Address:        "10.0.0.1",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-a"},
+			Address: "10.0.0.1",
+			Port:    "8080",
 		}, nil, nil),
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-			Address:        "10.0.0.2",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-b"},
+			Address: "10.0.0.2",
+			Port:    "8080",
 		}, nil, nil),
 }
 
@@ -124,15 +124,15 @@ func freshEndpoints() []scheduling.Endpoint {
 	return []scheduling.Endpoint{
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-				Address:        "10.0.0.1",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-a"},
+				Address: "10.0.0.1",
+				Port:    "8080",
 			}, nil, nil),
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-				Address:        "10.0.0.2",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-b"},
+				Address: "10.0.0.2",
+				Port:    "8080",
 			}, nil, nil),
 	}
 }
@@ -717,9 +717,9 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 				tokens[i] = uint32(i + 1)
 			}
 			endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-x"},
-				Address:        "10.0.0.9",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-x"},
+				Address: "10.0.0.9",
+				Port:    "8080",
 			}, nil, nil)
 			req := &scheduling.InferenceRequest{
 				RequestID:   "r",

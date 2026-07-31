@@ -99,7 +99,7 @@ func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.Inferen
 
 	for _, endpoint := range endpoints {
 		scoredEndpoints[endpoint] = 0.0 // initial value
-		if endpoint.GetMetadata().NamespacedName.String() == podName {
+		if endpoint.GetMetadata().ID.String() == podName {
 			scoredEndpoints[endpoint] = 1.0
 		}
 	}

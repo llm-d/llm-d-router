@@ -564,7 +564,7 @@ type stubSchedulingEndpoint struct {
 
 func newStubSchedulingEndpoint(name string) *stubSchedulingEndpoint {
 	return &stubSchedulingEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "default"}},
 		attr:     datalayer.NewAttributes(),
 	}
 }

@@ -47,7 +47,7 @@ func (p *dataProducer) assignedReplica(t *testing.T, endpoints []fwksched.Endpoi
 		info, ok := v.(*attrprefix.PrefixCacheMatchInfo)
 		require.True(t, ok)
 		if info.MatchBlocks() > 0 {
-			return ep.GetMetadata().NamespacedName.Name
+			return ep.GetMetadata().ID.Name
 		}
 	}
 	return ""

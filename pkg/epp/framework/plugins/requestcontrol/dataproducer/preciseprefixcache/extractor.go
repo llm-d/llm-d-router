@@ -37,12 +37,12 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 		return nil
 	}
 	meta := event.Endpoint.GetMetadata()
-	if meta == nil || meta.NamespacedName.Name == "" {
+	if meta == nil || meta.ID.Name == "" {
 		return nil
 	}
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	endpointKey := meta.NamespacedName.String()
+	endpointKey := meta.ID.String()
 
 	switch event.Type {
 	case fwkdl.EventAddOrUpdate:
@@ -70,7 +70,7 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
-	endpointKey := meta.NamespacedName.String()
+	endpointKey := meta.ID.String()
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
 	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)

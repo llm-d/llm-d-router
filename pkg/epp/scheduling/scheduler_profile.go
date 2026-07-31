@@ -192,7 +192,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, scorer.TypedName().Type, scorer.TypedName().Name, time.Since(before))
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {
-				debug.Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().NamespacedName, "score", score)
+				debug.Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().ID, "score", score)
 			}
 			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
 		}
@@ -268,8 +268,8 @@ func topScoredEndpoints(scored []*fwksched.ScoredEndpoint, limit int) ([]string,
 		if ranked[i].Score != ranked[j].Score {
 			return ranked[i].Score > ranked[j].Score
 		}
-		return ranked[i].GetMetadata().NamespacedName.String() <
-			ranked[j].GetMetadata().NamespacedName.String()
+		return ranked[i].GetMetadata().ID.String() <
+			ranked[j].GetMetadata().ID.String()
 	})
 	if limit < len(ranked) {
 		ranked = ranked[:limit]
@@ -277,7 +277,7 @@ func topScoredEndpoints(scored []*fwksched.ScoredEndpoint, limit int) ([]string,
 	names := make([]string, len(ranked))
 	scores := make([]float64, len(ranked))
 	for i, se := range ranked {
-		names[i] = se.GetMetadata().NamespacedName.String()
+		names[i] = se.GetMetadata().ID.String()
 		scores[i] = se.Score
 	}
 	return names, scores
