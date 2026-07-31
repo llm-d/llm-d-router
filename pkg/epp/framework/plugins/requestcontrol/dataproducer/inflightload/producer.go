@@ -423,7 +423,10 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// the prompt cost, which is consumed by prefill. As soon as the first chunk
 	// arrives (StartOfStream), prefill is done across all profiles, so free the
 	// token counters for every targeted endpoint regardless of profile name.
-	// Request counters are still released on EndOfStream below via PluginState.Delete.
+	// The prefill profile's entry is released in full (request counter included):
+	// the first chunk means the prefill worker has finished and handed off, so
+	// the request is no longer in flight on that endpoint. Other profiles'
+	// request counters are released on EndOfStream below via PluginState.Delete.
 	if !p.addEstimatedOutputTokens && resp.StartOfStream {
 		for profileName, profileResult := range result.ProfileResults {
 			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -433,7 +436,11 @@ func (p *InFlightLoadProducer) ResponseBody(
 			if endpoint == nil || endpoint.GetMetadata() == nil {
 				continue
 			}
-			p.releaseTokensEarly(endpoint, request, profileName)
+			if profileName == profilePrefill {
+				p.release(endpoint, request, profileName)
+			} else {
+				p.releaseTokensEarly(endpoint, request, profileName)
+			}
 		}
 	}
 

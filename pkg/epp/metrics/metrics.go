@@ -677,8 +677,16 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 	return true
 }
 
-// RecordRequestTPOT records the average time per output token.
-func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
+// RecordRequestTPOT records the average time per output token. TPOT is only
+// derivable for streaming responses: a non-streaming response arrives as a
+// single body chunk, so the first-token and completion timestamps coincide and
+// no inter-token timing exists. Such requests are skipped silently instead of
+// being logged as invalid (they would otherwise emit an error-level line per
+// request on non-streaming workloads).
+func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
+	if !streaming {
+		return false
+	}
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if firstToken.IsZero() || outputTokenCount <= 1 {

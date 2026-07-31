@@ -224,6 +224,12 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
 
+Polling sources share one Collector goroutine per endpoint. The base tick is
+`--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
+`interval` parameter (e.g. `"1s"`) that is rounded to the nearest multiple of the base tick;
+when omitted, the source runs on every base tick. The runtime converts each source's
+interval to base-tick multiples and schedules dispatches accordingly.
+
 See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc for the canonical model.
 
 ---

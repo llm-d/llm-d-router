@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: ${EPP_NAME}-prefill
+  name: ${EPP_NAME}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: ${EPP_NAME}-prefill-binding
+  name: ${EPP_NAME}-binding
 subjects:
 - kind: ServiceAccount
-  name: ${EPP_NAME}-prefill
+  name: ${EPP_NAME}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -18,12 +18,12 @@ roleRef:
 apiVersion: v1
 kind: Service
 metadata:
-  name: ${EPP_NAME}-prefill
+  name: ${EPP_NAME}
   labels:
-    app: ${EPP_NAME}-prefill
+    app: ${EPP_NAME}
 spec:
   selector:
-    app: ${EPP_NAME}-prefill
+    app: ${EPP_NAME}
   ports:
   - name: default
     protocol: TCP
@@ -44,20 +44,20 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ${EPP_NAME}-prefill
+  name: ${EPP_NAME}
   labels:
-    app: ${EPP_NAME}-prefill
+    app: ${EPP_NAME}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ${EPP_NAME}-prefill
+      app: ${EPP_NAME}
   template:
     metadata:
       labels:
-        app: ${EPP_NAME}-prefill
+        app: ${EPP_NAME}
     spec:
-      serviceAccountName: ${EPP_NAME}-prefill
+      serviceAccountName: ${EPP_NAME}
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
@@ -65,7 +65,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --pool-name
-        - "${POOL_NAME}-prefill"
+        - "${POOL_NAME}"
         - --pool-namespace
         - "${NAMESPACE}"
         - --v
@@ -103,4 +103,4 @@ spec:
       volumes:
       - name: epp-config
         configMap:
-          name: epp-config-prefill
+          name: epp-config

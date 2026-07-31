@@ -3,6 +3,7 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -53,6 +54,73 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 		keys[i] = base + uint64(i) // #nosec G115 -- test data, i is small
 	}
 	return keys
+}
+
+type sourceEndpointAdapter struct{}
+
+func (a *sourceEndpointAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
+	return "10.0.0.1:8000", "test-model", EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: []uint64{uint64(msg.Payload[0])},
+				Tokens:      makeTokens(16),
+			},
+		},
+	}, nil
+}
+
+func (a *sourceEndpointAdapter) ShardingKey(*RawMessage) string {
+	return "10.0.0.1:8000"
+}
+
+func TestProcessRawMessage_UsesSubscriberSourceEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+
+	for i, sourceEndpoint := range []string{"10.0.0.1:8000", "10.0.0.1:8003"} {
+		pool.processRawMessage(ctx, &RawMessage{
+			Topic:          "kv@10.0.0.1:8000@test-model",
+			Payload:        []byte{byte(i + 1)},
+			SourceEndpoint: sourceEndpoint,
+		})
+	}
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 2)
+
+	got := []string{
+		result[keys[0]][0].PodIdentifier,
+		result[keys[0]][1].PodIdentifier,
+	}
+	assert.ElementsMatch(t, []string{"10.0.0.1:8000", "10.0.0.1:8003"}, got)
+}
+
+func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:   "kv@10.0.0.1:8000@test-model",
+		Payload: []byte{1},
+	})
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 1)
+	assert.Equal(t, "10.0.0.1:8000", result[keys[0]][0].PodIdentifier)
 }
 
 // TestCanonicalWritePath_FallbackLegacy verifies that when BlockSize equals
@@ -1094,6 +1162,64 @@ func TestPool_DedupMetricsCountBlockHashes(t *testing.T) {
 		"first of two duplicate removes must suppress all 4 constituent block hashes")
 	assert.Equal(t, 4.0, counterValue(t, metrics.DedupRemovedHashesForwarded)-forwardedBefore,
 		"second remove must forward all 4 constituent block hashes")
+}
+
+// stubAdapter is a minimal EngineAdapter that shards every message onto the
+// same key and decodes to an empty batch, so tasks flow through the pool
+// without exercising any engine-specific parsing.
+type stubAdapter struct{}
+
+//nolint:gocritic // unnamed results match the EngineAdapter implementations
+func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, error) {
+	return "pod-1", "model-1", EventBatch{}, nil
+}
+
+func (stubAdapter) ShardingKey(_ *RawMessage) string { return "pod-1" }
+
+// TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
+// enqueues and dequeues, and is reset once the pool shuts down.
+func TestPool_QueueDepthAccounting(t *testing.T) {
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+
+	tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+		BlockSizeTokens: 4, HashSeed: "test",
+	})
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Concurrency = 2
+	pool := NewPool(cfg, idx, tp, stubAdapter{})
+
+	const tasks = 3
+	for i := range uint64(tasks) {
+		pool.AddTask(&RawMessage{Topic: "kv@pod-1@model-1", Sequence: i})
+	}
+
+	assert.Equal(t, int64(tasks), pool.queueDepth.Load(), "every enqueued task must be counted")
+	assert.InDelta(t, float64(tasks), gaugeValue(t, metrics.PoolQueueDepth), 0.001)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	assert.Eventually(t, func() bool {
+		return pool.queueDepth.Load() == 0
+	}, 5*time.Second, 10*time.Millisecond, "workers must decrement the depth as tasks drain")
+
+	pool.Shutdown(ctx)
+	assert.Equal(t, int64(0), pool.queueDepth.Load())
+	assert.InDelta(t, 0.0, gaugeValue(t, metrics.PoolQueueDepth), 0.001)
+	assert.InDelta(t, float64(cfg.Concurrency), gaugeValue(t, metrics.PoolCapacity), 0.001)
+}
+
+// gaugeValue reads the current value of a prometheus.Gauge without touching the
+// global registry.
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, g.Write(&m))
+	return m.GetGauge().GetValue()
 }
 
 // counterValue reads the current value of a plain prometheus.Counter without

@@ -55,3 +55,4 @@
 # Coordinator
 /cmd/coordinator/                                                         @shmuelk @roytman @llm-d/router-maintainers
 /pkg/coordinator/                                                         @shmuelk @roytman @llm-d/router-maintainers
+/test/coordinator/                                                        @shmuelk @roytman @llm-d/router-maintainers

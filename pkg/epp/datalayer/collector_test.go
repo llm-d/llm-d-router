@@ -71,6 +71,7 @@ func (e *errSource) Dispatch(_ context.Context, _ fwkdl.Endpoint) error {
 	return e.err
 }
 func (e *errSource) AppendExtractor(_ fwkplugin.Plugin) error { return nil }
+func (e *errSource) Interval() time.Duration                  { return 0 }
 
 type dataSource struct {
 	kind      string
@@ -96,6 +97,7 @@ func (d *dataSource) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	}
 	return nil
 }
+func (d *dataSource) Interval() time.Duration { return 0 }
 func (d *dataSource) AppendExtractor(p fwkplugin.Plugin) error {
 	s, ok := p.(*stubExtractor)
 	if !ok {

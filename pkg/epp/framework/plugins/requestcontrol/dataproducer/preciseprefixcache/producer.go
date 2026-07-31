@@ -73,14 +73,18 @@ var (
 // subscriberManager is the subset of kvevents.SubscriberManager the producer
 // relies on, narrowed so tests can substitute a fake.
 type subscriberManager interface {
-	EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, topicFilter string, remoteSocket bool) error
+	EnsureSubscriber(
+		ctx context.Context,
+		podIdentifier, sourceEndpoint, endpoint, topicFilter string,
+		remoteSocket bool,
+	) error
 	RemoveSubscriber(ctx context.Context, podIdentifier string)
 	GetActiveSubscribers() ([]string, []string)
 	Shutdown(ctx context.Context)
 }
 
 // Producer is a DataProducer plugin that maintains a KV-block prefix-cache
-// index by subscribing to vLLM KV-events and writes per-endpoint
+// index by subscribing to engine KV-events and writes per-endpoint
 // PrefixCacheMatchInfo for each request. Operators pair it with the
 // generic prefix-cache-scorer (set prefixMatchInfoProducerName to this
 // producer's instance name) to route requests by precise cache locality.
@@ -178,12 +182,16 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, fmt.Errorf("failed to create KVBlockScorer: %w", err)
 	}
 
-	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, engineadapter.NewVLLMAdapter())
+	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
+	}
+	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
-		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber",
+		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
 		}
@@ -316,7 +324,7 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 
-	perPromptKeys, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
+	perPromptKeys, mmBlockIndices, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to compute block keys: %w", err)
@@ -326,12 +334,12 @@ func (p *Producer) Produce(ctx context.Context,
 		return nil
 	}
 
-	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys)
+	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys, mmBlockIndices)
 }
 
 func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
-	perPromptKeys [][]kvblock.BlockHash,
+	perPromptKeys [][]kvblock.BlockHash, mmBlockIndices []int,
 ) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointSet := extractEndpointSet(endpoints)
@@ -381,10 +389,13 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 				cachedBlocksByTier[tier] += count
 			}
 		}
-		ep.Put(p.dk.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
-				WithCachedBlockCount(cachedBlocks).
-				WithCachedBlocksByTier(cachedBlocksByTier))
+		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
+			WithCachedBlockCount(cachedBlocks).
+			WithCachedBlocksByTier(cachedBlocksByTier)
+		if len(mmBlockIndices) > 0 {
+			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
+		}
+		ep.Put(p.dk.String(), info)
 	}
 
 	if p.speculativeEnabled {

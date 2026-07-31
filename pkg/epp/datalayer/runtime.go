@@ -47,7 +47,8 @@ const (
 
 // Runtime manages data sources, extractors, their mapping, and endpoint lifecycle.
 type Runtime struct {
-	pollingInterval time.Duration // used for polling sources
+	requestedPollingInterval time.Duration // original value from flag, for warning log
+	pollingInterval          time.Duration // effective interval (>= defaultRefreshInterval)
 
 	dispatchers  *pollingDispatchers
 	notification *notificationManager
@@ -66,26 +67,32 @@ const (
 )
 
 // NewRuntime creates a new Runtime with the given polling interval.
-// If duration is <= 0, uses the defaultRefreshInterval.
+// If duration is <= 0 or below defaultRefreshInterval, uses defaultRefreshInterval.
 func NewRuntime(pollingInterval time.Duration) *Runtime {
 	interval := defaultRefreshInterval
-	if pollingInterval > 0 {
+	if pollingInterval > defaultRefreshInterval {
 		interval = pollingInterval
 	}
 	return &Runtime{
-		pollingInterval: interval,
-		dispatchers:     newPollingDispatchers(),
-		notification:    newNotificationManager(),
-		endpoint:        newEndpointManager(),
-		extractors:      newExtractorMap(),
-		collectors:      newCollectorManager(),
-		logger:          logr.Discard(),
+		requestedPollingInterval: pollingInterval,
+		pollingInterval:          interval,
+		dispatchers:              newPollingDispatchers(),
+		notification:             newNotificationManager(),
+		endpoint:                 newEndpointManager(),
+		extractors:               newExtractorMap(),
+		collectors:               newCollectorManager(),
+		logger:                   logr.Discard(),
 	}
 }
 
 // Configure is called to transform the configuration information into the Runtime's
 // internal fields.
 func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
+	if r.requestedPollingInterval > 0 && r.requestedPollingInterval < defaultRefreshInterval {
+		logger.Info("refresh-metrics-interval below minimum, clamped",
+			"requested", r.requestedPollingInterval, "effective", r.pollingInterval)
+	}
+
 	hasPending := len(r.pendingRegistrations) > 0
 	if (cfg == nil || len(cfg.Sources) == 0) && !hasPending {
 		return errors.New("data layer enabled but no data sources configured")
@@ -97,6 +104,21 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		numSources = len(cfg.Sources)
 	}
 	logger.Info("Configuring datalayer runtime", "numSources", numSources)
+
+	// Lower the base tick to the smallest source interval so that no
+	// source is forced to run slower than its configured cadence.
+	if cfg != nil {
+		for _, srcCfg := range cfg.Sources {
+			if disp, ok := srcCfg.Plugin.(fwkdl.PollingDispatcher); ok {
+				if iv := disp.Interval(); iv > 0 && iv < r.pollingInterval {
+					r.pollingInterval = iv
+				}
+			}
+		}
+		if r.pollingInterval < defaultRefreshInterval {
+			r.pollingInterval = defaultRefreshInterval
+		}
+	}
 
 	// boundTypes tracks (srcName, extractor type) pairs that already have a bound
 	// extractor. Pending registrations consult this so code-registered defaults
@@ -118,6 +140,21 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 			logger.V(logging.DEFAULT).Info("Processing source", "source", srcName, "numExtractors", len(srcCfg.Extractors))
 			if err := r.validateSourceExtractors(src, srcCfg.Extractors); err != nil {
 				return err
+			}
+
+			if disp, ok := src.(fwkdl.PollingDispatcher); ok {
+				period, err := periodTicks(disp.Interval(), r.pollingInterval)
+				if err != nil {
+					return fmt.Errorf("source %s: %w", srcName, err)
+				}
+				if requested := disp.Interval(); requested > 0 {
+					effective := time.Duration(period) * r.pollingInterval
+					if effective != requested {
+						logger.Info("source interval rounded to nearest base-tick multiple",
+							"source", srcName, "requested", requested, "effective", effective)
+					}
+				}
+				src = newIntervalDispatcher(disp, period)
 			}
 
 			if err := r.registerSource(src, gvk); err != nil {
@@ -225,7 +262,6 @@ func (r *Runtime) Register(reg fwkdl.PendingRegistration) error {
 // registerSource dispatches src to the matching variant manager. g enforces
 // per-Configure-call GVK uniqueness for NotificationSources. src may be a
 // PollingDispatcher (not a DataSource), so the parameter is plugin.Plugin.
-//
 // A source that implements more than one variant interface is rejected: type-
 // switch order would otherwise silently bind it to the first match, hiding the
 // ambiguity until a notification or endpoint event mismatched its handler.
@@ -375,6 +411,9 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 
 	dispatchers := make([]fwkdl.PollingDispatcher, 0, r.dispatchers.Count())
 	for _, d := range r.dispatchers.Dispatchers() {
+		if id, ok := d.(*intervalDispatcher); ok {
+			d = newIntervalDispatcher(id.PollingDispatcher, id.period)
+		}
 		dispatchers = append(dispatchers, d)
 	}
 	if len(dispatchers) == 0 {
