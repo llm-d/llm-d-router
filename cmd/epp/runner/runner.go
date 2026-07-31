@@ -760,7 +760,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
-	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
+	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle, opts.AllowExperimentalPlugins); err != nil {
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
 	}
 

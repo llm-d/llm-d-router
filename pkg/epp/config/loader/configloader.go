@@ -164,7 +164,7 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
 	}
 
-	if err := applySystemDefaults(rawConfig, handle); err != nil {
+	if err := applySystemDefaults(rawConfig, handle, allowExperimentalPlugins); err != nil {
 		return nil, fmt.Errorf("system default application failed: %w", err)
 	}
 	logger.Info("Instantiated all plugins and applied system defaults. Effective raw configuration", "config", rawConfig.String())

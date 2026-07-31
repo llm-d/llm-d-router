@@ -69,7 +69,7 @@ func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error)
 // creation repeats until no required key is missing or no further producer can
 // be added. defaultProducerRegistry maps a data key to its default producer type;
 // factoryRegistry maps a plugin type to its factory function.
-func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map[string]string, factoryRegistry map[string]plugin.FactoryFunc, handle plugin.Handle) error {
+func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map[string]string, factoryRegistry map[string]plugin.FactoryFunc, handle plugin.Handle, allowExperimentalPlugins bool) error {
 	logger := log.FromContext(ctx)
 
 	for {
@@ -99,6 +99,10 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 			if handle.Plugin(defaultProducerNameOrType) != nil {
 				// Already created. This can happen when a producer produces multiple data keys.
 				continue
+			}
+			stability := plugin.GetPluginStability(defaultProducerNameOrType)
+			if stability == plugin.StabilityAlpha && !allowExperimentalPlugins {
+				return fmt.Errorf("auto-created default producer %q has %s stability level, but command line flag --allow-experimental-plugins is not set (required by dataKey: %v, consumed by: %v)", defaultProducerNameOrType, stability, key, consumerName)
 			}
 			factory, ok := factoryRegistry[defaultProducerNameOrType]
 			if !ok {

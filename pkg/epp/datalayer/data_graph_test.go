@@ -401,7 +401,7 @@ func TestCreateMissingDataProducers(t *testing.T) {
 				handle.AddPlugin(p.TypedName().Name, p)
 			}
 
-			err := CreateMissingDataProducers(context.Background(), tc.defaultProducerRegistry, tc.factoryRegistry, handle)
+			err := CreateMissingDataProducers(context.Background(), tc.defaultProducerRegistry, tc.factoryRegistry, handle, true)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -459,7 +459,7 @@ func TestCreateMissingDataProducers_Transitive(t *testing.T) {
 	err := CreateMissingDataProducers(context.Background(),
 		map[string]string{keyOuter.String(): typeOuter, keyInner.String(): typeInner},
 		map[string]fwkplugin.FactoryFunc{typeOuter: outerFactory, typeInner: innerFactory},
-		handle)
+		handle, true)
 	assert.NoError(t, err)
 
 	assert.NotNil(t, handle.Plugin(typeOuter), "directly-needed producer should be auto-created")
@@ -560,7 +560,7 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 				handle.AddPlugin(p.TypedName().Name, p)
 			}
 
-			err := CreateMissingDataProducers(context.Background(), map[string]string{}, tc.factoryRegistry, handle)
+			err := CreateMissingDataProducers(context.Background(), map[string]string{}, tc.factoryRegistry, handle, true)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -583,4 +583,30 @@ func assertTopologicalOrder(t *testing.T, dag map[string][]string, ordered []str
 			assert.Less(t, positions[dep], positions[node], "Dependency %s should come before %s", dep, node)
 		}
 	}
+}
+
+func TestCreateMissingDataProducers_AlphaStabilityBlocked(t *testing.T) {
+	alphaProducerType := "alpha-producer-type"
+	fwkplugin.Register(alphaProducerType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("alphaKey", alphaProducerType): nil}}, nil
+	})
+
+	keyAlpha := fwkplugin.NewDataKey("alphaKey", alphaProducerType)
+	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+	handle.AddPlugin("consumer", &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyAlpha: nil}})
+
+	// 1. Without allowExperimentalPlugins -> should fail
+	err := CreateMissingDataProducers(context.Background(),
+		map[string]string{keyAlpha.String(): alphaProducerType},
+		fwkplugin.Registry,
+		handle, false)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
+
+	// 2. With allowExperimentalPlugins -> should succeed
+	err = CreateMissingDataProducers(context.Background(),
+		map[string]string{keyAlpha.String(): alphaProducerType},
+		fwkplugin.Registry,
+		handle, true)
+	assert.NoError(t, err)
 }

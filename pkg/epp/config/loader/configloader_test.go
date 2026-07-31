@@ -1219,7 +1219,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 			"existing-plugin": &mockSaturationDetector{},
 		}
 
-		err := ensureSaturationDetector(cfg, handle, allPlugins)
+		err := ensureSaturationDetector(cfg, handle, allPlugins, false)
 		require.NoError(t, err)
 		require.Equal(t, "existing-plugin", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
@@ -1237,7 +1237,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 			"utilization-detector": &mockSaturationDetector{},
 		}
 
-		err := ensureSaturationDetector(cfg, handle, allPlugins)
+		err := ensureSaturationDetector(cfg, handle, allPlugins, false)
 		require.NoError(t, err)
 		require.Equal(t, "utilization-detector", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
