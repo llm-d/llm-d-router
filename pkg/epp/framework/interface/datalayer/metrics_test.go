@@ -26,14 +26,19 @@ import (
 
 func TestMetricsClone(t *testing.T) {
 	m := &Metrics{
-		ActiveModels:            map[string]int{"modelA": 1},
-		WaitingModels:           map[string]int{"modelB": 2},
-		MaxActiveModels:         5,
-		RunningRequestsSize:     3,
-		WaitingQueueSize:        7,
-		KVCacheUsagePercent:     42.5,
-		KvCacheMaxTokenCapacity: 2048,
-		UpdateTime:              time.Now(),
+		ActiveModels:             map[string]int{"modelA": 1},
+		WaitingModels:            map[string]int{"modelB": 2},
+		MaxActiveModels:          5,
+		RunningRequestsSize:      3,
+		WaitingQueueSize:         7,
+		KVCacheUsagePercent:      42.5,
+		KvCacheMaxTokenCapacity:  2048,
+		NumPrefillComputedTokens: 1024,
+		NumPrefillCachedTokens:   4096,
+		NumPrefillTotalTokens:    5120,
+		BatchExecutionLatencyMs:  50.0,
+		ComputePrefillThroughput: 20480.0,
+		UpdateTime:               time.Now(),
 	}
 
 	clone := m.Clone()

@@ -19,9 +19,13 @@ package zmqmetrics
 // ZmqMetricsStats represents the Msgpack serialization schema
 // sent by the model server's ZMQ publisher.
 type ZmqMetricsStats struct {
-	NumRequestsRunning int            `msgpack:"num_requests_running"`
-	NumRequestsWaiting int            `msgpack:"num_requests_waiting"`
-	KVCacheUsagePerc   float64        `msgpack:"kv_cache_usage_perc"`
-	CacheConfigInfo    map[string]any `msgpack:"cache_config_info"`
-	EngineID           string         `msgpack:"engine_id"`
+	NumRequestsRunning       int            `msgpack:"num_requests_running"`
+	NumRequestsWaiting       int            `msgpack:"num_requests_waiting"`
+	KVCacheUsagePerc         float64        `msgpack:"kv_cache_usage_perc"`
+	CacheConfigInfo          map[string]any `msgpack:"cache_config_info"`
+	EngineID                 string         `msgpack:"engine_id"`
+	NumPrefillComputedTokens int            `msgpack:"num_prefill_computed_tokens"`
+	NumPrefillCachedTokens   int            `msgpack:"num_prefill_cached_tokens"`
+	NumPrefillTotalTokens    int            `msgpack:"num_prefill_total_tokens"`
+	BatchExecutionLatencyMs  float64        `msgpack:"batch_execution_latency_ms"`
 }

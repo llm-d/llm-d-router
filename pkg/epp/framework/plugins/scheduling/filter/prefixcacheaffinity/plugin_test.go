@@ -291,3 +291,24 @@ func TestFactory_DefaultsToPrefillThroughput(t *testing.T) {
 	assert.Error(t, err, "default throughput source needs a non-zero peakPrefillThroughput")
 	assert.Contains(t, err.Error(), "peakPrefillThroughput must be > 0")
 }
+
+func TestFilter_OnlinePrefillThroughputUsedOverStaticFallback(t *testing.T) {
+	// PeakPrefillThroughput is 1000 tokens/sec.
+	// Endpoint "a" has 500 tokens in flight. With static throughput, TTFT = 500 / 1000 * 1000 = 500ms.
+	// But endpoint "a" has online ComputePrefillThroughput = 5000 tokens/sec. With online throughput, TTFT = 500 / 5000 * 1000 = 100ms.
+	// Endpoint "b" has 50 tokens in flight and static fallback (0 online), TTFT = 50 / 1000 * 1000 = 50ms.
+	// With penalty threshold = 100ms, bestStickyTTFT (100ms) - bestNonStickyTTFT (50ms) = 50ms <= 100ms. Stickiness is kept!
+	// If static throughput (1000) was used for "a", TTFT (500ms) - 50ms = 450ms > 100ms, which would break stickiness.
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
+
+	epA := makeEndpoint("a", 90, 10, 500)
+	mA := epA.GetMetrics()
+	mA.ComputePrefillThroughput = 5000
+
+	epB := makeEndpoint("b", 10, 10, 50)
+
+	endpoints := []fwksched.Endpoint{epA, epB}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, 1, len(result), "online throughput should reduce estimated TTFT so stickiness is maintained")
+	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
+}

@@ -194,9 +194,10 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	}
 
 	// TTFT load gate: break stickiness if sticky endpoints are too slow.
+	bestStickyTTFT := math.MaxFloat64
 	if p.config.MaxTTFTPenaltyMs > 0 && len(nonSticky) > 0 {
-		bestStickyTTFT := p.bestTTFT(sticky)
-		bestNonStickyTTFT := p.bestTTFT(nonSticky)
+		bestStickyTTFT = p.bestTTFT(ctx, sticky)
+		bestNonStickyTTFT := p.bestTTFT(ctx, nonSticky)
 		if bestStickyTTFT-bestNonStickyTTFT > p.config.MaxTTFTPenaltyMs {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
@@ -204,11 +205,13 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 				"prefillThroughput", p.config.PeakPrefillThroughput)
 			return endpoints
 		}
+	} else if len(sticky) > 0 {
+		bestStickyTTFT = p.bestTTFT(ctx, sticky)
 	}
 
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints),
-		"bestStickyTTFT", p.bestTTFT(sticky),
+		"bestStickyTTFT", bestStickyTTFT,
 		"prefillThroughput", p.config.PeakPrefillThroughput)
 	return sticky
 }
@@ -241,10 +244,10 @@ func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
 }
 
 // bestTTFT returns the lowest per-endpoint TTFT (ms) across endpoints.
-func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
+func (p *Plugin) bestTTFT(ctx context.Context, endpoints []fwksched.Endpoint) float64 {
 	best := math.MaxFloat64
 	for _, ep := range endpoints {
-		if ttft := p.endpointTTFT(ep); ttft < best {
+		if ttft := p.endpointTTFT(ctx, ep); ttft < best {
 			best = ttft
 		}
 	}
@@ -256,7 +259,7 @@ func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
 // throughput. Endpoints missing the required attribute contribute no signal:
 // MaxFloat64 on the predictor path (never the fastest), 0 in-flight tokens on
 // the throughput path (no observed load).
-func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
+func (p *Plugin) endpointTTFT(ctx context.Context, ep fwksched.Endpoint) float64 {
 	if p.config.usesLatencyPredictor() {
 		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String()); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
@@ -264,7 +267,20 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
 		}
 		return math.MaxFloat64
 	}
-	return float64(p.inFlightTokens(ep)) / p.config.PeakPrefillThroughput * 1000
+
+	throughput := p.config.PeakPrefillThroughput
+	if m := ep.GetMetrics(); m != nil && m.ComputePrefillThroughput > 0 {
+		throughput = m.ComputePrefillThroughput
+	}
+
+	logger := log.FromContext(ctx)
+	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: calculated endpoint TTFT",
+		"endpoint", ep.GetMetadata().NamespacedName,
+		"throughput", throughput,
+		"inFlightTokens", p.inFlightTokens(ep),
+	)
+
+	return float64(p.inFlightTokens(ep)) / throughput * 1000
 }
 
 // inFlightTokens returns an endpoint's in-flight token count, or 0 when the

@@ -37,6 +37,15 @@ type Metrics struct {
 	// Number of GPU blocks in the model server for KV Cache.
 	CacheNumBlocks int
 
+	// Raw scalar telemetry fields
+	NumPrefillComputedTokens int
+	NumPrefillCachedTokens   int
+	NumPrefillTotalTokens    int
+	BatchExecutionLatencyMs  float64
+
+	// Derived online prefill throughput (tokens/sec)
+	ComputePrefillThroughput float64
+
 	// UpdateTime records the last time when the metrics were updated.
 	UpdateTime time.Time
 }
@@ -68,15 +77,20 @@ func (m *Metrics) Clone() *Metrics {
 	waitingModels := make(map[string]int, len(m.WaitingModels))
 	maps.Copy(waitingModels, m.WaitingModels)
 	return &Metrics{
-		ActiveModels:            activeModels,
-		WaitingModels:           waitingModels,
-		MaxActiveModels:         m.MaxActiveModels,
-		RunningRequestsSize:     m.RunningRequestsSize,
-		WaitingQueueSize:        m.WaitingQueueSize,
-		KVCacheUsagePercent:     m.KVCacheUsagePercent,
-		KvCacheMaxTokenCapacity: m.KvCacheMaxTokenCapacity,
-		CacheBlockSize:          m.CacheBlockSize,
-		CacheNumBlocks:          m.CacheNumBlocks,
-		UpdateTime:              m.UpdateTime,
+		ActiveModels:             activeModels,
+		WaitingModels:            waitingModels,
+		MaxActiveModels:          m.MaxActiveModels,
+		RunningRequestsSize:      m.RunningRequestsSize,
+		WaitingQueueSize:         m.WaitingQueueSize,
+		KVCacheUsagePercent:      m.KVCacheUsagePercent,
+		KvCacheMaxTokenCapacity:  m.KvCacheMaxTokenCapacity,
+		CacheBlockSize:           m.CacheBlockSize,
+		CacheNumBlocks:           m.CacheNumBlocks,
+		NumPrefillComputedTokens: m.NumPrefillComputedTokens,
+		NumPrefillCachedTokens:   m.NumPrefillCachedTokens,
+		NumPrefillTotalTokens:    m.NumPrefillTotalTokens,
+		BatchExecutionLatencyMs:  m.BatchExecutionLatencyMs,
+		ComputePrefillThroughput: m.ComputePrefillThroughput,
+		UpdateTime:               m.UpdateTime,
 	}
 }

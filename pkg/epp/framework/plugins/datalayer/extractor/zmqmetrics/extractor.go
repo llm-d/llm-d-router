@@ -34,29 +34,50 @@ import (
 
 const ZMQExtractorType = "zmq-state-extractor"
 
+type Config struct {
+	PrefillBufferCapacity int `json:"prefillBufferCapacity,omitempty"`
+}
+
+var DefaultConfig = Config{
+	PrefillBufferCapacity: 5,
+}
+
 // Extractor implements ZMQ msgpack metrics extraction.
 type Extractor struct {
 	typedName fwkplugin.TypedName
+	config    Config
+	tracker   *prefillTracker
 }
 
 var _ fwkdl.StreamingExtractor[[]byte] = (*Extractor)(nil)
 
 // NewZMQMetricsExtractor returns a new ZMQ metrics extractor.
-func NewZMQMetricsExtractor(name string) *Extractor {
+func NewZMQMetricsExtractor(name string, config Config) *Extractor {
 	if name == "" {
 		name = ZMQExtractorType
+	}
+	if config.PrefillBufferCapacity <= 0 {
+		config.PrefillBufferCapacity = DefaultConfig.PrefillBufferCapacity
 	}
 	return &Extractor{
 		typedName: fwkplugin.TypedName{
 			Type: ZMQExtractorType,
 			Name: name,
 		},
+		config:  config,
+		tracker: newPrefillTracker(config.PrefillBufferCapacity),
 	}
 }
 
 // ZMQExtractorFactory is a factory function used to instantiate ZMQ extractor plugins.
-func ZMQExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewZMQMetricsExtractor(name), nil
+func ZMQExtractorFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	config := DefaultConfig
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&config); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+		}
+	}
+	return NewZMQMetricsExtractor(name, config), nil
 }
 
 // TypedName returns the type and name of the Extractor.
@@ -74,12 +95,17 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.StreamInput[[]byte])
 	}
 
 	ep := in.Endpoint
+	epKey := ep.GetMetadata().NamespacedName.String()
 	current := ep.GetMetrics()
 	clone := current.Clone()
 
 	clone.RunningRequestsSize = stats.NumRequestsRunning
 	clone.WaitingQueueSize = stats.NumRequestsWaiting
 	clone.KVCacheUsagePercent = stats.KVCacheUsagePerc
+	clone.NumPrefillComputedTokens = stats.NumPrefillComputedTokens
+	clone.NumPrefillCachedTokens = stats.NumPrefillCachedTokens
+	clone.NumPrefillTotalTokens = stats.NumPrefillTotalTokens
+	clone.BatchExecutionLatencyMs = stats.BatchExecutionLatencyMs
 
 	if stats.CacheConfigInfo != nil {
 		if val, ok := parseToInt(stats.CacheConfigInfo["block_size"]); ok {
@@ -93,6 +119,11 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.StreamInput[[]byte])
 		} else if clone.CacheBlockSize > 0 && clone.CacheNumBlocks > 0 {
 			clone.KvCacheMaxTokenCapacity = clone.CacheBlockSize * clone.CacheNumBlocks
 		}
+	}
+
+	if stats.NumPrefillComputedTokens > 0 {
+		rate := ext.tracker.AddReading(epKey, stats.NumPrefillComputedTokens, stats.BatchExecutionLatencyMs)
+		clone.ComputePrefillThroughput = rate
 	}
 
 	clone.UpdateTime = time.Now()
@@ -147,6 +178,18 @@ func populateStatsFromMap(m map[string]any, target *sourcezmq.ZmqMetricsStats) {
 	if engineID, ok := m["engine_id"].(string); ok {
 		target.EngineID = engineID
 	}
+	if val, ok := parseToInt(m["num_prefill_computed_tokens"]); ok {
+		target.NumPrefillComputedTokens = val
+	}
+	if val, ok := parseToInt(m["num_prefill_cached_tokens"]); ok {
+		target.NumPrefillCachedTokens = val
+	}
+	if val, ok := parseToInt(m["num_prefill_total_tokens"]); ok {
+		target.NumPrefillTotalTokens = val
+	}
+	if val, ok := parseToFloat(m["batch_execution_latency_ms"]); ok {
+		target.BatchExecutionLatencyMs = val
+	}
 }
 
 func populateStatsFromSlice(s []any, target *sourcezmq.ZmqMetricsStats) {
@@ -173,6 +216,26 @@ func populateStatsFromSlice(s []any, target *sourcezmq.ZmqMetricsStats) {
 	if len(s) > 4 {
 		if engineID, ok := s[4].(string); ok {
 			target.EngineID = engineID
+		}
+	}
+	if len(s) > 5 {
+		if val, ok := parseToInt(s[5]); ok {
+			target.NumPrefillComputedTokens = val
+		}
+	}
+	if len(s) > 6 {
+		if val, ok := parseToInt(s[6]); ok {
+			target.NumPrefillCachedTokens = val
+		}
+	}
+	if len(s) > 7 {
+		if val, ok := parseToInt(s[7]); ok {
+			target.NumPrefillTotalTokens = val
+		}
+	}
+	if len(s) > 8 {
+		if val, ok := parseToFloat(s[8]); ok {
+			target.BatchExecutionLatencyMs = val
 		}
 	}
 }

@@ -23,20 +23,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
+	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	sourcezmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/zmqmetrics"
 )
 
 func TestZMQExtractor_Extract(t *testing.T) {
-	ext := NewZMQMetricsExtractor("test-extractor")
+	ext := NewZMQMetricsExtractor("test-extractor", DefaultConfig)
 	assert.Equal(t, ZMQExtractorType, ext.TypedName().Type)
 
-	t.Run("int and string cache config info", func(t *testing.T) {
+	t.Run("int and string cache config info with prefill fields", func(t *testing.T) {
 		stats := sourcezmq.ZmqMetricsStats{
-			NumRequestsRunning: 5,
-			NumRequestsWaiting: 12,
-			KVCacheUsagePerc:   0.45,
+			NumRequestsRunning:       5,
+			NumRequestsWaiting:       12,
+			KVCacheUsagePerc:         0.45,
+			NumPrefillComputedTokens: 1024,
+			NumPrefillCachedTokens:   4096,
+			NumPrefillTotalTokens:    5120,
+			BatchExecutionLatencyMs:  50.0,
 			CacheConfigInfo: map[string]any{
 				"block_size":           "16",
 				"num_gpu_blocks":       "7605",
@@ -49,7 +54,8 @@ func TestZMQExtractor_Extract(t *testing.T) {
 		require.NoError(t, err)
 
 		ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-			Address: "10.0.0.1",
+			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod-1"},
+			Address:        "10.0.0.1",
 		}, nil)
 
 		in := fwkdl.StreamInput[[]byte]{
@@ -67,15 +73,24 @@ func TestZMQExtractor_Extract(t *testing.T) {
 		assert.Equal(t, 16, m.CacheBlockSize)
 		assert.Equal(t, 7605, m.CacheNumBlocks)
 		assert.Equal(t, 121680, m.KvCacheMaxTokenCapacity)
+		assert.Equal(t, 1024, m.NumPrefillComputedTokens)
+		assert.Equal(t, 4096, m.NumPrefillCachedTokens)
+		assert.Equal(t, 5120, m.NumPrefillTotalTokens)
+		assert.Equal(t, 50.0, m.BatchExecutionLatencyMs)
+		// Rate = 1024 tokens / (50 ms / 1000) = 20480 tokens/sec
+		assert.InDelta(t, 20480.0, m.ComputePrefillThroughput, 0.001)
 	})
 
-	t.Run("tuple slice msgpack", func(t *testing.T) {
+	t.Run("tuple slice msgpack with prefill fields", func(t *testing.T) {
 		tuplePayload, err := msgpack.Marshal([]any{
-			3, 7, 0.25, map[string]any{"block_size": 16, "num_gpu_blocks": 1000}, "engine-2",
+			3, 7, 0.25, map[string]any{"block_size": 16, "num_gpu_blocks": 1000}, "engine-2", 512, 1024, 1536, 25.0,
 		})
 		require.NoError(t, err)
 
-		ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Address: "10.0.0.2"}, nil)
+		ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod-2"},
+			Address:        "10.0.0.2",
+		}, nil)
 		err = ext.Extract(context.Background(), fwkdl.StreamInput[[]byte]{Payload: tuplePayload, Endpoint: ep})
 		require.NoError(t, err)
 
@@ -85,11 +100,17 @@ func TestZMQExtractor_Extract(t *testing.T) {
 		assert.Equal(t, 0.25, m.KVCacheUsagePercent)
 		assert.Equal(t, 16, m.CacheBlockSize)
 		assert.Equal(t, 1000, m.CacheNumBlocks)
+		assert.Equal(t, 512, m.NumPrefillComputedTokens)
+		assert.Equal(t, 1024, m.NumPrefillCachedTokens)
+		assert.Equal(t, 1536, m.NumPrefillTotalTokens)
+		assert.Equal(t, 25.0, m.BatchExecutionLatencyMs)
+		// Rate = 512 tokens / (25 ms / 1000) = 20480 tokens/sec
+		assert.InDelta(t, 20480.0, m.ComputePrefillThroughput, 0.001)
 	})
 }
 
 func TestZMQExtractor_InvalidPayload(t *testing.T) {
-	ext := NewZMQMetricsExtractor("test-extractor")
+	ext := NewZMQMetricsExtractor("test-extractor", DefaultConfig)
 	ep := fwkdl.NewEndpoint(nil, nil)
 
 	in := fwkdl.StreamInput[[]byte]{
