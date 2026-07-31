@@ -54,6 +54,7 @@ type Runtime struct {
 	notification *notificationManager
 	endpoint     *endpointManager
 	extractors   *extractorMap
+	syncer       fwkdl.CrossReplicaSyncer
 
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
@@ -102,6 +103,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	numSources := 0
 	if cfg != nil {
 		numSources = len(cfg.Sources)
+		r.syncer = cfg.Syncer
 	}
 	logger.Info("Configuring datalayer runtime", "numSources", numSources)
 
@@ -238,6 +240,18 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 			r.extractors.Append(srcName, pending.Extractor)
 		}
 		markBound(srcName, extType)
+	}
+
+	// Register the cross-replica publisher as a polling source so the datalayer
+	// drives it per endpoint at its own interval, like any other dispatcher.
+	if pub := newCrossReplicaPublisher(r.syncer, r.extractors); pub != nil {
+		period, err := periodTicks(pub.Interval(), r.pollingInterval)
+		if err != nil {
+			return fmt.Errorf("cross-replica publisher: %w", err)
+		}
+		if err := r.dispatchers.Register(newIntervalDispatcher(pub, period)); err != nil {
+			return fmt.Errorf("register cross-replica publisher: %w", err)
+		}
 	}
 
 	logger.Info("Datalayer runtime configured",
@@ -482,6 +496,30 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 			if epExt, ok := ext.(fwkdl.EndpointExtractor); ok {
 				if err := epExt.Extract(ctx, *processed); err != nil {
 					logger.Error(err, "endpoint extractor failed", "extractor", ext.TypedName())
+				}
+				if contributor, ok := ext.(fwkdl.CrossReplicaContributor); ok && r.syncer != nil {
+					spec := contributor.CrossReplicaState()
+					endpointID := processed.Endpoint.GetMetadata().GetNamespacedName().String()
+					if spec.SyncDisabled {
+						continue
+					}
+					switch processed.Type {
+					case fwkdl.EventAddOrUpdate:
+						processed.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
+							Get: func() fwkdl.Cloneable {
+								if val, ok, _ := r.syncer.Get(ctx, spec.StateKey, endpointID, spec.Aggregate); ok {
+									if c, ok := val.(fwkdl.Cloneable); ok {
+										return c
+									}
+								}
+								return nil
+							},
+						})
+					case fwkdl.EventDelete:
+						if err := r.syncer.Delete(ctx, spec.StateKey, endpointID); err != nil {
+							logger.Error(err, "failed to delete shared state", "extractor", ext.TypedName(), "key", spec.StateKey)
+						}
+					}
 				}
 			}
 		}

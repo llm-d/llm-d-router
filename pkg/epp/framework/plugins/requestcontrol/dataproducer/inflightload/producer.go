@@ -63,6 +63,10 @@ type Config struct {
 	// to the approximate-prefix producer; set it to a precise-prefix-cache
 	// producer's instance name to discount against precise cache state instead.
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	// SyncCrossReplicaState controls whether this producer's in-flight load is
+	// synchronized across EPP replicas when a cross-replica syncer is configured.
+	// Unset defaults to true; set false to keep the load local to this replica.
+	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
 }
 
 func defaultConfig() Config {
@@ -97,6 +101,11 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
 
+	syncCrossReplicaState := true
+	if cfg.SyncCrossReplicaState != nil {
+		syncCrossReplicaState = *cfg.SyncCrossReplicaState
+	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
@@ -106,6 +115,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		uncachedRequestTokensDk:  attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
+		syncCrossReplicaState:    syncCrossReplicaState,
 		PluginState:              fwkplugin.NewPluginState(ctx),
 	}, nil
 }
@@ -116,6 +126,7 @@ var (
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
+	_ datalayer.CrossReplicaContributor    = (*InFlightLoadProducer)(nil)
 	_ fwkplugin.ConsumerPlugin             = &InFlightLoadProducer{}
 	_ fwkplugin.StateDumper                = &InFlightLoadProducer{}
 )
@@ -130,6 +141,7 @@ type InFlightLoadProducer struct {
 	dk                       fwkplugin.DataKey
 	prefixMatchInfoDK        fwkplugin.DataKey
 	uncachedRequestTokensDk  fwkplugin.DataKey
+	syncCrossReplicaState    bool
 	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
 }
 
@@ -276,6 +288,33 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 		Extractor:     p,
 		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
 	})
+}
+
+// CrossReplicaState declares the cross-EPP state this plugin contributes.
+func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
+	return datalayer.CrossReplicaSpec{
+		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
+		AttributeKey: p.dk.String(),
+		SyncDisabled: !p.syncCrossReplicaState,
+		Supply: func(endpointID string) func() datalayer.Cloneable {
+			return func() datalayer.Cloneable {
+				return &attrconcurrency.InFlightLoad{
+					Requests: p.requestTracker.get(endpointID),
+					Tokens:   p.tokenTracker.get(endpointID),
+				}
+			}
+		},
+		Aggregate: func(values []any) any {
+			total := &attrconcurrency.InFlightLoad{}
+			for _, v := range values {
+				if ifl, ok := v.(*attrconcurrency.InFlightLoad); ok {
+					total.Requests += ifl.Requests
+					total.Tokens += ifl.Tokens
+				}
+			}
+			return total
+		},
+	}
 }
 
 // Extract handles endpoint lifecycle events to manage dynamic attributes.
