@@ -443,6 +443,11 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
+	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
+		setupLog.Error(err, "Plugin stability validation failed")
+		return nil, nil, err
+	}
+
 	if err := r.configureAndStartDatalayer(ctx, eppConfig.DataConfig, mgr); err != nil {
 		setupLog.Error(err, "failed to initialize data layer")
 		return nil, nil, err
@@ -762,10 +767,6 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
 	}
 
-	if err := fwkplugin.ValidatePluginStability(handle, opts.AllowExperimentalPlugins); err != nil {
-		return nil, fmt.Errorf("plugin stability validation failed: %w", err)
-	}
-
 	// Add requestControl plugins
 	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
 
@@ -983,6 +984,11 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	disc, err := r.resolveDiscovery(rawConfig)
 	if err != nil {
 		setupLog.Error(err, "Failed to resolve discovery plugin")
+		return err
+	}
+
+	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
+		setupLog.Error(err, "Plugin stability validation failed")
 		return err
 	}
 
