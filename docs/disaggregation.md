@@ -578,10 +578,11 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 }
 ```
 
-`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
+`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`) when each pod is a complete DP group; wide-EP worker pods instead set the compensated `P2P_BASE` (see the wide-EP paragraph below). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
 **Data parallelism:** the P2P tier supports `--data-parallel-size` N > 1 when
-each pod is a complete DP group (the per-pod DP deployment).
+each pod is a complete DP group (the per-pod DP deployment), or a multi-pod
+(wide-EP) group with compensated socket bases (below).
 
 - vLLM gives each DP replica its own P2P listener and offload region:
   replica `i` serves on `<p2p-connector-port>+i`, where `i` is the
@@ -595,13 +596,41 @@ each pod is a complete DP group (the per-pod DP deployment).
   `remote_port` = `--p2p-connector-port` + `r`; a port outside the rank
   range falls back to rank 0.
 - The endpoint port encodes the pod-local rank, which matches the global
-  index only when the pod is a whole DP group. In multi-pod DP groups (for
+  index only when the pod is a whole DP group. Multi-pod DP groups (for
   example LWS wide-EP, where pod `k`'s replicas hold global indices
-  `k*N..k*N+N-1` behind the same serving ports), the global index cannot
-  be read from the port and would have to be supplied with the request, so
-  those deployments are not covered.
+  `k*N..k*N+N-1` behind the same serving ports) must compensate the
+  configured socket base ports per pod; see the wide-EP example below.
 - Every replica maps its own offload region, so the pod's `/dev/shm` must
   exceed N x `cpu_bytes_to_use`.
+
+**Wide-EP (multi-pod DP groups):** vLLM adds the **global**
+`data_parallel_index` to the configured P2P and KV-events base ports, while
+the router addresses an engine by pod IP plus **pod-local** rank. Each pod
+must therefore subtract its global start rank from both configured bases so
+every pod binds the same pod-local ranges and the serving-port offset again
+names the target rank. In an LWS template with `DP_SIZE_LOCAL` ranks per
+pod:
+
+```bash
+START_RANK=$(( ${LWS_WORKER_INDEX:-0} * DP_SIZE_LOCAL ))
+P2P_BASE=$((7777 - START_RANK))
+KV_EVENTS_BASE=$((5557 - START_RANK))
+```
+
+`P2P_BASE` is the P2P secondary tier port:
+
+```json
+"secondary_tiers": [{"type": "p2p", "host": "${POD_IP}", "port": ${P2P_BASE}}]
+```
+
+`KV_EVENTS_BASE` is the KV-events publisher endpoint
+(`"endpoint": "tcp://*:${KV_EVENTS_BASE}"`), so the EPP's per-rank
+subscribers (`precise-prefix-cache-producer` dials
+`podDiscoveryConfig.socketPort` + rank index) reach each rank's socket.
+With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
+`5557-5564`, and serving `8000-8007`. Only the socket bases are
+compensated; `data_parallel_index` and the global rank carried in KV-event
+batches are unchanged.
 
 ### General Sidecar Flags
 
