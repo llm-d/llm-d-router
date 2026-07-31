@@ -17,10 +17,12 @@ limitations under the License.
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // snapshotRegistries captures the current state of the package-level registries
@@ -146,4 +148,22 @@ func TestRegisterDeprecated(t *testing.T) {
 	assert.Equal(t, "v0.11.0", meta.ScheduledRemovalIn)
 	assert.Equal(t, "new-plugin", meta.ReplacementType)
 	assert.Equal(t, StabilityBeta, meta.Stability)
+}
+
+func TestValidatePluginStability(t *testing.T) {
+	snapshotRegistries(t)
+
+	Register("alpha-plugin", StabilityAlpha, dummyFactory)
+	Register("stable-plugin", StabilityStable, dummyFactory)
+
+	handle := NewEppHandle(context.Background(), func() []types.NamespacedName { return nil })
+	handle.AddPlugin("alpha-1", &basePlugin{name: TypedName{Type: "alpha-plugin", Name: "alpha-1"}})
+	handle.AddPlugin("stable-1", &basePlugin{name: TypedName{Type: "stable-plugin", Name: "stable-1"}})
+
+	err := ValidatePluginStability(handle, false)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
+
+	err = ValidatePluginStability(handle, true)
+	assert.NoError(t, err)
 }

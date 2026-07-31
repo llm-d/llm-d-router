@@ -47,7 +47,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins(), false)
+		err := ensureDataLayer(cfg, handle, metricsPlugins())
 
 		require.NoError(t, err)
 		require.NotNil(t, cfg.DataLayer)
@@ -63,7 +63,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins(), false)
+		err := ensureDataLayer(cfg, handle, metricsPlugins())
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 1)
@@ -80,7 +80,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins(), false)
+		err := ensureDataLayer(cfg, handle, metricsPlugins())
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 2)
@@ -99,7 +99,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins(), false)
+		err := ensureDataLayer(cfg, handle, metricsPlugins())
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 1, "no duplicate metrics source")
@@ -113,7 +113,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins(), false)
+		err := ensureDataLayer(cfg, handle, metricsPlugins())
 
 		require.NoError(t, err)
 		require.Empty(t, cfg.DataLayer.Sources)

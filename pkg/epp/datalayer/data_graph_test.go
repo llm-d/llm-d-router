@@ -38,9 +38,10 @@ import (
 const mockProducedDataKey = "mockProducedData"
 
 type mockDataProducerP struct {
-	name     string
-	produces map[fwkplugin.DataKey]any
-	consumes map[fwkplugin.DataKey]any
+	name       string
+	pluginType string
+	produces   map[fwkplugin.DataKey]any
+	consumes   map[fwkplugin.DataKey]any
 }
 
 type mockProducedDataType struct {
@@ -52,7 +53,11 @@ func (m *mockProducedDataType) Clone() fwkdl.Cloneable {
 }
 
 func (m *mockDataProducerP) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+	t := m.pluginType
+	if t == "" {
+		t = "mock"
+	}
+	return fwkplugin.TypedName{Name: m.name, Type: t}
 }
 
 func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
@@ -401,7 +406,7 @@ func TestCreateMissingDataProducers(t *testing.T) {
 				handle.AddPlugin(p.TypedName().Name, p)
 			}
 
-			err := CreateMissingDataProducers(context.Background(), tc.defaultProducerRegistry, tc.factoryRegistry, handle, true)
+			err := CreateMissingDataProducers(context.Background(), tc.defaultProducerRegistry, tc.factoryRegistry, handle)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -459,7 +464,7 @@ func TestCreateMissingDataProducers_Transitive(t *testing.T) {
 	err := CreateMissingDataProducers(context.Background(),
 		map[string]string{keyOuter.String(): typeOuter, keyInner.String(): typeInner},
 		map[string]fwkplugin.FactoryFunc{typeOuter: outerFactory, typeInner: innerFactory},
-		handle, true)
+		handle)
 	assert.NoError(t, err)
 
 	assert.NotNil(t, handle.Plugin(typeOuter), "directly-needed producer should be auto-created")
@@ -560,7 +565,7 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 				handle.AddPlugin(p.TypedName().Name, p)
 			}
 
-			err := CreateMissingDataProducers(context.Background(), map[string]string{}, tc.factoryRegistry, handle, true)
+			err := CreateMissingDataProducers(context.Background(), map[string]string{}, tc.factoryRegistry, handle)
 
 			if tc.wantErr {
 				assert.Error(t, err)
@@ -588,25 +593,25 @@ func assertTopologicalOrder(t *testing.T, dag map[string][]string, ordered []str
 func TestCreateMissingDataProducers_AlphaStabilityBlocked(t *testing.T) {
 	alphaProducerType := "alpha-producer-type"
 	fwkplugin.Register(alphaProducerType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("alphaKey", alphaProducerType): nil}}, nil
+		return &mockDataProducerP{name: name, pluginType: alphaProducerType, produces: map[fwkplugin.DataKey]any{fwkplugin.NewDataKey("alphaKey", alphaProducerType): nil}}, nil
 	})
 
 	keyAlpha := fwkplugin.NewDataKey("alphaKey", alphaProducerType)
 	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
 	handle.AddPlugin("consumer", &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyAlpha: nil}})
 
-	// 1. Without allowExperimentalPlugins -> should fail
 	err := CreateMissingDataProducers(context.Background(),
 		map[string]string{keyAlpha.String(): alphaProducerType},
 		fwkplugin.Registry,
-		handle, false)
+		handle)
+	assert.NoError(t, err)
+
+	// 1. Without allowExperimentalPlugins -> should fail validation
+	err = fwkplugin.ValidatePluginStability(handle, false)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
 
 	// 2. With allowExperimentalPlugins -> should succeed
-	err = CreateMissingDataProducers(context.Background(),
-		map[string]string{keyAlpha.String(): alphaProducerType},
-		fwkplugin.Registry,
-		handle, true)
+	err = fwkplugin.ValidatePluginStability(handle, true)
 	assert.NoError(t, err)
 }

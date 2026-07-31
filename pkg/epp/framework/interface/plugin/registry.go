@@ -19,6 +19,8 @@ package plugin
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"sort"
 )
 
 // FactoryFunc is the definition of the factory functions that are used to instantiate plugins
@@ -98,6 +100,22 @@ func GetPluginStability(pluginType string) StabilityLevel {
 		return meta.Stability
 	}
 	return StabilityStable
+}
+
+// ValidatePluginStability inspects all plugins registered in the handle and returns an error
+// if any plugin has Alpha stability when allowExperimentalPlugins is false.
+func ValidatePluginStability(handle Handle, allowExperimentalPlugins bool) error {
+	plugins := handle.GetAllPlugins()
+	sort.Slice(plugins, func(i, j int) bool {
+		return plugins[i].TypedName().Name < plugins[j].TypedName().Name
+	})
+	for _, p := range plugins {
+		stability := GetPluginStability(p.TypedName().Type)
+		if stability == StabilityAlpha && !allowExperimentalPlugins {
+			return fmt.Errorf("plugin '%s' (type: '%s') has Alpha stability level, but command line flag --allow-experimental-plugins is not set", p.TypedName().Name, p.TypedName().Type)
+		}
+	}
+	return nil
 }
 
 // Registry is a mapping from plugin type to Factory function.

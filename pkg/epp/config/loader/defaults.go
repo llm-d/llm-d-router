@@ -120,21 +120,21 @@ func applyStaticDefaults(cfg *configapi.EndpointPickerConfig) {
 // applySystemDefaults injects required components that were omitted from the config.
 // It handles "System" defaults: logic that requires inspecting instantiated plugins (via the handle) to ensure the
 // system graph is complete.
-func applySystemDefaults(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allowExperimentalPlugins bool) error {
+func applySystemDefaults(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle) error {
 	allPlugins := handle.GetAllPluginsWithNames()
-	if err := ensureSchedulingLayer(cfg, handle, allPlugins, allowExperimentalPlugins); err != nil {
+	if err := ensureSchedulingLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply scheduling system defaults: %w", err)
 	}
-	if err := ensureFlowControlLayer(cfg, handle, allPlugins, allowExperimentalPlugins); err != nil {
+	if err := ensureFlowControlLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply flow control system defaults: %w", err)
 	}
-	if err := ensureParsers(cfg, handle, allPlugins, allowExperimentalPlugins); err != nil {
+	if err := ensureParsers(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply parser defaults: %w", err)
 	}
-	if err := ensureSaturationDetector(cfg, handle, allPlugins, allowExperimentalPlugins); err != nil {
+	if err := ensureSaturationDetector(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply saturation detector defaults: %w", err)
 	}
-	if err := ensureDataLayer(cfg, handle, allPlugins, allowExperimentalPlugins); err != nil {
+	if err := ensureDataLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply data layer defaults: %w", err)
 	}
 	return nil
@@ -147,7 +147,6 @@ func ensureSchedulingLayer(
 	cfg *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
-	allowExperimentalPlugins bool,
 ) error {
 	if len(cfg.SchedulingProfiles) == 0 {
 		defaultProfile := configapi.SchedulingProfile{Name: "default"}
@@ -171,7 +170,7 @@ func ensureSchedulingLayer(
 			}
 		}
 		if !hasHandler {
-			if err := registerDefaultPlugin(cfg, handle, single.SingleProfileHandlerType, allowExperimentalPlugins); err != nil {
+			if err := registerDefaultPlugin(cfg, handle, single.SingleProfileHandlerType); err != nil {
 				return err
 			}
 		}
@@ -187,7 +186,7 @@ func ensureSchedulingLayer(
 	}
 
 	if maxScorePickerName == "" {
-		if err := registerDefaultPlugin(cfg, handle, maxscore.MaxScorePickerType, allowExperimentalPlugins); err != nil {
+		if err := registerDefaultPlugin(cfg, handle, maxscore.MaxScorePickerType); err != nil {
 			return err
 		}
 		maxScorePickerName = maxscore.MaxScorePickerType
@@ -219,19 +218,19 @@ func ensureSchedulingLayer(
 }
 
 // ensureFlowControlLayer guarantees that the flow control subsystem is structurally complete.
-func ensureFlowControlLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin, allowExperimentalPlugins bool) error {
+func ensureFlowControlLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
 	if _, ok := allPlugins[registry.DefaultOrderingPolicyRef]; !ok {
-		if err := registerDefaultPlugin(cfg, handle, registry.DefaultOrderingPolicyRef, allowExperimentalPlugins); err != nil {
+		if err := registerDefaultPlugin(cfg, handle, registry.DefaultOrderingPolicyRef); err != nil {
 			return err
 		}
 	}
 	if _, ok := allPlugins[registry.DefaultFairnessPolicyRef]; !ok {
-		if err := registerDefaultPlugin(cfg, handle, registry.DefaultFairnessPolicyRef, allowExperimentalPlugins); err != nil {
+		if err := registerDefaultPlugin(cfg, handle, registry.DefaultFairnessPolicyRef); err != nil {
 			return err
 		}
 	}
 	if _, ok := allPlugins[registry.DefaultUsageLimitPolicyRef]; !ok {
-		if err := registerDefaultPlugin(cfg, handle, registry.DefaultUsageLimitPolicyRef, allowExperimentalPlugins); err != nil {
+		if err := registerDefaultPlugin(cfg, handle, registry.DefaultUsageLimitPolicyRef); err != nil {
 			return err
 		}
 	}
@@ -244,7 +243,6 @@ func ensureParsers(
 	cfg *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
-	allowExperimentalPlugins bool,
 ) error {
 	if cfg.RequestHandler == nil {
 		cfg.RequestHandler = &configapi.RequestHandlerConfig{}
@@ -258,7 +256,7 @@ func ensureParsers(
 	}
 	for _, pc := range cfg.RequestHandler.Parsers {
 		if _, ok := allPlugins[pc.PluginRef]; !ok {
-			if err := registerDefaultPlugin(cfg, handle, pc.PluginRef, allowExperimentalPlugins); err != nil {
+			if err := registerDefaultPlugin(cfg, handle, pc.PluginRef); err != nil {
 				return err
 			}
 		}
@@ -272,7 +270,6 @@ func ensureSaturationDetector(
 	cfg *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
-	allowExperimentalPlugins bool,
 ) error {
 	if cfg.FlowControl == nil {
 		cfg.FlowControl = &configapi.FlowControlConfig{}
@@ -290,7 +287,7 @@ func ensureSaturationDetector(
 
 	if sdConfig.PluginRef == utilization.UtilizationDetectorType {
 		if _, ok := allPlugins[sdConfig.PluginRef]; !ok {
-			if err := registerDefaultPlugin(cfg, handle, utilization.UtilizationDetectorType, allowExperimentalPlugins); err != nil {
+			if err := registerDefaultPlugin(cfg, handle, utilization.UtilizationDetectorType); err != nil {
 				return err
 			}
 		}
@@ -301,7 +298,7 @@ func ensureSaturationDetector(
 // ensureDataLayer additively injects the default metrics source and extractor unless opted out.
 // Unlike other ensureXxx functions, it checks for explicit opt-out via InjectDefaults and avoids
 // double-injection when the metrics source is already present in a user-supplied config.
-func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin, allowExperimentalPlugins bool) error {
+func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}
@@ -310,12 +307,12 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	}
 
 	if _, ok := allPlugins[sourcemetrics.MetricsDataSourceType]; !ok {
-		if err := registerDefaultPlugin(cfg, handle, sourcemetrics.MetricsDataSourceType, allowExperimentalPlugins); err != nil {
+		if err := registerDefaultPlugin(cfg, handle, sourcemetrics.MetricsDataSourceType); err != nil {
 			return err
 		}
 	}
 	if _, ok := allPlugins[extractormetrics.MetricsExtractorType]; !ok {
-		if err := registerDefaultPlugin(cfg, handle, extractormetrics.MetricsExtractorType, allowExperimentalPlugins); err != nil {
+		if err := registerDefaultPlugin(cfg, handle, extractormetrics.MetricsExtractorType); err != nil {
 			return err
 		}
 	}
@@ -348,13 +345,7 @@ func registerDefaultPlugin(
 	cfg *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	pluginType string,
-	allowExperimentalPlugins bool,
 ) error {
-	stability := fwkplugin.GetPluginStability(pluginType)
-	if stability == fwkplugin.StabilityAlpha && !allowExperimentalPlugins {
-		return fmt.Errorf("default plugin '%s' has %s stability level, but command line flag --allow-experimental-plugins is not set", pluginType, stability)
-	}
-
 	name := pluginType
 	factory, ok := fwkplugin.Registry[pluginType]
 	if !ok {

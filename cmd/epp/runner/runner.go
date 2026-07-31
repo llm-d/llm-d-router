@@ -750,7 +750,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
 	r.PluginHandle = handle
-	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, opts.AllowExperimentalPlugins, logger)
+	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load the configuration - %w", err)
@@ -760,8 +760,12 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
-	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle, opts.AllowExperimentalPlugins); err != nil {
+	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
+	}
+
+	if err := fwkplugin.ValidatePluginStability(handle, opts.AllowExperimentalPlugins); err != nil {
+		return nil, fmt.Errorf("plugin stability validation failed: %w", err)
 	}
 
 	// Add requestControl plugins

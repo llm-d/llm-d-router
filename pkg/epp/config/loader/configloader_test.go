@@ -429,7 +429,7 @@ func TestPluginsWithDependencies(t *testing.T) {
 
 			// 2. Instantiate
 			handle := testutils.NewTestHandle(context.Background())
-			err = instantiatePlugins(rawConfig.Plugins, handle, false, logger)
+			err = instantiatePlugins(rawConfig.Plugins, handle, logger)
 			if tc.wantErr {
 				require.Error(t, err, "Expected instantiatePlugins to fail")
 				return
@@ -835,7 +835,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 
 			// 2. Instantiate & Configure
 			handle := testutils.NewTestHandle(context.Background())
-			cfg, err := InstantiateAndConfigure(rawConfig, handle, false, logger)
+			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
 
 			if tc.wantErr {
 				require.Error(t, err, "Expected InstantiateAndConfigure to fail")
@@ -1219,7 +1219,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 			"existing-plugin": &mockSaturationDetector{},
 		}
 
-		err := ensureSaturationDetector(cfg, handle, allPlugins, false)
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
 		require.Equal(t, "existing-plugin", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
@@ -1237,7 +1237,7 @@ func TestEnsureSaturationDetector(t *testing.T) {
 			"utilization-detector": &mockSaturationDetector{},
 		}
 
-		err := ensureSaturationDetector(cfg, handle, allPlugins, false)
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
 		require.NoError(t, err)
 		require.Equal(t, "utilization-detector", cfg.FlowControl.SaturationDetector.PluginRef)
 	})
@@ -1294,12 +1294,15 @@ func TestAllowExperimentalPluginsFlag(t *testing.T) {
 		},
 	}
 
+	_, err := InstantiateAndConfigure(rawConfig, handle, logger)
+	require.NoError(t, err)
+
 	// 1. Without flag enabled (allowExperimentalPlugins = false) -> should fail
-	_, err := InstantiateAndConfigure(rawConfig, handle, false, logger)
+	err = fwkplugin.ValidatePluginStability(handle, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
 
 	// 2. With flag enabled (allowExperimentalPlugins = true) -> should succeed
-	_, err = InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(context.Background()), true, logger)
+	err = fwkplugin.ValidatePluginStability(handle, true)
 	require.NoError(t, err)
 }
