@@ -17,6 +17,7 @@ limitations under the License.
 package coordinate2e
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -359,6 +360,7 @@ func allSubstitutions() map[string]string {
 		"${POOL_NAME}":               poolNameBase,
 		"${MODEL_NAME}":              modelName,
 		"${VLLM_IMAGE}":              vllmSimImage,
+		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc:%s", getNamespace(), vllmRenderPort),
 		"${VLLM_DATA_PARALLEL_SIZE}": "1",
 		"${VLLM_REPLICA_COUNT_E}":    "1",
 		"${VLLM_REPLICA_COUNT_P}":    "1",

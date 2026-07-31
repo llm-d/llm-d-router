@@ -173,9 +173,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        topology:
-          - single
-          - 3epp
+        include:
+          - topology: single
+            target: test-e2e-coordinator-run
+          - topology: 3epp
+            target: test-e2e-coordinator-3epp-run
     name: e2e-tests (${{ matrix.topology }})
     steps:
       - name: Checkout source
@@ -221,7 +223,7 @@ jobs:
         env:
           GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
-        run: make -f Makefile.coord.mk test-e2e-coordinator-run E2E_EPP_TOPOLOGY=${{ matrix.topology }}
+        run: make -f Makefile.coord.mk ${{ matrix.target }}
 
   e2e-tests-status:
     needs: e2e-tests
