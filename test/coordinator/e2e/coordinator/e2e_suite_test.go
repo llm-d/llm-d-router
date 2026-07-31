@@ -80,8 +80,12 @@ const (
 	coordinatorComponentDir = "../../../../deploy/coordinator"
 	rendererManifest        = "../../../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
-	envoyManifest    = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml"
-	servicesManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/services.yaml"
+	envoyManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml"
+
+	// sharedEnvoyManifest holds the Envoy Deployment and Service, identical
+	// across topologies; the per-topology manifests carry only the routing
+	// ConfigMap it mounts.
+	sharedEnvoyManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/shared-envoy-resources.yaml"
 
 	// 3-EPP topology manifests: the Envoy that fans EPP-Profile out to three
 	// role-scoped ext_proc clusters, and the three role-scoped InferencePools.

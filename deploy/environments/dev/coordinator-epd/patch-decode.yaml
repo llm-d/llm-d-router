@@ -19,6 +19,9 @@ spec:
         - "--kv-cache-size=1024"
         - "--block-size=16"
         - "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
+        # The routing-sidecar this patch deletes owns port 8000 in the base and
+        # proxies to vLLM on 8200. With it gone, vLLM binds 8000 directly so the
+        # pod keeps serving on 8000, the port the InferencePool and the probes below target.
         - "--port=8000"
         - "--model=${MODEL_NAME}"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"

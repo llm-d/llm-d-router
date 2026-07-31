@@ -14,8 +14,9 @@
 # EPP-Profile header set, hitting the matching phase route above.
 #
 # Placeholders ${NAMESPACE}, ${EPP_NAME_ENCODE}, ${EPP_NAME_PREFILL}, and
-# ${EPP_NAME_DECODE} are substituted by the suite before apply. The envoy Service
-# lives alongside in services.yaml.
+# ${EPP_NAME_DECODE} are substituted by the suite before apply. This file holds
+# only the 3-EPP routing ConfigMap; the Envoy Deployment and Service (identical
+# across topologies) live in shared-envoy-resources.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -411,81 +412,3 @@ data:
                           address: ${EPP_NAME_DECODE}.${NAMESPACE}
                           port_value: 9002
                     load_balancing_weight: 1
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: envoy
-  labels:
-    app: envoy
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: envoy
-  template:
-    metadata:
-      labels:
-        app: envoy
-      annotations:
-        prometheus.io/path: /stats/prometheus
-        prometheus.io/port: "19001"
-        prometheus.io/scrape: "true"
-    spec:
-      containers:
-        - name: envoy
-          image: docker.io/envoyproxy/envoy:distroless-v1.33.2
-          args:
-            - "--service-cluster"
-            - "${NAMESPACE}/inference-gateway"
-            - "--service-node"
-            - "$(ENVOY_POD_NAME)"
-            - "--log-level"
-            - "info"
-            - "--cpuset-threads"
-            - "--drain-strategy"
-            - "immediate"
-            - "--drain-time-s"
-            - "60"
-            - "-c"
-            - "/etc/envoy/envoy.yaml"
-          command:
-            - envoy
-          env:
-            - name: ENVOY_NS_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: ENVOY_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-          ports:
-            - containerPort: 8081
-              name: http-8081
-            - containerPort: 19001
-              name: metrics
-          readinessProbe:
-            failureThreshold: 1
-            httpGet:
-              path: /ready
-              port: 19001
-              scheme: HTTP
-            periodSeconds: 5
-            successThreshold: 1
-            timeoutSeconds: 1
-          resources:
-            requests:
-              cpu: 100m
-              memory: 512Mi
-          volumeMounts:
-            - name: config
-              mountPath: /etc/envoy
-              readOnly: true
-      volumes:
-        - name: config
-          configMap:
-            name: envoy
-            items:
-              - key: envoy.yaml
-                path: envoy.yaml

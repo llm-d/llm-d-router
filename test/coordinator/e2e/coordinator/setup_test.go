@@ -78,10 +78,10 @@ func setupInfra() {
 			"${EPP_NAME_DECODE}":  eppNameDecode,
 		}
 	}
-	ginkgo.By("Applying Envoy from " + manifest)
+	ginkgo.By("Applying Envoy routing ConfigMap from " + manifest)
 	applyManifest(manifest, infraSubs)
-	ginkgo.By("Applying Envoy services from " + servicesManifest)
-	applyManifest(servicesManifest, infraSubs)
+	ginkgo.By("Applying shared Envoy Deployment and Service from " + sharedEnvoyManifest)
+	applyManifest(sharedEnvoyManifest, infraSubs)
 }
 
 // createCRDs installs the GIE CRDs used for testing.
@@ -98,8 +98,9 @@ func createCRDs() {
 // ServiceAccount, RoleBinding, and Service are created once by createStableInfra.
 // Returns all created object ids for cleanup.
 func createEndPointPickers() []string {
-	var objects []string
-	for _, e := range eppsToCreate() {
+	epps := eppsToCreate()
+	objects := make([]string, 0, len(epps)*2)
+	for _, e := range epps {
 		objects = append(objects, createOneEndPointPicker(e)...)
 	}
 	return objects
