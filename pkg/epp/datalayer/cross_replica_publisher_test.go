@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,8 +118,16 @@ func TestCrossReplicaPublisher_SkipsSyncDisabled(t *testing.T) {
 		fakeContributor{key: "disabled", syncDisabled: true},
 	)
 
-	pub := newCrossReplicaPublisher(&fakeSyncer{}, em)
+	pub := newCrossReplicaPublisher(&fakeSyncer{}, em, 0)
 	require.NotNil(t, pub)
 	require.Len(t, pub.contributors, 1)
 	assert.Equal(t, fwkdl.StateKey("enabled"), pub.contributors[0].CrossReplicaState().StateKey)
+	assert.Equal(t, defaultCrossReplicaSyncInterval, pub.Interval(), "zero interval falls back to default")
+}
+
+func TestCrossReplicaPublisher_ConfiguredInterval(t *testing.T) {
+	em := extractorMapWith(fakeContributor{key: "enabled"})
+	pub := newCrossReplicaPublisher(&fakeSyncer{}, em, 500*time.Millisecond)
+	require.NotNil(t, pub)
+	assert.Equal(t, 500*time.Millisecond, pub.Interval())
 }

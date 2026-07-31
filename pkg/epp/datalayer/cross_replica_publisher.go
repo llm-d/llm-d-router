@@ -30,22 +30,24 @@ import (
 
 const (
 	crossReplicaPublisherType = "cross-replica-publisher"
-	// crossReplicaSyncInterval is the cadence at which local per-endpoint
-	// state is pushed to the syncer.
-	crossReplicaSyncInterval = 200 * time.Millisecond
+	// defaultCrossReplicaSyncInterval is the fallback cadence at which local
+	// per-endpoint state is pushed to the syncer when none is configured.
+	defaultCrossReplicaSyncInterval = 200 * time.Millisecond
 )
 
 // crossReplicaPublisher is a PollingDispatcher that publishes each endpoint's
-// local state to the syncer. The datalayer drives it per endpoint at
-// crossReplicaSyncInterval, like any other polling source.
+// local state to the syncer. The datalayer drives it per endpoint at interval,
+// like any other polling source.
 type crossReplicaPublisher struct {
 	syncer       fwkdl.CrossReplicaSyncer
 	contributors []fwkdl.CrossReplicaContributor
+	interval     time.Duration
 }
 
 // newCrossReplicaPublisher collects the opted-in CrossReplicaContributors, or
-// returns nil if there is no syncer or none opt in.
-func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extractorMap) *crossReplicaPublisher {
+// returns nil if there is no syncer or none opt in. A non-positive interval
+// falls back to defaultCrossReplicaSyncInterval.
+func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extractorMap, interval time.Duration) *crossReplicaPublisher {
 	if syncer == nil {
 		return nil
 	}
@@ -61,7 +63,10 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	if len(contributors) == 0 {
 		return nil
 	}
-	return &crossReplicaPublisher{syncer: syncer, contributors: contributors}
+	if interval <= 0 {
+		interval = defaultCrossReplicaSyncInterval
+	}
+	return &crossReplicaPublisher{syncer: syncer, contributors: contributors, interval: interval}
 }
 
 func (p *crossReplicaPublisher) TypedName() fwkplugin.TypedName {
@@ -70,7 +75,7 @@ func (p *crossReplicaPublisher) TypedName() fwkplugin.TypedName {
 
 // Interval is the cadence at which the datalayer calls Dispatch.
 func (p *crossReplicaPublisher) Interval() time.Duration {
-	return crossReplicaSyncInterval
+	return p.interval
 }
 
 // Dispatch publishes each contributor's local value for ep. Set failures are

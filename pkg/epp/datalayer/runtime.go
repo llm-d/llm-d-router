@@ -55,6 +55,7 @@ type Runtime struct {
 	endpoint     *endpointManager
 	extractors   *extractorMap
 	syncer       fwkdl.CrossReplicaSyncer
+	syncInterval time.Duration
 
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
@@ -104,6 +105,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	if cfg != nil {
 		numSources = len(cfg.Sources)
 		r.syncer = cfg.Syncer
+		r.syncInterval = cfg.SyncInterval
 	}
 	logger.Info("Configuring datalayer runtime", "numSources", numSources)
 
@@ -244,7 +246,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 
 	// Register the cross-replica publisher as a polling source so the datalayer
 	// drives it per endpoint at its own interval, like any other dispatcher.
-	if pub := newCrossReplicaPublisher(r.syncer, r.extractors); pub != nil {
+	if pub := newCrossReplicaPublisher(r.syncer, r.extractors, r.syncInterval); pub != nil {
 		period, err := periodTicks(pub.Interval(), r.pollingInterval)
 		if err != nil {
 			return fmt.Errorf("cross-replica publisher: %w", err)
