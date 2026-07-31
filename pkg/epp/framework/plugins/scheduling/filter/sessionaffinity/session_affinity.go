@@ -31,56 +31,122 @@ import (
 const (
 	// SessionAffinityType is the type of the SessionAffinity filter.
 	SessionAffinityType = "session-affinity-filter"
+
+	// StrategyEncodedEndpointHeader echoes the picked pod back to the client,
+	// which resends it on subsequent requests.
+	StrategyEncodedEndpointHeader = "encoded_endpoint_header"
+
+	// StrategySessionIDHeader maps an opaque client-supplied session identifier
+	// to a pod.
+	StrategySessionIDHeader = "session_id_header"
 )
 
 // parameters configures the SessionAffinity filter.
 type parameters struct {
+	// Strategy is StrategyEncodedEndpointHeader (the default) or
+	// StrategySessionIDHeader.
+	Strategy string `json:"strategy"`
 	// HeaderName overrides the default x-session-token header used to read and
 	// write the session token. When empty the default is used.
 	HeaderName string `json:"headerName"`
 	// ProfileName is the name of the profile this instance is associated with (optional).
 	// When empty, the plugin defaults to the primary (decode) pod.
-	// Used in ResponseHeader to look up the correct target pod from SchedulingResult.
 	ProfileName string `json:"profileName"`
+
+	// StrategySessionIDHeader specific parameters
+	// EvictionTTLSeconds is how long a session binding survives unused.
+	// session_id_header only.
+	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
+	// EvictionSweepSeconds is how often expired bindings are swept.
+	// session_id_header only.
+	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
+}
+
+func defaultParameters() parameters {
+	return parameters{
+		Strategy:             StrategyEncodedEndpointHeader,
+		EvictionTTLSeconds:   300,
+		EvictionSweepSeconds: 10,
+	}
+}
+
+// validate rejects only what would change behavior for the selected strategy.
+// Eviction fields are meaningless for StrategyEncodedEndpointHeader and are
+// left unchecked there.
+func (p *parameters) validate() error {
+	switch p.Strategy {
+	case StrategyEncodedEndpointHeader:
+		return nil
+	case StrategySessionIDHeader:
+		if p.EvictionTTLSeconds <= 0 {
+			return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", p.EvictionTTLSeconds)
+		}
+		if p.EvictionSweepSeconds <= 0 {
+			return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
+		}
+		return nil
+	default:
+		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionIDHeader, p.Strategy)
+	}
 }
 
 // compile-time type assertion
 var _ scheduling.Filter = &SessionAffinity{}
 var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
+var _ requestcontrol.PreRequest = &SessionAffinity{}
 
 // Factory defines the factory function for the SessionAffinity filter.
-func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	params := parameters{}
+func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	params := defaultParameters()
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", SessionAffinityType, err)
 		}
 	}
+	if err := params.validate(); err != nil {
+		return nil, fmt.Errorf("invalid parameters of the '%s' filter - %w", SessionAffinityType, err)
+	}
 
-	return NewSessionAffinity(name, params.HeaderName, params.ProfileName), nil
+	return &SessionAffinity{
+		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
+		strategy:  newStrategy(params, handle),
+	}, nil
 }
 
-// NewSessionAffinity returns a filter. When sessionHeader is empty the default
-// x-session-token header is used.
+// NewSessionAffinity returns a filter using the encoded_endpoint_header algorithm.
+// When sessionHeader is empty the default x-session-token header is used.
 func NewSessionAffinity(name, sessionHeader, profileName string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName:     plugin.TypedName{Type: SessionAffinityType, Name: name},
-		sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
-		profileName:   profileName,
+		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
+		strategy: &encodedEndpointHeaderStrategy{
+			sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
+			profileName:   profileName,
+		},
 	}
 }
 
+// strategy is the algorithm-specific behavior for session affinity: how a
+// session's candidate set is filtered, how a fresh pick is recorded, and what
+// (if anything) is written back to the client.
+type strategy interface {
+	filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint
+	preRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult)
+	responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata)
+}
+
+func newStrategy(params parameters, handle plugin.Handle) strategy {
+	if params.Strategy == StrategySessionIDHeader {
+		return newSessionIDHeaderStrategy(params, handle)
+	}
+	return newEncodedEndpointHeaderStrategy(params)
+}
+
 // SessionAffinity is a routing filter that pins subsequent requests in a
-// session to the same pod the first request in the session was sent to. When
-// the session pod is among the candidates it is returned as the sole endpoint;
-// otherwise all candidates are returned so downstream filters and scorers can
-// decide.
+// session to the same pod the first request in the session was sent to, per
+// whichever algorithm strategy implements.
 type SessionAffinity struct {
 	typedName plugin.TypedName
-	// sessionHeader is the request/response header carrying the session token.
-	sessionHeader string
-	// profileName is the name of the profile this instance is associated with.
-	profileName string
+	strategy  strategy
 }
 
 // TypedName returns the typed name of the plugin.
@@ -91,22 +157,15 @@ func (s *SessionAffinity) TypedName() plugin.TypedName {
 // Filter returns the endpoint running the session when it is among the
 // candidates, otherwise all candidate endpoints.
 func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
-	podName := sessionutil.DecodePodName(ctx, request.Headers[s.sessionHeader])
-	if podName == "" {
-		return endpoints
-	}
+	return s.strategy.filter(ctx, request, endpoints)
+}
 
-	for _, endpoint := range endpoints {
-		if endpoint.GetMetadata().ID.String() == podName {
-			return []scheduling.Endpoint{endpoint}
-		}
-	}
-
-	return endpoints
+// PreRequest records the picked pod for the session.
+func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+	s.strategy.preRequest(ctx, request, schedulingResult)
 }
 
 // ResponseHeader sets the session header on the response sent to the client.
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	podToWrite := sessionutil.ResolvePodToWrite(request, s.profileName, targetPod)
-	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, podToWrite)
+	s.strategy.responseHeader(ctx, request, response, targetPod)
 }

@@ -26,8 +26,8 @@ import (
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
-// sessionIDHeaderStrategy scores the session's pinned pod for the affinity
-// scorer. It embeds the shared implementation and adds only the score output;
+// sessionIDHeaderStrategy filters the candidate set to the session's pinned pod.
+// It embeds the shared implementation and adds only the filter output;
 // PreRequest and ResponseHeader are promoted from the embed.
 type sessionIDHeaderStrategy struct {
 	*sessionutil.SessionIDHeader
@@ -54,16 +54,14 @@ func (s *sessionIDHeaderStrategy) responseHeader(ctx context.Context, request *s
 	s.ResponseHeader(ctx, request, response, targetPod)
 }
 
-// score gives the chosen pod 1.0 and every other candidate 0.0. When the
-// request carries no session identifier the scorer abstains: all candidates
-// stay at 0.0.
-func (s *sessionIDHeaderStrategy) score(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
-	scoredEndpoints := make(map[scheduling.Endpoint]float64, len(endpoints))
-	for _, endpoint := range endpoints {
-		scoredEndpoints[endpoint] = 0.0
+// filter returns the session's pinned pod alone when it is among the
+// candidates, otherwise all candidates. When the request carries no session
+// identifier the filter is a pass-through: all candidates are returned. The
+// set is never empty, so scheduling never fails for lack of endpoints.
+func (s *sessionIDHeaderStrategy) filter(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	target, ok := s.Choose(request, endpoints)
+	if !ok || target == nil {
+		return endpoints
 	}
-	if target, ok := s.Choose(request, endpoints); ok && target != nil {
-		scoredEndpoints[target] = 1.0
-	}
-	return scoredEndpoints
+	return []scheduling.Endpoint{target}
 }

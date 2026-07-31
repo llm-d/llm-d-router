@@ -7,7 +7,7 @@ Scores candidate pods by giving a higher score to the pod that was previously us
 Supports two algorithms, selected by the `strategy` parameter:
 
 - `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the scorer writes that same header on the response so the client can echo it back on the next request.
-- `session_id_header`: stateful. The client supplies an opaque session identifier (in the same header, or via an agent-identity request attribute if the header is absent), and the scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session is placed on the pod currently bound by the fewest sessions. A bound session whose pod is absent from the candidate set migrates to the least-loaded present pod immediately.
+- `session_id_header`: stateful. The client supplies an opaque session identifier (in the same header, or via an agent-identity request attribute if the header is absent), and the scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session is placed on the pod currently bound by the fewest sessions. A bound session whose pod is absent from the candidate set migrates to the present pod bound by the fewest sessions immediately.
 
 ## Parameters
 
@@ -61,4 +61,4 @@ The decode instance uses the default behavior (writing the decode pod to `x-sess
 
 ## Relationship to the session affinity filter
 
-The [session affinity filter](../../filter/sessionaffinity/README.md) (`session-affinity-filter`) provides the same affinity behavior as a hard constraint and writes the same response header. Configuring both alongside the scorer is unnecessary and can be misleading; see [Relationship to the session affinity scorer](../../filter/sessionaffinity/README.md#relationship-to-the-session-affinity-scorer) for details. Use the scorer for a soft preference that can be outweighed by other scorers, or the filter for a hard pin.
+The [session affinity filter](../../filter/sessionaffinity/README.md) (`session-affinity-filter`) provides the same affinity behavior as a hard constraint. Configuring both alongside the scorer is unnecessary and can be misleading; see [Relationship to the session affinity scorer](../../filter/sessionaffinity/README.md#relationship-to-the-session-affinity-scorer) for details. Use the scorer for a soft preference that can be outweighed by other scorers, or the filter for a hard pin.
