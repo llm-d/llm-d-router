@@ -106,8 +106,8 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (ma
 	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		// The client's chat-completions body is forwarded as-is.
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		// The client's chat-completions or responses body is forwarded as-is.
 	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs

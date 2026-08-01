@@ -96,6 +96,52 @@ func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 	}
 }
 
+func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", testImageJPEGContentType)
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
+						map[string]any{
+							"type":      "input_image",
+							"image_url": imageServer.URL + "/photo.jpg",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if reqCtx.MultimodalEntries[0].ContentType != testImageJPEGContentType {
+		t.Fatalf("expected content type image/jpeg, got %s", reqCtx.MultimodalEntries[0].ContentType)
+	}
+
+	input := reqCtx.Body["input"].([]any)
+	content := input[0].(map[string]any)["content"].([]any)
+	url := content[1].(map[string]any)["image_url"].(string)
+	if url[:len("data:image/jpeg;base64,")] != "data:image/jpeg;base64," {
+		t.Fatalf("expected data URI, got %s", url)
+	}
+}
+
 func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 

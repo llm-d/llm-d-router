@@ -100,7 +100,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	s.injectUUIDs(reqCtx)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
@@ -127,18 +127,28 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return
-	}
-
 	hashIdx := 0
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	if messages, ok := reqCtx.Body["messages"].([]any); ok {
+		hashIdx = injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries, hashIdx)
+	}
+	if input, ok := reqCtx.Body["input"].([]any); ok {
+		injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries, hashIdx)
+	}
+}
+
+// injectImagePartUUIDs walks items (chat-completions messages or a Responses
+// input array) for content parts of partType and stamps each with the hash of
+// its corresponding multimodal entry, in order, starting at startIdx. It
+// returns the next unused index, so a caller walking multiple item arrays for
+// the same request can keep hash assignment contiguous across both.
+func injectImagePartUUIDs(items []any, partType string, entries []pipeline.MultimodalEntry, startIdx int) int {
+	hashIdx := startIdx
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
+		content, ok := itemMap["content"].([]any)
 		if !ok {
 			continue
 		}
@@ -147,13 +157,14 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" {
+			if partMap["type"] != partType {
 				continue
 			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
+			if hashIdx < len(entries) {
+				partMap["uuid"] = entries[hashIdx].Hash
 				hashIdx++
 			}
 		}
 	}
+	return hashIdx
 }

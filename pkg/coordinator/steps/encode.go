@@ -106,8 +106,15 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
-	if format == reqcommon.APITypeChatCompletions {
-		imageParts = collectImageParts(reqCtx.Body)
+	switch format {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			imageParts = collectImageParts(messages, imageURLPartType)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			imageParts = collectImageParts(input, inputImagePartType)
+		}
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -217,16 +224,17 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 
 func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		imageContent := buildSingleImageContent(imageParts, entry.Index)
-		body := map[string]any{
-			"model": reqCtx.Model,
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{imageContent},
-				},
-			},
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		imageContent := buildSingleImageContent(imageParts, entry.Index, format)
+		item := map[string]any{
+			"role":    "user",
+			"content": []any{imageContent},
+		}
+		body := map[string]any{"model": reqCtx.Model}
+		if format == reqcommon.APITypeResponses {
+			body["input"] = []any{item}
+		} else {
+			body["messages"] = []any{item}
 		}
 		reqcommon.CapSingleToken(body, format)
 		return body, nil
@@ -253,18 +261,18 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 	}
 }
 
-// collectImageParts walks the request messages once and returns the image_url
-// parts in order, so the fan-out loop can index by position instead of
-// re-walking all parts per image (O(N*M) -> O(N+M)).
-func collectImageParts(body map[string]any) []map[string]any {
-	messages, _ := body["messages"].([]any)
+// collectImageParts walks a chat-completions messages array or a Responses
+// input array once and returns the content parts matching partType in order,
+// so the fan-out loop can index by position instead of re-walking all parts
+// per image (O(N*M) -> O(N+M)).
+func collectImageParts(items []any, partType string) []map[string]any {
 	var parts []map[string]any
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
+		content, ok := itemMap["content"].([]any)
 		if !ok {
 			continue
 		}
@@ -273,7 +281,7 @@ func collectImageParts(body map[string]any) []map[string]any {
 			if !ok {
 				continue
 			}
-			if partMap["type"] == imageURLPartType {
+			if partMap["type"] == partType {
 				parts = append(parts, partMap)
 			}
 		}
@@ -281,7 +289,21 @@ func collectImageParts(body map[string]any) []map[string]any {
 	return parts
 }
 
-func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
+// buildSingleImageContent builds a synthetic single-image content part for
+// the encode sub-request. The image value's shape differs by format:
+// chat-completions nests it as image_url.url, while Responses' input_image
+// part stores it as a bare string directly on the part.
+func buildSingleImageContent(imageParts []map[string]any, index int, format reqcommon.APIType) map[string]any {
+	if format == reqcommon.APITypeResponses {
+		var url string
+		if index >= 0 && index < len(imageParts) {
+			url, _ = imageParts[index][imageURLPartType].(string)
+		}
+		return map[string]any{
+			"type":      inputImagePartType,
+			"image_url": url,
+		}
+	}
 	if index >= 0 && index < len(imageParts) {
 		return map[string]any{
 			"type":      imageURLPartType,

@@ -131,8 +131,9 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return s.executeCompletions(ctx, reqCtx)
 	case reqcommon.APITypeChatCompletions:
 		return s.executeChatCompletions(ctx, reqCtx)
+	case reqcommon.APITypeResponses:
+		return s.executeResponses(ctx, reqCtx)
 	default:
-		// Other APIs, such as Responses, carry no token_ids to normalize.
 		logger := log.FromContext(ctx).WithName(RenderStepName)
 		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
 		return nil
@@ -260,12 +261,30 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 }
 
 func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName(RenderStepName)
-
 	var renderResp renderResponse
 	if err := s.postRender(ctx, reqCtx, reqcommon.PathChatCompletions, &renderResp); err != nil {
 		return err
 	}
+	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+}
+
+// executeResponses handles the /v1/responses path. The render service
+// tokenizes whatever shape reqCtx.Body["input"] is (string or message-item
+// array) itself, so this step does not need to distinguish those shapes -
+// applying the response is identical to executeChatCompletions.
+func (s *RenderStep) executeResponses(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	var renderResp renderResponse
+	if err := s.postRender(ctx, reqCtx, reqcommon.PathResponses, &renderResp); err != nil {
+		return err
+	}
+	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+}
+
+// applyRenderResponse stores a renderResponse's token_ids and reconciles its
+// per-image features onto reqCtx.MultimodalEntries. Shared by every format
+// whose render call returns this response shape (chat-completions, responses).
+func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse) error {
+	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	reqCtx.TokenIDs = renderResp.TokenIDs
 	if err := s.checkTokenLimit(len(reqCtx.TokenIDs)); err != nil {
