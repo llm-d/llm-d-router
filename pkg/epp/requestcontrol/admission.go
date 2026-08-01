@@ -177,10 +177,14 @@ func (fcac *FlowControlAdmissionController) Admit(
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
-	// A TTL eviction signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
-	// the pool is empty. Probe pool emptiness (nil metadata = whole pool) only on that path.
+	// A TTL expiry signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
+	// the pool is empty. This covers the queued eviction outcome and a pre-admission expiry, which surfaces as
+	// RejectedOther or EvictedOther wrapping ErrTTLExpired. Probe pool emptiness (nil metadata = whole pool) only
+	// on those paths.
 	ttlPoolEmpty := false
-	if outcome == types.QueueOutcomeEvictedTTL {
+	if outcome == types.QueueOutcomeEvictedTTL ||
+		((outcome == types.QueueOutcomeRejectedOther || outcome == types.QueueOutcomeEvictedOther) &&
+			errors.Is(err, types.ErrTTLExpired)) {
 		ttlPoolEmpty = len(fcac.endpointCandidates.Locate(ctx, nil)) == 0
 	}
 	return translateFlowControlOutcome(outcome, err, ttlPoolEmpty)
@@ -261,10 +265,20 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error, ttlPoolE
 	case types.QueueOutcomeEvictedContextCancelled:
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}
 	case types.QueueOutcomeRejectedOther, types.QueueOutcomeEvictedOther:
-		if errors.Is(err, types.ErrFlowControllerNotRunning) {
+		switch {
+		case errors.Is(err, types.ErrFlowControllerNotRunning):
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "flow controller shutting down: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonShuttingDown)}}
+		// A TTL expiry or client disconnect that fires before the item is admitted to a queue (e.g. while
+		// buffered in the enqueue channel or blocked in submission) surfaces as RejectedOther/EvictedOther
+		// rather than as a dedicated eviction outcome. These are client-caused terminations, so delegate
+		// to the mapping of the post-admission equivalent; the two paths then agree by construction.
+		case errors.Is(err, types.ErrTTLExpired):
+			return translateFlowControlOutcome(types.QueueOutcomeEvictedTTL, err, ttlPoolEmpty)
+		case errors.Is(err, types.ErrContextCancelled):
+			return translateFlowControlOutcome(types.QueueOutcomeEvictedContextCancelled, err, ttlPoolEmpty)
+		default:
+			return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
 		}
-		return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
 	default:
 		return errcommon.Error{Code: errcommon.Internal, Msg: "unhandled flow control outcome: " + msg}
 	}

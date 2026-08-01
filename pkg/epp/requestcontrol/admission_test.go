@@ -19,6 +19,7 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -282,6 +283,28 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErrSubstr: "internal flow control error",
 		},
 		{
+			name:            "fc_reject_other_preadmission_ttl",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeRejectedOther,
+			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
+			locatorPods:     []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)},
+			expectErr:       true,
+			expectErrCode:   errcommon.ResourceExhausted,
+			expectErrSubstr: "request timed out in queue",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
+		},
+		{
+			name:            "fc_reject_other_preadmission_ttl_empty_pool",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeRejectedOther,
+			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
+			locatorPods:     []fwkdl.Endpoint{},
+			expectErr:       true,
+			expectErrCode:   errcommon.ServiceUnavailable,
+			expectErrSubstr: "request timed out in queue and no endpoints are available",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		},
+		{
 			name:            "fc_evict_other",
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeEvictedOther,
@@ -383,6 +406,49 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 			name:       "shutdown rejection returns 503",
 			outcome:    fctypes.QueueOutcomeRejectedOther,
 			err:        fctypes.ErrFlowControllerNotRunning,
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
+		},
+		{
+			name:       "pre-admission TTL rejection maps like TTL eviction",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
+		},
+		{
+			name:         "pre-admission TTL rejection with empty pool maps like TTL eviction",
+			outcome:      fctypes.QueueOutcomeRejectedOther,
+			err:          fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
+			ttlPoolEmpty: true,
+			wantCode:     errcommon.ServiceUnavailable,
+			wantReason:   string(errcommon.RequestDroppedReasonNoEndpoints),
+		},
+		{
+			name:       "pre-admission cancellation rejection maps like cancellation eviction",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrContextCancelled),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonContextCancelled),
+		},
+		{
+			name:       "other TTL eviction maps like TTL eviction",
+			outcome:    fctypes.QueueOutcomeEvictedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired),
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
+		},
+		{
+			name:       "other cancellation eviction maps like cancellation eviction",
+			outcome:    fctypes.QueueOutcomeEvictedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrContextCancelled),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonContextCancelled),
+		},
+		{
+			name:       "shutdown takes precedence over TTL",
+			outcome:    fctypes.QueueOutcomeRejectedOther,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrFlowControllerNotRunning, fctypes.ErrTTLExpired),
 			wantCode:   errcommon.ServiceUnavailable,
 			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
 		},
