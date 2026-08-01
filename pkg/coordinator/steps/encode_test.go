@@ -355,6 +355,92 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 // The encode chat sub-request is built fresh from the request context and does
 // not carry the client's sampling fields, so max_completion_tokens is not
 // propagated and is never injected: max_tokens=1 alone caps output.
+func TestEncodeStep_ResponsesFormat(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		tokens, _ := receivedBody["tokens"].(map[string]any)
+		features, _ := tokens["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		hash, _ := imageHashes[0].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{
+				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: gateway.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe"},
+						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedBody["model"] != testModelName {
+		t.Fatalf("expected model from body, got %v", receivedBody["model"])
+	}
+
+	input, ok := receivedBody["input"].([]any)
+	if !ok {
+		t.Fatal("expected input in responses format")
+	}
+	item := input[0].(map[string]any)
+	content := item["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content part (image only), got %d", len(content))
+	}
+	part := content[0].(map[string]any)
+	if part["type"] != inputImagePartType {
+		t.Fatalf("expected %s content part, got %v", inputImagePartType, part["type"])
+	}
+	if _, ok := part["image_url"].(string); !ok {
+		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
+	}
+
+	tokens, ok := receivedBody["tokens"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tokens field in responses format")
+	}
+	tokenIDs, _ := tokens["token_ids"].([]any)
+	if len(tokenIDs) != 4 { // BOS + 3 placeholders
+		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
+	}
+}
+
 func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T) {
 	var receivedBody map[string]any
 
