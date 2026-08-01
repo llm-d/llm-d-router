@@ -7,24 +7,35 @@ Scores candidate pods by giving a higher score to the pod that was previously us
 Supports two algorithms, selected by the `strategy` parameter:
 
 - `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the scorer writes that same header on the response so the client can echo it back on the next request.
-- `session_id_header`: stateful. The client supplies an opaque session identifier (in the same header, or via an agent-identity request attribute if the header is absent), and the scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session is placed on the pod currently bound by the fewest sessions. A bound session whose pod is absent from the candidate set migrates to the present pod bound by the fewest sessions immediately.
+- `session_id_header`: stateful. The client supplies an opaque session identifier, read from one or more configured sources (a request header, or a request attribute published by an upstream plugin) tried in priority order. The scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session is placed on the pod currently bound by the fewest sessions. A bound session whose pod is absent from the candidate set migrates to the present pod bound by the fewest sessions immediately.
 
 ## Parameters
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `strategy` | string | `encoded_endpoint_header` | `encoded_endpoint_header` or `session_id_header`. |
-| `headerName` | string | `x-session-token` | Request and response header carrying the session token. When set, only this header is read; the default is ignored. |
+| `strategy` | string | `encoded_endpoint_header` | `encoded_endpoint_header` or `session_id_header`. Only the config block matching the strategy is used. |
 | `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult`. When empty, it defaults to the primary (decode) pod. |
-| `evictionTtlSeconds` | float | `300` | How long a session binding survives unused. `session_id_header` only. |
-| `evictionSweepSeconds` | float | `10` | How often expired bindings are swept. `session_id_header` only. |
+| `encodedEndpointHeaderConfig` | object | | Config for `encoded_endpoint_header`; see below. |
+| `sessionIdConfig` | object | | Config for `session_id_header`; see below. |
+
+`encodedEndpointHeaderConfig`:
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `header` | string | `x-session-token` | Request and response header carrying the base64-encoded pod token. |
+
+`sessionIdConfig`:
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `sources` | list | one `header` source `x-session-id` | Where the session identifier is read from, in priority order; the first non-empty match wins. Each source sets exactly one of `header` (a request header name) or `attribute` (a request-attribute key published by an upstream plugin). |
+| `evictionTtlSeconds` | float | `300` | How long a session binding survives unused. |
+| `evictionSweepSeconds` | float | `10` | How often expired bindings are swept. |
 
 ### Default Configuration (without PD disaggregation)
 
 ```yaml
 - type: session-affinity-scorer
-  parameters:
-    headerName: x-session-token
 ```
 
 ### Session ID Header Configuration
@@ -33,9 +44,23 @@ Supports two algorithms, selected by the `strategy` parameter:
 - type: session-affinity-scorer
   parameters:
     strategy: session_id_header
-    headerName: x-session-token
-    evictionTtlSeconds: 300
-    evictionSweepSeconds: 10
+    sessionIdConfig:
+      sources:
+        - header: x-session-id
+      evictionTtlSeconds: 300
+      evictionSweepSeconds: 10
+```
+
+To pin agent traffic, list the agent-identity attribute as a fallback source after the header:
+
+```yaml
+- type: session-affinity-scorer
+  parameters:
+    strategy: session_id_header
+    sessionIdConfig:
+      sources:
+        - header: x-session-id
+        - attribute: agent-identity
 ```
 
 ### PD Disaggregation Configuration
@@ -47,14 +72,16 @@ To support session affinity with PD disaggregation, configure two separate insta
 - name: session-affinity-decode
   type: session-affinity-scorer
   parameters:
-    headerName: x-session-token
+    encodedEndpointHeaderConfig:
+      header: x-session-token
 
 # Instance for the prefill profile (pins prefill requests)
 - name: session-affinity-prefill
   type: session-affinity-scorer
   parameters:
-    headerName: x-session-token-prefill
     profileName: prefill
+    encodedEndpointHeaderConfig:
+      header: x-session-token-prefill
 ```
 
 The decode instance uses the default behavior (writing the decode pod to `x-session-token`). The prefill instance uses `profileName: prefill` to look up the prefill pod from the scheduling results and write it to `x-session-token-prefill`. This ensures that subsequent requests in the same session target both the same prefill pod and the same decode pod. `session_id_header` supports the same pattern: configure one instance per profile, each with its own `profileName`.

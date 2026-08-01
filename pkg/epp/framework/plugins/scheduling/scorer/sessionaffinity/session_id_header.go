@@ -36,8 +36,7 @@ type sessionIDHeaderStrategy struct {
 func newSessionIDHeaderStrategy(params parameters, handle plugin.Handle) strategy {
 	return &sessionIDHeaderStrategy{
 		SessionIDHeader: sessionutil.NewSessionIDHeader(
-			params.HeaderName, params.ProfileName,
-			params.EvictionTTLSeconds, params.EvictionSweepSeconds,
+			params.SessionIDConfig, params.ProfileName,
 			plugin.StateKey(SessionAffinityType), handle,
 		),
 	}
@@ -57,12 +56,12 @@ func (s *sessionIDHeaderStrategy) responseHeader(ctx context.Context, request *s
 // score gives the chosen pod 1.0 and every other candidate 0.0. When the
 // request carries no session identifier the scorer abstains: all candidates
 // stay at 0.0.
-func (s *sessionIDHeaderStrategy) score(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
+func (s *sessionIDHeaderStrategy) score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
 		scoredEndpoints[endpoint] = 0.0
 	}
-	if target, ok := s.Choose(request, endpoints); ok && target != nil {
+	if target, ok := s.Choose(ctx, request, endpoints); ok && target != nil {
 		scoredEndpoints[target] = 1.0
 	}
 	return scoredEndpoints

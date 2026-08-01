@@ -35,7 +35,7 @@ type encodedEndpointHeaderStrategy struct {
 // newEncodedEndpointHeaderStrategy builds the encoded_endpoint_header strategy.
 func newEncodedEndpointHeaderStrategy(params parameters) strategy {
 	return &encodedEndpointHeaderStrategy{
-		sessionHeader: sessionutil.NormalizeHeader(params.HeaderName),
+		sessionHeader: sessionutil.NormalizeHeader(params.EncodedEndpointHeaderConfig.Header),
 		profileName:   params.ProfileName,
 	}
 }

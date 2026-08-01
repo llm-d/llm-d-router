@@ -18,6 +18,10 @@ package sessionaffinity
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +34,80 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+// DefaultSessionIDHeader is the header a SessionIDConfig reads when no sources
+// are configured.
+const DefaultSessionIDHeader = "x-session-id"
+
+// SessionIDConfig configures the session_id_header strategy.
+type SessionIDConfig struct {
+	// Sources resolve the session identifier in priority order; the first
+	// non-empty match wins. When empty, a single header source
+	// DefaultSessionIDHeader is used.
+	Sources []SessionIDSource `json:"sources"`
+	// EvictionTTLSeconds is how long a session binding survives unused.
+	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
+	// EvictionSweepSeconds is how often expired bindings are swept.
+	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
+}
+
+// SessionIDSource names one place a session identifier can be read from.
+// Exactly one of Header or Attribute must be set.
+type SessionIDSource struct {
+	// Header is a request header name.
+	Header string `json:"header"`
+	// Attribute is a request-attribute key published by an upstream plugin.
+	Attribute string `json:"attribute"`
+}
+
+// Default eviction schedule applied to a SessionIDConfig with unset fields:
+// bindings unused for 300s are swept every 10s.
+const (
+	defaultEvictionTTLSeconds   = 300
+	defaultEvictionSweepSeconds = 10
+)
+
+// ApplyDefaults fills unset fields with their defaults: an empty Sources reads
+// DefaultSessionIDHeader, and a zero eviction schedule uses the standard TTL
+// and sweep. Run after decode and before Validate. Defaults live here rather
+// than in a pre-seeded struct so a JSON overlay replaces Sources instead of
+// merging element-wise into a seeded slice.
+func (c *SessionIDConfig) ApplyDefaults() {
+	if len(c.Sources) == 0 {
+		c.Sources = []SessionIDSource{{Header: DefaultSessionIDHeader}}
+	}
+	if c.EvictionTTLSeconds == 0 {
+		c.EvictionTTLSeconds = defaultEvictionTTLSeconds
+	}
+	if c.EvictionSweepSeconds == 0 {
+		c.EvictionSweepSeconds = defaultEvictionSweepSeconds
+	}
+}
+
+// Validate rejects configs that would not select a valid session identifier or
+// a usable eviction schedule. It expects a config already passed through
+// applyDefaults.
+func (c *SessionIDConfig) Validate() error {
+	for i, source := range c.Sources {
+		if err := source.validate(); err != nil {
+			return fmt.Errorf("sources[%d]: %w", i, err)
+		}
+	}
+	if c.EvictionTTLSeconds <= 0 {
+		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
+	}
+	if c.EvictionSweepSeconds <= 0 {
+		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	}
+	return nil
+}
+
+func (s SessionIDSource) validate() error {
+	if (s.Header == "") == (s.Attribute == "") {
+		return errors.New("exactly one of header or attribute must be set")
+	}
+	return nil
+}
+
 // SessionIDHeader maps an opaque client-supplied session identifier to a pod
 // via a bounded, TTL-evicted binding store. An unbound session is placed on the
 // pod with the fewest bound sessions. A session whose bound pod is absent from
@@ -41,8 +119,8 @@ import (
 // ResponseHeader is a no-op. Each plugin embeds it and adds only its own output
 // method.
 type SessionIDHeader struct {
-	sessionHeader string
-	profileName   string
+	sources     []SessionIDSource
+	profileName string
 	// pluginKey keys the Choose->PreRequest presence handoff and labels the
 	// plugin in logs; the owning scorer/filter passes its own plugin type.
 	pluginKey     plugin.StateKey
@@ -71,13 +149,13 @@ func (b *boundPodPresence) Clone() plugin.StateData {
 // NewSessionIDHeader builds the shared session_id_header implementation and
 // starts its eviction sweep for the plugin's lifetime. pluginKey is the owning
 // plugin's type, used for the PluginState handoff key and log labels.
-func NewSessionIDHeader(headerName, profileName string, ttlSeconds, sweepSeconds float64, pluginKey plugin.StateKey, handle plugin.Handle) *SessionIDHeader {
+func NewSessionIDHeader(config SessionIDConfig, profileName string, pluginKey plugin.StateKey, handle plugin.Handle) *SessionIDHeader {
 	s := &SessionIDHeader{
-		sessionHeader: NormalizeHeader(headerName),
+		sources:       config.Sources,
 		profileName:   profileName,
 		pluginKey:     pluginKey,
-		ttl:           time.Duration(ttlSeconds * float64(time.Second)),
-		sweepInterval: time.Duration(sweepSeconds * float64(time.Second)),
+		ttl:           time.Duration(config.EvictionTTLSeconds * float64(time.Second)),
+		sweepInterval: time.Duration(config.EvictionSweepSeconds * float64(time.Second)),
 		pluginState:   plugin.NewPluginState(handle.Context()),
 	}
 	go s.runEviction(handle.Context(), s.sweepInterval)
@@ -90,6 +168,49 @@ type binding struct {
 	lastSeen time.Time
 }
 
+// resolveSessionID returns the session identifier from the first configured
+// source that yields a non-empty value, or "" when none do.
+//
+// Empty means the request expresses no session preference. No identifier is
+// generated: a router-minted value is unique per request, so it could never
+// match a stored binding.
+func (s *SessionIDHeader) resolveSessionID(ctx context.Context, request *scheduling.InferenceRequest) string {
+	if request == nil {
+		return ""
+	}
+	for _, source := range s.sources {
+		if source.Header != "" {
+			if id := strings.TrimSpace(request.Headers[NormalizeHeader(source.Header)]); id != "" {
+				return id
+			}
+			continue
+		}
+		if id, ok := attributeString(ctx, request, source.Attribute); ok {
+			if id = strings.TrimSpace(id); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+// attributeString reads a request attribute as a string. Producers store their
+// identifier under a named string type (e.g. session.SessionID), so a plain
+// string type assertion would miss them; any value of string kind is accepted.
+func attributeString(ctx context.Context, request *scheduling.InferenceRequest, key string) (string, bool) {
+	v, ok := request.GetAttribute(key)
+	if !ok {
+		return "", false
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.String {
+		log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - attribute is not a string, skipping source",
+			"attribute", key)
+		return "", false
+	}
+	return rv.String(), true
+}
+
 // Choose resolves the endpoint a request should be pinned to and records, for
 // PreRequest, whether the session's bound pod was present in the candidate set.
 // It returns (nil, false) when there are no candidates or the request carries
@@ -97,12 +218,12 @@ type binding struct {
 // returns the bound pod when present, else the least-loaded candidate, with ok
 // true. Choose does not mutate the store; the binding is committed in
 // PreRequest.
-func (s *SessionIDHeader) Choose(request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) (scheduling.Endpoint, bool) {
+func (s *SessionIDHeader) Choose(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) (scheduling.Endpoint, bool) {
 	if len(endpoints) == 0 {
 		return nil, false
 	}
 
-	sessionID := SessionID(request, s.sessionHeader)
+	sessionID := s.resolveSessionID(ctx, request)
 	if sessionID == "" {
 		return nil, false
 	}
@@ -171,7 +292,7 @@ func (s *SessionIDHeader) boundPod(sessionID string) string {
 // PreRequest is the only place podCount and bindings are mutated. A session
 // migrates only when its bound pod is absent from the candidate set.
 func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	sessionID := SessionID(request, s.sessionHeader)
+	sessionID := s.resolveSessionID(ctx, request)
 	if sessionID == "" {
 		return
 	}

@@ -290,10 +290,14 @@ func TestSessionAffinity_FactoryValidation(t *testing.T) {
 		{name: "empty params default to encoded_endpoint_header", params: "", expectErr: false},
 		{name: "explicit encoded_endpoint_header", params: `{"strategy":"encoded_endpoint_header"}`, expectErr: false},
 		{name: "session_id_header with defaults", params: `{"strategy":"session_id_header"}`, expectErr: false},
+		{name: "session_id_header with attribute source", params: `{"strategy":"session_id_header","sessionIdConfig":{"sources":[{"attribute":"agent-identity"}]}}`, expectErr: false},
+		{name: "session_id_header header then attribute fallback sources", params: `{"strategy":"session_id_header","sessionIdConfig":{"sources":[{"header":"x-session-id"},{"attribute":"agent-identity"}]}}`, expectErr: false},
+		{name: "session_id_header empty sources defaults, valid", params: `{"strategy":"session_id_header","sessionIdConfig":{"sources":[]}}`, expectErr: false},
+		{name: "session_id_header zero ttl defaults, valid", params: `{"strategy":"session_id_header","sessionIdConfig":{"evictionTtlSeconds":0}}`, expectErr: false},
 		{name: "unknown strategy rejected", params: `{"strategy":"bogus"}`, expectErr: true},
-		{name: "session_id_header zero ttl rejected", params: `{"strategy":"session_id_header","evictionTtlSeconds":0}`, expectErr: true},
-		{name: "session_id_header negative ttl rejected", params: `{"strategy":"session_id_header","evictionTtlSeconds":-1}`, expectErr: true},
-		{name: "session_id_header zero sweep rejected", params: `{"strategy":"session_id_header","evictionSweepSeconds":0}`, expectErr: true},
+		{name: "session_id_header source with both header and attribute rejected", params: `{"strategy":"session_id_header","sessionIdConfig":{"sources":[{"header":"h","attribute":"a"}]}}`, expectErr: true},
+		{name: "session_id_header negative ttl rejected", params: `{"strategy":"session_id_header","sessionIdConfig":{"evictionTtlSeconds":-1}}`, expectErr: true},
+		{name: "session_id_header negative sweep rejected", params: `{"strategy":"session_id_header","sessionIdConfig":{"evictionSweepSeconds":-1}}`, expectErr: true},
 	}
 
 	handle := utils.NewTestHandle(utils.NewTestContext(t))

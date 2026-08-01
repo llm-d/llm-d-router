@@ -44,47 +44,37 @@ const (
 // parameters configures the SessionAffinity filter.
 type parameters struct {
 	// Strategy is StrategyEncodedEndpointHeader (the default) or
-	// StrategySessionIDHeader.
-	Strategy string `json:"strategy"`
-	// HeaderName overrides the default x-session-token header used to read and
-	// write the session token. When empty the default is used.
-	HeaderName string `json:"headerName"`
-	// ProfileName is the name of the profile this instance is associated with (optional).
-	// When empty, the plugin defaults to the primary (decode) pod.
+	// StrategySessionIDHeader. Only the config matching Strategy is used.
+	Strategy                    string                                  `json:"strategy"`
+	EncodedEndpointHeaderConfig sessionutil.EncodedEndpointHeaderConfig `json:"encodedEndpointHeaderConfig"`
+	SessionIDConfig             sessionutil.SessionIDConfig             `json:"sessionIdConfig"`
+	// ProfileName selects which pod of the SchedulingResult this instance pins.
+	// When empty, the primary (decode) pod is used.
 	ProfileName string `json:"profileName"`
-
-	// StrategySessionIDHeader specific parameters
-	// EvictionTTLSeconds is how long a session binding survives unused.
-	// session_id_header only.
-	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
-	// EvictionSweepSeconds is how often expired bindings are swept.
-	// session_id_header only.
-	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
 }
 
 func defaultParameters() parameters {
-	return parameters{
-		Strategy:             StrategyEncodedEndpointHeader,
-		EvictionTTLSeconds:   300,
-		EvictionSweepSeconds: 10,
+	return parameters{Strategy: StrategyEncodedEndpointHeader}
+}
+
+// applyDefaults fills the selected strategy's config with its defaults. Run
+// after decode, before validate.
+func (p *parameters) applyDefaults() {
+	switch p.Strategy {
+	case StrategyEncodedEndpointHeader:
+		p.EncodedEndpointHeaderConfig.ApplyDefaults()
+	case StrategySessionIDHeader:
+		p.SessionIDConfig.ApplyDefaults()
 	}
 }
 
-// validate rejects only what would change behavior for the selected strategy.
-// Eviction fields are meaningless for StrategyEncodedEndpointHeader and are
-// left unchecked there.
+// validate dispatches to the selected strategy's config validator.
 func (p *parameters) validate() error {
 	switch p.Strategy {
 	case StrategyEncodedEndpointHeader:
 		return nil
 	case StrategySessionIDHeader:
-		if p.EvictionTTLSeconds <= 0 {
-			return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", p.EvictionTTLSeconds)
-		}
-		if p.EvictionSweepSeconds <= 0 {
-			return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
-		}
-		return nil
+		return p.SessionIDConfig.Validate()
 	default:
 		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionIDHeader, p.Strategy)
 	}
@@ -103,6 +93,7 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", SessionAffinityType, err)
 		}
 	}
+	params.applyDefaults()
 	if err := params.validate(); err != nil {
 		return nil, fmt.Errorf("invalid parameters of the '%s' filter - %w", SessionAffinityType, err)
 	}

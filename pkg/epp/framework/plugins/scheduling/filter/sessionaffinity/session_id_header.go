@@ -36,8 +36,7 @@ type sessionIDHeaderStrategy struct {
 func newSessionIDHeaderStrategy(params parameters, handle plugin.Handle) strategy {
 	return &sessionIDHeaderStrategy{
 		SessionIDHeader: sessionutil.NewSessionIDHeader(
-			params.HeaderName, params.ProfileName,
-			params.EvictionTTLSeconds, params.EvictionSweepSeconds,
+			params.SessionIDConfig, params.ProfileName,
 			plugin.StateKey(SessionAffinityType), handle,
 		),
 	}
@@ -58,8 +57,8 @@ func (s *sessionIDHeaderStrategy) responseHeader(ctx context.Context, request *s
 // candidates, otherwise all candidates. When the request carries no session
 // identifier the filter is a pass-through: all candidates are returned. The
 // set is never empty, so scheduling never fails for lack of endpoints.
-func (s *sessionIDHeaderStrategy) filter(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
-	target, ok := s.Choose(request, endpoints)
+func (s *sessionIDHeaderStrategy) filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	target, ok := s.Choose(ctx, request, endpoints)
 	if !ok || target == nil {
 		return endpoints
 	}

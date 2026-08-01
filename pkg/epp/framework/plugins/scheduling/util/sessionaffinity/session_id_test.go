@@ -46,8 +46,13 @@ func newTestSessionIDHeader(t *testing.T, overrides func(*testOptions)) *Session
 	if overrides != nil {
 		overrides(&opts)
 	}
+	config := SessionIDConfig{
+		Sources:              []SessionIDSource{{Header: DefaultHeader}},
+		EvictionTTLSeconds:   opts.evictionTTLSeconds,
+		EvictionSweepSeconds: 10,
+	}
 	return NewSessionIDHeader(
-		"", opts.profileName, opts.evictionTTLSeconds, 10, testPluginKey,
+		config, opts.profileName, testPluginKey,
 		utils.NewTestHandle(utils.NewTestContext(t)),
 	)
 }
@@ -91,7 +96,7 @@ func TestSessionIDHeader_Choose_BoundSessionPresent(t *testing.T) {
 	req := requestWithSession("s1")
 	s.PreRequest(context.Background(), req, schedulingResultFor(endpointB))
 
-	got, ok := s.Choose(requestWithSession("s1"), endpoints)
+	got, ok := s.Choose(context.Background(), requestWithSession("s1"), endpoints)
 	if !ok || got != endpointB {
 		t.Errorf("Choose = (%v, %v), want (pod-b, true)", got.GetMetadata().ID.Name, ok)
 	}
@@ -106,7 +111,7 @@ func TestSessionIDHeader_Choose_UnboundPicksLeastLoaded(t *testing.T) {
 	// Bind one session to pod-a so pod-b is strictly less loaded.
 	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
 
-	got, ok := s.Choose(requestWithSession("s2"), endpoints)
+	got, ok := s.Choose(context.Background(), requestWithSession("s2"), endpoints)
 	if !ok || got != endpointB {
 		t.Errorf("Choose = (%v, %v), want (pod-b, true)", got.GetMetadata().ID.Name, ok)
 	}
@@ -114,7 +119,7 @@ func TestSessionIDHeader_Choose_UnboundPicksLeastLoaded(t *testing.T) {
 
 func TestSessionIDHeader_Choose_NoEndpoints(t *testing.T) {
 	s := newTestSessionIDHeader(t, nil)
-	if got, ok := s.Choose(requestWithSession("s1"), []scheduling.Endpoint{}); ok || got != nil {
+	if got, ok := s.Choose(context.Background(), requestWithSession("s1"), []scheduling.Endpoint{}); ok || got != nil {
 		t.Errorf("Choose with no endpoints = (%v, %v), want (nil, false)", got, ok)
 	}
 }
@@ -130,7 +135,7 @@ func TestSessionIDHeader_Choose_NoSessionAbstains(t *testing.T) {
 	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
 
 	noSession := &scheduling.InferenceRequest{RequestID: "req-no-session"}
-	if got, ok := s.Choose(noSession, endpoints); ok || got != nil {
+	if got, ok := s.Choose(context.Background(), noSession, endpoints); ok || got != nil {
 		t.Errorf("Choose with no session = (%v, %v), want (nil, false)", got, ok)
 	}
 }
@@ -159,7 +164,7 @@ func TestSessionIDHeader_PreRequest_MigratesOnGenuineAbsence(t *testing.T) {
 
 	// Choose with only pod-b as a candidate records pod-a as genuinely absent.
 	req := requestWithSession("s1")
-	s.Choose(req, []scheduling.Endpoint{endpointB})
+	s.Choose(context.Background(), req, []scheduling.Endpoint{endpointB})
 
 	// PreRequest for the same request now sees the picker chose pod-b.
 	s.PreRequest(context.Background(), req, schedulingResultFor(endpointB))
@@ -185,7 +190,7 @@ func TestSessionIDHeader_PreRequest_HoldsPinWhenPresentButOutvoted(t *testing.T)
 
 	// Choose with pod-a present as a candidate (not absent).
 	req := requestWithSession("s1")
-	s.Choose(req, []scheduling.Endpoint{endpointA, endpointB})
+	s.Choose(context.Background(), req, []scheduling.Endpoint{endpointA, endpointB})
 
 	// The picker chooses pod-b anyway (another scorer outvoted affinity).
 	s.PreRequest(context.Background(), req, schedulingResultFor(endpointB))
@@ -403,4 +408,199 @@ func TestSessionIDHeader_RunEvictionSparesRefreshedBinding(t *testing.T) {
 func TestSessionIDHeader_ResponseHeader_IsNoOp(t *testing.T) {
 	s := newTestSessionIDHeader(t, nil)
 	s.ResponseHeader(context.Background(), nil, nil, nil)
+}
+
+// headerWithSources builds a SessionIDHeader configured with the given sources,
+// for exercising resolveSessionID in isolation.
+func headerWithSources(t *testing.T, sources ...SessionIDSource) *SessionIDHeader {
+	t.Helper()
+	return NewSessionIDHeader(
+		SessionIDConfig{Sources: sources, EvictionTTLSeconds: 300, EvictionSweepSeconds: 10},
+		"", testPluginKey, utils.NewTestHandle(utils.NewTestContext(t)),
+	)
+}
+
+// namedSessionID mimics a producer publishing its identifier under a named
+// string type (e.g. session.SessionID) rather than a plain string.
+type namedSessionID string
+
+func TestResolveSessionID(t *testing.T) {
+	const attr = "agent-identity"
+
+	withHeader := func(name, value string) *scheduling.InferenceRequest {
+		return &scheduling.InferenceRequest{Headers: map[string]string{name: value}}
+	}
+	withAttr := func(value string) *scheduling.InferenceRequest {
+		req := &scheduling.InferenceRequest{Headers: map[string]string{}}
+		req.PutAttribute(attr, value)
+		return req
+	}
+	// withAttrValue stores an arbitrary value under the attribute key, to cover
+	// producers that publish a named string type or a non-string value.
+	withAttrValue := func(value any) *scheduling.InferenceRequest {
+		req := &scheduling.InferenceRequest{Headers: map[string]string{}}
+		req.PutAttribute(attr, value)
+		return req
+	}
+
+	tests := []struct {
+		name    string
+		sources []SessionIDSource
+		request *scheduling.InferenceRequest
+		want    string
+	}{
+		{
+			name:    "header source resolves",
+			sources: []SessionIDSource{{Header: "x-session-id"}},
+			request: withHeader("x-session-id", "sess-1"),
+			want:    "sess-1",
+		},
+		{
+			name:    "attribute source resolves",
+			sources: []SessionIDSource{{Attribute: attr}},
+			request: withAttr("agent-42"),
+			want:    "agent-42",
+		},
+		{
+			name:    "attribute stored as a named string type resolves",
+			sources: []SessionIDSource{{Attribute: attr}},
+			request: withAttrValue(namedSessionID("agent-99")),
+			want:    "agent-99",
+		},
+		{
+			name:    "attribute stored as a non-string value is skipped",
+			sources: []SessionIDSource{{Attribute: attr}},
+			request: withAttrValue(42),
+			want:    "",
+		},
+		{
+			name:    "header wins over attribute in priority order",
+			sources: []SessionIDSource{{Header: "x-session-id"}, {Attribute: attr}},
+			request: func() *scheduling.InferenceRequest {
+				req := withHeader("x-session-id", "from-header")
+				req.PutAttribute(attr, "from-attr")
+				return req
+			}(),
+			want: "from-header",
+		},
+		{
+			name:    "falls through to attribute when header empty",
+			sources: []SessionIDSource{{Header: "x-session-id"}, {Attribute: attr}},
+			request: withAttr("from-attr"),
+			want:    "from-attr",
+		},
+		{
+			name:    "none match yields empty",
+			sources: []SessionIDSource{{Header: "x-session-id"}, {Attribute: attr}},
+			request: &scheduling.InferenceRequest{Headers: map[string]string{}},
+			want:    "",
+		},
+		{
+			name:    "whitespace-only value is treated as empty",
+			sources: []SessionIDSource{{Header: "x-session-id"}},
+			request: withHeader("x-session-id", "   "),
+			want:    "",
+		},
+		{
+			name:    "nil request yields empty",
+			sources: []SessionIDSource{{Header: "x-session-id"}},
+			request: nil,
+			want:    "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := headerWithSources(t, test.sources...)
+			if got := s.resolveSessionID(context.Background(), test.request); got != test.want {
+				t.Errorf("resolveSessionID = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSessionIDConfig_ApplyDefaults(t *testing.T) {
+	t.Run("empty config gets default source and eviction schedule", func(t *testing.T) {
+		c := SessionIDConfig{}
+		c.ApplyDefaults()
+		if len(c.Sources) != 1 || c.Sources[0].Header != DefaultSessionIDHeader {
+			t.Errorf("Sources = %+v, want single %q header source", c.Sources, DefaultSessionIDHeader)
+		}
+		if c.EvictionTTLSeconds != defaultEvictionTTLSeconds || c.EvictionSweepSeconds != defaultEvictionSweepSeconds {
+			t.Errorf("eviction = (%v, %v), want (%v, %v)", c.EvictionTTLSeconds, c.EvictionSweepSeconds, defaultEvictionTTLSeconds, defaultEvictionSweepSeconds)
+		}
+	})
+
+	t.Run("configured sources are left untouched", func(t *testing.T) {
+		c := SessionIDConfig{Sources: []SessionIDSource{{Attribute: "agent-identity"}}}
+		c.ApplyDefaults()
+		if len(c.Sources) != 1 || c.Sources[0].Attribute != "agent-identity" {
+			t.Errorf("Sources = %+v, want the configured attribute source unchanged", c.Sources)
+		}
+	})
+}
+
+func TestSessionIDConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    SessionIDConfig
+		expectErr bool
+	}{
+		{
+			name: "single header source is valid",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: DefaultSessionIDHeader}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 10,
+			},
+		},
+		{
+			name: "source with both header and attribute rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "h", Attribute: "a"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 10,
+			},
+			expectErr: true,
+		},
+		{
+			name: "source with neither header nor attribute rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: 10,
+			},
+			expectErr: true,
+		},
+		{
+			name: "zero ttl rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   0,
+				EvictionSweepSeconds: 10,
+			},
+			expectErr: true,
+		},
+		{
+			name: "negative sweep rejected",
+			config: SessionIDConfig{
+				Sources:              []SessionIDSource{{Header: "x-session-id"}},
+				EvictionTTLSeconds:   300,
+				EvictionSweepSeconds: -1,
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.config.Validate()
+			if test.expectErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !test.expectErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
 }
