@@ -24,10 +24,12 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 func makePodMetric(name string, queueDepth int, kvUsage float64, updateTime time.Time) fwkdl.Endpoint {
@@ -369,4 +371,71 @@ func TestDetector_Filter(t *testing.T) {
 			require.Len(t, got, tc.wantLen)
 		})
 	}
+}
+
+// TestDetector_StaleEndpointObservability verifies that Saturation records the stale-endpoint
+// gauge (keyed by detector name) and that the stale-metrics log is time-bounded.
+func TestDetector_StaleEndpointObservability(t *testing.T) {
+	t.Parallel()
+
+	eppmetrics.Register()
+
+	// A wide staleness threshold keeps fresh pods deterministically fresh on slow CI machines;
+	// the stale pod is stamped far past the threshold.
+	config := Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+	}
+	// A unique detector name isolates this test's gauge series from parallel tests.
+	detectorName := "stale-observability-test"
+	detector := NewDetector(detectorName, config, logr.Discard())
+
+	staleGaugeValue := func() float64 {
+		families, err := ctrlmetrics.Registry.Gather()
+		require.NoError(t, err)
+		for _, f := range families {
+			if f.GetName() != "llm_d_epp_flow_control_stale_endpoints" {
+				continue
+			}
+			for _, m := range f.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "detector" && l.GetValue() == detectorName {
+						return m.GetGauge().GetValue()
+					}
+				}
+			}
+		}
+		return -1 // Series absent.
+	}
+
+	baseTime := time.Now()
+	pods := []fwkdl.Endpoint{
+		makePodMetric("fresh", 1, 0.1, baseTime),
+		makePodMetric("stale", 1, 0.1, baseTime.Add(-2*time.Hour)),
+		fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+			NamespacedName: types.NamespacedName{Name: "nil-metrics", Namespace: "ns1"},
+		}, nil),
+	}
+
+	detector.Saturation(context.Background(), pods)
+	require.Equal(t, 2.0, staleGaugeValue(), "stale and nil-metrics endpoints should both be counted")
+	firstWarn := detector.lastStaleWarnNanos.Load()
+	require.NotZero(t, firstWarn, "first stale observation should record a log timestamp")
+
+	// A second observation within staleWarnInterval must not log again.
+	detector.Saturation(context.Background(), pods)
+	require.Equal(t, firstWarn, detector.lastStaleWarnNanos.Load(),
+		"stale-metrics logging must be time-bounded, not per evaluation")
+
+	// An empty candidate list has no stale endpoints; the gauge must not stay pinned at its last
+	// value, or an empty-pool stall reads as a metrics collection failure.
+	detector.Saturation(context.Background(), []fwkdl.Endpoint{})
+	require.Equal(t, 0.0, staleGaugeValue(), "gauge should read zero for an empty candidate list")
+
+	// Re-observe staleness, then confirm fresh metrics clear it.
+	detector.Saturation(context.Background(), pods)
+	require.Equal(t, 2.0, staleGaugeValue(), "staleness should be re-observed after the empty list")
+	detector.Saturation(context.Background(), []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
+	require.Equal(t, 0.0, staleGaugeValue(), "gauge should return to zero when staleness clears")
 }
