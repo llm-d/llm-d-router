@@ -28,6 +28,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/vtc"
 )
 
 // TestFairnessPolicyConformance is the main conformance test suite for FairnessPolicy implementations.
@@ -39,6 +40,7 @@ func TestFairnessPolicyConformance(t *testing.T) {
 	policies := map[string]fwkplugin.FactoryFunc{
 		globalstrict.GlobalStrictFairnessPolicyType: globalstrict.GlobalStrictFairnessPolicyFactory,
 		roundrobin.RoundRobinFairnessPolicyType:     roundrobin.RoundRobinFairnessPolicyFactory,
+		vtc.VTCFairnessPolicyType:                   vtc.VTCFairnessPolicyFactory,
 	}
 
 	for name, f := range policies {
