@@ -486,11 +486,13 @@ func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
 		RequestID:   "req-mm-weighted",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{tokens},
-				MultiModalFeatures: []fwkrh.MultiModalFeature{
-					{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 48, Length: 16},
-				},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs: tokens,
+					MultiModalFeatures: []fwkrh.MultiModalFeature{
+						{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 48, Length: 16},
+					},
+				}},
 			},
 		},
 	}
