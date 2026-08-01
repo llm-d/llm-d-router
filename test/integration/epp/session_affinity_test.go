@@ -18,6 +18,7 @@ package epp
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -82,6 +83,51 @@ dataLayer:
 		"second request carrying the session token must be pinned to the first request's endpoint")
 }
 
+// TestSessionAffinityScorer_RequestFlow is the scorer analogue of
+// TestSessionAffinityFilter_RequestFlow: the encoded scorer feeds max-score-picker
+// rather than hard-narrowing candidates, but the affinity contract is the same.
+// The first request is routed and gets a session token; the second, carrying
+// that token, pins to the same endpoint.
+func TestSessionAffinityScorer_RequestFlow(t *testing.T) {
+	configText := `
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: session-affinity-scorer
+  - type: max-score-picker
+  - type: mock-metrics-source
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: session-affinity-scorer
+      - pluginRef: max-score-picker
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
+`
+
+	ctx := t.Context()
+	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
+
+	pods := []PodState{
+		P(0, 0, 0.1, modelMyModelTarget),
+		P(1, 0, 0.1, modelMyModelTarget),
+	}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+	h.WaitForReadyPodsMetric(len(pods))
+
+	firstEndpoint, token := sendSessionRequest(t, h, "")
+	require.NotEmpty(t, token, "first response must carry a session token")
+
+	secondEndpoint, _ := sendSessionRequest(t, h, token)
+	require.Equal(t, firstEndpoint, secondEndpoint,
+		"second request carrying the session token must be pinned to the first request's endpoint")
+}
+
 // sendSessionRequest drives one full request/response transaction through the
 // EPP and returns the routed destination endpoint and the session token set on
 // the response headers. When sessionToken is non-empty it is sent as the
@@ -140,8 +186,9 @@ plugins:
   - type: session-affinity-filter
     name: session-affinity-prefill
     parameters:
-      headerName: x-session-token-prefill
       profileName: prefill
+      encodedEndpointHeaderConfig:
+        header: x-session-token-prefill
   - type: mock-metrics-source
 requestHandler:
   parsers:
@@ -303,4 +350,157 @@ func headerValue(setHeaders []*configPb.HeaderValueOption, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestSessionAffinityFilter_SessionIDHeaderStrategy exercises the session_id_header
+// strategy end to end with an ordered source list [header x-session-id, attribute
+// agent-identity]. It proves: (1) the header source binds and pins a session; (2)
+// a request carrying only an agent header resolves via the agent-identity plugin's
+// published attribute and pins (the cross-plugin handoff); (3) the header wins
+// over the attribute when both are present.
+func TestSessionAffinityFilter_SessionIDHeaderStrategy(t *testing.T) {
+	configText := `
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: agent-identity
+  - type: session-affinity-filter
+    parameters:
+      strategy: session_id_header
+      sessionIdConfig:
+        sources:
+          - header: x-session-id
+          - attribute: agent-identity
+  - type: mock-metrics-source
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: session-affinity-filter
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
+`
+	runSessionIDHeaderStrategyChecks(t, configText)
+}
+
+// TestSessionAffinityScorer_SessionIDHeaderStrategy is the scorer analogue: the
+// same source list and cross-plugin handoff, but the scorer feeds max-score-picker
+// rather than hard-narrowing candidates.
+func TestSessionAffinityScorer_SessionIDHeaderStrategy(t *testing.T) {
+	configText := `
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: agent-identity
+  - type: session-affinity-scorer
+    parameters:
+      strategy: session_id_header
+      sessionIdConfig:
+        sources:
+          - header: x-session-id
+          - attribute: agent-identity
+  - type: max-score-picker
+  - type: mock-metrics-source
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: session-affinity-scorer
+      - pluginRef: max-score-picker
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  sources:
+  - pluginRef: mock-metrics-source
+`
+	runSessionIDHeaderStrategyChecks(t, configText)
+}
+
+// runSessionIDHeaderStrategyChecks drives the shared session_id_header assertions
+// against a plugin (filter or scorer) configured with the ordered
+// [header x-session-id, attribute agent-identity] source list. Affinity is
+// asserted by same-session-same-endpoint, since session_id_header writes no token
+// back and leastLoadedPod's target need not be a fixed pod.
+func runSessionIDHeaderStrategyChecks(t *testing.T, configText string) {
+	const claudeHeader = "x-claude-code-session-id"
+
+	ctx := t.Context()
+	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
+	pods := []PodState{
+		P(0, 0, 0.1, modelMyModelTarget),
+		P(1, 0, 0.1, modelMyModelTarget),
+	}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+	h.WaitForReadyPodsMetric(len(pods))
+
+	// (1) Header source: same x-session-id pins to the same endpoint.
+	headerFirst := sendRoutedRequest(t, h, map[string]string{"x-session-id": "sess-A"})
+	headerSecond := sendRoutedRequest(t, h, map[string]string{"x-session-id": "sess-A"})
+	require.Equal(t, headerFirst, headerSecond,
+		"same x-session-id must pin to the same endpoint")
+
+	// (2) Attribute fallback: no header, agent-identity publishes the attribute
+	// from the agent header, and the session pins across requests.
+	agentFirst := sendRoutedRequest(t, h, map[string]string{claudeHeader: "agent-B"})
+	agentSecond := sendRoutedRequest(t, h, map[string]string{claudeHeader: "agent-B"})
+	require.Equal(t, agentFirst, agentSecond,
+		"same agent identity resolved via the attribute source must pin to the same endpoint")
+
+	// Negative control: two distinct sessions must spread across the two pods.
+	// This can only hold if affinity is actually binding and load-spreading; a
+	// no-op plugin would route both to the picker's default pod, and it proves
+	// step (2) resolved a real identifier from the attribute rather than abstaining.
+	require.NotEqual(t, headerFirst, agentFirst,
+		"two distinct sessions must pin to different pods")
+
+	// (3) Priority: header wins over attribute. A request carrying both the
+	// x-session-id header of session A and a different agent header resolves as
+	// session A, so it pins to session A's endpoint.
+	both := sendRoutedRequest(t, h, map[string]string{"x-session-id": "sess-A", claudeHeader: "agent-B"})
+	require.Equal(t, headerFirst, both,
+		"the header source must win over the attribute source when both are present")
+}
+
+// routedRequestSeq gives each sendRoutedRequest call a distinct RequestID.
+var routedRequestSeq int64
+
+// sendRoutedRequest drives one full request/response transaction with the given
+// extra request headers and returns the routed destination endpoint. Unlike
+// sendSessionRequest it reads no response token: session_id_header writes nothing
+// back, so affinity is asserted purely by the endpoint the request is routed to.
+func sendRoutedRequest(t *testing.T, h *TestHarness, extraHeaders map[string]string) string {
+	t.Helper()
+
+	// Unique per call: the Choose->PreRequest boundPodPresence handoff is keyed by
+	// RequestID, so reusing one across sequential requests would couple their state.
+	reqHeaders := map[string]string{
+		metadata.ObjectiveKey:        modelMyModel,
+		metadata.ModelNameRewriteKey: modelMyModelTarget,
+		reqcommon.RequestIDHeaderKey: fmt.Sprintf("session-req-%d", atomic.AddInt64(&routedRequestSeq, 1)),
+	}
+	for k, v := range extraHeaders {
+		reqHeaders[k] = v
+	}
+
+	requests := integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
+	requests = append(requests, ReqResponseOnly(
+		map[string]string{"content-type": "application/json", "status": "200"},
+		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
+	)...)
+
+	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
+	require.NoError(t, err)
+
+	responses, err := integration.StreamedRequest(t, client, requests, 4)
+	require.NoError(t, err)
+	require.Len(t, responses, 4)
+
+	endpoint := headerValue(responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+	require.NotEmpty(t, endpoint, "request headers response must set the destination endpoint")
+	return endpoint
 }
