@@ -124,13 +124,15 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+	switch {
+	case reqCtx.OriginalPath == gateway.DefaultGeneratePath:
 		return s.executeGenerate(ctx, reqCtx)
-	}
-	if strings.Contains(reqCtx.OriginalPath, gateway.PathCompletions) {
+	case strings.Contains(reqCtx.OriginalPath, gateway.PathCompletions):
 		return s.executeCompletions(ctx, reqCtx)
-	} else if strings.Contains(reqCtx.OriginalPath, gateway.PathChatCompletions) {
+	case strings.Contains(reqCtx.OriginalPath, gateway.PathChatCompletions):
 		return s.executeChatCompletions(ctx, reqCtx)
+	case strings.Contains(reqCtx.OriginalPath, gateway.PathResponses):
+		return s.executeResponses(ctx, reqCtx)
 	}
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 	logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
@@ -258,12 +260,30 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 }
 
 func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName(RenderStepName)
-
 	var renderResp renderResponse
 	if err := s.postRender(ctx, reqCtx, gateway.PathChatCompletions, &renderResp); err != nil {
 		return err
 	}
+	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+}
+
+// executeResponses handles the /v1/responses path. The render service
+// tokenizes whatever shape reqCtx.Body["input"] is (string or message-item
+// array) itself, so this step does not need to distinguish those shapes -
+// applying the response is identical to executeChatCompletions.
+func (s *RenderStep) executeResponses(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	var renderResp renderResponse
+	if err := s.postRender(ctx, reqCtx, gateway.PathResponses, &renderResp); err != nil {
+		return err
+	}
+	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+}
+
+// applyRenderResponse stores a renderResponse's token_ids and reconciles its
+// per-image features onto reqCtx.MultimodalEntries. Shared by every format
+// whose render call returns this response shape (chat-completions, responses).
+func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse) error {
+	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	reqCtx.TokenIDs = renderResp.TokenIDs
 	if err := s.checkTokenLimit(len(reqCtx.TokenIDs)); err != nil {

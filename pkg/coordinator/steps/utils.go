@@ -99,10 +99,9 @@ func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 	if _, ok := body[reqcommon.FieldMaxCompletionTokens]; ok {
 		body[reqcommon.FieldMaxCompletionTokens] = 1
 	}
-
-	// TODO: max_output_tokens is another client-supplied output cap (Responses
-	// API) that a client can send instead of max_tokens/max_completion_tokens; it
-	// should be capped to 1 here as well so the synthetic legs stay single-token.
+	if _, ok := body[reqcommon.FieldMaxOutputTokens]; ok {
+		body[reqcommon.FieldMaxOutputTokens] = 1
+	}
 
 	body[reqcommon.FieldStream] = false
 	delete(body, reqcommon.FieldStreamOptions)
