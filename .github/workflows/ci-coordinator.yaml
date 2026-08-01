@@ -174,9 +174,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - topology: single
+          - topology: single-EPP
             target: test-e2e-coordinator-run
-          - topology: 3epp
+          - topology: 3-EPP
             target: test-e2e-coordinator-3epp-run
     name: e2e-tests (${{ matrix.topology }})
     steps:
