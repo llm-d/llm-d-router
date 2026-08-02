@@ -373,6 +373,53 @@ func TestEnforceScoreRange(t *testing.T) {
 	}
 }
 
+func TestRequestSpanAttributes(t *testing.T) {
+	tests := []struct {
+		name    string
+		request *fwksched.InferenceRequest
+		keys    []string
+		values  []string
+	}{
+		{name: "nil request"},
+		{name: "empty request", request: &fwksched.InferenceRequest{}},
+		{
+			name:    "model and request ID",
+			request: &fwksched.InferenceRequest{TargetModel: "model", RequestID: "request"},
+			keys:    []string{"gen_ai.request.model", "gen_ai.request.id"},
+			values:  []string{"model", "request"},
+		},
+		{
+			name:    "model only",
+			request: &fwksched.InferenceRequest{TargetModel: "model"},
+			keys:    []string{"gen_ai.request.model"},
+			values:  []string{"model"},
+		},
+		{
+			name:    "request ID only",
+			request: &fwksched.InferenceRequest{RequestID: "request"},
+			keys:    []string{"gen_ai.request.id"},
+			values:  []string{"request"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := requestSpanAttributes(test.request)
+			if len(got) != len(test.keys) {
+				t.Fatalf("requestSpanAttributes() returned %d attributes, want %d", len(got), len(test.keys))
+			}
+			for i := range got {
+				if string(got[i].Key) != test.keys[i] {
+					t.Errorf("attribute %d key = %q, want %q", i, got[i].Key, test.keys[i])
+				}
+				if got[i].Value.AsString() != test.values[i] {
+					t.Errorf("attribute %d value = %q, want %q", i, got[i].Value.AsString(), test.values[i])
+				}
+			}
+		})
+	}
+}
+
 func TestRunWithOutOfRangeScores(t *testing.T) {
 	// Scorer that returns negative score
 	negativeScorer := &testPlugin{

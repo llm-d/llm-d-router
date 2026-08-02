@@ -35,10 +35,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// tracerScope is the OTel instrumentation scope for scheduler-level scoring
-// spans emitted from this package.
-const tracerScope = "llm-d-router/pkg/epp/scheduling"
-
 // internalSpanKind is hoisted to avoid allocating a span-start option on every
 // scoring call.
 var internalSpanKind = trace.WithSpanKind(trace.SpanKindInternal)
@@ -149,14 +145,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	)
 	defer span.End()
 	span.SetAttributes(attribute.Int("llm_d.epp.filter.candidate_endpoints", len(endpoints)))
-	if request != nil {
-		if request.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
-		}
-		if request.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
-		}
-	}
+	span.SetAttributes(requestSpanAttributes(request)...)
 
 	for _, filter := range p.filters {
 		logger.V(logutil.VERBOSE).Info("Running filter plugin", "plugin", filter.TypedName())
@@ -184,7 +173,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// chain-level only; no per-endpoint keys, to keep span cardinality bounded.
 	// The tracer is resolved once and threaded into runScorer so the per-scorer
 	// spans reuse it rather than rebuilding instrumentation options per scorer.
-	tracer := tracing.Tracer(tracerScope)
+	tracer := tracing.Tracer(TracerScope)
 	ctx, span := tracer.Start(ctx, "llm_d.epp.scoring", internalSpanKind)
 	defer span.End()
 	// On the default (tracing-disabled) path Start returns a non-recording span;
@@ -196,7 +185,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 			attribute.Int("llm_d.epp.scorer.count", len(p.scorers)),
 			attribute.Int("llm_d.epp.scoring.candidate_endpoints", len(endpoints)),
 		)
-		setRequestSpanAttributes(span, request)
+		span.SetAttributes(requestSpanAttributes(request)...)
 	}
 
 	weightedScorePerEndpoint := make(map[fwksched.Endpoint]float64, len(endpoints))
@@ -278,18 +267,18 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	return scores
 }
 
-// setRequestSpanAttributes mirrors the request-identity attribute schema used
-// by the scorer plugins so scheduler-level spans correlate with the same trace.
-func setRequestSpanAttributes(span trace.Span, request *fwksched.InferenceRequest) {
+func requestSpanAttributes(request *fwksched.InferenceRequest) []attribute.KeyValue {
 	if request == nil {
-		return
+		return nil
 	}
+	attributes := make([]attribute.KeyValue, 0, 2)
 	if request.TargetModel != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		attributes = append(attributes, attribute.String("gen_ai.request.model", request.TargetModel))
 	}
 	if request.RequestID != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+		attributes = append(attributes, attribute.String("gen_ai.request.id", request.RequestID))
 	}
+	return attributes
 }
 
 func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksched.InferenceRequest, weightedScorePerEndpoint map[fwksched.Endpoint]float64) *fwksched.ProfileRunResult {
@@ -330,14 +319,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 			attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
 		)
 	}
-	if request != nil {
-		if request.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
-		}
-		if request.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
-		}
-	}
+	span.SetAttributes(requestSpanAttributes(request)...)
 
 	before := time.Now()
 	result := p.picker.Pick(ctx, scoredEndpoints)
