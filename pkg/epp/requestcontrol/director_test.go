@@ -367,29 +367,29 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 	scoredEndpoint1 := &fwksched.ScoredEndpoint{
 		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-			Address:        "192.168.1.100",
-			Port:           "8000",
-			MetricsHost:    "192.168.1.100:8000",
-			NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+			Address:     "192.168.1.100",
+			Port:        "8000",
+			MetricsHost: "192.168.1.100:8000",
+			ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
 		}, nil, nil),
 		Score: 0.91,
 	}
 	scoredEndpoint2 := &fwksched.ScoredEndpoint{
 		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-			Address:        "192.168.2.100",
-			Port:           "8000",
-			MetricsHost:    "192.168.2.100:8000",
-			NamespacedName: types.NamespacedName{Name: "pod2", Namespace: "default"},
+			Address:     "192.168.2.100",
+			Port:        "8000",
+			MetricsHost: "192.168.2.100:8000",
+			ID:          types.NamespacedName{Name: "pod2", Namespace: "default"},
 		}, nil, nil),
 		Score: 0.74,
 	}
 	// Scored but not selected by the picker; its score is still surfaced.
 	scoredEndpoint3 := &fwksched.ScoredEndpoint{
 		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-			Address:        "192.168.3.100",
-			Port:           "8000",
-			MetricsHost:    "192.168.3.100:8000",
-			NamespacedName: types.NamespacedName{Name: "pod3", Namespace: "default"},
+			Address:     "192.168.3.100",
+			Port:        "8000",
+			MetricsHost: "192.168.3.100:8000",
+			ID:          types.NamespacedName{Name: "pod3", Namespace: "default"},
 		}, nil, nil),
 		Score: 0.12,
 	}
@@ -466,10 +466,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000",
 				TargetEndpointScores: map[string]float64{

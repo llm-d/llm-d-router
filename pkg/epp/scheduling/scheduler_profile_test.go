@@ -198,9 +198,9 @@ func TestSchedulerProfileScoredCandidates(t *testing.T) {
 		WithPicker(plugin)
 
 	input := []fwksched.Endpoint{
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil),
 	}
 	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
 
@@ -220,7 +220,7 @@ func TestSchedulerProfileScoredCandidates(t *testing.T) {
 	}
 	gotScores := make(map[string]float64, len(got.ScoredCandidates))
 	for _, candidate := range got.ScoredCandidates {
-		gotScores[candidate.GetMetadata().NamespacedName.String()] = candidate.Score
+		gotScores[candidate.GetMetadata().ID.String()] = candidate.Score
 	}
 	if diff := cmp.Diff(wantScores, gotScores); diff != "" {
 		t.Errorf("Unexpected scored candidates (-want +got): %v", diff)

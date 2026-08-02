@@ -414,7 +414,7 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 		makePodMetric("fresh", 1, 0.1, baseTime),
 		makePodMetric("stale", 1, 0.1, baseTime.Add(-2*time.Hour)),
 		fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-			NamespacedName: types.NamespacedName{Name: "nil-metrics", Namespace: "ns1"},
+			ID: types.NamespacedName{Name: "nil-metrics", Namespace: "ns1"},
 		}, nil),
 	}
 
