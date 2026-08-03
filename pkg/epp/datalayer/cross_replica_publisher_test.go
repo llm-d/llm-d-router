@@ -85,7 +85,7 @@ func (c fakeContributor) CrossReplicaState() fwkdl.CrossReplicaSpec {
 
 func testEndpoint(namespace, name string) fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Namespace: namespace, Name: name},
+		ID: types.NamespacedName{Namespace: namespace, Name: name},
 	}, nil)
 }
 
