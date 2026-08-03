@@ -65,8 +65,8 @@ type TokenProcessorConfig struct {
 	// algorithm must not change while a persisted or shared index (e.g. the
 	// Redis backend) holds keys, or while engines still hold blocks whose
 	// stored engine-to-request mappings were built under the old keys —
-	// parent-chain resolution would then mix algorithms and produce request
-	// keys lookups can never match. Change it only together with an index
+	// parent-chain resolution would then mix algorithms and produce request-key
+	// lookups that can never match. Change it only together with an index
 	// flush and engine cache reset, and roll all replicas sharing an index
 	// to the same value.
 	HashAlgorithm string `json:"hashAlgorithm"`
