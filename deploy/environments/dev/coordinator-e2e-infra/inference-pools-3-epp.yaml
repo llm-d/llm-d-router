@@ -1,8 +1,7 @@
 # Role-scoped InferencePools for the coordinator 3-EPP e2e topology. Each pool
 # selects a single worker role via the llm-d.ai/role label (all three roles share
 # the same app label, so role is what distinguishes them) and is backed by that
-# role's own EPP Service. Mirrors the guide's "3 separate EPPs" option, where each
-# Helm release owns one role-scoped InferencePool.
+# role's own EPP Service.
 #
 # Placeholders POOL_NAME_*, EPP_NAME_*, and TARGET_PORTS are substituted by the
 # suite before apply; TARGET_PORTS is the same pre-formatted YAML block-sequence

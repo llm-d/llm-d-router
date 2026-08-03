@@ -136,12 +136,19 @@ func createOneEndPointPicker(e roleEPP) []string {
 // mount, and ConfigMap reference from the shared "epp-config" name to cmName so
 // each 3-EPP role mounts its own ConfigMap. It matches only the "name: epp-config"
 // line endings, leaving the "/etc/epp/epp-config.yaml" mount path and ConfigMap
-// key (still keyed "epp-config.yaml") untouched.
+// key (still keyed "epp-config.yaml") untouched. The match count is asserted so a
+// formatting change in the shared manifest fails here instead of silently
+// no-opping and leaving all three roles pointed at the wrong ConfigMap.
 func renameEPPConfigVolume(docs []string, cmName string) []string {
+	const oldRef = "name: epp-config\n"
 	out := make([]string, len(docs))
+	matches := 0
 	for i, d := range docs {
-		out[i] = strings.ReplaceAll(d, "name: epp-config\n", "name: "+cmName+"\n")
+		matches += strings.Count(d, oldRef)
+		out[i] = strings.ReplaceAll(d, oldRef, "name: "+cmName+"\n")
 	}
+	gomega.Expect(matches).To(gomega.Equal(3),
+		"expected 3 %q references (volume, volumeMount, configMap) in the EPP Deployment; the shared manifest format may have changed", oldRef)
 	return out
 }
 

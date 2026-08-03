@@ -43,6 +43,7 @@ jobs:
               - hack/**
               - test/**
               - config/coordinator/**
+              - deploy/**
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-coordinator.yaml

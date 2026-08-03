@@ -1,8 +1,7 @@
 # Hand-rolled Envoy manifest for the coordinator 3-EPP e2e topology.
 #
-# The e2e analogue of the guide's router/httproute-3-epp.yaml: instead of the
-# single EPP that envoy.yaml routes every EPP-Profile request to, this routes
-# each EPP-Profile value (encode | prefill | decode) to its own role-scoped EPP
+# Instead of the single EPP that envoy.yaml routes every EPP-Profile request to,
+# this routes each EPP-Profile value (encode | prefill | decode) to its own role-scoped EPP
 # ext_proc cluster. Each of those EPPs backs a role-scoped InferencePool (see
 # inference-pools-3-epp.yaml) and runs a single default scheduling profile, so no
 # header-profile-handler is needed. The chosen EPP picks an endpoint and Envoy

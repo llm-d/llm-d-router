@@ -105,7 +105,7 @@ var (
 
 	// threeEPP selects the 3-EPP topology (one role-scoped EPP + InferencePool per
 	// phase) instead of the default single-EPP topology. See envoy3EPPManifest and
-	// the eppConfig{Encode,Prefill,Decode} configs.
+	// the eppConfigLeastBusy (encode, decode) and eppConfigPrefill configs.
 	threeEPP = env.GetEnvString("E2E_EPP_TOPOLOGY", "single", ginkgo.GinkgoLogr) == "3epp"
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)

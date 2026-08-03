@@ -123,10 +123,8 @@ schedulingProfiles:
 // ever sees its own role's pods, it needs no role filter and no profile-selection
 // plugin: single-profile-handler picks the one "default" profile, and the Envoy
 // route (envoy-3-epp.yaml) is what dispatches each EPP-Profile value to the right
-// EPP. The plugin/scorer choices mirror the guide's "3 separate EPPs" values
-// files (router/coord-disaggregation-{encode,prefill,decode}.values.yaml). The
-// openai-parser/vllmhttp-parser request handler matches the single-EPP config so
-// the generate path (vllm-http wire format) is parsed the same way.
+// EPP. The openai-parser/vllmhttp-parser request handler matches the single-EPP
+// config so the generate path (vllm-http wire format) is parsed the same way.
 
 // eppConfigLeastBusy backs both the encode and decode EPPs: both pick the
 // least-busy endpoint (active-request-scorer). Encode has no prefix-cache
@@ -155,7 +153,7 @@ schedulingProfiles:
 
 // eppConfigPrefill keeps prefix groups on cache-warm pods
 // (prefix-cache-affinity-filter), then picks by queued prefill token load
-// (token-load-scorer), matching the guide's prefill values file.
+// (token-load-scorer).
 const eppConfigPrefill = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
