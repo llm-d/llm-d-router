@@ -52,3 +52,7 @@ Configuring both the filter and the scorer is unnecessary:
 - If they use **different** `headerName` values, the configuration is misleading: the response carries the same token under two different headers (both encode the chosen pod), so the client cannot tell which header to echo back.
 
 Choose one: the filter for a hard pin, or the scorer for a soft preference that can be outweighed by other scorers.
+
+## Multi-cluster support
+
+`multicluster-session-affinity-filter` is the cluster-scoped variant. Cluster identity comes from discovery, so it delegates to this filter unchanged and pins a session to its cluster.
