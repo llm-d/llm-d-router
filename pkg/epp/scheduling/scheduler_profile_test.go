@@ -724,7 +724,7 @@ func (s *fixedScoresScorer) Score(_ context.Context, _ *fwksched.InferenceReques
 	}
 	out := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, e := range endpoints {
-		out[e] = s.scores[e.GetMetadata().NamespacedName.Name]
+		out[e] = s.scores[e.GetMetadata().ID.Name]
 	}
 	return out
 }
@@ -805,8 +805,8 @@ func TestRunScorerPluginsTracing(t *testing.T) {
 		WithPicker(picker)
 
 	input := []fwksched.Endpoint{
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
 	}
 	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: "req-123"}
 
@@ -882,7 +882,7 @@ func TestRunScorerPluginsTracingDisabled(t *testing.T) {
 		WithPicker(picker)
 
 	input := []fwksched.Endpoint{
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
 	}
 	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
 
@@ -906,7 +906,7 @@ func TestRunScorerEmptyCandidateAvg(t *testing.T) {
 		WithPicker(picker)
 
 	input := []fwksched.Endpoint{
-		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
 	}
 	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: "req-1"}
 
