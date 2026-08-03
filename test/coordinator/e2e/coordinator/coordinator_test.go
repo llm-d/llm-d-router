@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
@@ -172,6 +173,13 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		bytes.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
+	// Envoy's pipeline listener preserves a client-supplied x-request-id
+	// (preserve_external_request_id) and the coordinator propagates it to every
+	// pipeline leg, so a unique id here scopes the per-role routing check to this
+	// one request. Envoy is shared infra whose access log accumulates across specs,
+	// so an unscoped parse would match earlier specs' legs on since-recycled IPs.
+	reqID := uuid.NewString()
+	req.Header.Set("X-Request-Id", reqID)
 
 	client := &http.Client{Timeout: requestTimeout}
 	resp, err := client.Do(req)
@@ -188,7 +196,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	logs := fetchCoordinatorLogs(nsName)
 	verifyCoordinatorSteps(logs, expectedSteps, expectedImages, true, true)
 	if threeEPP {
-		verifyPerRoleRouting(nsName, slices.Contains(expectedSteps, "encode"))
+		verifyPerRoleRouting(nsName, slices.Contains(expectedSteps, "encode"), reqID)
 	}
 	if wantMaxTokens > 0 {
 		// Prefill is always capped; encode is capped only when the request carries
@@ -269,15 +277,17 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 // independent and catches a misrouted or swapped EPP-Profile route, which a
 // status-code check (all workers echo a plausible 200) cannot.
 //
-// The check is on where each leg landed, not how many: the coordinator stamps
-// one shared request id on every leg, so the per-image encode sub-requests are
-// indistinguishable in the access log. Their count is already asserted from the
+// reqID scopes the access-log parse to this request (see parseEnvoyLegRoutes).
+//
+// The check is on where each leg landed, not how many: the coordinator propagates
+// the one shared request id (reqID) to every leg, so the per-image encode sub-requests
+// are indistinguishable in the access log. Their count is already asserted from the
 // coordinator logs (see "all sub-requests complete" in verifyCoordinatorSteps);
 // here we require the encode profile to appear only when the pipeline runs the
 // encode step (expectEncode), and prefill and decode to always appear. The
 // generate path carries images but encodes inline on prefill, so it runs no
 // encode leg despite the images.
-func verifyPerRoleRouting(nsName string, expectEncode bool) {
+func verifyPerRoleRouting(nsName string, expectEncode bool, reqID string) {
 	ginkgo.By("Verifying each pipeline leg was routed to its own role's worker")
 
 	roleIPs := map[string]map[string]bool{}
@@ -288,7 +298,7 @@ func verifyPerRoleRouting(nsName string, expectEncode bool) {
 	// Envoy flushes access logs asynchronously, so poll until every expected role
 	// leg is recorded before asserting where each was routed.
 	gomega.Eventually(func(g gomega.Gomega) {
-		legs := parseEnvoyLegRoutes(fetchDeploymentLogs(nsName, "envoy", "envoy"), roleIPs)
+		legs := parseEnvoyLegRoutes(fetchDeploymentLogs(nsName, "envoy", "envoy"), roleIPs, reqID)
 		for _, e := range eppsToCreate() {
 			role := e.role
 			if role == "encode" && !expectEncode {
@@ -309,10 +319,12 @@ func verifyPerRoleRouting(nsName string, expectEncode bool) {
 
 // parseEnvoyLegRoutes extracts the per-role pipeline legs from the Envoy access
 // log (format defined in envoy-3-epp.yaml). It returns, per EPP-Profile value in
-// roles, the upstream pod IPs Envoy routed those legs to. Lines whose profile is
-// not a known role (the external client request and readiness probes take the
-// default route) are ignored.
-func parseEnvoyLegRoutes(logs string, roles map[string]map[string]bool) map[string][]string {
+// roles, the upstream pod IPs Envoy routed those legs to. Only lines carrying
+// reqID are considered: Envoy is shared across specs and its access log
+// accumulates, so scoping by request id keeps earlier specs' legs (on
+// since-recycled pod IPs) out. Lines whose profile is not a known role (the
+// external client request and readiness probes take the default route) are ignored.
+func parseEnvoyLegRoutes(logs string, roles map[string]map[string]bool, reqID string) map[string][]string {
 	out := map[string][]string{}
 	for _, line := range strings.Split(logs, "\n") {
 		if !strings.Contains(line, "[envoy]") {
@@ -323,6 +335,9 @@ func parseEnvoyLegRoutes(logs string, roles map[string]map[string]bool) map[stri
 			if k, v, ok := strings.Cut(tok, "="); ok {
 				fields[k] = v
 			}
+		}
+		if fields["id"] != reqID {
+			continue
 		}
 		profile := fields["epp-profile"]
 		if _, ok := roles[profile]; !ok {
