@@ -137,7 +137,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	switch format {
 	case gateway.FormatChatCompletions:
 		body := maps.Clone(reqCtx.Body)
-		reqcommon.PrimeSingleTokenRequest(body, reqCtx.Body)
+		capSingleTokenOutput(body, format)
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}
@@ -164,9 +164,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"request_id":                    reqCtx.RequestID,
 			"model":                         reqCtx.Model,
 			"prompt":                        prompt,
-			reqcommon.FieldMaxTokens:        1,
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
+		capSingleTokenOutput(body, format)
 		if features != nil {
 			body["features"] = features
 		}
@@ -175,26 +175,26 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		return body, nil
 
-	default:
+	case gateway.FormatGenerate:
+		// The /inference/v1/generate engine reads transfer params only from
+		// sampling_params.extra_args; top-level fields are ignored on input.
+		sampling := map[string]any{reqcommon.FieldMaxTokens: 1}
+		setGenerateTransferParams(sampling, kvParams, ecParams)
 		body := map[string]any{
-			"request_id": reqCtx.RequestID,
-			"token_ids":  reqCtx.TokenIDs,
-			"model":      reqCtx.Model,
-			reqcommon.FieldSamplingParams: map[string]any{
-				reqcommon.FieldMaxTokens: 1,
-				"extra_args": map[string]any{
-					reqcommon.FieldKVTransferParams: kvParams,
-				},
-			},
+			"request_id":                  reqCtx.RequestID,
+			"token_ids":                   reqCtx.TokenIDs,
+			"model":                       reqCtx.Model,
+			reqcommon.FieldSamplingParams: sampling,
 		}
+		capSingleTokenOutput(body, format)
 		if features != nil {
 			body["features"] = features
 		}
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
 		return body, nil
 	}
+	// resolveFormat only ever yields the three formats above; a new value
+	// reaching here is a programming error, not a client fault.
+	return nil, fmt.Errorf("prefill: unsupported request format %v", format)
 }
 
 type prefillResponse struct {

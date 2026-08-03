@@ -564,7 +564,7 @@ type stubSchedulingEndpoint struct {
 
 func newStubSchedulingEndpoint(name string) *stubSchedulingEndpoint {
 	return &stubSchedulingEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "default"}},
 		attr:     datalayer.NewAttributes(),
 	}
 }
@@ -623,6 +623,49 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testin
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+// TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream verifies
+// that when AddEstimatedOutputTokens is false, the prefill profile's request counter is
+// released at StartOfStream (the first chunk means prefill has completed and handed off),
+// while the decode profile's request counter is held until EndOfStream.
+func TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	ctx := context.Background()
+	prefillID := fullEndpointName("prefill-endpoint")
+	decodeID := fullEndpointName("decode-endpoint")
+
+	// 4 input tokens per profile. Output tokens are excluded.
+	req := makeTokenRequest("req-pd-no-output", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
+		},
+	}
+	producer.PreRequest(ctx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID))
+	require.Equal(t, int64(4), producer.tokenTracker.get(decodeID))
+
+	// First chunk: prefill is fully released (request included), decode keeps its
+	// request counter with tokens released.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID), "prefill request should be released at StartOfStream")
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID))
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID), "decode request should still be held")
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode tokens should be released at StartOfStream")
+
+	// EndOfStream releases the decode request counter.
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID))
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_SingleChunk verifies that a single-chunk

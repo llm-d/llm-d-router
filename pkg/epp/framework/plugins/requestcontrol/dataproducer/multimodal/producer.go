@@ -283,7 +283,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		if metadata == nil {
 			continue
 		}
-		matchedItems := p.matchedItemsForPod(metadata.NamespacedName.String(), requestItems)
+		matchedItems := p.matchedItemsForPod(metadata.ID.String(), requestItems)
 		p.recordHitRatio(len(matchedItems), len(requestItems))
 		endpoint.Put(p.dk.String(), attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
@@ -399,12 +399,12 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 		return nil
 	}
 	metadata := event.Endpoint.GetMetadata()
-	if metadata == nil || metadata.NamespacedName.Name == "" {
+	if metadata == nil || metadata.ID.Name == "" {
 		return nil
 	}
-	p.removePod(metadata.NamespacedName.String())
+	p.removePod(metadata.ID.String())
 	log.FromContext(ctx).V(logging.DEBUG).Info("Removed stale pod from multimodal encoder-cache state",
-		"pod", metadata.NamespacedName.String())
+		"pod", metadata.ID.String())
 	return nil
 }
 

@@ -52,6 +52,12 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"MaxPodHitCount", MaxPodHitCount},
 		{"DedupRemovedHashesSuppressed", DedupRemovedHashesSuppressed},
 		{"DedupRemovedHashesForwarded", DedupRemovedHashesForwarded},
+		{"SubscriberActive", SubscriberActive},
+		{"SubscriberReconnections", SubscriberReconnections},
+		{"MessagesReceived", MessagesReceived},
+		{"ZMQErrors", ZMQErrors},
+		{"PoolQueueDepth", PoolQueueDepth},
+		{"PoolCapacity", PoolCapacity},
 	}
 
 	for _, e := range expected {
@@ -59,6 +65,92 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 			t.Errorf("Collectors() is missing %s", e.name)
 		}
 	}
+}
+
+func TestKVEventsMetricNames(t *testing.T) {
+	// The kvevents observability metrics must be emitted under the router EPP
+	// subsystem with the kv_cache_events prefix.
+	reg := prometheus.NewRegistry()
+	kvevents := []prometheus.Collector{
+		SubscriberActive, SubscriberReconnections, MessagesReceived,
+		ZMQErrors, PoolQueueDepth, PoolCapacity,
+	}
+	for _, c := range kvevents {
+		reg.MustRegister(c)
+	}
+
+	// Emit a sample for each labeled metric so it appears in the gather output.
+	SubscriberActive.Set(1)
+	SubscriberReconnections.WithLabelValues("pod-a").Inc()
+	MessagesReceived.WithLabelValues("pod-a").Inc()
+	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
+	PoolQueueDepth.Set(3)
+	PoolCapacity.Set(4)
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() failed: %v", err)
+	}
+
+	got := make(map[string]bool, len(mfs))
+	for _, mf := range mfs {
+		got[mf.GetName()] = true
+	}
+
+	for _, name := range []string{
+		"llm_d_router_epp_kv_cache_events_active_subscribers",
+		"llm_d_router_epp_kv_cache_events_subscriber_reconnections_total",
+		"llm_d_router_epp_kv_cache_events_messages_received_total",
+		"llm_d_router_epp_kv_cache_events_zmq_errors_total",
+		"llm_d_router_epp_kv_cache_events_pool_queue_depth",
+		"llm_d_router_epp_kv_cache_events_pool_capacity",
+	} {
+		if !got[name] {
+			t.Errorf("expected metric %q to be registered, got names: %v", name, got)
+		}
+	}
+}
+
+func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
+	// Removing a subscriber must drop only its own series, leaving other pods'
+	// series intact.
+	SubscriberReconnections.WithLabelValues("pod-a").Inc()
+	MessagesReceived.WithLabelValues("pod-a").Inc()
+	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
+	ZMQErrors.WithLabelValues("pod-a", "connect").Inc()
+	SubscriberReconnections.WithLabelValues("pod-b").Inc()
+	MessagesReceived.WithLabelValues("pod-b").Inc()
+	ZMQErrors.WithLabelValues("pod-b", "recv").Inc()
+
+	CleanupSubscriber("pod-a")
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(SubscriberReconnections, MessagesReceived, ZMQErrors)
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() failed: %v", err)
+	}
+
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == podIdentifierLabel && l.GetValue() == "pod-a" {
+					t.Errorf("metric %q still has a series for pod-a", mf.GetName())
+				}
+			}
+		}
+	}
+
+	// pod-b must be untouched: three series across the three metrics.
+	remaining := 0
+	for _, mf := range mfs {
+		remaining += len(mf.GetMetric())
+	}
+	if remaining != 3 {
+		t.Errorf("expected 3 remaining pod-b series, got %d", remaining)
+	}
+
+	CleanupSubscriber("pod-b")
 }
 
 func TestLogMetrics(t *testing.T) {

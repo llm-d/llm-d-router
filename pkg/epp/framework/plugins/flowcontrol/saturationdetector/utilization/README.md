@@ -22,7 +22,19 @@ The global pool saturation is the average of the endpoint scores:
 
     PoolSaturation = Average(EndpointScore)
 
-*Note: Endpoints with missing or stale metrics are aggressively scored as 100% saturated.*
+**Heterogeneous Deployments:** Because this detector calculates saturation as an unweighted average of individual endpoint scores, it treats all endpoints equally regardless of their physical capacity. In deployments with heterogeneous compute (e.g., mixing H100 and L4 nodes), a small, saturated endpoint has the exact same impact on global backpressure as a massive, saturated endpoint. Contrast this with the Concurrency Detector, which evaluates saturation as a single aggregate fraction, biasing toward larger endpoints.
+*Note: Endpoints with missing or stale metrics are aggressively scored as 100% saturated (fail-closed).*
+
+**Operational dependency:** because stale endpoints score as saturated, Flow Control dispatch depends on the
+health of model-server metrics collection (scrape path, port, TLS, auth). A fleet-wide scrape outage pins
+`flow_control_pool_saturation` at 1.0 and halts dispatch entirely. The `flow_control_stale_endpoints` gauge and a
+rate-limited detector log distinguish this from genuine overload: stale endpoints read exactly 1.0, while genuine
+oversubscription typically reads above 1.0. This fail-closed posture is deliberate — admitting blind on missing
+data risks overloading model servers with no backpressure signal at all. Staleness also tends to correlate with
+overload: a server too busy to serve its metrics endpoint is often the one that is saturated, so failing open
+would hide exactly the wrong endpoints. The posture is not configurable; if field evidence shows a need, a
+staleness policy (for example, holding the last known score for a bounded window) can be added later without
+changing this default.
 
 **Scrape-lag compensation:** `WaitingQueueSize` is scraped on a poller while the Flow Controller's dispatch loop runs far faster, so between two scrapes the queue term is stale-low and the gate would let the controller over-dispatch. When an `inflight-load-producer` is configured, the queue term is corrected by the in-flight requests the scrape does not yet reflect:
 
@@ -35,7 +47,6 @@ The correction rests on assumptions that hold for a single-writer, aggregated de
 
 - **`RunningRequestsSize` must be populated.** The subtraction of running requests is only sound when the metrics mapping defines `runningRequestsSpec` (defaults exist for vLLM and SGLang). A custom mapping without it leaves `RunningRequestsSize` at 0, and the credit over-counts by the running count.
 - **Single EPP replica.** `InFlightRequests` is tracked per EPP replica, while `WaitingQueueSize + RunningRequestsSize` is engine-global. With multiple EPP replicas the credit floors at 0 and the compensation silently disappears (the same single-writer assumption the concurrency detector makes).
-- **Aggregated (non-P/D) pools.** With the default producer config the prefill profile's request counter is held until end-of-stream, so under P/D disaggregation a prefill endpoint shows phantom credit for the full decode duration of every request whose prefill it served. Correcting this requires releasing the prefill request counter at start-of-stream in the producer.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:

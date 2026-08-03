@@ -251,14 +251,14 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			ns = "default"
 		}
 		meta := &fwkdl.EndpointMetadata{
-			NamespacedName: types.NamespacedName{Name: e.Name, Namespace: ns},
-			PodName:        e.Name,
-			Address:        e.Address,
-			Port:           e.Port,
-			MetricsHost:    net.JoinHostPort(e.Address, e.Port),
-			Labels:         e.Labels,
+			ID:          types.NamespacedName{Name: e.Name, Namespace: ns},
+			Name:        e.Name,
+			Address:     e.Address,
+			Port:        e.Port,
+			MetricsHost: net.JoinHostPort(e.Address, e.Port),
+			Labels:      e.Labels,
 		}
-		incoming[meta.NamespacedName] = struct{}{}
+		incoming[meta.ID] = struct{}{}
 		notifier.Upsert(meta)
 	}
 

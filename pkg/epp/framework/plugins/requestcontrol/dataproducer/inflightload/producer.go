@@ -284,7 +284,7 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		return nil
 	}
 
-	id := event.Endpoint.GetMetadata().NamespacedName.String()
+	id := event.Endpoint.GetMetadata().ID.String()
 
 	switch event.Type {
 	case datalayer.EventDelete:
@@ -365,7 +365,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		if endpoint == nil || endpoint.GetMetadata() == nil {
 			continue
 		}
-		eid := endpoint.GetMetadata().NamespacedName.String()
+		eid := endpoint.GetMetadata().ID.String()
 		requestCounter := p.requestTracker.inc(eid)
 
 		// Compute the uncached prompt portion this endpoint must actually compute.
@@ -423,7 +423,10 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// the prompt cost, which is consumed by prefill. As soon as the first chunk
 	// arrives (StartOfStream), prefill is done across all profiles, so free the
 	// token counters for every targeted endpoint regardless of profile name.
-	// Request counters are still released on EndOfStream below via PluginState.Delete.
+	// The prefill profile's entry is released in full (request counter included):
+	// the first chunk means the prefill worker has finished and handed off, so
+	// the request is no longer in flight on that endpoint. Other profiles'
+	// request counters are released on EndOfStream below via PluginState.Delete.
 	if !p.addEstimatedOutputTokens && resp.StartOfStream {
 		for profileName, profileResult := range result.ProfileResults {
 			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -433,7 +436,11 @@ func (p *InFlightLoadProducer) ResponseBody(
 			if endpoint == nil || endpoint.GetMetadata() == nil {
 				continue
 			}
-			p.releaseTokensEarly(endpoint, request, profileName)
+			if profileName == profilePrefill {
+				p.release(endpoint, request, profileName)
+			} else {
+				p.releaseTokensEarly(endpoint, request, profileName)
+			}
 		}
 	}
 
@@ -472,7 +479,7 @@ func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwks
 	if meta == nil {
 		return
 	}
-	eid := meta.NamespacedName.String()
+	eid := meta.ID.String()
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 
 	// DeleteKey triggers OnEvicted, which decrements the counters exactly once.
@@ -492,7 +499,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	if meta == nil {
 		return
 	}
-	eid := meta.NamespacedName.String()
+	eid := meta.ID.String()
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {

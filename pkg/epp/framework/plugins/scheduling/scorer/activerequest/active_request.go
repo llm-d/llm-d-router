@@ -49,7 +49,7 @@ type endpointScores map[scheduling.Endpoint]float64
 func (s endpointScores) MarshalLog() interface{} {
 	result := make(map[string]float64, len(s))
 	for ep, score := range s {
-		result[ep.GetMetadata().NamespacedName.String()] = score
+		result[ep.GetMetadata().ID.String()] = score
 	}
 	return result
 }
@@ -158,7 +158,7 @@ func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.InferenceReques
 	maxCount := int64(0)
 
 	for _, endpoint := range endpoints {
-		endpointName := endpoint.GetMetadata().NamespacedName.String()
+		endpointName := endpoint.GetMetadata().ID.String()
 		count := s.requestCount(ctx, endpoint)
 		requestCounts[endpoint] = count
 		logCounts[endpointName] = count
@@ -196,13 +196,13 @@ func (s *ActiveRequest) requestCount(ctx context.Context, endpoint scheduling.En
 	case *attrconcurrency.InFlightLoad:
 		if load == nil {
 			log.FromContext(ctx).V(logutil.TRACE).Info("Ignoring nil in-flight load attribute",
-				"endpoint", endpoint.GetMetadata().NamespacedName.String())
+				"endpoint", endpoint.GetMetadata().ID.String())
 			return 0
 		}
 		return load.Requests
 	default:
 		log.FromContext(ctx).V(logutil.TRACE).Info("Ignoring in-flight load attribute with unexpected type",
-			"endpoint", endpoint.GetMetadata().NamespacedName.String(),
+			"endpoint", endpoint.GetMetadata().ID.String(),
 			"attributeType", fmt.Sprintf("%T", val))
 		return 0
 	}

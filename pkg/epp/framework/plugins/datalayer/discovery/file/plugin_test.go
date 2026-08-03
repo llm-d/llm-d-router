@@ -58,7 +58,7 @@ func (r *recordingNotifier) upsertedNames() []string {
 	defer r.mu.Unlock()
 	names := make([]string, len(r.upserted))
 	for i, m := range r.upserted {
-		names[i] = m.NamespacedName.String()
+		names[i] = m.ID.String()
 	}
 	return names
 }
@@ -164,7 +164,7 @@ endpoints:
 	cancel()
 
 	require.NoError(t, newFD(path, false).Start(ctx, notifier))
-	assert.Equal(t, "default", notifier.upserted[0].NamespacedName.Namespace)
+	assert.Equal(t, "default", notifier.upserted[0].ID.Namespace)
 }
 
 func TestStart_MetricsHostIsAddressPort(t *testing.T) {
@@ -283,7 +283,7 @@ endpoints:
 		notifier.mu.Lock()
 		defer notifier.mu.Unlock()
 		for _, m := range notifier.upserted {
-			if m.NamespacedName.Name == "ep3" {
+			if m.ID.Name == "ep3" {
 				return true
 			}
 		}

@@ -81,6 +81,16 @@ linters:
           alias: errcommon
         - pkg: github.com/llm-d/llm-d-router/test/utils/igw
           alias: igwtestutils
+        - pkg: github.com/llm-d/llm-d-router/test/framework/net
+          alias: fwknet
+        - pkg: github.com/llm-d/llm-d-router/test/framework/context
+          alias: fwkcontext
+        - pkg: github.com/llm-d/llm-d-router/test/framework/k8s
+          alias: fwkk8s
+        - pkg: github.com/llm-d/llm-d-router/test/framework/gaie
+          alias: fwkgaie
+        - pkg: github.com/llm-d/llm-d-router/test/framework/epp
+          alias: fwkepp
     revive: # see https://github.com/mgechev/revive#available-rules for all options
       rules:
         - name: blank-imports
