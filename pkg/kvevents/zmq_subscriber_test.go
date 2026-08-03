@@ -56,6 +56,48 @@ func buildEventBatchPayload(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+func buildBlockStoredEventBatchPayload(t *testing.T, blockHashBase uint64, dataParallelRank int) []byte {
+	t.Helper()
+
+	tokens := make([]uint32, 64)
+	blockHashes := make([]any, 4)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data
+	}
+	for i := range blockHashes {
+		blockHashes[i] = blockHashBase + uint64(i) // #nosec G115 -- test data
+	}
+
+	blockStored := []any{
+		string(kvevents.EventTypeBlockStored),
+		blockHashes,
+		uint64(0),
+		tokens,
+		16,
+		nil,
+		"gpu",
+		nil,
+		nil,
+	}
+	payload, err := msgpack.Marshal([]any{
+		1234567890.0,
+		[]any{blockStored},
+		dataParallelRank,
+	})
+	require.NoError(t, err)
+	return payload
+}
+
+func availableEndpoint(t *testing.T, ctx context.Context) string {
+	t.Helper()
+
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	endpoint := fmt.Sprintf("tcp://%s", ln.Addr().String())
+	require.NoError(t, ln.Close())
+	return endpoint
+}
+
 // TestZMQPubSub verifies that the pure-Go ZMQ library correctly implements
 // the PUB/SUB pattern used by the zmqSubscriber.
 func TestZMQPubSub(t *testing.T) {
@@ -126,7 +168,7 @@ func TestZMQSubscriber_ReceivesMessages(t *testing.T) {
 	// Start subscriber — remote=false means it binds (Listen).
 	endpoint := "tcp://127.0.0.1:15559"
 	subManager := kvevents.NewSubscriberManager(pool)
-	err = subManager.EnsureSubscriber(ctx, "test-pod", endpoint, "kv@", false)
+	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "kv@", false)
 	require.NoError(t, err)
 
 	// Give subscriber time to bind.
@@ -154,6 +196,83 @@ func TestZMQSubscriber_ReceivesMessages(t *testing.T) {
 	subManager.Shutdown(ctx)
 }
 
+func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
+	require.NoError(t, err)
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool.Start(ctx)
+
+	subManager := kvevents.NewSubscriberManager(pool)
+	defer subManager.Shutdown(ctx)
+
+	sourceEndpoints := []string{"10.0.0.1:8000", "10.0.0.1:8003"}
+	zmqEndpoints := []string{availableEndpoint(t, ctx), availableEndpoint(t, ctx)}
+	for i := range sourceEndpoints {
+		require.NoError(t, subManager.EnsureSubscriber(
+			ctx,
+			fmt.Sprintf("test-rank-%d", i),
+			sourceEndpoints[i],
+			zmqEndpoints[i],
+			"kv@",
+			false,
+		))
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	publishers := make([]zmq4.Socket, len(zmqEndpoints))
+	for i, endpoint := range zmqEndpoints {
+		publishers[i] = zmq4.NewPub(ctx)
+		defer publishers[i].Close()
+		require.NoError(t, publishers[i].Dial(endpoint))
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	topic := []byte("kv@10.0.0.1:8000@TestModel")
+	payloads := [][]byte{
+		buildBlockStoredEventBatchPayload(t, 100, 8),
+		buildBlockStoredEventBatchPayload(t, 200, 11),
+	}
+	tokens := make([]uint32, 64)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data
+	}
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, tokens, "TestModel", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, keys)
+	firstKey := keys[0]
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for i, publisher := range publishers {
+			seq := make([]byte, 8)
+			binary.BigEndian.PutUint64(seq, uint64(i+1))
+			require.NoError(t, publisher.Send(zmq4.NewMsgFrom(topic, seq, payloads[i])))
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		result, lookupErr := index.Lookup(ctx, keys, nil)
+		require.NoError(t, lookupErr)
+		if len(result[firstKey]) != 2 {
+			continue
+		}
+
+		got := []string{
+			result[firstKey][0].PodIdentifier,
+			result[firstKey][1].PodIdentifier,
+		}
+		assert.ElementsMatch(t, sourceEndpoints, got)
+		return
+	}
+
+	t.Fatal("timed out waiting for blocks from both serving endpoints")
+}
+
 // TestZMQSubscriber_ShortSequenceFrameSkipped verifies that a message with a
 // truncated sequence frame (< 8 bytes) is skipped instead of panicking.
 func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
@@ -174,7 +293,7 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 	endpoint := fmt.Sprintf("tcp://%s", ln.Addr().String())
 	ln.Close()
 	subManager := kvevents.NewSubscriberManager(pool)
-	err = subManager.EnsureSubscriber(ctx, "test-pod", endpoint, "kv@", false)
+	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "kv@", false)
 	require.NoError(t, err)
 	time.Sleep(100 * time.Millisecond)
 

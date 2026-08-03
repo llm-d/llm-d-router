@@ -129,7 +129,7 @@ func TestReadInFlightLoad(t *testing.T) {
 
 func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int) fwksched.Endpoint {
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{
+		ID: types.NamespacedName{
 			Name:      name,
 			Namespace: "default",
 		}},
@@ -270,8 +270,8 @@ func TestPredictedLatency_GetPodRunningRequestCount(t *testing.T) {
 			name: "One running request",
 			setupRequests: func(r *PredictedLatency, p fwksched.Endpoint) {
 				podName := types.NamespacedName{
-					Name:      p.GetMetadata().NamespacedName.Name,
-					Namespace: p.GetMetadata().NamespacedName.Namespace,
+					Name:      p.GetMetadata().ID.Name,
+					Namespace: p.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.04)
@@ -283,8 +283,8 @@ func TestPredictedLatency_GetPodRunningRequestCount(t *testing.T) {
 			name: "Multiple running requests",
 			setupRequests: func(r *PredictedLatency, p fwksched.Endpoint) {
 				endpointName := types.NamespacedName{
-					Name:      p.GetMetadata().NamespacedName.Name,
-					Namespace: p.GetMetadata().NamespacedName.Namespace,
+					Name:      p.GetMetadata().ID.Name,
+					Namespace: p.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.04)
@@ -326,8 +326,8 @@ func TestPredictedLatency_GetPodMinTPOTSLO(t *testing.T) {
 			name: "One running request",
 			setupRequests: func(r *PredictedLatency, e fwksched.Endpoint) {
 				endpointName := types.NamespacedName{
-					Name:      e.GetMetadata().NamespacedName.Name,
-					Namespace: e.GetMetadata().NamespacedName.Namespace,
+					Name:      e.GetMetadata().ID.Name,
+					Namespace: e.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.04)
@@ -339,8 +339,8 @@ func TestPredictedLatency_GetPodMinTPOTSLO(t *testing.T) {
 			name: "Multiple running requests - should return minimum",
 			setupRequests: func(r *PredictedLatency, e fwksched.Endpoint) {
 				endpointName := types.NamespacedName{
-					Name:      e.GetMetadata().NamespacedName.Name,
-					Namespace: e.GetMetadata().NamespacedName.Namespace,
+					Name:      e.GetMetadata().ID.Name,
+					Namespace: e.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.05)
@@ -473,7 +473,7 @@ func TestSloContextStoreEviction(t *testing.T) {
 	}
 
 	metadata := &fwkdl.EndpointMetadata{
-		NamespacedName: endpointName,
+		ID: endpointName,
 	}
 
 	sloCtx := newPredictedLatencyContext(req)

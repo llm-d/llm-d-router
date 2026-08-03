@@ -41,10 +41,13 @@ func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.O
 
 	if mockDataSource != nil {
 		mockType := mockDataSource.TypedName().Type
-		fwkplugin.Register(mockType, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		fwkplugin.Register(mockType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 			return mockDataSource, nil
 		})
-		defer delete(fwkplugin.Registry, mockType)
+		defer func() {
+			delete(fwkplugin.Registry, mockType)
+			delete(fwkplugin.RegistryMetadata, mockType)
+		}()
 	}
 
 	// Skip controller name validation in integration tests to avoid collisions

@@ -158,18 +158,19 @@ Once a filter is defined, two steps are needed to make it available:
 
 ### 1. Register the factory
 
-Add an import and a `plugin.Register` call in [`runner.go`](https://github.com/llm-d/llm-d-router/blob/main/cmd/epp/runner/runner.go):
+Add an import and a `plugin.Register` call in [`runner.go`](https://github.com/llm-d/llm-d-router/blob/main/cmd/epp/runner/runner.go). New plugins should generally be registered with `plugin.StabilityAlpha` unless intended to be enabled by default:
 
 ```go
 import (
     // ...existing imports...
+    "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
     "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
     // ...
 )
 
 func registerInTreePlugins() {
     // ...existing registrations...
-    plugin.Register(bylabel.LabelSelectorFilterType, bylabel.SelectorFactory)
+    plugin.Register(bylabel.LabelSelectorFilterType, plugin.StabilityAlpha, bylabel.SelectorFactory)
 }
 ```
 

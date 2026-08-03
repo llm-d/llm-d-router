@@ -274,9 +274,57 @@ schedulingProfiles:
 - name: default
   plugins:
   - pluginRef: maxScore
-featureGates: [] # Explicitly empty
+featureGates: ["flowControl=false"] # Explicit opt-out.
 flowControl:
   maxBytes: "1024"
+`
+
+// successFlowControlConfigNoGatesText carries flowControl settings with no featureGates stanza, so
+// the section is ignored under the gate's disabled default.
+const successFlowControlConfigNoGatesText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+flowControl:
+  maxBytes: "1024"
+`
+
+// successFlowControlDisabledNoSectionText is the plain legacy-path config: an explicit opt-out with
+// nothing for the loader to report as ignored.
+const successFlowControlDisabledNoSectionText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates: ["flowControl=false"]
+`
+
+// successFlowControlDisabledSaturationDetectorText pairs an explicit opt-out with a saturation
+// detector, which the legacy admission path honors and so must not be reported as ignored.
+const successFlowControlDisabledSaturationDetectorText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates: ["flowControl=false"]
+saturationDetector:
+  pluginRef: utilization-detector
 `
 
 // successComplexFlowControlConfigText tests that Flow Control configuration with custom plugins is correctly loaded.

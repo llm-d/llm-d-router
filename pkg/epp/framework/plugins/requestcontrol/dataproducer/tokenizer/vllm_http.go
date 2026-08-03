@@ -33,6 +33,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -89,7 +91,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 		return nil, fmt.Errorf("invalid 'mmTimeout': %w", err)
 	}
 	return &vllmHTTPRenderer{
-		client:    &http.Client{Transport: newRenderTransport()},
+		client:    &http.Client{Transport: otelhttp.NewTransport(newRenderTransport())},
 		baseURL:   url,
 		modelName: modelName,
 		timeout:   timeout,

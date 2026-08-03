@@ -31,7 +31,7 @@ import (
 
 func makeEndpoint(name string, ttftHeadroom, tpotHeadroom float64, hasPrediction bool) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
+		ID: types.NamespacedName{Name: name, Namespace: "default"},
 	}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if hasPrediction {
@@ -95,7 +95,7 @@ func TestFilter_BothTiers_SelectPositive(t *testing.T) {
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "should select positive tier")
-	assert.Equal(t, "pos1", result[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "pos1", result[0].GetMetadata().ID.Name)
 }
 
 func TestFilter_BothTiers_EpsilonExploreNeg(t *testing.T) {
@@ -106,7 +106,7 @@ func TestFilter_BothTiers_EpsilonExploreNeg(t *testing.T) {
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "should select negative tier")
-	assert.Equal(t, "neg1", result[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "neg1", result[0].GetMetadata().ID.Name)
 }
 
 func TestFilter_NoPredictionGoesToNegative(t *testing.T) {
@@ -118,7 +118,7 @@ func TestFilter_NoPredictionGoesToNegative(t *testing.T) {
 	result := p.Filter(context.Background(), nil, endpoints)
 	// nopred goes to negative, epsilon selects negative
 	assert.Equal(t, 1, len(result))
-	assert.Equal(t, "nopred", result[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "nopred", result[0].GetMetadata().ID.Name)
 }
 
 // Note: Deficit bucketing tests are in the slo-deficit-bucket-filter package.

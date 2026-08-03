@@ -26,7 +26,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: decode-filter
@@ -47,7 +47,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: prefill-filter
@@ -79,7 +79,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: prefill-filter
@@ -115,7 +115,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: max-score-picker
@@ -150,7 +150,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: encode-filter
@@ -165,6 +165,56 @@ schedulingProfiles:
   - pluginRef: max-score-picker
   - pluginRef: prefix-cache-scorer
     weight: 2
+`,
+	"gpuUtilConfig": `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: dcgm-data-source
+  name: dcgm-source
+  parameters:
+    port: 9400
+- type: dcgm-extractor
+  name: dcgm-extractor
+- type: endpoint-attribute-filter
+  name: gpu-utilization-filter
+  parameters:
+    attribute: "GPUUtilization/dcgm-extractor"
+    onMissing: "Pass"
+    fallbackOnEmpty: true
+    algorithm:
+      type: "threshold"
+      threshold:
+        operator: "LessThanOrEqual"
+        value: 0.90
+- type: endpoint-attribute-scorer
+  name: gpu-utilization-scorer
+  parameters:
+    attributeKey: "GPUUtilization/dcgm-extractor"
+    algorithm:
+      type: "linear_lower_is_better"
+      normalization:
+        fixedRange:
+          min: 0.0
+          max: 1.0
+- type: kv-cache-utilization-scorer
+- type: max-score-picker
+- type: single-profile-handler
+- type: decode-filter
+dataLayer:
+  sources:
+  - pluginRef: dcgm-source
+    extractors:
+    - pluginRef: dcgm-extractor
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: gpu-utilization-filter
+  - pluginRef: gpu-utilization-scorer
+    weight: 2.0
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 1.0
+  - pluginRef: max-score-picker
 `,
 }
 

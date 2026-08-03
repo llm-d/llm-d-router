@@ -22,23 +22,14 @@ import (
 	inferenceapi "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
-// expectedPools enumerates the three phase-specific InferencePools the
-// e-p-d-pools topology brings up. Their existence is the single hard signal
-// that the env wired correctly: every other route in the pipeline depends on
-// them. Names derive from poolNameBase (e.g. qwen3-vl-2b-instruct-inference-pool).
-func expectedPools() []string {
-	return []string{
-		poolNameBase + "-encode",
-		poolNameBase + "-prefill",
-		poolNameBase + "-decode",
-	}
-}
-
-// expectAllPoolsExist asserts that the encode, prefill, and decode
-// InferencePools exist in the test namespace.
-func expectAllPoolsExist() {
+// expectPoolExists asserts that every InferencePool for the active topology
+// exists in the test namespace: the single pool covering all three roles
+// (single-EPP), or the three role-scoped pools (3-EPP). Their existence is the
+// hard signal that the env wired correctly, since every route in the pipeline
+// depends on them.
+func expectPoolExists() {
 	nsName := getNamespace()
-	for _, name := range expectedPools() {
+	for _, name := range poolNames() {
 		pool := &inferenceapi.InferencePool{}
 		key := types.NamespacedName{Namespace: nsName, Name: name}
 		gomega.Eventually(func() error {

@@ -28,6 +28,10 @@ const (
 	DestinationEndpointNamespace = "envoy.lb"
 	// DestinationEndpointKey is the header and response metadata key used by Envoy to route to the appropriate pod.
 	DestinationEndpointKey = "x-gateway-destination-endpoint"
+	// DestinationEndpointScoresKey is the response metadata key holding a struct that maps each endpoint listed in
+	// DestinationEndpointKey to the scheduler's score for it. Emitted only when the EPP is started with
+	// --emit-endpoint-scores and the picker surfaced scores.
+	DestinationEndpointScoresKey = "x-gateway-destination-endpoint-scores"
 	// DestinationEndpointServedKey is the metadata key used by Envoy to specify the endpoint that served the request.
 	DestinationEndpointServedKey = "x-gateway-destination-endpoint-served"
 	// FlowFairnessIDKey is the header key used to pass the fairness ID to be used in Flow Control.
