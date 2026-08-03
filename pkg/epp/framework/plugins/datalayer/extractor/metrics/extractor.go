@@ -182,7 +182,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		updated = true
 	}
 
-	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().NamespacedName)
+	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().ID)
 	if updated {
 		clone.UpdateTime = time.Now()
 		logger.V(logutil.TRACE).Info("Refreshed metrics",

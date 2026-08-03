@@ -164,6 +164,11 @@ type ScoredEndpoint struct {
 // ProfileRunResult captures the profile run result.
 type ProfileRunResult struct {
 	TargetEndpoints []Endpoint
+	// ScoredCandidates carries the weighted score of every endpoint the profile
+	// scored, including candidates the picker did not select. TargetEndpoints is
+	// a subset of these, so the two are not parallel. Ordering is unspecified;
+	// consumers key by endpoint.
+	ScoredCandidates []ScoredEndpoint
 }
 
 // SchedulingResult captures the result of the scheduling cycle.

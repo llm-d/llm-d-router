@@ -21,9 +21,9 @@ import (
 func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: nsn,
-			Address:        ipaddr,
-			Labels:         labels,
+			ID:      nsn,
+			Address: ipaddr,
+			Labels:  labels,
 		},
 		nil,
 		nil,
@@ -112,7 +112,7 @@ func TestContextLengthAwareFilter(t *testing.T) {
 
 	gotNames := make([]string, len(filteredEndpoints))
 	for i, endpoint := range filteredEndpoints {
-		gotNames[i] = endpoint.GetMetadata().NamespacedName.Name
+		gotNames[i] = endpoint.GetMetadata().ID.Name
 	}
 
 	expectedEndpoints := []string{"short-range", "wide-range", "no-label"}
@@ -279,7 +279,7 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
-	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().ID.Name)
 }
 
 func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
@@ -309,5 +309,5 @@ func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
-	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().ID.Name)
 }

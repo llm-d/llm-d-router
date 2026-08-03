@@ -29,8 +29,8 @@ import (
 
 func createTestEndpointWithLabels(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int, labels map[string]string) fwksched.Endpoint {
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
-		Labels:         labels,
+		ID:     types.NamespacedName{Name: name, Namespace: "default"},
+		Labels: labels,
 	}, &fwkdl.Metrics{
 		KVCacheUsagePercent: kvCacheUsage,
 		RunningRequestsSize: runningRequestsSize,

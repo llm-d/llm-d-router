@@ -36,7 +36,7 @@ const (
 
 func makeEndpoint(nsn k8stypes.NamespacedName, ip, port string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: nsn, Address: ip, Port: port, Labels: labels},
+		&fwkdl.EndpointMetadata{ID: nsn, Address: ip, Port: port, Labels: labels},
 		nil,
 		fwkdl.NewAttributes(),
 	)
@@ -1347,9 +1347,9 @@ func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
 	podPort := "8080"
 	ep := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
-			Address:        podAddr,
-			Port:           podPort,
+			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
+			Address: podAddr,
+			Port:    podPort,
 		},
 		&fwkdl.Metrics{},
 		nil,

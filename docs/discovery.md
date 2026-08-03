@@ -105,7 +105,7 @@ type EndpointDiscovery interface {
 type DiscoveryNotifier interface {
     // Upsert adds or updates an endpoint in the datastore.
     Upsert(endpoint *EndpointMetadata)
-    // Delete removes an endpoint by its namespaced name.
+    // Delete removes an endpoint by its ID.
     Delete(id types.NamespacedName)
 }
 ```
@@ -114,8 +114,8 @@ type DiscoveryNotifier interface {
 
 | Field | Type | Description |
 |---|---|---|
-| `NamespacedName` | `types.NamespacedName` | Unique identity of the endpoint. |
-| `PodName` | `string` | Logical name (used in metrics). |
+| `ID` | `types.NamespacedName` | Unique identity of the endpoint. Each discovery source must set it uniquely across the endpoints it reports. |
+| `Name` | `string` | Name of the workload behind the endpoint. |
 | `Address` | `string` | IP address of the inference server. |
 | `Port` | `string` | Port as a string (e.g. `"8000"`). |
 | `MetricsHost` | `string` | `host:port` for metrics scraping. Defaults to `address:port` if empty. |
@@ -555,9 +555,9 @@ func (d *MyDiscovery) TypedName() fwkplugin.TypedName { return d.typedName }
 func (d *MyDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotifier) error {
     // 1. Enumerate existing endpoints.
     notifier.Upsert(&fwkdl.EndpointMetadata{
-        NamespacedName: types.NamespacedName{Name: "ep0", Namespace: "default"},
-        Address:        "10.0.0.1",
-        Port:           "8000",
+        ID:      types.NamespacedName{Name: "ep0", Namespace: "default"},
+        Address: "10.0.0.1",
+        Port:    "8000",
         MetricsHost:    "10.0.0.1:8000",
     })
 

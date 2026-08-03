@@ -97,7 +97,7 @@ func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.Infere
 	}
 
 	for _, endpoint := range endpoints {
-		if endpoint.GetMetadata().NamespacedName.String() == podName {
+		if endpoint.GetMetadata().ID.String() == podName {
 			return []scheduling.Endpoint{endpoint}
 		}
 	}
