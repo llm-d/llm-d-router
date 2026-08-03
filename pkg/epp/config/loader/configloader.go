@@ -150,11 +150,6 @@ func InstantiateAndConfigure(
 	handle fwkplugin.Handle,
 	logger logr.Logger,
 ) (*config.Config, error) {
-	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load feature gates: %w", err)
-	}
-
 	if err := validatePlugins(rawConfig.Plugins); err != nil {
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
@@ -183,6 +178,11 @@ func InstantiateAndConfigure(
 	}
 	if len(dataConfig.Sources) == 0 {
 		logger.Info("No data sources configured; metrics collection is disabled")
+	}
+
+	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load feature gates: %w", err)
 	}
 
 	var flowControlConfig *flowcontrol.Config

@@ -12,6 +12,9 @@ Every plugin in `llm-d-router` is assigned a **Stability Level** upon registrati
 | **Beta** | Feature-complete and enabled by default. Backwards-compatible within current version; subject to a +2 minor version deprecation policy before removal. | Allowed by default (no CLI flag required). |
 | **Stable** | Production-grade and fully backwards-compatible across minor releases. Breaking changes only on major version bumps. | Allowed by default (no CLI flag required). |
 
+> [!NOTE]
+> Currently, all in-tree plugins are classified as **Alpha** or **Beta**. Plugins will be promoted to **Stable** as the project approaches its 1.0 release.
+
 ### Alpha Plugin CLI Flag (`--allow-experimental-plugins`)
 
 To ensure experimental plugins are only enabled intentionally, Alpha plugins require passing the `--allow-experimental-plugins` command-line flag to the EPP runner:
