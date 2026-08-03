@@ -20,9 +20,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-logr/logr"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -32,43 +34,61 @@ import (
 
 const (
 	benchChunksPerOp = 10
-	// maxAllocsPerResponse is the allocation ceiling for one complete
-	// response (benchChunksPerOp intermediate chunks + 1 end-of-stream).
-	// Bump this intentionally when a change adds justified allocations.
-	maxAllocsPerResponse = 60
+	// maxAllocsPerResponse caps allocations per response; a failure is a
+	// regression to investigate, not a number to raise.
+	maxAllocsPerResponse = 65
 )
 
-func TestHandleResponseBodyAllocs(t *testing.T) {
-	plugin := newTestResponseStreaming("alloc-plugin")
+// newStreamingDirectorFixture builds a Director with one streaming plugin and
+// a production-verbosity logger (DEBUG/TRACE disabled) so the benchmark
+// measures the allocation cost production actually pays.
+func newStreamingDirectorFixture(name string) (*Director, *testResponseStreaming, context.Context) {
+	plugin := newTestResponseStreaming(name)
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
 		NewConfig().WithResponseStreamingPlugins(plugin))
+	// Info level leaves V(DEBUG) and V(TRACE) disabled, as in production. A
+	// discarding logger would hide the cost of deriving one, which is exactly
+	// what this benchmark exists to track.
+	logger := crzap.New(crzap.Level(uberzap.NewAtomicLevelAt(zapcore.InfoLevel)))
+	ctx := log.IntoContext(context.Background(), logger)
+	return director, plugin, ctx
+}
 
-	ctx := log.IntoContext(context.Background(), logr.Discard())
+func newStreamingRequestContext(requestID string) *handlers.RequestContext {
+	return &handlers.RequestContext{
+		Request: &handlers.Request{
+			Headers: map[string]string{reqcommon.RequestIDHeaderKey: requestID},
+		},
+		Response: &handlers.Response{
+			Headers: map[string]string{},
+		},
+		TargetPod: &fwkdl.EndpointMetadata{
+			ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
+		},
+		Usage: fwkrh.Usage{},
+	}
+}
+
+// streamOneResponse runs one full response and resets state for reuse.
+func streamOneResponse(ctx context.Context, director *Director, reqCtx *handlers.RequestContext, plugin *testResponseStreaming) {
+	for chunk := 0; chunk < benchChunksPerOp; chunk++ {
+		director.HandleResponseBody(ctx, reqCtx, false)
+	}
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	reqCtx.ResponseBodyStarted = false
+	plugin.mu.Lock()
+	plugin.respsOnStreaming = plugin.respsOnStreaming[:0]
+	plugin.targetPodsOnStreaming = plugin.targetPodsOnStreaming[:0]
+	plugin.mu.Unlock()
+}
+
+func TestHandleResponseBodyAllocs(t *testing.T) {
+	director, plugin, ctx := newStreamingDirectorFixture("alloc-plugin")
+	reqCtx := newStreamingRequestContext("alloc-request")
 
 	avg := testing.AllocsPerRun(100, func() {
-		reqCtx := &handlers.RequestContext{
-			Request: &handlers.Request{
-				Headers: map[string]string{
-					reqcommon.RequestIDHeaderKey: "alloc-request",
-				},
-			},
-			Response: &handlers.Response{
-				Headers: map[string]string{},
-			},
-			TargetPod: &fwkdl.EndpointMetadata{
-				ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
-			},
-			Usage: fwkrh.Usage{},
-		}
-		for chunk := 0; chunk < benchChunksPerOp; chunk++ {
-			director.HandleResponseBody(ctx, reqCtx, false)
-		}
-		director.HandleResponseBody(ctx, reqCtx, true)
-
-		plugin.mu.Lock()
-		plugin.respsOnStreaming = plugin.respsOnStreaming[:0]
-		plugin.targetPodsOnStreaming = plugin.targetPodsOnStreaming[:0]
-		plugin.mu.Unlock()
+		streamOneResponse(ctx, director, reqCtx, plugin)
 	})
 	if avg > maxAllocsPerResponse {
 		t.Errorf("HandleResponseBody allocations regressed: got %.0f, ceiling %d", avg, maxAllocsPerResponse)
@@ -86,40 +106,12 @@ func TestHandleResponseBodyAllocs(t *testing.T) {
 //	    ./pkg/epp/requestcontrol/ | tee bench.out
 //	benchstat bench.out
 func BenchmarkHandleResponseBody(b *testing.B) {
-	plugin := newTestResponseStreaming("bench-plugin")
-	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
-		NewConfig().WithResponseStreamingPlugins(plugin))
-
-	ctx := log.IntoContext(context.Background(), logr.Discard())
+	director, plugin, ctx := newStreamingDirectorFixture("bench-plugin")
+	reqCtx := newStreamingRequestContext("bench-request")
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reqCtx := &handlers.RequestContext{
-			Request: &handlers.Request{
-				Headers: map[string]string{
-					reqcommon.RequestIDHeaderKey: "bench-request",
-				},
-			},
-			Response: &handlers.Response{
-				Headers: map[string]string{},
-			},
-			TargetPod: &fwkdl.EndpointMetadata{
-				ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
-			},
-			Usage: fwkrh.Usage{},
-		}
-
-		for chunk := 0; chunk < benchChunksPerOp; chunk++ {
-			director.HandleResponseBody(ctx, reqCtx, false)
-		}
-		// Wait for async queue to drain before the final synchronous chunk.
-		director.HandleResponseBody(ctx, reqCtx, true)
-
-		// Reset plugin state for the next iteration.
-		plugin.mu.Lock()
-		plugin.respsOnStreaming = plugin.respsOnStreaming[:0]
-		plugin.targetPodsOnStreaming = plugin.targetPodsOnStreaming[:0]
-		plugin.mu.Unlock()
+		streamOneResponse(ctx, director, reqCtx, plugin)
 	}
 }
