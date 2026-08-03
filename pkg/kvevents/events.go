@@ -63,6 +63,8 @@ type RawMessage struct {
 	Sequence uint64
 	// Payload is the raw encoded event batch bytes, not yet decoded.
 	Payload []byte
+	// SourceEndpoint is the serving endpoint associated with the subscriber.
+	SourceEndpoint string
 }
 
 // EngineAdapter defines the interface for engine-specific message parsers.

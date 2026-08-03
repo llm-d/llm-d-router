@@ -18,7 +18,9 @@ package datalayer
 
 import (
 	"fmt"
+	"time"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -28,6 +30,11 @@ import (
 // the set-up phase.
 type Config struct {
 	Sources []DataSourceConfig // the data sources configured in the data layer
+	Syncer  fwkdl.CrossReplicaSyncer
+	// SyncInterval is the cadence for publishing local state to Syncer.
+	// A SyncInterval of zero (i.e. left unset) causes the publisher to fall
+	// back to its own default cadence.
+	SyncInterval time.Duration
 }
 
 func (c *Config) String() string {

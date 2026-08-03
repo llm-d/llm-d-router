@@ -22,19 +22,21 @@ import (
 	inferenceapi "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
-// expectPoolExists asserts that the single InferencePool covering the encode,
-// prefill, and decode worker pods exists in the test namespace. Its existence
-// is the single hard signal that the env wired correctly: every other route in
-// the pipeline depends on it. The name is poolNameBase (e.g.
-// qwen3-vl-2b-instruct-inference-pool).
+// expectPoolExists asserts that every InferencePool for the active topology
+// exists in the test namespace: the single pool covering all three roles
+// (single-EPP), or the three role-scoped pools (3-EPP). Their existence is the
+// hard signal that the env wired correctly, since every route in the pipeline
+// depends on them.
 func expectPoolExists() {
 	nsName := getNamespace()
-	pool := &inferenceapi.InferencePool{}
-	key := types.NamespacedName{Namespace: nsName, Name: poolNameBase}
-	gomega.Eventually(func() error {
-		return testConfig.K8sClient.Get(testConfig.Context, key, pool)
-	}, readyTimeout, defaultInterval).Should(
-		gomega.Succeed(),
-		"InferencePool %q not found in namespace %q", poolNameBase, nsName,
-	)
+	for _, name := range poolNames() {
+		pool := &inferenceapi.InferencePool{}
+		key := types.NamespacedName{Namespace: nsName, Name: name}
+		gomega.Eventually(func() error {
+			return testConfig.K8sClient.Get(testConfig.Context, key, pool)
+		}, readyTimeout, defaultInterval).Should(
+			gomega.Succeed(),
+			"InferencePool %q not found in namespace %q", name, nsName,
+		)
+	}
 }

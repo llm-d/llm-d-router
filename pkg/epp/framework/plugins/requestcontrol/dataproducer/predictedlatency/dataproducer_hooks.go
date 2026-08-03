@@ -49,16 +49,16 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 			prefixCacheInfo := prefixCacheInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 			prefixCacheScore = float64(prefixCacheInfo.MatchBlocks()) / float64(prefixCacheInfo.TotalBlocks())
 			if !math.IsNaN(prefixCacheScore) {
-				logger.V(logutil.DEBUG).Info("Found prefix cache score in pod attribute", "pod", endpoint.GetMetadata().NamespacedName.Name, "score", prefixCacheScore)
+				logger.V(logutil.DEBUG).Info("Found prefix cache score in pod attribute", "pod", endpoint.GetMetadata().ID.Name, "score", prefixCacheScore)
 			} else {
 				prefixCacheScore = 0.0
-				logger.V(logutil.DEBUG).Info("Prefix cache score is NaN, defaulting to 0", "pod", endpoint.GetMetadata().NamespacedName.Name)
+				logger.V(logutil.DEBUG).Info("Prefix cache score is NaN, defaulting to 0", "pod", endpoint.GetMetadata().ID.Name)
 			}
 		} else {
-			logger.V(logutil.DEBUG).Info("No prefix cache score found in pod attribute, defaulting to 0", "pod", endpoint.GetMetadata().NamespacedName.Name)
+			logger.V(logutil.DEBUG).Info("No prefix cache score found in pod attribute, defaulting to 0", "pod", endpoint.GetMetadata().ID.Name)
 			prefixCacheScore = 0.0
 		}
-		predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().NamespacedName.Name] = prefixCacheScore
+		predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().ID.Name] = prefixCacheScore
 
 		if pl.config.UseEncoderCacheFeatures {
 			pl.captureEncoderCacheSizes(ctx, predictedLatencyCtx, endpoint)
@@ -68,7 +68,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 		// reuse it for both the prediction features and the dispatch-time training
 		// features. Re-reading the live attribute in PreRequest would make the
 		// value depend on undefined PreRequest hook ordering.
-		predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().NamespacedName.String()] = pl.readInFlightLoad(endpoint)
+		predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().ID.String()] = pl.readInFlightLoad(endpoint)
 	}
 	if !pl.config.PredictInProduce {
 		logger.V(logutil.DEBUG).Info("PredictInProduce disabled, skipping predictions")
@@ -97,7 +97,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 				)
 				pred.Endpoint.Put(pl.latencyPredictionInfoDataKey.String(), latencyInfo)
 				logger.V(logutil.DEBUG).Info("Stored latency prediction in endpoint",
-					"pod", pred.Endpoint.GetMetadata().NamespacedName.Name,
+					"pod", pred.Endpoint.GetMetadata().ID.Name,
 					"ttft", pred.TTFT,
 					"tpot", pred.TPOT,
 					"ttftValid", pred.TTFTValid,
@@ -146,7 +146,7 @@ func (pl *PredictedLatency) captureEncoderCacheSizes(ctx context.Context, predic
 		matchedSize = inputSize
 	}
 	predictedLatencyCtx.encoderInputSize = inputSize
-	predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().NamespacedName.Name] = matchedSize
+	predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().ID.Name] = matchedSize
 	logger.V(logutil.DEBUG).Info("Encoder cache sizes for pod",
 		"pod", endpoint.GetMetadata().String(),
 		"encoderInputSize", inputSize,

@@ -437,6 +437,17 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
+	if ref := rawDataConfig.CrossReplicaSyncerPluginRef; ref != "" {
+		syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+		}
+		cfg.Syncer = syncer
+	}
+	if iv := rawDataConfig.CrossReplicaSyncInterval; iv != nil {
+		cfg.SyncInterval = iv.Duration
+	}
+
 	for _, source := range rawDataConfig.Sources {
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
 			sourceConfig := datalayer.DataSourceConfig{

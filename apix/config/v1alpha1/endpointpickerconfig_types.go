@@ -238,13 +238,25 @@ type DataLayerConfig struct {
 	// endpoints. This enables running the EPP without a Kubernetes cluster.
 	// If omitted, the EPP uses the default Kubernetes-based discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
+	// +optional
+	// CrossReplicaSyncerPluginRef names the plugin instance to use as the cross-EPP
+	// cross-replica syncer. The reference is to the name of an entry in the
+	// top-level Plugins section. If omitted, no cross-replica syncer is used
+	// and plugins that read cross-replica state fall back to local data.
+	CrossReplicaSyncerPluginRef string `json:"crossReplicaSyncerPluginRef,omitempty"`
+	// +optional
+	// CrossReplicaSyncInterval is the cadence at which each replica publishes
+	// its local per-endpoint state to the cross-replica syncer. It is rounded
+	// to a multiple of the datalayer base tick. If omitted, a default is used.
+	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
+		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
 }
 
 // DiscoveryConfig references the EndpointDiscovery plugin to use.

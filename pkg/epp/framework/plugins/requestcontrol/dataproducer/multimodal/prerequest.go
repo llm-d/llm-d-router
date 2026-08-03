@@ -56,7 +56,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 			if metadata == nil {
 				continue
 			}
-			podCache := p.getOrCreatePodCache(metadata.NamespacedName.String())
+			podCache := p.getOrCreatePodCache(metadata.ID.String())
 			for _, item := range items {
 				podCache.Add(item.Hash, struct{}{})
 			}

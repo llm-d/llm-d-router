@@ -491,7 +491,7 @@ func (pl *PredictedLatency) parseSLOHeaders(ctx context.Context, request *fwksch
 // --- Running request queue helpers ---
 
 func (pl *PredictedLatency) getEndpointMinTPOTSLO(endpoint fwksched.Endpoint) float64 {
-	endpointName := endpoint.GetMetadata().NamespacedName
+	endpointName := endpoint.GetMetadata().ID
 	if runningReqs := pl.getRunningRequestList(endpointName); runningReqs != nil && runningReqs.GetSize() > 0 {
 		if min := runningReqs.Peek(); min != nil {
 			return min.tpot
@@ -501,7 +501,7 @@ func (pl *PredictedLatency) getEndpointMinTPOTSLO(endpoint fwksched.Endpoint) fl
 }
 
 func (pl *PredictedLatency) getEndpointRunningRequestCount(endpoint fwksched.Endpoint) int {
-	endpointName := endpoint.GetMetadata().NamespacedName
+	endpointName := endpoint.GetMetadata().ID
 	if runningReqs := pl.getRunningRequestList(endpointName); runningReqs != nil {
 		return runningReqs.GetSize()
 	}
@@ -529,8 +529,8 @@ func (pl *PredictedLatency) removeRequestFromQueue(requestID string, ctx *predic
 		return
 	}
 	endpointName := types.NamespacedName{
-		Name:      ctx.targetMetadata.NamespacedName.Name,
-		Namespace: ctx.targetMetadata.NamespacedName.Namespace,
+		Name:      ctx.targetMetadata.ID.Name,
+		Namespace: ctx.targetMetadata.ID.Namespace,
 	}
 	pl.removeRequestFromEndpoint(endpointName, requestID)
 }

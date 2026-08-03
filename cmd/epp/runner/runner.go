@@ -468,6 +468,8 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		HealthChecking:                   opts.HealthChecking,
 		CertPath:                         opts.CertPath,
 		EnableCertReload:                 opts.EnableCertReload,
+		TLSMinVersion:                    opts.TLSMinVersionValue(),
+		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
@@ -477,6 +479,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+		EmitEndpointScores:               opts.EmitEndpointScores,
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -741,7 +744,7 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 		names := make([]types.NamespacedName, 0, len(pods))
 
 		for _, p := range pods {
-			names = append(names, p.GetMetadata().NamespacedName)
+			names = append(names, p.GetMetadata().ID)
 		}
 		return names
 	}
@@ -1025,6 +1028,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		HealthChecking:                   opts.HealthChecking,
 		CertPath:                         opts.CertPath,
 		EnableCertReload:                 opts.EnableCertReload,
+		TLSMinVersion:                    opts.TLSMinVersionValue(),
+		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
@@ -1033,6 +1038,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+		EmitEndpointScores:               opts.EmitEndpointScores,
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))

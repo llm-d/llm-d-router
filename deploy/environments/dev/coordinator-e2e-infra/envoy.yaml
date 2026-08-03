@@ -1,19 +1,21 @@
-# Hand-rolled Envoy manifest for the e-p-d-pool e2e test.
+# Hand-rolled Envoy manifest for the coordinator e-p-d-pool e2e test.
 #
 # Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes any
 # request carrying an EPP-Profile header (encode | prefill | decode) to the
 # single EPP's ext_proc cluster; the EPP itself picks the scheduling profile
-# named by that header value (see header-profile-handler). The chosen
-# EPP picks an endpoint and Envoy forwards the request to it via the
-# ORIGINAL_DST cluster (just like the single-pool e2e Envoy).
+# named by that header value (see header-profile-handler). The chosen EPP picks
+# an endpoint and Envoy forwards the request to it via the ORIGINAL_DST cluster
+# (just like the single-pool e2e Envoy).
 #
 # A request without an EPP-Profile header is the external client request: it
 # matches the default route and is forwarded to the coordinator, the pipeline
 # entry point. The coordinator then re-enters the gateway once per phase with
 # the EPP-Profile header set, hitting the phase route above.
 #
-# Placeholders ${NAMESPACE} and ${EPP_NAME} are substituted by the suite
-# before apply (mirrors single_pool/createEnvoy substitution pattern).
+# Placeholders ${NAMESPACE} and ${EPP_NAME} are substituted by the suite before
+# apply. This file holds only the single-EPP routing ConfigMap; the Envoy
+# Deployment and Service (identical across topologies) live in
+# shared-envoy-resources.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -274,98 +276,3 @@ data:
                           address: ${EPP_NAME}.${NAMESPACE}
                           port_value: 9002
                     load_balancing_weight: 1
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: envoy
-  labels:
-    app: envoy
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: envoy
-  template:
-    metadata:
-      labels:
-        app: envoy
-      annotations:
-        prometheus.io/path: /stats/prometheus
-        prometheus.io/port: "19001"
-        prometheus.io/scrape: "true"
-    spec:
-      containers:
-        - name: envoy
-          image: docker.io/envoyproxy/envoy:distroless-v1.33.2
-          args:
-            - "--service-cluster"
-            - "${NAMESPACE}/inference-gateway"
-            - "--service-node"
-            - "$(ENVOY_POD_NAME)"
-            - "--log-level"
-            - "info"
-            - "--cpuset-threads"
-            - "--drain-strategy"
-            - "immediate"
-            - "--drain-time-s"
-            - "60"
-            - "-c"
-            - "/etc/envoy/envoy.yaml"
-          command:
-            - envoy
-          env:
-            - name: ENVOY_NS_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: ENVOY_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-          ports:
-            - containerPort: 8081
-              name: http-8081
-            - containerPort: 19001
-              name: metrics
-          readinessProbe:
-            failureThreshold: 1
-            httpGet:
-              path: /ready
-              port: 19001
-              scheme: HTTP
-            periodSeconds: 5
-            successThreshold: 1
-            timeoutSeconds: 1
-          resources:
-            requests:
-              cpu: 100m
-              memory: 512Mi
-          volumeMounts:
-            - name: config
-              mountPath: /etc/envoy
-              readOnly: true
-      volumes:
-        - name: config
-          configMap:
-            name: envoy
-            items:
-              - key: envoy.yaml
-                path: envoy.yaml
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app: envoy
-  name: envoy
-spec:
-  ports:
-    - name: http-8081
-      port: 8081
-      protocol: TCP
-      targetPort: 8081
-      nodePort: 30080
-  selector:
-    app: envoy
-  type: NodePort

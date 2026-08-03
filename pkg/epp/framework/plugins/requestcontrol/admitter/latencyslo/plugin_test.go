@@ -30,7 +30,7 @@ import (
 
 func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests int) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{
 			KVCacheUsagePercent: kvCache,
 			RunningRequestsSize: runningRequests,

@@ -210,7 +210,7 @@ func newProducerAndDetector(ctx context.Context, t *testing.T, maxConcurrency in
 	det := detectorPlugin.(flowcontrol.SaturationDetector)
 
 	epMeta := &datalayer.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		ID: types.NamespacedName{Name: "pod-1", Namespace: "default"},
 	}
 	ep := datalayer.NewEndpoint(epMeta, datalayer.NewMetrics())
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{

@@ -626,9 +626,9 @@ func TestEvictionPipeline(t *testing.T) {
 	)
 
 	epMeta := &datalayer.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-1", Namespace: "default"},
-		Address:        "10.0.0.1",
-		Port:           "8000",
+		ID:      types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		Address: "10.0.0.1",
+		Port:    "8000",
 	}
 	schedEndpoint := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	makeResult := func() *fwksched.SchedulingResult {
@@ -973,7 +973,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	detector := detectorPlugin.(flowcontrol.SaturationDetector)
 
 	epMeta := &datalayer.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		ID: types.NamespacedName{Name: "pod-1", Namespace: "default"},
 	}
 	ep := datalayer.NewEndpoint(epMeta, datalayer.NewMetrics())
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
@@ -1028,7 +1028,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 		"old request completion should not affect re-registered endpoint's tracker")
 
 	// Verify the deleted endpoint's tracker is clean.
-	eid := epMeta.NamespacedName.String()
+	eid := epMeta.ID.String()
 	require.Equal(t, int64(0), producer.GetRequests(eid),
 		"deleted endpoint tracker should report 0 requests")
 
@@ -1085,7 +1085,7 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	detector := detectorPlugin.(flowcontrol.SaturationDetector)
 
 	epMeta := &datalayer.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		ID: types.NamespacedName{Name: "pod-1", Namespace: "default"},
 	}
 
 	oldEp := datalayer.NewEndpoint(epMeta, datalayer.NewMetrics())

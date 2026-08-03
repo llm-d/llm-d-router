@@ -215,10 +215,10 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 				},
 			},
 		}
-		reqcommon.PrimeSingleTokenRequest(body, reqCtx.Body)
+		capSingleTokenOutput(body, format)
 		return body
 	default:
-		return map[string]any{
+		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": tokenIDs,
 			"features": map[string]any{
@@ -226,8 +226,9 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
 			},
-			reqcommon.FieldSamplingParams: map[string]any{reqcommon.FieldMaxTokens: 1},
 		}
+		capSingleTokenOutput(body, format)
+		return body
 	}
 }
 

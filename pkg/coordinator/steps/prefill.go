@@ -137,7 +137,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	switch format {
 	case gateway.FormatChatCompletions:
 		body := maps.Clone(reqCtx.Body)
-		reqcommon.PrimeSingleTokenRequest(body, reqCtx.Body)
+		capSingleTokenOutput(body, format)
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}
@@ -164,9 +164,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"request_id":                    reqCtx.RequestID,
 			"model":                         reqCtx.Model,
 			"prompt":                        prompt,
-			reqcommon.FieldMaxTokens:        1,
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
+		capSingleTokenOutput(body, format)
 		if features != nil {
 			body["features"] = features
 		}
@@ -186,6 +186,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"model":                       reqCtx.Model,
 			reqcommon.FieldSamplingParams: sampling,
 		}
+		capSingleTokenOutput(body, format)
 		if features != nil {
 			body["features"] = features
 		}

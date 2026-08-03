@@ -17,8 +17,8 @@ COORDINATOR_IMAGE    ?= $(IMAGE_REGISTRY)/llm-d-coordinator:$(COORDINATOR_TAG)
 VLLM_IMAGE           ?= $(IMAGE_REGISTRY)/llm-d-inference-sim:$(VLLM_SIMULATOR_TAG)
 EPP_IMAGE            ?= $(IMAGE_REGISTRY)/llm-d-router-endpoint-picker:$(EPP_TAG)
 
-# vllm-render defaults to the same image as the other simulated vLLM roles; override
-# independently to point it at a real vLLM image (e.g. vllm/vllm-openai-cpu:v0.21.0).
+# vllm-render defaults to the same simulator image as the other vLLM roles,
+# matching the router e2e suite (test/scripts/test-e2e-router.sh).
 VLLM_RENDER_IMAGE    ?= $(VLLM_IMAGE)
 VLLM_RENDER_PORT     ?= 8082
 
@@ -116,7 +116,7 @@ endif
 # Env vars forwarded into the e2e test container.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
                E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
-               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME
+               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -201,9 +201,17 @@ test-e2e-coordinator-run: image-pull ## Run coordinator e2e tests against pre-lo
 	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
 		$(BUILDER_IMAGE) test/coordinator/scripts/run_e2e_coordinator.sh
 
+.PHONY: test-e2e-coordinator-3epp-run
+test-e2e-coordinator-3epp-run: ## Run coordinator e2e tests against pre-loaded images in the 3-EPP topology (CI entry point; use test-e2e-coordinator-3epp locally)
+	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run E2E_EPP_TOPOLOGY=3epp
+
 .PHONY: test-e2e-coordinator
 test-e2e-coordinator: image-build-builder image-build-coordinator image-build-epp ## Build images and run coordinator e2e tests
 	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run
+
+.PHONY: test-e2e-coordinator-3epp
+test-e2e-coordinator-3epp: image-build-builder image-build-coordinator image-build-epp ## Build images and run coordinator e2e tests in the 3-EPP (per-role EPP + InferencePool) topology
+	$(MAKE) -f Makefile.coord.mk test-e2e-coordinator-run E2E_EPP_TOPOLOGY=3epp
 
 .PHONY: build
 build: image-build-builder ## Build the coordinator binary

@@ -84,9 +84,9 @@ func readTopology(ep fwkdl.Endpoint) (*attrtopology.Topology, bool) {
 func newRankEndpoint(podName string, rank int, labels map[string]string) fwkdl.Endpoint {
 	epName := fmt.Sprintf("%s-rank-%d", podName, rank)
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: epName, Namespace: testNamespace},
-		PodName:        podName,
-		Labels:         labels,
+		ID:     types.NamespacedName{Name: epName, Namespace: testNamespace},
+		Name:   podName,
+		Labels: labels,
 	}, nil)
 }
 

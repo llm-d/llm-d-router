@@ -26,6 +26,9 @@ The plugin config supports:
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert.
 -   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+-   `interval` (string, optional): Scrape period (e.g. `"1s"`). Rounded to the nearest
+    multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
+    base tick.
 
 ### Example Configuration
 
@@ -35,4 +38,5 @@ parameters:
   scheme: "http"
   path: "/metrics"
   insecureSkipVerify: true
+  interval: "1s"
 ```

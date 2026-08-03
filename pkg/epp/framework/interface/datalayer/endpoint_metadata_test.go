@@ -49,9 +49,9 @@ var (
 		},
 	}
 	expected = &EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
-		Address:        podip,
-		Labels:         labels,
+		ID:      types.NamespacedName{Name: name, Namespace: namespace},
+		Address: podip,
+		Labels:  labels,
 	}
 )
 
@@ -68,13 +68,13 @@ func TestEndpointMetadataClone(t *testing.T) {
 
 func TestEndpointMetadataEqual(t *testing.T) {
 	base := &EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
-		PodName:        "pod-a",
-		Address:        "10.0.0.1",
-		Port:           "8000",
-		MetricsHost:    "10.0.0.1:9000",
-		Labels:         map[string]string{"app": "vllm"},
-		RankIndex:      1,
+		ID:          types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
+		Name:        "pod-a",
+		Address:     "10.0.0.1",
+		Port:        "8000",
+		MetricsHost: "10.0.0.1:9000",
+		Labels:      map[string]string{"app": "vllm"},
+		RankIndex:   1,
 	}
 
 	assert.True(t, base.Equal(base.Clone()))
@@ -95,13 +95,13 @@ func TestEndpointMetadataEqual(t *testing.T) {
 		{
 			name: "namespaced name",
 			mutate: func(meta *EndpointMetadata) {
-				meta.NamespacedName.Name = "pod-b-rank-0"
+				meta.ID.Name = "pod-b-rank-0"
 			},
 		},
 		{
-			name: "pod name",
+			name: "endpoint name",
 			mutate: func(meta *EndpointMetadata) {
-				meta.PodName = "pod-b"
+				meta.Name = "pod-b"
 			},
 		},
 		{
@@ -147,11 +147,11 @@ func TestEndpointMetadataEqual(t *testing.T) {
 
 func TestEndpointMetadataString(t *testing.T) {
 	endpointMetadata := EndpointMetadata{
-		NamespacedName: types.NamespacedName{
+		ID: types.NamespacedName{
 			Name:      pod.Name,
 			Namespace: pod.Namespace,
 		},
-		PodName:     pod.Name,
+		Name:        pod.Name,
 		Address:     pod.Status.PodIP,
 		Port:        "8000",
 		MetricsHost: "127.0.0.1:8000",
