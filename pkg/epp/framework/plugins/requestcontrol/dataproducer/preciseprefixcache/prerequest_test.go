@@ -48,6 +48,7 @@ func newProducerForPreRequest(ctx context.Context, speculativeEnabled bool, idx 
 		speculativeTTL:     time.Minute,
 		speculativeEnabled: speculativeEnabled,
 		pluginState:        plugin.NewPluginState(ctx),
+		healthMonitor:      NewKVEventsHealthMonitor(true),
 	}
 }
 
@@ -172,4 +173,20 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
+}
+
+// Last-routed time separates an idle endpoint from one whose KV-events pipeline
+// stopped, so it is recorded even when speculative indexing is off and the rest
+// of PreRequest is skipped.
+func TestPreRequest_RecordsRoutingWithSpeculativeIndexingDisabled(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := newProducerForPreRequest(ctx, false, &fakeKVBlockIndex{})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-routing"}
+	p.PreRequest(ctx, req, primaryOnly("decode", testEndpoints[0]))
+
+	lastConfirmed, lastRouted, known := p.healthMonitor.GetHealthStatus("10.0.0.1:8080")
+	require.True(t, known)
+	assert.False(t, lastRouted.IsZero(), "routing decision was not recorded")
+	assert.True(t, lastConfirmed.IsZero(), "no KV event has confirmed anything yet")
 }
