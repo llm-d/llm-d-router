@@ -618,6 +618,12 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, fwkplugin.StabilityAlpha, endpointattribute.EndpointAttributeScorerFactory)
 	fwkplugin.Register(burstprefix.PluginType, fwkplugin.StabilityAlpha, burstprefix.Factory)
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
+	// multicluster variants
+	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
+	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
+	fwkplugin.Register(kvcacheutilization.MultiClusterScorerType, fwkplugin.StabilityAlpha, kvcacheutilization.MultiClusterScorerFactory)
+	fwkplugin.Register(prefix.MultiClusterScorerType, fwkplugin.StabilityAlpha, prefix.MultiClusterScorerFactory)
+	fwkplugin.Register(reqdataprodprefix.MultiClusterPluginType, fwkplugin.StabilityAlpha, reqdataprodprefix.MultiClusterFactory)
 
 	// Flow Control plugins
 	// Beta
@@ -666,6 +672,9 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, fwkplugin.StabilityBeta, sourcemetrics.MetricsDataSourceFactory)
 	fwkplugin.Register(extractormetrics.MetricsExtractorType, fwkplugin.StabilityBeta, extractormetrics.CoreMetricsExtractorFactory)
+	// multicluster variants: a pool-aggregate metrics source and extractor
+	fwkplugin.Register(sourcemetrics.MultiClusterMetricsDataSourceType, fwkplugin.StabilityAlpha, sourcemetrics.MultiClusterMetricsDataSourceFactory)
+	fwkplugin.Register(extractormetrics.MultiClusterMetricsExtractorType, fwkplugin.StabilityAlpha, extractormetrics.MultiClusterMetricsExtractorFactory)
 
 	// register datalayer notification source plugins
 	// Beta
@@ -690,6 +699,8 @@ func (r *Runner) registerInTreePlugins() {
 	// register discovery plugins
 	// Beta
 	fwkplugin.Register(discoveryfile.PluginType, fwkplugin.StabilityBeta, discoveryfile.Factory)
+	// multicluster variant
+	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
 
 	// register request header processor plugins
 	// Alpha

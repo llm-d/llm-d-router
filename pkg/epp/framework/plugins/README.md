@@ -25,6 +25,52 @@ epp --allow-experimental-plugins
 
 If an Alpha plugin is configured while `--allow-experimental-plugins` is not set (the default), the EPP runner will fail initialization with an explicit error.
 
+## Multi-cluster variants
+
+A few plugins ship a multi-cluster variant beside the stock plugin, for a cluster-scoped EPP whose candidate endpoints are clusters. The scheduling variants are `multicluster-kv-cache-utilization-scorer`, `multicluster-queue-scorer`, `multicluster-session-affinity-filter`, and `multicluster-prefix-cache-scorer`. The `multicluster-approx-prefix-cache-producer` is the matching request-control data producer. They rely on three datalayer variants: `multicluster-file-discovery` discovers peer clusters as endpoints, and `multicluster-metrics-data-source` with `multicluster-metrics-extractor` scrape each cluster and write its pool-aggregate metrics into the attributes the scorers read.
+
+The pure-delegation variants (`multicluster-session-affinity-filter`, `multicluster-prefix-cache-scorer`, `multicluster-approx-prefix-cache-producer`) reuse the stock plugin's behavior and only rename the type, so their per-plugin Prometheus metrics report under the stock type label rather than the multicluster one.
+
+### Dependencies
+
+The metric scorers are not standalone. `multicluster-kv-cache-utilization-scorer` and `multicluster-queue-scorer` read the `llm-d.ai/multicluster-kv-cache-utilization` and `llm-d.ai/multicluster-queue-size` attributes, which only exist if `multicluster-metrics-extractor` is configured to write them from what `multicluster-metrics-data-source` scrapes. Without the source and extractor in `dataLayer`, those scorers see no pool metrics and return no score.
+
+### Example
+
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: multicluster-file-discovery
+    name: discovery
+    parameters:
+      path: /etc/epp/clusters.yaml
+  - type: multicluster-metrics-data-source
+    name: metrics-source
+    parameters:
+      scheme: https
+      caCertPath: /etc/epp/tls/ca.crt
+  - type: multicluster-metrics-extractor
+    name: metrics-extractor
+  - type: multicluster-session-affinity-filter
+    name: session-affinity
+  - type: multicluster-kv-cache-utilization-scorer
+    name: kv-cache
+  - type: multicluster-queue-scorer
+    name: queue
+  - type: max-score-picker
+  - type: single-profile-handler
+dataLayer:
+  discovery:
+    pluginRef: discovery
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+```
+
+`clusters.yaml` follows the same format as the pod file discovery, except an `address` may be a hostname.
+
 ## Related Documentation
 
 - [Architecture Overview](../../../../docs/architecture.md)
