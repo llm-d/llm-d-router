@@ -56,7 +56,7 @@ func TestHandleResponseBodyAllocs(t *testing.T) {
 				Headers: map[string]string{},
 			},
 			TargetPod: &fwkdl.EndpointMetadata{
-				NamespacedName: types.NamespacedName{Namespace: "ns", Name: "pod"},
+				ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
 			},
 			Usage: fwkrh.Usage{},
 		}
@@ -105,7 +105,7 @@ func BenchmarkHandleResponseBody(b *testing.B) {
 				Headers: map[string]string{},
 			},
 			TargetPod: &fwkdl.EndpointMetadata{
-				NamespacedName: types.NamespacedName{Namespace: "ns", Name: "pod"},
+				ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
 			},
 			Usage: fwkrh.Usage{},
 		}
