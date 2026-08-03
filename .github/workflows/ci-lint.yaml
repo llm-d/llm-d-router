@@ -118,7 +118,7 @@ jobs:
       # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
       - name: Upload gosec SARIF
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           sarif_file: gosec.sarif
           category: gosec
