@@ -216,7 +216,7 @@ func checkHealthServing(addr string) bool {
 }
 
 type dummyAlphaPlugin struct {
-	name      string
+	name       string
 	pluginType string
 }
 
