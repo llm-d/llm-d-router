@@ -284,7 +284,7 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		return nil
 	}
 
-	id := event.Endpoint.GetMetadata().NamespacedName.String()
+	id := event.Endpoint.GetMetadata().ID.String()
 
 	switch event.Type {
 	case datalayer.EventDelete:
@@ -365,7 +365,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		if endpoint == nil || endpoint.GetMetadata() == nil {
 			continue
 		}
-		eid := endpoint.GetMetadata().NamespacedName.String()
+		eid := endpoint.GetMetadata().ID.String()
 		requestCounter := p.requestTracker.inc(eid)
 
 		// Compute the uncached prompt portion this endpoint must actually compute.
@@ -479,7 +479,7 @@ func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwks
 	if meta == nil {
 		return
 	}
-	eid := meta.NamespacedName.String()
+	eid := meta.ID.String()
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 
 	// DeleteKey triggers OnEvicted, which decrements the counters exactly once.
@@ -499,7 +499,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	if meta == nil {
 		return
 	}
-	eid := meta.NamespacedName.String()
+	eid := meta.ID.String()
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {

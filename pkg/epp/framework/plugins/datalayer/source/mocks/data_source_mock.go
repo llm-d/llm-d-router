@@ -76,7 +76,7 @@ func (fds *MetricsDataSource) Dispatch(_ context.Context, ep fwkdl.Endpoint) err
 	atomic.AddInt64(&fds.CallCount, 1)
 	fds.mu.RLock()
 	defer fds.mu.RUnlock()
-	nn := ep.GetMetadata().Clone().NamespacedName
+	nn := ep.GetMetadata().Clone().ID
 	if metrics, ok := fds.metrics[nn]; ok {
 		if _, ok := fds.errors[nn]; !ok {
 			clone := metrics.Clone()

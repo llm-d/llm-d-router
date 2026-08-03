@@ -95,7 +95,7 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 	logger := log.FromContext(ctx)
 
 	for _, endpoint := range endpoints {
-		endpointID := endpoint.GetMetadata().NamespacedName.String()
+		endpointID := endpoint.GetMetadata().ID.String()
 		tokenLoad := 0.0
 
 		// Read both accumulated in-flight load and the projected impact of the

@@ -405,7 +405,7 @@ func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 // NewEndpoint sets up data polling on the provided endpoint.
 func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 	logger, _ := logr.FromContext(ctx)
-	logger = logger.WithValues("endpoint", endpointMetadata.GetNamespacedName())
+	logger = logger.WithValues("endpoint", endpointMetadata.GetID())
 
 	endpoint := fwkdl.NewEndpoint(endpointMetadata, nil)
 
@@ -424,7 +424,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 
 	collector := NewCollector()
 
-	key := endpointMetadata.GetNamespacedName()
+	key := endpointMetadata.GetID()
 	if !r.collectors.Register(key, collector) {
 		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
 		return nil
@@ -445,7 +445,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 func (r *Runtime) ReleaseEndpoint(ep fwkdl.Endpoint) {
 	r.dispatchEndpointEvent(context.Background(), r.logger, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep})
 
-	key := ep.GetMetadata().GetNamespacedName()
+	key := ep.GetMetadata().GetID()
 	if collector, ok := r.collectors.Remove(key); ok {
 		collector.Stop()
 	}
@@ -454,7 +454,7 @@ func (r *Runtime) ReleaseEndpoint(ep fwkdl.Endpoint) {
 // UpdateEndpoint dispatches an add/update lifecycle event for an existing endpoint.
 func (r *Runtime) UpdateEndpoint(ctx context.Context, ep fwkdl.Endpoint) {
 	logger, _ := logr.FromContext(ctx)
-	logger = logger.WithValues("endpoint", ep.GetMetadata().GetNamespacedName())
+	logger = logger.WithValues("endpoint", ep.GetMetadata().GetID())
 	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
 }
 

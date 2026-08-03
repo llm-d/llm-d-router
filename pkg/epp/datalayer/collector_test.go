@@ -38,7 +38,7 @@ import (
 
 func defaultEndpoint() fwkdl.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{
+		ID: types.NamespacedName{
 			Name:      "pod-name",
 			Namespace: "default",
 		},

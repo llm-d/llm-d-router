@@ -79,7 +79,7 @@ func TestScoreMissingOrInvalidMatchInfoReturnsZero(t *testing.T) {
 func newEndpoint(name string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: name},
+			ID: k8stypes.NamespacedName{Namespace: "default", Name: name},
 		},
 		&fwkdl.Metrics{},
 		nil,

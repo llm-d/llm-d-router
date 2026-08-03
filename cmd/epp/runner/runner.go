@@ -472,6 +472,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+		EmitEndpointScores:               opts.EmitEndpointScores,
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -706,7 +707,7 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 		names := make([]types.NamespacedName, 0, len(pods))
 
 		for _, p := range pods {
-			names = append(names, p.GetMetadata().NamespacedName)
+			names = append(names, p.GetMetadata().ID)
 		}
 		return names
 	}
@@ -995,6 +996,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+		EmitEndpointScores:               opts.EmitEndpointScores,
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))

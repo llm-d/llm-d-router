@@ -102,9 +102,9 @@ func TestRuntimePollingDispatch(t *testing.T) {
 			t.Cleanup(cancel)
 
 			endpointMeta := &fwkdl.EndpointMetadata{
-				NamespacedName: types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
-				MetricsHost:    srv.Listener.Addr().String(),
-				Port:           "8000",
+				ID:          types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
+				MetricsHost: srv.Listener.Addr().String(),
+				Port:        "8000",
 			}
 
 			ep := r.NewEndpoint(ctx, endpointMeta)
@@ -154,9 +154,9 @@ func TestRuntimePollingMultipleExtractors(t *testing.T) {
 	t.Cleanup(cancel)
 
 	endpointMeta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
-		MetricsHost:    srv.Listener.Addr().String(),
-		Port:           "8000",
+		ID:          types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
+		MetricsHost: srv.Listener.Addr().String(),
+		Port:        "8000",
 	}
 
 	ep := r.NewEndpoint(ctx, endpointMeta)
@@ -203,9 +203,9 @@ func TestRuntimePollingEndpointLifecycle(t *testing.T) {
 	t.Cleanup(cancel)
 
 	endpointMeta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
-		MetricsHost:    srv.Listener.Addr().String(),
-		Port:           "8000",
+		ID:          types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
+		MetricsHost: srv.Listener.Addr().String(),
+		Port:        "8000",
 	}
 
 	ep := r.NewEndpoint(ctx, endpointMeta)
@@ -257,9 +257,9 @@ func TestRuntimePollingWithoutExtractors(t *testing.T) {
 	t.Cleanup(cancel)
 
 	endpointMeta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
-		MetricsHost:    srv.Listener.Addr().String(),
-		Port:           "8000",
+		ID:          types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
+		MetricsHost: srv.Listener.Addr().String(),
+		Port:        "8000",
 	}
 
 	ep := r.NewEndpoint(ctx, endpointMeta)
@@ -296,9 +296,9 @@ func TestRuntimePollingHTTPError(t *testing.T) {
 	t.Cleanup(cancel)
 
 	endpointMeta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
-		MetricsHost:    srv.Listener.Addr().String(),
-		Port:           "8000",
+		ID:          types.NamespacedName{Name: "test-pod", Namespace: "test-ns"},
+		MetricsHost: srv.Listener.Addr().String(),
+		Port:        "8000",
 	}
 
 	ep := r.NewEndpoint(ctx, endpointMeta)

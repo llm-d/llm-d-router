@@ -34,12 +34,12 @@ import (
 
 func TestSessionAffinity_Filter(t *testing.T) {
 	endpointA := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-a"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-a"}},
 		&fwkdl.Metrics{},
 		nil,
 	)
 	endpointB := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-b"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-b"}},
 		&fwkdl.Metrics{},
 		nil,
 	)
@@ -47,7 +47,7 @@ func TestSessionAffinity_Filter(t *testing.T) {
 	inputEndpoints := []scheduling.Endpoint{endpointA, endpointB}
 
 	// valid session token for endpointB
-	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().NamespacedName.String()))
+	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().ID.String()))
 	// valid token whose pod is not among the candidates
 	tokenForMissingPod := base64.StdEncoding.EncodeToString([]byte("pod-missing"))
 
@@ -130,7 +130,7 @@ func TestSessionAffinity_Filter(t *testing.T) {
 
 			gotPods := make([]string, len(got))
 			for idx, endpoint := range got {
-				gotPods[idx] = endpoint.GetMetadata().NamespacedName.Name
+				gotPods[idx] = endpoint.GetMetadata().ID.Name
 			}
 
 			assert.ElementsMatch(t, test.wantPods, gotPods, "filtered endpoints should match expected endpoints")
@@ -141,12 +141,12 @@ func TestSessionAffinity_Filter(t *testing.T) {
 
 func TestSessionAffinity_ResponseHeader(t *testing.T) {
 	targetEndpoint := &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "pod1"},
-		Address:        "1.2.3.4",
+		ID:      k8stypes.NamespacedName{Namespace: "default", Name: "pod1"},
+		Address: "1.2.3.4",
 	}
 
 	// expected token to be set in response header
-	wantToken := base64.StdEncoding.EncodeToString([]byte(targetEndpoint.NamespacedName.String()))
+	wantToken := base64.StdEncoding.EncodeToString([]byte(targetEndpoint.ID.String()))
 
 	tests := []struct {
 		name            string
@@ -200,7 +200,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 						"prefill": {
 							TargetEndpoints: []scheduling.Endpoint{
 								scheduling.NewEndpoint(
-									&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"}},
+									&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"}},
 									&fwkdl.Metrics{},
 									nil,
 								),

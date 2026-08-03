@@ -40,9 +40,9 @@ const testBlockSize = 16
 // with the given unweighted cached-block count.
 func endpoint(p *Producer, name, address string, cachedBlocks int) scheduling.Endpoint {
 	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: name},
-		Address:        address,
-		Port:           "8080",
+		ID:      k8stypes.NamespacedName{Name: name},
+		Address: address,
+		Port:    "8080",
 	}, nil, nil)
 	e.Put(p.prefixMatchDataKey.String(),
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
@@ -128,9 +128,9 @@ func TestProduce_MissingMatchInfo_TreatedAsZero(t *testing.T) {
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	bare := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: "pod-bare"},
-		Address:        "10.0.0.9",
-		Port:           "8080",
+		ID:      k8stypes.NamespacedName{Name: "pod-bare"},
+		Address: "10.0.0.9",
+		Port:    "8080",
 	}, nil, nil)
 
 	req := &scheduling.InferenceRequest{RequestID: "req-bare"}
@@ -334,9 +334,9 @@ func TestPluginFactory_PrefillProfileName(t *testing.T) {
 // a waiting-queue depth.
 func endpointWithLoad(p *Producer, name, address string, cachedBlocks, waiting int) scheduling.Endpoint {
 	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: name},
-		Address:        address,
-		Port:           "8080",
+		ID:      k8stypes.NamespacedName{Name: name},
+		Address: address,
+		Port:    "8080",
 	}, &fwkdl.Metrics{WaitingQueueSize: waiting}, nil)
 	e.Put(p.prefixMatchDataKey.String(),
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))

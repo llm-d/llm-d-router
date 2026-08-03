@@ -39,9 +39,9 @@ const (
 func makeTestEndpointBase() scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "test-pod"},
-			Address:        testEndpointAddr,
-			Port:           testEndpointPort,
+			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "test-pod"},
+			Address: testEndpointAddr,
+			Port:    testEndpointPort,
 		},
 		nil,
 		fwkdl.NewAttributes(),

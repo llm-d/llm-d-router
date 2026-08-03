@@ -142,7 +142,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 
 		r, err := parseContextRange(rangeStr)
 		if err != nil {
-			logger.Error(err, "Failed to parse context range label", "endpoint", metadata.NamespacedName, "rangeStr", rangeStr)
+			logger.Error(err, "Failed to parse context range label", "endpoint", metadata.ID, "rangeStr", rangeStr)
 			continue
 		}
 
@@ -181,7 +181,7 @@ func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.Infe
 
 		r, err := parseContextRange(rangeStr)
 		if err != nil {
-			logger.Error(err, "Failed to parse context range label", "endpoint", metadata.NamespacedName, "rangeStr", rangeStr)
+			logger.Error(err, "Failed to parse context range label", "endpoint", metadata.ID, "rangeStr", rangeStr)
 			scoredEndpoints[endpoint] = 0.0
 			continue
 		}

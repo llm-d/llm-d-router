@@ -56,9 +56,9 @@ func newExtractorProducer(discoverPods bool) *Producer {
 
 func newEndpoint(name, addr string) fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: name},
-		Address:        addr,
-		Port:           "8080",
+		ID:      k8stypes.NamespacedName{Namespace: "ns", Name: name},
+		Address: addr,
+		Port:    "8080",
 	}, nil)
 }
 
@@ -125,7 +125,7 @@ func TestProducer_ExtractEndpoint_IgnoresMissingMetadata(t *testing.T) {
 	defer p.subscribersManager.Shutdown(ctx)
 
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+		ID: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 	}, nil)
 
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
@@ -145,8 +145,8 @@ func TestProducer_EnsureSubscriber_SurvivesRequestCtxCancel(t *testing.T) {
 	reqCtx, cancel := context.WithCancel(context.Background())
 
 	require.NoError(t, p.ensureSubscriber(reqCtx, &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
-		Address:        "10.0.0.1", Port: "8080",
+		ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+		Address: "10.0.0.1", Port: "8080",
 	}))
 
 	cancel()
@@ -176,10 +176,10 @@ func TestProducer_ExtractEndpoint_OffsetsZMQPortByRankIndex(t *testing.T) {
 		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 			Type: fwkdl.EventAddOrUpdate,
 			Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: ep.name},
-				Address:        ep.address,
-				Port:           "8080",
-				RankIndex:      ep.rank,
+				ID:        k8stypes.NamespacedName{Namespace: "ns", Name: ep.name},
+				Address:   ep.address,
+				Port:      "8080",
+				RankIndex: ep.rank,
 			}, nil),
 		}))
 	}
@@ -211,10 +211,10 @@ func TestProducer_EnsureSubscriber_PassesServingEndpoint(t *testing.T) {
 	}
 
 	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-3"},
-		Address:        "10.0.0.1",
-		Port:           "8003",
-		RankIndex:      3,
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-3"},
+		Address:   "10.0.0.1",
+		Port:      "8003",
+		RankIndex: 3,
 	}))
 
 	assert.Equal(t, []string{"ns/pod-a-rank-3"}, subscribers.ids)
@@ -231,9 +231,9 @@ func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
 		Type: fwkdl.EventAddOrUpdate,
 		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
-			Address:        "10.0.0.1",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+			Address: "10.0.0.1",
+			Port:    "8080",
 			// RankIndex stays at its zero value.
 		}, nil),
 	}))
@@ -303,7 +303,7 @@ func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscri
 	require.Len(t, ids, 1)
 
 	deleteEndpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+		ID: k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 	}, nil)
 
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{

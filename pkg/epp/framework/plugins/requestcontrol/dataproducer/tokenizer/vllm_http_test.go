@@ -22,10 +22,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -289,4 +294,46 @@ func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "invalid 'timeout'")
+}
+
+// The render transport must inject W3C trace context so the vLLM pod shares
+// the same trace id as the EPP request.
+func TestVLLMHTTPRenderer_RenderPropagatesTraceContext(t *testing.T) {
+	prevProp := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	t.Cleanup(func() { otel.SetTextMapPropagator(prevProp) })
+
+	var gotTraceparent string
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		close(done)
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{1}}})
+	}))
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	require.NoError(t, err)
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	require.NoError(t, err)
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	_, _, err = r.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	<-done
+
+	if gotTraceparent == "" {
+		t.Fatal("expected traceparent header to be injected into outbound render request, got none")
+	}
+	if !strings.Contains(gotTraceparent, traceID.String()) {
+		t.Fatalf("expected outbound traceparent to carry trace ID %s, got %q", traceID, gotTraceparent)
+	}
 }
