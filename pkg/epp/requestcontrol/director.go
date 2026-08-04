@@ -365,9 +365,16 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 }
 
 // engineTypeLabelKey is the Pod label used to identify the inference engine
-// type (mirrors metrics.DefaultEngineTypeLabelKey; duplicated locally to
-// avoid an inter-package dependency for this single lookup).
-const engineTypeLabelKey = "llm-d.ai/engine-type"
+// type. It matches pkg/epp/framework/plugins/datalayer/extractor/metrics.DefaultEngineTypeLabelKey;
+// duplicated locally to avoid an inter-package dependency for this single lookup.
+//
+// legacyEngineTypeLabelKey is the deprecated GAIE-prefixed variant of the same
+// label, still checked as a fallback during the migration period (mirrors
+// extractor/metrics.legacyGAIEEngineTypeLabelKey).
+const (
+	engineTypeLabelKey       = "llm-d.ai/engine-type"
+	legacyEngineTypeLabelKey = "inference.networking.k8s.io/engine-type"
+)
 
 // injectPriorityIntoBody writes reqCtx.Priority directly into the request
 // body's "priority" field so the backend's native priority scheduler (SGLang
@@ -414,7 +421,11 @@ func isVLLMBackend(result *fwksched.SchedulingResult) bool {
 	if meta == nil || meta.Labels == nil {
 		return false
 	}
-	return strings.EqualFold(meta.Labels[engineTypeLabelKey], "vllm")
+	engineType := meta.Labels[engineTypeLabelKey]
+	if engineType == "" {
+		engineType = meta.Labels[legacyEngineTypeLabelKey]
+	}
+	return strings.EqualFold(engineType, "vllm")
 }
 
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {

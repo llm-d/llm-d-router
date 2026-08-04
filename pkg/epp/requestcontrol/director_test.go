@@ -403,6 +403,44 @@ func TestDirector_HandleRequest(t *testing.T) {
 		PrimaryProfileName: "testProfile",
 	}
 
+	vllmScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address:     "192.168.1.100",
+							Port:        "8000",
+							MetricsHost: "192.168.1.100:8000",
+							ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
+							Labels:      map[string]string{"llm-d.ai/engine-type": "vllm"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
+	legacyVLLMScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address:     "192.168.1.100",
+							Port:        "8000",
+							MetricsHost: "192.168.1.100:8000",
+							ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
+							Labels:      map[string]string{"inference.networking.k8s.io/engine-type": "vllm"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
 	tests := []struct {
 		name                    string
 		reqBodyMap              map[string]any
@@ -887,6 +925,42 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"priority": float64(0),
 			},
 			rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
+		},
+		{
+			name: "vllm backend negates priority via engine-type label",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = vllmScheduleResults
+			},
+			initialTargetModelName: model,
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(-2),
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "vllm backend negates priority via legacy engine-type label",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = legacyVLLMScheduleResults
+			},
+			initialTargetModelName: model,
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(-2),
+			},
+			inferenceObjectiveName: objectiveName,
 		},
 		{
 			name:        "prompt or messages not found, expect err",
