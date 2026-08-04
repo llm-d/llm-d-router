@@ -13,12 +13,21 @@ The EPP acts as the routing intelligence engine. Its resource usage scales prima
 #### CPU Allocation
 - **Rule of Thumb**: Allocate **0.5 to 1.0 CPU cores per request/second** of expected throughput for large agentic workloads (approximately 100k input / 1k output tokens).
 - **Scaling Behavior**: CPU utilization scales linearly with the request rate, and increases with both the input prompt size and output token length.
-- **Prefix Matching Overhead**: Increasing the `maxPrefixBlocksToMatch` parameter increases EPP CPU utilization. At lower throughputs, a large prefix block limit (such as 6250 blocks) can increase EPP CPU utilization by over 100% compared to a small limit (256 blocks) due to the overhead of searching and matching blocks.
+- **Prefix Matching Overhead**: Increasing the `maxPrefixTokensToMatch` parameter increases EPP CPU utilization. At lower throughputs, a large prefix limit (such as 400,000 tokens / 6,250 blocks with effective `blockSizeTokens: 64`) can increase EPP CPU utilization by over 100% compared to a small limit (16,384 tokens / 256 blocks) due to the overhead of searching and matching prefix blocks.
 - **Idle CPU Scaling**: Idle CPU usage of the EPP container scales with the number of model-serving pods in the cluster due to continuous metric scraping. For example, in a cluster with 100 model-serving pods, the idle CPU usage of the EPP container grows to approximately **7.5 cores**.
 
 #### Memory Allocation
 - **Base Memory**: EPP memory usage is relatively low and stable with small output token requests, but scales with the number of concurrent inflight requests.
 - **Inflight Requests Impact**: Memory usage increases with the number of concurrent inflight requests and the output (decode) token length.
+- **Flow Control Queues**: With flow control enabled, requests that cannot dispatch
+  under saturation are buffered in EPP memory, including their request bodies. The buffered volume
+  is bounded per priority band by `priorityBands[].maxRequests` (default 5000) and `maxBytes`
+  (default 1G), which `defaultPriorityBand` sets as a template for bands you do not list; budget for
+  the sum of the per-band `maxBytes` limits of the priority levels your traffic actually uses, on top
+  of the inflight-request sizing above. The global `flowControl.maxRequests` / `maxBytes` caps
+  default to unlimited, so set a global `maxBytes` under the container memory limit: at the per-band
+  default, a handful of bands clears the sizing guidance below before any band cap engages. Lower
+  these limits (or set a shorter `defaultRequestTTL`) to trade queueing for earlier shedding.
 - **Sizing Guidelines**:
   - For a request rate of 50 to 100 requests/second with 1k output tokens, EPP requires between **4 GiB and 6 GiB** of memory.
   - For workloads with longer output lengths (such as 5k output tokens), memory usage can reach **20+ GiB** due to the accumulation of state for concurrent inflight requests.
@@ -37,6 +46,10 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
   | 3 | 2.7x |
   | 4 | 3.5x |
 
+  - **Note (Flow Control)**: Flow control state (queues, fairness accounting, and the saturation
+    view) is per replica and not shared. In Active-Active mode, priority and fairness are enforced
+    only within each replica's share of the traffic, and per-band capacity limits apply per
+    replica, so the fleet-wide queued volume scales with the replica count.
   - **Warning (Prefix Routing)**: **Active-Active mode should be avoided when using approximate prefix routing.** Because EPP replicas do not share prefix state, each replica only has visibility into the prefix state of the requests it has individually handled. This partition of state significantly degrades prefix cache hit rates, making prefix caching highly inefficient.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
@@ -47,27 +60,27 @@ The following tables present empirical benchmark results for EPP running with ll
 #### Throughput and Prefix Block Sizing
 This table shows peak CPU and memory utilization for EPP under a 100k token workload (95k system prompt, 5k question prompt, and 1k output tokens) when using approximate prefix caching across 100 model-serving pods.
 
-| Configuration | Request Rate (Req/s) | maxPrefixBlocksToMatch | Peak CPU (Cores) | Peak Memory (GiB) | Scheduler P50 Latency (s) |
+| Configuration | Request Rate (Req/s) | maxPrefixTokensToMatch | Peak CPU (Cores) | Peak Memory (GiB) | Scheduler P50 Latency (s) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Small Prefix Match | 5.0 | 256 | 1.19 | 0.26 | 0.00010 |
-| Large Prefix Match | 5.0 | 6250 | 3.82 | 0.65 | 0.00010 |
-| Small Prefix Match | 98.7 | 256 | 35.17 | 2.46 | 0.00014 |
-| Large Prefix Match | 98.8 | 6250 | 46.50 | 3.41 | 0.00020 |
+| Small Prefix Match | 5.0 | 4096 | 1.19 | 0.26 | 0.00010 |
+| Large Prefix Match | 5.0 | 100000 | 3.82 | 0.65 | 0.00010 |
+| Small Prefix Match | 98.7 | 4096 | 35.17 | 2.46 | 0.00014 |
+| Large Prefix Match | 98.8 | 100000 | 46.50 | 3.41 | 0.00020 |
 
 Configuration used: [#1287](https://github.com/llm-d/llm-d-router/issues/1287#issuecomment-4666058475).
 These were run against 0.9.0 EPP container image.
 
 #### Output Length and Prefix Matching Complexity
-This table shows EPP peak resource usage at a constant request rate of 50 requests/second with a 100k input token workload, varying the output token length and the `maxPrefixBlocksToMatch` configuration.
+This table shows EPP peak resource usage at a constant request rate of 50 requests/second with a 100k input token workload, varying the output token length and the `maxPrefixTokensToMatch` configuration.
 
-| Input Tokens | Output Tokens | maxPrefixBlocksToMatch | Peak CPU (Cores) | Peak Memory (GiB) |
+| Input Tokens | Output Tokens | maxPrefixTokensToMatch | Peak CPU (Cores) | Peak Memory (GiB) |
 | :--- | :--- | :--- | :--- | :--- |
-| 100k | 500 | 256 | 15.13 | 2.27 |
-| 100k | 500 | 2048 | 17.14 | 3.76 |
-| 100k | 1000 | 256 | 17.51 | 3.66 |
-| 100k | 1000 | 2048 | 20.28 | 5.23 |
-| 100k | 5000 | 1024 | 30.95 | 12.54 |
-| 100k | 10000 | 512 | 32.53 | 12.54 |
+| 100k | 500 | 4096 | 15.13 | 2.27 |
+| 100k | 500 | 32768 | 17.14 | 3.76 |
+| 100k | 1000 | 4096 | 17.51 | 3.66 |
+| 100k | 1000 | 32768 | 20.28 | 5.23 |
+| 100k | 5000 | 16384 | 30.95 | 12.54 |
+| 100k | 10000 | 8192 | 32.53 | 12.54 |
 
 Configuration used: [#1287](https://github.com/llm-d/llm-d-router/issues/1287#issuecomment-4619775397)
 These were run against 0.9.0 EPP container image.

@@ -239,7 +239,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	for _, pod := range pods {
-		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
+		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().ID)]
 		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
@@ -292,7 +292,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	for _, hashes := range state.PerPromptHashes {
 		total += len(hashes)
 	}
-	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
+	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().ID)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
@@ -306,7 +306,7 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 		gpuBlocks = p.config.LRUCapacityPerServer
 	}
 	return server{
-		ServerID:       ServerID(targetEndpoint.GetMetadata().NamespacedName),
+		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
 		NumOfGPUBlocks: gpuBlocks,
 	}
 }

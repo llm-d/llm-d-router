@@ -30,6 +30,47 @@ between the Routing and Scheduling layers. It decides *if* and *when* a request,
 mechanism for managing diverse SLOs, ensuring fairness among competing workloads, and maintaining system stability under
 high load.
 
+### Enabling, disabling, and tuning
+
+Flow control is disabled by default and is enabled explicitly, via the `flowControl` feature gate
+in the EPP config:
+
+```yaml
+featureGates: ["flowControl"]
+```
+
+With the gate off, the legacy saturation-only admission path is used. With it on, saturation no
+longer pushes excess requests into each model server's local queue: they wait in the EPP and
+dispatch by priority as capacity frees, with queue wait bounded by a TTL. Sheddable
+(negative-priority) requests buffer under the same TTL and capacity rules instead of being
+rejected immediately on saturation. Enabling the layer changes queueing behavior under load, so
+review the tuning knobs below as part of turning it on.
+
+Setting a `flowControl:` config section while the gate is disabled logs a warning: everything in it
+except `saturationDetector` (which the legacy admission path also uses) is ignored.
+
+Operationally, dispatch decisions depend on fresh endpoint metrics: saturation detection reads the
+model-server metrics that the EPP's own data layer scrapes from endpoints. Endpoints whose metrics
+are older than the detector's `metricsStalenessThreshold` count as fully saturated, so if the EPP
+loses its scrape path to all endpoints (network policy, metrics port change, a starved refresh
+loop), dispatch halts and queued requests eventually shed at their TTL. Keep the refresh interval
+comfortably inside the staleness threshold and monitor scrape health when running with flow
+control on.
+
+Tuning knobs, all under the `flowControl:` config section:
+
+* Per-band `maxRequests` / `maxBytes` — the shedding knobs. Lower them to reject excess load at the
+  queue boundary instead of buffering it (for example, to approximate the legacy immediate-shed
+  behavior for sheddable traffic).
+* `defaultRequestTTL` — the queue-wait budget, and the other way a request is shed. When the pool
+  has no endpoints the queue acts as a scale-from-zero waiting room and requests hold for the full
+  budget, so keep it under the client or gateway deadline unless you want requests to survive a cold
+  start.
+* The priority-holdback usage-limit policy — a gating knob, not a shedding one. It lowers the
+  admission ceiling for low-priority traffic as utilization rises, so that traffic waits in queue
+  rather than being rejected; it sheds only by way of the two limits above. Configure it via
+  `usageLimitPolicyPluginRef`.
+
 ### High Level Architecture
 
 The following diagram illustrates the high-level dependency model and request flow for the system. It shows how

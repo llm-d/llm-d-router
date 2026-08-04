@@ -106,15 +106,15 @@ func (f *fakeKVBlockScorer) Score(ctx context.Context, keys []kvblock.BlockHash,
 var testEndpoints = []scheduling.Endpoint{
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-			Address:        "10.0.0.1",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-a"},
+			Address: "10.0.0.1",
+			Port:    "8080",
 		}, nil, nil),
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-			Address:        "10.0.0.2",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-b"},
+			Address: "10.0.0.2",
+			Port:    "8080",
 		}, nil, nil),
 }
 
@@ -124,15 +124,15 @@ func freshEndpoints() []scheduling.Endpoint {
 	return []scheduling.Endpoint{
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-				Address:        "10.0.0.1",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-a"},
+				Address: "10.0.0.1",
+				Port:    "8080",
 			}, nil, nil),
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-				Address:        "10.0.0.2",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-b"},
+				Address: "10.0.0.2",
+				Port:    "8080",
 			}, nil, nil),
 	}
 }
@@ -717,9 +717,9 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 				tokens[i] = uint32(i + 1)
 			}
 			endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-x"},
-				Address:        "10.0.0.9",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-x"},
+				Address: "10.0.0.9",
+				Port:    "8080",
 			}, nil, nil)
 			req := &scheduling.InferenceRequest{
 				RequestID:   "r",
@@ -740,12 +740,36 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 	}
 }
 
-type fakeSubscriberManager struct {
-	ids       []string
-	endpoints []string
+func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "unsupported"
+
+	_, err = New(ctx, "unsupported-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
 }
 
-func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+type fakeSubscriberManager struct {
+	ids             []string
+	sourceEndpoints []string
+	endpoints       []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(
+	_ context.Context,
+	id, sourceEndpoint, endpoint, _ string,
+	_ bool,
+) error {
+	f.ids = append(f.ids, id)
+	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
+	f.endpoints = append(f.endpoints, endpoint)
 	return nil
 }
 func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}

@@ -67,7 +67,7 @@ func TestDatasource(t *testing.T) {
 
 	ctx := context.Background()
 	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{
+		ID: types.NamespacedName{
 			Name:      "pod1",
 			Namespace: "default",
 		},

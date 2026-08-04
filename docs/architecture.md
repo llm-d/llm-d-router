@@ -154,11 +154,8 @@ kind: EndpointPickerConfig
 plugins:
 - type: precise-prefix-cache-producer
   parameters:
-    indexerConfig:
-      tokenProcessorConfig:
-        blockSize: 5
-      kvBlockIndexConfig:
-        maxPrefixBlocksToMatch: 256
+    tokenProcessorConfig:
+      blockSizeTokens: 5
 - type: prefix-cache-scorer
   parameters:
     prefixMatchInfoProducerName: precise-prefix-cache-producer
@@ -195,6 +192,8 @@ RequestHandler:
 - When no parsers are configured, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used.
 
 FlowControl:
+- The flow control admission layer itself is off by default; enable it with
+  `featureGates: ["flowControl"]`.
 - `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
 
@@ -223,6 +222,12 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
   endpoint or Kubernetes object change notifications
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+
+Polling sources share one Collector goroutine per endpoint. The base tick is
+`--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
+`interval` parameter (e.g. `"1s"`) that is rounded to the nearest multiple of the base tick;
+when omitted, the source runs on every base tick. The runtime converts each source's
+interval to base-tick multiples and schedules dispatches accordingly.
 
 See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc for the canonical model.
 

@@ -34,8 +34,9 @@ type EndpointPickerConfig struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// +optional
-	// FeatureGates is a set of flags that enable various experimental features with the EPP.
-	// If omitted none of these experimental features will be enabled.
+	// FeatureGates is a set of flags that toggle optional EPP features. Each entry is a gate name,
+	// optionally suffixed with "=true" or "=false" (a bare name means "=true"). Gates carry
+	// per-gate defaults that apply when omitted; some default to enabled.
 	FeatureGates FeatureGates `json:"featureGates,omitempty"`
 
 	// +required
@@ -186,7 +187,8 @@ func (sp SchedulingPlugin) String() string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
-// FeatureGates is a set of flags that enable various experimental features with the EPP
+// FeatureGates is a set of flags that toggle optional EPP features ("name", "name=true", or
+// "name=false"); omitted gates use their registered defaults.
 type FeatureGates []string
 
 func (fg FeatureGates) String() string {
@@ -238,13 +240,25 @@ type DataLayerConfig struct {
 	// endpoints. This enables running the EPP without a Kubernetes cluster.
 	// If omitted, the EPP uses the default Kubernetes-based discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
+	// +optional
+	// CrossReplicaSyncerPluginRef names the plugin instance to use as the cross-EPP
+	// cross-replica syncer. The reference is to the name of an entry in the
+	// top-level Plugins section. If omitted, no cross-replica syncer is used
+	// and plugins that read cross-replica state fall back to local data.
+	CrossReplicaSyncerPluginRef string `json:"crossReplicaSyncerPluginRef,omitempty"`
+	// +optional
+	// CrossReplicaSyncInterval is the cadence at which each replica publishes
+	// its local per-endpoint state to the cross-replica syncer. It is rounded
+	// to a multiple of the datalayer base tick. If omitted, a default is used.
+	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
+		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
 }
 
 // DiscoveryConfig references the EndpointDiscovery plugin to use.

@@ -19,8 +19,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	fwkplugin.Register(DisaggHeadersHandlerType, HeadersHandlerFactory)
-	fwkplugin.Register(PrefillHeaderHandlerType, HeadersHandlerFactory) //nolint:staticcheck
+	fwkplugin.Register(DisaggHeadersHandlerType, fwkplugin.StabilityBeta, HeadersHandlerFactory)
+	fwkplugin.Register(PrefillHeaderHandlerType, fwkplugin.StabilityBeta, HeadersHandlerFactory) //nolint:staticcheck
 	os.Exit(m.Run())
 }
 
@@ -33,9 +33,9 @@ const (
 func makeEndpointByAddr(addr string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
-			Address:        addr,
-			Port:           testPort,
+			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
+			Address: addr,
+			Port:    testPort,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -45,9 +45,9 @@ func makeEndpointByAddr(addr string) scheduling.Endpoint {
 func makeEncodeEndpoint(addr string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "encode-pod"},
-			Address:        addr,
-			Port:           testPort,
+			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "encode-pod"},
+			Address: addr,
+			Port:    testPort,
 		},
 		&fwkdl.Metrics{},
 		nil,

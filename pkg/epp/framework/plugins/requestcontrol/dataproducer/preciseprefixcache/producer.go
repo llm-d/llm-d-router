@@ -73,14 +73,18 @@ var (
 // subscriberManager is the subset of kvevents.SubscriberManager the producer
 // relies on, narrowed so tests can substitute a fake.
 type subscriberManager interface {
-	EnsureSubscriber(ctx context.Context, podIdentifier, endpoint, topicFilter string, remoteSocket bool) error
+	EnsureSubscriber(
+		ctx context.Context,
+		podIdentifier, sourceEndpoint, endpoint, topicFilter string,
+		remoteSocket bool,
+	) error
 	RemoveSubscriber(ctx context.Context, podIdentifier string)
 	GetActiveSubscribers() ([]string, []string)
 	Shutdown(ctx context.Context)
 }
 
 // Producer is a DataProducer plugin that maintains a KV-block prefix-cache
-// index by subscribing to vLLM KV-events and writes per-endpoint
+// index by subscribing to engine KV-events and writes per-endpoint
 // PrefixCacheMatchInfo for each request. Operators pair it with the
 // generic prefix-cache-scorer (set prefixMatchInfoProducerName to this
 // producer's instance name) to route requests by precise cache locality.
@@ -178,12 +182,16 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, fmt.Errorf("failed to create KVBlockScorer: %w", err)
 	}
 
-	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, engineadapter.NewVLLMAdapter())
+	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
+	}
+	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
-		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber",
+		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
 		}

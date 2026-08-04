@@ -23,8 +23,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 type tracedScorer struct {
@@ -46,7 +46,7 @@ func (t *tracedScorer) Score(
 	keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 ) (map[string]float64, error) {
-	tracer := telemetry.Tracer("llm-d-kv-cache/pkg/kvcache")
+	tracer := tracing.Tracer("llm-d-router/pkg/kvcache")
 	_, span := tracer.Start(ctx, "llm_d.kv_cache.scorer.compute",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)

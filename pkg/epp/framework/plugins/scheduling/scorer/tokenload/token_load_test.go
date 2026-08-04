@@ -45,9 +45,9 @@ func TestTokenLoadScorer(t *testing.T) {
 		pod3NN := types.NamespacedName{Namespace: "default", Name: "pod3"}
 
 		endpoints := []fwksched.Endpoint{
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod1NN}, &fwkdl.Metrics{}, nil),
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod2NN}, &fwkdl.Metrics{}, nil),
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod3NN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod1NN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod2NN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod3NN}, &fwkdl.Metrics{}, nil),
 		}
 
 		// pod1: 0 in-flight, no current-request impact. Score = 1 - 0/1000 = 1.0
@@ -69,9 +69,9 @@ func TestTokenLoadScorer(t *testing.T) {
 		pod3NN := types.NamespacedName{Namespace: "default", Name: "pod3"}
 
 		endpoints := []fwksched.Endpoint{
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod1NN}, &fwkdl.Metrics{}, nil),
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod2NN}, &fwkdl.Metrics{}, nil),
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: pod3NN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod1NN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod2NN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod3NN}, &fwkdl.Metrics{}, nil),
 		}
 
 		// pod1: 0 in-flight + 250 current = 250. Score = 1 - 250/1000 = 0.75
@@ -96,7 +96,7 @@ func TestTokenLoadScorer(t *testing.T) {
 	t.Run("missing data key degrades gracefully", func(t *testing.T) {
 		podNN := types.NamespacedName{Namespace: "default", Name: "pod-no-data"}
 		endpoints := []fwksched.Endpoint{
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podNN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: podNN}, &fwkdl.Metrics{}, nil),
 		}
 
 		// No key set; should score as if 0 token load
@@ -107,7 +107,7 @@ func TestTokenLoadScorer(t *testing.T) {
 	t.Run("typed nil attribute handles gracefully", func(t *testing.T) {
 		podNN := types.NamespacedName{Namespace: "default", Name: "pod-typed-nil"}
 		endpoints := []fwksched.Endpoint{
-			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podNN}, &fwkdl.Metrics{}, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: podNN}, &fwkdl.Metrics{}, nil),
 		}
 
 		var nilLoad *attrconcurrency.InFlightLoad

@@ -104,7 +104,7 @@ func (s *Scorer) Score(ctx context.Context, req *scheduling.InferenceRequest, en
 		scores[endpoint] = 0
 		pod := ""
 		if meta := endpoint.GetMetadata(); meta != nil {
-			pod = meta.PodName
+			pod = meta.Name
 		}
 		info, ok := endpoint.Get(s.mmMatchDataKey.String())
 		if !ok {

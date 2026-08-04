@@ -66,7 +66,7 @@ func newTestEndpoints(names ...string) []fwksched.Endpoint {
 	endpoints := make([]fwksched.Endpoint, len(names))
 	for i, name := range names {
 		endpoints[i] = fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}}, nil, nil)
+			&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, nil, nil)
 	}
 	return endpoints
 }
