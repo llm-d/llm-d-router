@@ -352,7 +352,7 @@ func headerValue(setHeaders []*configPb.HeaderValueOption, key string) string {
 	return ""
 }
 
-// TestSessionAffinityFilter_SessionIDHeaderStrategy exercises the session_id_header
+// TestSessionAffinityFilter_SessionIDHeaderStrategy exercises the session_id
 // strategy end to end with an ordered source list [header x-session-id, attribute
 // agent-identity]. It proves: (1) the header source binds and pins a session; (2)
 // a request carrying only an agent header resolves via the agent-identity plugin's
@@ -367,7 +367,7 @@ plugins:
   - type: agent-identity
   - type: session-affinity-filter
     parameters:
-      strategy: session_id_header
+      strategy: session_id
       sessionIdConfig:
         sources:
           - header: x-session-id
@@ -399,7 +399,7 @@ plugins:
   - type: agent-identity
   - type: session-affinity-scorer
     parameters:
-      strategy: session_id_header
+      strategy: session_id
       sessionIdConfig:
         sources:
           - header: x-session-id
@@ -421,10 +421,10 @@ dataLayer:
 	runSessionIDHeaderStrategyChecks(t, configText)
 }
 
-// runSessionIDHeaderStrategyChecks drives the shared session_id_header assertions
+// runSessionIDHeaderStrategyChecks drives the shared session_id assertions
 // against a plugin (filter or scorer) configured with the ordered
 // [header x-session-id, attribute agent-identity] source list. Affinity is
-// asserted by same-session-same-endpoint, since session_id_header writes no token
+// asserted by same-session-same-endpoint, since session_id writes no token
 // back and leastLoadedPod's target need not be a fixed pod.
 func runSessionIDHeaderStrategyChecks(t *testing.T, configText string) {
 	const claudeHeader = "x-claude-code-session-id"
@@ -471,7 +471,7 @@ var routedRequestSeq int64
 
 // sendRoutedRequest drives one full request/response transaction with the given
 // extra request headers and returns the routed destination endpoint. Unlike
-// sendSessionRequest it reads no response token: session_id_header writes nothing
+// sendSessionRequest it reads no response token: session_id writes nothing
 // back, so affinity is asserted purely by the endpoint the request is routed to.
 func sendRoutedRequest(t *testing.T, h *TestHarness, extraHeaders map[string]string) string {
 	t.Helper()

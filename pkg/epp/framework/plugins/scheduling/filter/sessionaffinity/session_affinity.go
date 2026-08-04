@@ -36,15 +36,15 @@ const (
 	// which resends it on subsequent requests.
 	StrategyEncodedEndpointHeader = "encoded_endpoint_header"
 
-	// StrategySessionIDHeader maps an opaque client-supplied session identifier
-	// to a pod.
-	StrategySessionIDHeader = "session_id_header"
+	// StrategySessionID maps an opaque client-supplied session identifier,
+	// sourced from a header or request attribute, to a pod.
+	StrategySessionID = "session_id"
 )
 
 // parameters configures the SessionAffinity filter.
 type parameters struct {
 	// Strategy is StrategyEncodedEndpointHeader (the default) or
-	// StrategySessionIDHeader. Only the config matching Strategy is used.
+	// StrategySessionID. Only the config matching Strategy is used.
 	Strategy                    string                                  `json:"strategy"`
 	EncodedEndpointHeaderConfig sessionutil.EncodedEndpointHeaderConfig `json:"encodedEndpointHeaderConfig"`
 	SessionIDConfig             sessionutil.SessionIDConfig             `json:"sessionIdConfig"`
@@ -63,7 +63,7 @@ func (p *parameters) applyDefaults() {
 	switch p.Strategy {
 	case StrategyEncodedEndpointHeader:
 		p.EncodedEndpointHeaderConfig.ApplyDefaults()
-	case StrategySessionIDHeader:
+	case StrategySessionID:
 		p.SessionIDConfig.ApplyDefaults()
 	}
 }
@@ -73,10 +73,10 @@ func (p *parameters) validate() error {
 	switch p.Strategy {
 	case StrategyEncodedEndpointHeader:
 		return nil
-	case StrategySessionIDHeader:
+	case StrategySessionID:
 		return p.SessionIDConfig.Validate()
 	default:
-		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionIDHeader, p.Strategy)
+		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionID, p.Strategy)
 	}
 }
 
@@ -126,7 +126,7 @@ type strategy interface {
 }
 
 func newStrategy(params parameters, handle plugin.Handle) strategy {
-	if params.Strategy == StrategySessionIDHeader {
+	if params.Strategy == StrategySessionID {
 		return newSessionIDHeaderStrategy(params, handle)
 	}
 	return newEncodedEndpointHeaderStrategy(params)

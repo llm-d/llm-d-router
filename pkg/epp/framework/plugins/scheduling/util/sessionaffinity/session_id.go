@@ -38,7 +38,7 @@ import (
 // are configured.
 const DefaultSessionIDHeader = "x-session-id"
 
-// SessionIDConfig configures the session_id_header strategy.
+// SessionIDConfig configures the session_id strategy.
 type SessionIDConfig struct {
 	// Sources resolve the session identifier in priority order; the first
 	// non-empty match wins. When empty, a single header source
@@ -146,7 +146,7 @@ func (b *boundPodPresence) Clone() plugin.StateData {
 	return &boundPodPresence{present: b.present}
 }
 
-// NewSessionIDHeader builds the shared session_id_header implementation and
+// NewSessionIDHeader builds the shared session_id strategy implementation and
 // starts its eviction sweep for the plugin's lifetime. pluginKey is the owning
 // plugin's type, used for the PluginState handoff key and log labels.
 func NewSessionIDHeader(config SessionIDConfig, profileName string, pluginKey plugin.StateKey, handle plugin.Handle) *SessionIDHeader {
@@ -379,7 +379,7 @@ func (s *SessionIDHeader) pickedPodName(schedulingResult *scheduling.SchedulingR
 	return ""
 }
 
-// ResponseHeader is a no-op: under session_id_header the client owns its
+// ResponseHeader is a no-op: under session_id the client owns its
 // session identifier.
 func (s *SessionIDHeader) ResponseHeader(context.Context, *scheduling.InferenceRequest, *requestcontrol.Response, *datalayer.EndpointMetadata) {
 }

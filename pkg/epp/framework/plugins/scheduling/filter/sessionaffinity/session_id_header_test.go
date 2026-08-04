@@ -32,7 +32,7 @@ import (
 func newTestFilterStrategy(t *testing.T) *sessionIDHeaderStrategy {
 	t.Helper()
 	built := newSessionIDHeaderStrategy(parameters{
-		Strategy: StrategySessionIDHeader,
+		Strategy: StrategySessionID,
 		SessionIDConfig: sessionutil.SessionIDConfig{
 			Sources:              []sessionutil.SessionIDSource{{Header: sessionutil.DefaultHeader}},
 			EvictionTTLSeconds:   300,
