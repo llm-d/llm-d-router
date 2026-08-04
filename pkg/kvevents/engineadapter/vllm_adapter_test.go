@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
+	"context"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -62,7 +63,7 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 		Payload:  payload,
 	}
 
-	podID, modelName, eventBatch, err := adapter.ParseMessage(msg)
+	podID, modelName, eventBatch, err := adapter.ParseMessage(context.Background(), msg)
 	require.NoError(t, err)
 	assert.Equal(t, "pod-1", podID)
 	assert.Equal(t, "llama-2-7b", modelName)
@@ -83,7 +84,7 @@ func TestVLLMParseMessage_InvalidPayload(t *testing.T) {
 		Payload: []byte{0xFF, 0xFF, 0xFF},
 	}
 
-	_, _, _, err := adapter.ParseMessage(msg)
+	_, _, _, err := adapter.ParseMessage(context.Background(), msg)
 	assert.Error(t, err)
 }
 
@@ -600,7 +601,7 @@ func TestVLLMEventBatch_NestedArrayEvents(t *testing.T) {
 		Payload:  payload,
 	}
 
-	_, _, eventBatch, err := adapter.ParseMessage(msg)
+	_, _, eventBatch, err := adapter.ParseMessage(context.Background(), msg)
 	require.NoError(t, err)
 	require.Len(t, eventBatch.Events, 1)
 
@@ -635,7 +636,7 @@ func TestVLLMParseMessage_MapEncodedBlockStored(t *testing.T) {
 	payload, err := msgpack.Marshal([]any{1234567890.0, []any{blockStoredEvent}, nil})
 	require.NoError(t, err)
 
-	podID, modelName, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+	podID, modelName, eventBatch, err := adapter.ParseMessage(context.Background(), &kvevents.RawMessage{
 		Topic:   "kv@pod-1@llama-2-7b",
 		Payload: payload,
 	})
@@ -673,7 +674,7 @@ func TestVLLMParseMessage_MapEncodedBlockRemovedAndCleared(t *testing.T) {
 		[]any{1234567890.0, []any{removed, cleared, arrayStored}, nil})
 	require.NoError(t, err)
 
-	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+	_, _, eventBatch, err := adapter.ParseMessage(context.Background(), &kvevents.RawMessage{
 		Topic:   "kv@pod-1@m",
 		Payload: payload,
 	})
@@ -716,7 +717,7 @@ func TestVLLMParseMessage_MapEncodedErrors(t *testing.T) {
 	} {
 		payload, err := msgpack.Marshal([]any{0.0, []any{tc.event}, nil})
 		require.NoError(t, err, name)
-		_, _, _, err = adapter.ParseMessage(&kvevents.RawMessage{
+		_, _, _, err = adapter.ParseMessage(context.Background(), &kvevents.RawMessage{
 			Topic:   "kv@pod-1@m",
 			Payload: payload,
 		})

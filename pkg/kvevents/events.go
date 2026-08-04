@@ -14,6 +14,12 @@
 
 package kvevents
 
+import (
+	"context"
+
+	"go.opentelemetry.io/otel/trace"
+)
+
 // KVCacheSpecKind identifies vLLM KV cache group semantics.
 type KVCacheSpecKind string
 
@@ -67,6 +73,11 @@ type RawMessage struct {
 	SourceEndpoint string
 	// reset clears the message's pod before later messages on the same queue.
 	reset bool
+	// SpanContext links processing back to the span that received the message,
+	// bridging the worker-queue boundary. Only the span identity crosses, never
+	// the subscriber's context: a subscriber reconnect cancels that context, and
+	// a queued task must not inherit the cancellation.
+	SpanContext trace.SpanContext
 }
 
 // EngineAdapter defines the interface for engine-specific message parsers.
@@ -76,7 +87,8 @@ type EngineAdapter interface {
 	// ParseMessage parses a raw transport message into domain data.
 	// It extracts pod identity and model name from the topic,
 	// and decodes the payload into an EventBatch.
-	ParseMessage(msg *RawMessage) (podID, modelName string, batch EventBatch, err error)
+	// ctx carries the caller's trace context so decorators can span the decode.
+	ParseMessage(ctx context.Context, msg *RawMessage) (podID, modelName string, batch EventBatch, err error)
 
 	// ShardingKey extracts the key used to shard messages across worker queues.
 	// Messages with the same sharding key are guaranteed to be processed in order.

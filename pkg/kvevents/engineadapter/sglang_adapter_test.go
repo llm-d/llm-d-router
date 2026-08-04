@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
+	"context"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -61,7 +62,7 @@ func TestSGLangParseMessage_Valid(t *testing.T) {
 		Payload:  payload,
 	}
 
-	podID, modelName, eventBatch, err := adapter.ParseMessage(msg)
+	podID, modelName, eventBatch, err := adapter.ParseMessage(context.Background(), msg)
 	require.NoError(t, err)
 	assert.Equal(t, "pod-1", podID)
 	assert.Equal(t, "llama-2-7b", modelName)
@@ -82,7 +83,7 @@ func TestSGLangParseMessage_InvalidPayload(t *testing.T) {
 		Payload: []byte{0xFF, 0xFF, 0xFF},
 	}
 
-	_, _, _, err := adapter.ParseMessage(msg)
+	_, _, _, err := adapter.ParseMessage(context.Background(), msg)
 	assert.Error(t, err)
 }
 

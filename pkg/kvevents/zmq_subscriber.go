@@ -17,12 +17,16 @@ package kvevents
 import (
 	"context"
 	"encoding/binary"
+	"strconv"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
@@ -168,7 +172,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" {
-			z.addTask(topic, seq, payload)
+			z.addTask(ctx, topic, seq, payload)
 			continue
 		}
 
@@ -231,18 +235,34 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 
 		debugLogger.V(logging.TRACE).Info("Received message from zmq subscriber",
 			"topic", topic, "seq", seq, "payloadSize", len(payload))
-		z.addTask(topic, seq, payload)
+		z.addTask(ctx, topic, seq, payload)
 		z.lastSeq = seq
 		z.hasLastSeq = true
 	}
 }
 
-func (z *zmqSubscriber) addTask(topic string, seq uint64, payload []byte) {
+// addTask hands a received message to the pool, carrying the receive span's
+// identity so processing rejoins this trace across the worker queue. The span
+// starts after Recv returns so it measures handoff work rather than the idle
+// wait for the next message.
+func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, payload []byte) {
+	_, span := tracing.Tracer(TracerScope).Start(ctx, "events_receive",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+	)
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("llm_d.kv_cache.events.topic", topic),
+		attribute.String("llm_d.kv_cache.events.sequence", strconv.FormatUint(seq, 10)),
+		attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(payload)),
+		attribute.String("llm_d.kv_cache.events.source_endpoint", z.sourceEndpoint),
+	)
+
 	z.pool.AddTask(&RawMessage{
 		Topic:          topic,
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
+		SpanContext:    span.SpanContext(),
 	})
 }
 
@@ -312,7 +332,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			continue
 		}
 
-		z.addTask(topic, seq, payload)
+		z.addTask(ctx, topic, seq, payload)
 		z.lastSeq = seq
 		z.hasLastSeq = true
 		replayed++

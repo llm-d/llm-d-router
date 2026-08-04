@@ -58,7 +58,7 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 
 type sourceEndpointAdapter struct{}
 
-func (a *sourceEndpointAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
+func (a *sourceEndpointAdapter) ParseMessage(_ context.Context, msg *RawMessage) (string, string, EventBatch, error) {
 	return "10.0.0.1:8000", "test-model", EventBatch{
 		Events: []GenericEvent{
 			&BlockStoredEvent{
@@ -1170,7 +1170,7 @@ func TestPool_DedupMetricsCountBlockHashes(t *testing.T) {
 type stubAdapter struct{}
 
 //nolint:gocritic // unnamed results match the EngineAdapter implementations
-func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, error) {
+func (stubAdapter) ParseMessage(_ context.Context, _ *RawMessage) (string, string, EventBatch, error) {
 	return "pod-1", "model-1", EventBatch{}, nil
 }
 
