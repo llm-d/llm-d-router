@@ -116,6 +116,8 @@ jobs:
         run: make lint-security
 
       # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
+      # This action writes to the code scanning API, so it is pinned by commit
+      # SHA rather than a floating tag. Keep the SHA form on version bumps.
       - name: Upload gosec SARIF
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
