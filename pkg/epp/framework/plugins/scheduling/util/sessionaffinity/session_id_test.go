@@ -102,18 +102,18 @@ func TestSessionIDHeader_Choose_BoundSessionPresent(t *testing.T) {
 	}
 }
 
-func TestSessionIDHeader_Choose_UnboundPicksLeastLoaded(t *testing.T) {
+func TestSessionIDHeader_Choose_UnboundAbstains(t *testing.T) {
 	s := newTestSessionIDHeader(t, nil)
 	endpointA := newTestEndpoint("pod-a")
 	endpointB := newTestEndpoint("pod-b")
 	endpoints := []scheduling.Endpoint{endpointA, endpointB}
 
-	// Bind one session to pod-a so pod-b is strictly less loaded.
+	// A prior session is bound: an unbound session still expresses no
+	// preference. The plugin does not place it; the consumer decides.
 	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
 
-	got, ok := s.Choose(context.Background(), requestWithSession("s2"), endpoints)
-	if !ok || got != endpointB {
-		t.Errorf("Choose = (%v, %v), want (pod-b, true)", got.GetMetadata().ID.Name, ok)
+	if got, ok := s.Choose(context.Background(), requestWithSession("s2"), endpoints); ok || got != nil {
+		t.Errorf("Choose for unbound session = (%v, %v), want (nil, false)", got, ok)
 	}
 }
 
@@ -130,8 +130,8 @@ func TestSessionIDHeader_Choose_NoSessionAbstains(t *testing.T) {
 	endpointB := newTestEndpoint("pod-b")
 	endpoints := []scheduling.Endpoint{endpointA, endpointB}
 
-	// A prior session is bound so a least-loaded pod exists: the no-session
-	// request must still get no preference. No session means abstain.
+	// A prior session is bound; the no-session request must still get no
+	// preference. No session means abstain.
 	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
 
 	noSession := &scheduling.InferenceRequest{RequestID: "req-no-session"}
@@ -148,9 +148,6 @@ func TestSessionIDHeader_PreRequest_FirstBind(t *testing.T) {
 
 	if got, want := s.boundPod("s1"), podKey("pod-a"); got != want {
 		t.Errorf("boundPod(s1) = %q, want %q", got, want)
-	}
-	if got := s.podSessionCount(podKey("pod-a")); got != 1 {
-		t.Errorf("podSessionCount(pod-a) = %d, want 1", got)
 	}
 }
 
@@ -172,12 +169,6 @@ func TestSessionIDHeader_PreRequest_MigratesOnGenuineAbsence(t *testing.T) {
 	if got, want := s.boundPod("s1"), podKey("pod-b"); got != want {
 		t.Errorf("boundPod(s1) = %q, want %q after migration", got, want)
 	}
-	if got := s.podSessionCount(podKey("pod-a")); got != 0 {
-		t.Errorf("podSessionCount(pod-a) = %d, want 0 after migration", got)
-	}
-	if got := s.podSessionCount(podKey("pod-b")); got != 1 {
-		t.Errorf("podSessionCount(pod-b) = %d, want 1 after migration", got)
-	}
 }
 
 func TestSessionIDHeader_PreRequest_HoldsPinWhenPresentButOutvoted(t *testing.T) {
@@ -198,19 +189,16 @@ func TestSessionIDHeader_PreRequest_HoldsPinWhenPresentButOutvoted(t *testing.T)
 	if got, want := s.boundPod("s1"), podKey("pod-a"); got != want {
 		t.Errorf("boundPod(s1) = %q, want %q (pin should hold)", got, want)
 	}
-	if got := s.podSessionCount(podKey("pod-a")); got != 1 {
-		t.Errorf("podSessionCount(pod-a) = %d, want 1 (unchanged)", got)
-	}
 }
 
-func TestSessionIDHeader_PreRequest_FirstBindRaceDoesNotDoubleCount(t *testing.T) {
+func TestSessionIDHeader_PreRequest_FirstBindRaceKeepsSingleBinding(t *testing.T) {
 	// Two concurrent requests for the same never-before-seen session ID, each
-	// picking a DIFFERENT pod. Neither had Score() write a presence record
-	// (score() only writes one when a binding already existed), so the request
+	// picking a DIFFERENT pod. Neither had Choose() write a presence record
+	// (Choose only writes one when a binding already existed), so the request
 	// that loses the LoadOrStore sees existing.podName != podName with no
 	// record to consult. It must not read that absent record as "bound pod
-	// gone" and migrate: the first bind stands, and podCount stays on the pod
-	// that won with exactly one session. Repeated so either goroutine can win.
+	// gone" and migrate: the first bind stands. Repeated so either goroutine
+	// can win.
 	for i := 0; i < 200; i++ {
 		s := newTestSessionIDHeader(t, nil)
 		endpointA := newTestEndpoint("pod-a")
@@ -235,10 +223,9 @@ func TestSessionIDHeader_PreRequest_FirstBindRaceDoesNotDoubleCount(t *testing.T
 		close(start)
 		wg.Wait()
 
-		countA := s.podSessionCount(podKey("pod-a"))
-		countB := s.podSessionCount(podKey("pod-b"))
-		if countA+countB != 1 {
-			t.Fatalf("iteration %d: podCount summed to %d across pod-a/pod-b, want 1 (no double count)", i, countA+countB)
+		got := s.boundPod("new-session")
+		if got != podKey("pod-a") && got != podKey("pod-b") {
+			t.Fatalf("iteration %d: boundPod = %q, want the pod of whichever request won the first bind", i, got)
 		}
 	}
 
@@ -257,12 +244,6 @@ func TestSessionIDHeader_PreRequest_FirstBindRaceDoesNotDoubleCount(t *testing.T
 
 	if got, want := s.boundPod("pinned-session"), podKey("pod-a"); got != want {
 		t.Errorf("boundPod = %q, want %q: a missing presence record must not force a migration", got, want)
-	}
-	if got := s.podSessionCount(podKey("pod-a")); got != 1 {
-		t.Errorf("podSessionCount(pod-a) = %d, want 1", got)
-	}
-	if got := s.podSessionCount(podKey("pod-b")); got != 0 {
-		t.Errorf("podSessionCount(pod-b) = %d, want 0 (no spurious migration)", got)
 	}
 }
 
@@ -323,7 +304,6 @@ func TestSessionIDHeader_RunEvictionDropsExpiredBinding(t *testing.T) {
 	s.ttl = 10 * time.Millisecond
 
 	s.bindings.Store("s1", binding{podName: podKey("pod-a"), lastSeen: time.Now().Add(-time.Hour)})
-	s.podCount.Store(podKey("pod-a"), 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -333,15 +313,11 @@ func TestSessionIDHeader_RunEvictionDropsExpiredBinding(t *testing.T) {
 		close(done)
 	}()
 
-	// Poll on both the binding removal and the count decrement: the sweep does
-	// them as two statements, so observing only the former can race ahead of
-	// the latter.
 	deadline := time.After(150 * time.Millisecond)
-	for s.boundPod("s1") != "" || s.podSessionCount(podKey("pod-a")) != 0 {
+	for s.boundPod("s1") != "" {
 		select {
 		case <-deadline:
-			t.Fatalf("binding was not fully evicted within the deadline (boundPod=%q podCount=%d)",
-				s.boundPod("s1"), s.podSessionCount(podKey("pod-a")))
+			t.Fatalf("binding was not evicted within the deadline (boundPod=%q)", s.boundPod("s1"))
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -360,7 +336,6 @@ func TestSessionIDHeader_RunEvictionSparesRefreshedBinding(t *testing.T) {
 	// A binding old enough that the sweeper will select it for eviction.
 	stale := binding{podName: podKey("pod-a"), lastSeen: time.Now().Add(-time.Hour)}
 	s.bindings.Store("s1", stale)
-	s.podCount.Store(podKey("pod-a"), 1)
 
 	// Hold the lock so the sweeper blocks after it has already snapshotted the
 	// stale value in Range but before it acts on it, then refresh the binding
@@ -399,9 +374,6 @@ func TestSessionIDHeader_RunEvictionSparesRefreshedBinding(t *testing.T) {
 
 	if got, want := s.boundPod("s1"), podKey("pod-a"); got != want {
 		t.Errorf("boundPod(s1) = %q, want %q: a refreshed binding must not be evicted", got, want)
-	}
-	if got := s.podSessionCount(podKey("pod-a")); got != 1 {
-		t.Errorf("podSessionCount(pod-a) = %d, want 1: count must track the surviving binding", got)
 	}
 }
 

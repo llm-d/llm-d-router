@@ -109,10 +109,11 @@ func (s SessionIDSource) validate() error {
 }
 
 // SessionIDHeader maps an opaque client-supplied session identifier to a pod
-// via a bounded, TTL-evicted binding store. An unbound session is placed on the
-// pod with the fewest bound sessions. A session whose bound pod is absent from
-// the candidate set migrates to the least-loaded present pod immediately, no
-// retry wait.
+// via a bounded, TTL-evicted binding store. It does not place sessions: an
+// unbound session, or one whose bound pod is absent from the candidate set,
+// yields no preference, and the consumer decides where the request goes. A
+// session whose bound pod is absent rebinds to the pod the request was routed
+// to.
 //
 // It is the shared implementation behind the session-affinity scorer and
 // filter: Choose resolves the target endpoint, PreRequest commits the binding,
@@ -126,12 +127,10 @@ type SessionIDHeader struct {
 	pluginKey     plugin.StateKey
 	ttl           time.Duration
 	sweepInterval time.Duration
-	// mu makes each bind/migrate/evict sequence atomic with its podCount
-	// adjustment: without it a first-bind increment can land after a concurrent
-	// sweep decrement, stranding a count with no live binding.
+	// mu serializes each bind/migrate/evict sequence so a first-bind cannot race
+	// a concurrent sweep and leave the binding store inconsistent.
 	mu          sync.Mutex
 	bindings    sync.Map // session identifier -> binding
-	podCount    sync.Map // pod key -> session count
 	pluginState *plugin.PluginState
 }
 
@@ -213,11 +212,12 @@ func attributeString(ctx context.Context, request *scheduling.InferenceRequest, 
 
 // Choose resolves the endpoint a request should be pinned to and records, for
 // PreRequest, whether the session's bound pod was present in the candidate set.
-// It returns (nil, false) when there are no candidates or the request carries
-// no session identifier: no session means no affinity preference. Otherwise it
-// returns the bound pod when present, else the least-loaded candidate, with ok
-// true. Choose does not mutate the store; the binding is committed in
-// PreRequest.
+// It returns (nil, false) when there are no candidates, the request carries no
+// session identifier, the session is unbound, or its bound pod is absent from
+// the candidate set: in each case the session expresses no usable preference
+// and the consumer decides. It returns (pod, true) only for a session bound to
+// a present candidate. Choose does not mutate the store; the binding is
+// committed in PreRequest.
 func (s *SessionIDHeader) Choose(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) (scheduling.Endpoint, bool) {
 	if len(endpoints) == 0 {
 		return nil, false
@@ -241,35 +241,9 @@ func (s *SessionIDHeader) Choose(ctx context.Context, request *scheduling.Infere
 	}
 
 	if target == nil {
-		target = s.leastLoadedPod(endpoints)
+		return nil, false
 	}
 	return target, true
-}
-
-// leastLoadedPod returns the candidate bound by the fewest sessions.
-func (s *SessionIDHeader) leastLoadedPod(endpoints []scheduling.Endpoint) scheduling.Endpoint {
-	best := endpoints[0]
-	minCount := s.podSessionCount(best.GetMetadata().ID.String())
-	for _, endpoint := range endpoints[1:] {
-		c := s.podSessionCount(endpoint.GetMetadata().ID.String())
-		if c < minCount {
-			minCount = c
-			best = endpoint
-		}
-	}
-	return best
-}
-
-func (s *SessionIDHeader) podSessionCount(podKey string) int {
-	v, ok := s.podCount.Load(podKey)
-	if !ok {
-		return 0
-	}
-	c, ok := v.(int)
-	if !ok {
-		return 0
-	}
-	return c
 }
 
 // boundPod returns the pod bound to sessionID, or "" when unbound. Expiry is
@@ -289,8 +263,8 @@ func (s *SessionIDHeader) boundPod(sessionID string) string {
 	return b.podName
 }
 
-// PreRequest is the only place podCount and bindings are mutated. A session
-// migrates only when its bound pod is absent from the candidate set.
+// PreRequest is the only place bindings are mutated. A session migrates only
+// when its bound pod is absent from the candidate set.
 func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	sessionID := s.resolveSessionID(ctx, request)
 	if sessionID == "" {
@@ -307,7 +281,6 @@ func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.In
 	fresh := binding{podName: podName, lastSeen: time.Now()}
 	existingValue, loaded := s.bindings.LoadOrStore(sessionID, fresh)
 	if !loaded {
-		s.incrementPodCount(podName)
 		log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - bound session to pod",
 			"plugin", string(s.pluginKey), "pod", podName)
 		return
@@ -334,28 +307,8 @@ func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.In
 	if !s.bindings.CompareAndSwap(sessionID, existingValue, fresh) {
 		return
 	}
-	s.decrementPodCount(existing.podName)
-	s.incrementPodCount(podName)
 	log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - session migrated pod",
 		"plugin", string(s.pluginKey), "from", existing.podName, "to", podName)
-}
-
-// incrementPodCount records one more session bound to podKey. Callers hold
-// s.mu, so the read-modify-write needs no CAS retry; sync.Map is still
-// required for the unlocked reader in podSessionCount.
-func (s *SessionIDHeader) incrementPodCount(podKey string) {
-	s.podCount.Store(podKey, s.podSessionCount(podKey)+1)
-}
-
-// decrementPodCount records one fewer session bound to podKey, removing the
-// entry once it reaches zero. Callers hold s.mu.
-func (s *SessionIDHeader) decrementPodCount(podKey string) {
-	c := s.podSessionCount(podKey)
-	if c <= 1 {
-		s.podCount.Delete(podKey)
-		return
-	}
-	s.podCount.Store(podKey, c-1)
 }
 
 // pickedPodName returns the pod chosen for this instance's profile, or "" when
@@ -415,9 +368,7 @@ func (s *SessionIDHeader) runEviction(ctx context.Context, interval time.Duratio
 				// refreshed this binding since Range snapshotted it, in which
 				// case CompareAndDelete correctly declines to remove it.
 				s.mu.Lock()
-				if s.bindings.CompareAndDelete(key, value) {
-					s.decrementPodCount(b.podName)
-				}
+				s.bindings.CompareAndDelete(key, value)
 				s.mu.Unlock()
 				return true
 			})

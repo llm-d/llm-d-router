@@ -7,7 +7,7 @@ Scores candidate pods by giving a higher score to the pod that was previously us
 Supports two algorithms, selected by the `strategy` parameter:
 
 - `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the scorer writes that same header on the response so the client can echo it back on the next request.
-- `session_id`: stateful. The client supplies an opaque session identifier, read from one or more configured sources (a request header, or a request attribute published by an upstream plugin) tried in priority order. The scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session is placed on the pod currently bound by the fewest sessions. A bound session whose pod is absent from the candidate set migrates to the present pod bound by the fewest sessions immediately.
+- `session_id`: stateful. The client supplies an opaque session identifier, read from one or more configured sources (a request header, or a request attribute published by an upstream plugin) tried in priority order. The scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session expresses no preference: the scorer gives every candidate zero and lets the picker place the request. A bound session whose pod is absent from the candidate set also scores zero everywhere, then rebinds to the pod the request was routed to.
 
 ## Parameters
 

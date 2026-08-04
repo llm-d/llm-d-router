@@ -425,7 +425,7 @@ dataLayer:
 // against a plugin (filter or scorer) configured with the ordered
 // [header x-session-id, attribute agent-identity] source list. Affinity is
 // asserted by same-session-same-endpoint, since session_id writes no token
-// back and leastLoadedPod's target need not be a fixed pod.
+// back and the plugin does not place a session on a fixed pod.
 func runSessionIDHeaderStrategyChecks(t *testing.T, configText string) {
 	const claudeHeader = "x-claude-code-session-id"
 
@@ -438,25 +438,32 @@ func runSessionIDHeaderStrategyChecks(t *testing.T, configText string) {
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
-	// (1) Header source: same x-session-id pins to the same endpoint.
+	// repeats amplifies the same-session assertions: the plugin places nothing,
+	// so the first request lands via the picker's random tie-break, and every
+	// subsequent request for that identifier must pin to it. An abstaining or
+	// no-op plugin would draw independently each time and fail within a few
+	// repeats (~(1/2)^repeats), so this distinguishes a real binding from chance
+	// without the flaky cross-session comparison it replaces.
+	const repeats = 10
+
+	// (1) Header source: the same x-session-id pins to one endpoint across
+	// repeated requests.
 	headerFirst := sendRoutedRequest(t, h, map[string]string{"x-session-id": "sess-A"})
-	headerSecond := sendRoutedRequest(t, h, map[string]string{"x-session-id": "sess-A"})
-	require.Equal(t, headerFirst, headerSecond,
-		"same x-session-id must pin to the same endpoint")
+	for i := 0; i < repeats; i++ {
+		require.Equal(t, headerFirst, sendRoutedRequest(t, h, map[string]string{"x-session-id": "sess-A"}),
+			"same x-session-id must pin to the same endpoint")
+	}
 
 	// (2) Attribute fallback: no header, agent-identity publishes the attribute
-	// from the agent header, and the session pins across requests.
+	// from the agent header, and the session pins across repeated requests. That
+	// the pin holds across every repeat (not by chance) is itself proof the
+	// attribute source resolved a real identifier: an unresolved source would
+	// abstain, binding nothing, and each request would land on a random pod.
 	agentFirst := sendRoutedRequest(t, h, map[string]string{claudeHeader: "agent-B"})
-	agentSecond := sendRoutedRequest(t, h, map[string]string{claudeHeader: "agent-B"})
-	require.Equal(t, agentFirst, agentSecond,
-		"same agent identity resolved via the attribute source must pin to the same endpoint")
-
-	// Negative control: two distinct sessions must spread across the two pods.
-	// This can only hold if affinity is actually binding and load-spreading; a
-	// no-op plugin would route both to the picker's default pod, and it proves
-	// step (2) resolved a real identifier from the attribute rather than abstaining.
-	require.NotEqual(t, headerFirst, agentFirst,
-		"two distinct sessions must pin to different pods")
+	for i := 0; i < repeats; i++ {
+		require.Equal(t, agentFirst, sendRoutedRequest(t, h, map[string]string{claudeHeader: "agent-B"}),
+			"same agent identity resolved via the attribute source must pin to the same endpoint")
+	}
 
 	// (3) Priority: header wins over attribute. A request carrying both the
 	// x-session-id header of session A and a different agent header resolves as

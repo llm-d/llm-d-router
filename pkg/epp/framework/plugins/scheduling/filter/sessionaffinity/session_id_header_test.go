@@ -101,19 +101,19 @@ func TestSessionIDHeaderFilter_NoSessionReturnsAll(t *testing.T) {
 	assert.ElementsMatch(t, []string{"pod-a", "pod-b"}, filterPodNames(got))
 }
 
-// TestSessionIDHeaderFilter_UnboundReturnsLeastLoaded checks an unbound session
-// is filtered to the least-loaded candidate (one pod, not all).
-func TestSessionIDHeaderFilter_UnboundReturnsLeastLoaded(t *testing.T) {
+// TestSessionIDHeaderFilter_UnboundReturnsAll checks an unbound session is a
+// pass-through: the filter expresses no preference and returns all candidates.
+func TestSessionIDHeaderFilter_UnboundReturnsAll(t *testing.T) {
 	s := newTestFilterStrategy(t)
 	endpointA := filterTestEndpoint("pod-a")
 	endpointB := filterTestEndpoint("pod-b")
 	endpoints := []scheduling.Endpoint{endpointA, endpointB}
 
-	// Bind one session to pod-a so pod-b is strictly less loaded.
+	// A prior session is bound; the unbound session must still see all pods.
 	s.preRequest(context.Background(), filterRequest("s1"), filterResultFor(endpointA))
 
 	got := s.filter(context.Background(), filterRequest("s2"), endpoints)
-	assert.Equal(t, []string{"pod-b"}, filterPodNames(got))
+	assert.ElementsMatch(t, []string{"pod-a", "pod-b"}, filterPodNames(got))
 }
 
 // TestSessionIDHeaderFilter_MigratesOnAbsence checks a session whose bound pod

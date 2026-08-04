@@ -91,12 +91,30 @@ func TestSessionIDHeaderScorer_NoSessionAbstains(t *testing.T) {
 	endpointB := scorerTestEndpoint("pod-b")
 	endpoints := []scheduling.Endpoint{endpointA, endpointB}
 
-	// A prior session is bound so a least-loaded pod exists; the no-session
-	// request must still not pick it.
+	// A prior session is bound; the no-session request must still not pick it.
 	s.preRequest(context.Background(), scorerRequest("s1"), scorerResultFor(endpointA))
 
 	noSession := &scheduling.InferenceRequest{RequestID: "req-no-session"}
 	got := s.score(context.Background(), noSession, endpoints)
+	want := map[scheduling.Endpoint]float64{endpointA: 0.0, endpointB: 0.0}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("unexpected scores (-want +got):\n%s", diff)
+	}
+}
+
+// TestSessionIDHeaderScorer_UnboundAbstains checks the scorer returns all zeros
+// for a session that carries an identifier but is not yet bound: the scorer
+// does not place it, the picker decides.
+func TestSessionIDHeaderScorer_UnboundAbstains(t *testing.T) {
+	s := newTestScorerStrategy(t)
+	endpointA := scorerTestEndpoint("pod-a")
+	endpointB := scorerTestEndpoint("pod-b")
+	endpoints := []scheduling.Endpoint{endpointA, endpointB}
+
+	// A prior session is bound; the unbound session must still score all zeros.
+	s.preRequest(context.Background(), scorerRequest("s1"), scorerResultFor(endpointA))
+
+	got := s.score(context.Background(), scorerRequest("s2"), endpoints)
 	want := map[scheduling.Endpoint]float64{endpointA: 0.0, endpointB: 0.0}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("unexpected scores (-want +got):\n%s", diff)
