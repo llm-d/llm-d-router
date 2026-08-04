@@ -357,64 +357,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err != nil {
 		return reqCtx, err
 	}
-	d.injectPriorityIntoBody(reqCtx, inferenceRequestBody, result)
+	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
+		return reqCtx, err
+	}
 	if err := d.repackage(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
 	return reqCtx, nil
-}
-
-// engineTypeLabelKey is the Pod label used to identify the inference engine
-// type (mirrors metrics.DefaultEngineTypeLabelKey; duplicated locally to
-// avoid an inter-package dependency for this single lookup).
-const engineTypeLabelKey = "llm-d.ai/engine-type"
-
-// injectPriorityIntoBody writes reqCtx.Priority directly into the request
-// body's "priority" field so the backend's native priority scheduler (SGLang
-// or vLLM) can use it, without requiring the pd-sidecar to be in the path.
-//
-// IMPORTANT: SGLang's --enable-priority-scheduling and vLLM's
-// --scheduling-policy priority disagree on the direction of the "priority"
-// field: SGLang schedules HIGHER integer values first, while vLLM schedules
-// LOWER values first. Our InferenceObjective convention (e.g. app-critical=100,
-// app-batch=-10) follows SGLang's "higher is more urgent" direction, so when
-// the chosen target endpoint is a vLLM backend, negate the value before
-// writing it into the body so the relative ordering still comes out correct
-// on vLLM's native scheduler.
-func (d *Director) injectPriorityIntoBody(reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody, result *fwksched.SchedulingResult) {
-	if inferenceRequestBody == nil {
-		return
-	}
-	v, ok := inferenceRequestBody.Payload.(fwkrh.PayloadMap)
-	if !ok {
-		return
-	}
-	priority := reqCtx.Priority
-	if isVLLMBackend(result) {
-		priority = -priority
-	}
-	v["priority"] = priority
-}
-
-// isVLLMBackend reports whether the scheduling result's primary target
-// endpoint carries the vLLM engine-type label.
-func isVLLMBackend(result *fwksched.SchedulingResult) bool {
-	if result == nil {
-		return false
-	}
-	primary, ok := result.ProfileResults[result.PrimaryProfileName]
-	if !ok || primary == nil || len(primary.TargetEndpoints) == 0 {
-		return false
-	}
-	endpoint := primary.TargetEndpoints[0]
-	if endpoint == nil {
-		return false
-	}
-	meta := endpoint.GetMetadata()
-	if meta == nil || meta.Labels == nil {
-		return false
-	}
-	return strings.EqualFold(meta.Labels[engineTypeLabelKey], "vllm")
 }
 
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
@@ -437,6 +386,27 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
 	mutated, err := rewriter.RewriteModelName(payload, reqCtx.TargetModelName)
+	if err != nil {
+		return err
+	}
+	// Store the result back so repackage serializes the mutated payload.
+	inferenceRequestBody.Payload = mutated
+	return nil
+}
+
+func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	logger := log.FromContext(ctx)
+	rewriter, ok := reqCtx.Parser.(fwkrh.PriorityRewriter)
+	if !ok {
+		logger.V(logutil.DEBUG).Info("parser does not implement PriorityRewriter, skipping priority rewrite")
+		return nil
+	}
+	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
+	if !ok {
+		logger.V(logutil.DEBUG).Info("payload does not implement MarshalablePayload, skipping priority rewrite")
+		return nil
+	}
+	mutated, err := rewriter.RewritePriority(payload, reqCtx.Priority, fwkrh.PriorityRewriteContext{TargetEndpoint: reqCtx.TargetPod})
 	if err != nil {
 		return err
 	}

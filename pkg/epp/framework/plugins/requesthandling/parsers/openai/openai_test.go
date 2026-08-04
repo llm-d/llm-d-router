@@ -25,6 +25,7 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -39,6 +40,55 @@ func TestNewOpenAIParser(t *testing.T) {
 
 	if diff := cmp.Diff(expectedName, parser.TypedName()); diff != "" {
 		t.Errorf("TypedName() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_RewritePriority(t *testing.T) {
+	parser := NewOpenAIParser()
+
+	tests := []struct {
+		name    string
+		ctx     fwkrh.PriorityRewriteContext
+		want    int
+		payload fwkrh.MarshalablePayload
+	}{
+		{
+			name:    "writes priority",
+			payload: fwkrh.PayloadMap{"model": "test"},
+			want:    2,
+		},
+		{
+			name:    "negates priority for vllm target",
+			payload: fwkrh.PayloadMap{"model": "test"},
+			ctx: fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+				Labels: map[string]string{"llm-d.ai/engine-type": "vllm"},
+			}},
+			want: -2,
+		},
+		{
+			name:    "negates priority for legacy vllm target label",
+			payload: fwkrh.PayloadMap{"model": "test"},
+			ctx: fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+				Labels: map[string]string{"inference.networking.k8s.io/engine-type": "vllm"},
+			}},
+			want: -2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.RewritePriority(tt.payload, 2, tt.ctx)
+			if err != nil {
+				t.Fatalf("RewritePriority() error = %v", err)
+			}
+			m, ok := got.(fwkrh.PayloadMap)
+			if !ok {
+				t.Fatalf("RewritePriority() payload = %T, want PayloadMap", got)
+			}
+			if gotPriority := m["priority"]; gotPriority != tt.want {
+				t.Errorf("priority = %v, want %v", gotPriority, tt.want)
+			}
+		})
 	}
 }
 

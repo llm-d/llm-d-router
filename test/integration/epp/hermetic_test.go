@@ -150,7 +150,7 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 						P(1, 10, 0.4, "foo", modelSQLLoraTarget), // Winner (Affinity overrides KV)
 						P(2, 10, 0.3, "foo"),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test3"),
+					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test3", prio(2)),
 					wantMetrics: map[string]string{
 						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
@@ -204,7 +204,7 @@ dataLayer:
 						P(1, 0, 0.85, "foo"),
 						P(2, 10, 0.9, "foo"),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSQLLoraTarget, "test4"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSQLLoraTarget, "test4", prio(2)),
 					wantMetrics: map[string]string{
 						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
@@ -241,7 +241,7 @@ dataLayer:
 						P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
 						P(1, 4, 0.85, "foo", modelSheddableTarget),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSheddableTarget, "test6"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSheddableTarget, "test6", prio(0)),
 					wantMetrics: map[string]string{
 						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
 					},
@@ -274,7 +274,7 @@ dataLayer:
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Low Queue + Matches Subset)
 						P(2, 10, 0.2, "foo"),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
+					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2", prio(2)),
 				},
 				{
 					name:     "subsetting: partial match",
@@ -284,7 +284,7 @@ dataLayer:
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 						P(2, 10, 0.2, "foo"), // Winner (Matches Subset, despite load)
 					},
-					wantResponses: ExpectRouteTo("192.168.1.3:8000", modelSQLLoraTarget, "test2"),
+					wantResponses: ExpectRouteTo("192.168.1.3:8000", modelSQLLoraTarget, "test2", prio(2)),
 				},
 				{
 					name:     "subsetting: no pods match",
@@ -313,7 +313,7 @@ dataLayer:
 					pods: []PodState{
 						P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelDirect, "test6"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelDirect, "test6", prio(2)),
 					wantMetrics: map[string]string{
 						"inference_objective_request_total": cleanMetric(metricReqTotal(modelDirect, modelDirect, prio(2))),
 					},
@@ -324,7 +324,7 @@ dataLayer:
 					pods: []PodState{
 						P(0, 0, 0.1, "foo", modelAfterRewrite),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, "test-rewrite"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, "test-rewrite", prio(0)),
 					wantMetrics: map[string]string{
 						"inference_objective_request_total": cleanMetric(metricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
 					},

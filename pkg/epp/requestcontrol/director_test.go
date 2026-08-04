@@ -572,10 +572,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":    model,
-				"prompt":   "original prompt",
-				"new_key":  "new_value",
-				"priority": float64(2),
+				"model":   model,
+				"prompt":  "original prompt",
+				"new_key": "new_value",
 			},
 			inferenceObjectiveName: objectiveName,
 			preRequestPlugin: &mockPreRequestPlugin{
@@ -609,9 +608,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":    modelRewritten,
-				"prompt":   "some prompt",
-				"priority": float64(0),
+				"model":  modelRewritten,
+				"prompt": "some prompt",
 			},
 			inferenceObjectiveName: model,
 			rewrites:               []*v1alpha2.InferenceModelRewrite{rewrite},
@@ -649,7 +647,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 						"content": "critical prompt",
 					},
 				},
-				"priority": float64(0),
 			},
 			targetModelName: model,
 		},
@@ -687,7 +684,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 						"content": "critical prompt",
 					},
 				},
-				"priority": float64(0),
 			},
 			targetModelName:    model,
 			dataProducerPlugin: newMockDataProducerPlugin("test-plugin"),
@@ -725,7 +721,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 						"content": "critical prompt",
 					},
 				},
-				"priority": float64(0),
 			},
 			targetModelName:         model,
 			admitRequestDenialError: nil,
@@ -813,9 +808,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":    "resolved-target-model-A",
-				"prompt":   "prompt for target resolution",
-				"priority": float64(1),
+				"model":  "resolved-target-model-A",
+				"prompt": "prompt for target resolution",
 			},
 			inferenceObjectiveName: objectiveNameResolve,
 		},
@@ -837,9 +831,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":    "food-review-1",
-				"prompt":   "test prompt",
-				"priority": float64(0),
+				"model":  "food-review-1",
+				"prompt": "test prompt",
 			},
 			reqBodyMap: map[string]any{
 				"model":  "food-review-1",
@@ -882,9 +875,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":    genericRewriteTarget,
-				"prompt":   "p",
-				"priority": float64(0),
+				"model":  genericRewriteTarget,
+				"prompt": "p",
 			},
 			rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
 		},
@@ -1063,6 +1055,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					updatedBodyMap := make(map[string]any)
 					if err := json.Unmarshal(reqCtx.Request.RawBody, &updatedBodyMap); err != nil {
 						t.Errorf("Error to Unmarshal reqCtx.Request.UpdatedBody, err is %v", err)
+					}
+					if _, wantPriority := test.wantMutatedBody["priority"]; !wantPriority {
+						delete(updatedBodyMap, "priority")
 					}
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
