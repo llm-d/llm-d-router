@@ -83,7 +83,7 @@ func (s *Server) fanoutEncoderCollect(
 // handleECNIXL fans out per-image encoder requests, aggregates each
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
-func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
+func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType APIType) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, completionRequest, ok := s.readJSONBody(r, w)
@@ -126,5 +126,5 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		}
 	}
 
-	s.runPDPipeline(w, r, completionRequest, prefillEndPoint, requestID)
+	s.runPDPipeline(w, r, completionRequest, prefillEndPoint, requestID, apiType)
 }
