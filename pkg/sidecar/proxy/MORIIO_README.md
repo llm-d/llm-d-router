@@ -65,10 +65,7 @@ overlapping the two legs, at the cost of pinning the rank before prefill confirm
 
 ## Host Address Configuration
 
-**DNS hostnames are the recommended and forward-looking way to address pods.** Raw IPs are
-still accepted for backward compatibility but are being phased out.
-
-### Recommended: DNS names (LeaderWorkerSet / LWS)
+Peer hosts are Kubernetes DNS names (LeaderWorkerSet / LWS):
 
 ```yaml
 # LWS pod names — resolved to IPs at startup
@@ -76,25 +73,18 @@ still accepted for backward compatibility but are being phased out.
 - --moriio-decode-hosts=decode-master.ns.svc,decode-worker.ns.svc
 ```
 
-### Legacy: raw IPs (backward compatibility)
-
-```yaml
-# Static IPs (e.g., hostNetwork: true where pod IP = node IP)
-- --moriio-remote-hosts=10.0.0.1,10.0.0.2
-- --moriio-decode-hosts=10.0.1.1,10.0.1.2
-```
+A literal IP may be given in place of any DNS name; it is used as-is (no lookup).
 
 **How host resolution works:**
 1. At startup (`Complete()`), DNS names are resolved to IPs via Kubernetes DNS
    (IPv4 preferred) to seed the initial peer IPs, before the proxy starts.
-2. Raw IP addresses are passed through unchanged (backward compatibility).
-3. On the request path, peer DNS names are **re-resolved under a short TTL**
+2. On the request path, peer DNS names are **re-resolved under a short TTL**
    (default 30s) when building `kv_transfer_params`, so a peer pod that restarts
    with a new IP is picked up without a router restart. Re-resolution serves the
    last-known-good IP on a transient lookup failure, de-duplicates concurrent
    lookups for the same host via singleflight, and serves the cached IP
    immediately once past the TTL while refreshing asynchronously (only the very
-   first, cold-start lookup blocks). Raw IPs still pass through with no lookup.
+   first, cold-start lookup blocks). A literal IP is used as-is (no lookup).
 
 Both the boot-time and request-path lookups share the same IPv4-preference and
 the same per-lookup timeout bound (see [Tuning](#tuning-environment-variables)).

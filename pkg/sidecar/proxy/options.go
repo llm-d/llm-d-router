@@ -283,8 +283,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Base MoRI-IO notify port on the decode pod.")
 	fs.StringVar(&opts.MoRIIODecodePodIP, "moriio-local-pod-ip", opts.MoRIIODecodePodIP,
 		"Decode pod's routable address, used as the prefill leg's remote_host. "+
-			"Prefer a Kubernetes DNS name (e.g., 'pod-name.namespace.svc.cluster.local'), "+
-			"resolved to an IP at startup; a raw IP is accepted for backward compatibility. "+
+			"A Kubernetes DNS name (e.g., 'pod-name.namespace.svc.cluster.local') "+
+			"is resolved to an IP at startup; a literal IP is used as-is. "+
 			"Defaults to the POD_IP env var. Required with --moriio-write-mode.")
 	fs.IntVar(&opts.MoRIIODecodeHandshakePort, "moriio-decode-handshake-port", opts.MoRIIODecodeHandshakePort,
 		"Base MoRI-IO handshake port on the decode pod.")
@@ -310,16 +310,16 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	// DNS names are resolved to IPs at startup (LWS-compatible).
 	fs.StringSliceVar(&opts.MoRIIORemoteHosts, "moriio-remote-hosts", opts.MoRIIORemoteHosts,
 		"Wide-EP: comma-separated remote (prefill-side) pod hosts for per-DP-rank fan-out. "+
-			"Prefer Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local'), "+
-			"resolved to IPs at startup; raw IPs are accepted for backward compatibility. "+
+			"Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
+			"are resolved to IPs at startup; literal IPs are used as-is. "+
 			"Pair with --moriio-dp-size-local.")
 	fs.IntVar(&opts.MoRIIODPSizeLocal, "moriio-dp-size-local", opts.MoRIIODPSizeLocal,
 		"Wide-EP: per-pod DP size used to map a global DP rank to a pod index. "+
 			"Must satisfy --moriio-dp-size = dp-size-local * len(hosts).")
 	fs.StringSliceVar(&opts.MoRIIODecodeHosts, "moriio-decode-hosts", opts.MoRIIODecodeHosts,
 		"Wide-EP: comma-separated decode-side pod hosts, emitted as the prefill leg's "+
-			"remote_hosts. Prefer Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local'), "+
-			"resolved to IPs at startup; raw IPs are accepted for backward compatibility. "+
+			"remote_hosts. Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
+			"are resolved to IPs at startup; literal IPs are used as-is. "+
 			"Pair with --moriio-dp-size-local.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -431,16 +431,16 @@ func (opts *Options) Complete() error {
 
 	// Capture the ORIGINAL host specs before one-shot resolution rewrites the
 	// resolved fields. The request-path hostResolver re-resolves these on a
-	// short TTL so peer pod restarts (new IP) are eventually picked up. Raw IPs
-	// stored here pass through the resolver unchanged.
+	// short TTL so peer pod restarts (new IP) are eventually picked up. Literal
+	// IPs stored here pass through the resolver unchanged.
 	opts.MoRIIORemoteHostSpecs = append([]string(nil), opts.MoRIIORemoteHosts...)
 	opts.MoRIIODecodeHostSpecs = append([]string(nil), opts.MoRIIODecodeHosts...)
 	opts.MoRIIODecodePodIPSpec = opts.MoRIIODecodePodIP
 
-	// LWS-compatible DNS resolution: automatically resolve hostnames to IPs at startup.
-	// This aligns with Kubernetes LeaderWorkerSet patterns where pod addresses are
-	// DNS names (e.g., "moriio-prefill-0-0.namespace.svc") rather than hardcoded IPs.
-	// Raw IPs are deprecated but still accepted for backward compatibility.
+	// LWS-compatible DNS resolution: resolve hostnames to IPs at startup. This
+	// aligns with Kubernetes LeaderWorkerSet patterns where pod addresses are
+	// DNS names (e.g., "moriio-prefill-0-0.namespace.svc"); a literal IP is
+	// used as-is.
 	if resolved, resolveErr := resolveHostsToIPs(opts.MoRIIORemoteHosts); resolveErr != nil {
 		return fmt.Errorf("resolving --moriio-remote-hosts: %w", resolveErr)
 	} else {
@@ -454,7 +454,7 @@ func (opts *Options) Complete() error {
 
 	// Single-host counterpart: --moriio-local-pod-ip is decode's advertised
 	// remote_host on the prefill leg. Resolve it the same way so it can be an
-	// LWS DNS name instead of a raw IP (raw IPs pass through unchanged).
+	// LWS DNS name (a literal IP passes through unchanged).
 	if opts.MoRIIODecodePodIP != "" {
 		if resolved, resolveErr := resolveHostsToIPs([]string{opts.MoRIIODecodePodIP}); resolveErr != nil {
 			return fmt.Errorf("resolving --moriio-local-pod-ip: %w", resolveErr)
@@ -520,11 +520,8 @@ func validateWideEPHosts(flag string, hosts []string, dpSize, dpLocal int) error
 	return nil
 }
 
-// resolveHostsToIPs resolves DNS names to IPs, passing through raw IP addresses unchanged.
-// Supports both:
-//   - Raw IPs (e.g., "10.0.0.1") - passed through as-is for static IP deployments
-//   - DNS names (e.g., "pod-name.namespace.svc") - resolved to IP at startup for LWS deployments
-//
+// resolveHostsToIPs resolves DNS names (e.g., "pod-name.namespace.svc") to IPs
+// at startup, preferring IPv4. A literal IP (e.g., "10.0.0.1") is used as-is.
 // Resolution happens once at startup.
 func resolveHostsToIPs(hosts []string) ([]string, error) {
 	if len(hosts) == 0 {
@@ -532,7 +529,7 @@ func resolveHostsToIPs(hosts []string) ([]string, error) {
 	}
 	resolved := make([]string, len(hosts))
 	for i, host := range hosts {
-		// Pass through raw IP addresses unchanged
+		// A literal IP is used as-is (no lookup).
 		if ip := net.ParseIP(host); ip != nil {
 			resolved[i] = host
 			continue
