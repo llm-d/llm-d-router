@@ -23,7 +23,7 @@ translate between the two components. Where a name matches an EPP metric, the
 Every metric on this page is exposed on a single `/metrics` endpoint served by the coordinator
 process, alongside the inference paths and `/healthz` and `/readyz` on the coordinator's chi router
 (`pkg/coordinator/server/server.go`). The registry it serves, the port or flag that selects it, and
-whether it is authenticated are settled by the phase 1 implementation. EPP's Prometheus wiring is
+whether it is authenticated are open. EPP's Prometheus wiring is
 separate: it lives in `cmd/epp/runner` and serves the controller-runtime registry rather than the
 default one.
 
@@ -65,7 +65,7 @@ A step may issue zero or many backend calls and includes local work; a phase is 
 `conditional-decode` issues a decode-phase call: `steps/decode_proxy.go` `newDecodeProxyRequest`
 stamps `EPPProfileHeader=PhaseDecode` unconditionally, and both the probe and the decode step go
 through it, so a cache-miss request sends two decode-phase calls. See the
-[open decision](#upstream-phase-family-phase-2) on the phase family.
+[open decision](#upstream-phase-family) on the phase family.
 
 ## Error classes
 
@@ -91,7 +91,7 @@ failure on the decode leg reaches the client but is absent from both error metri
 
 ## Metrics catalog
 
-### Request family (phase 1)
+### Request family
 
 Recorded in `server/handlers.go` `handleInference`. Requests that exit early because they are
 malformed (body-read error, 413, invalid JSON) count as `bad_request` with `model_name=unknown`.
@@ -110,7 +110,7 @@ Unless otherwise noted, metrics in this family share the label `{model_name}`.
 dashboard panel that groups the family by model has no series for it. EPP's
 `llm_d_epp_request_running` is labelled by model, fairness ID, and priority.
 
-### Pipeline step family (phase 1)
+### Pipeline step family
 
 Recorded in `pipeline.go` `Execute`, one observation per step per request. This family measures each
 stage's whole wall time, local work plus orchestration plus any backend calls the stage makes, not
@@ -151,7 +151,7 @@ histogram_quantile(0.95, sum by (le) (rate(
   llm_d_coordinator_pipeline_step_duration_seconds_bucket{step="decode"}[5m])))
 ```
 
-### Upstream phase family (phase 2)
+### Upstream phase family
 
 Recorded in `steps/encode.go`, `prefill.go` and `decode_proxy.go`. This family counts and times the
 outbound sub-requests the coordinator sends to the gateway carrying the epp-profile header. Only
@@ -201,7 +201,7 @@ upstream_request_total{phase="prefill"} += 1
 upstream_request_total{phase="decode"}  += 1
 ```
 
-### Disaggregation decision and decode cache (phase 3)
+### Disaggregation decision and decode cache
 
 #### `disagg_decision_total`
 
