@@ -5,12 +5,15 @@ runs to serve them (see [Coordinator Architecture](coordinator_architecture.md))
 from the Endpoint Picker (EPP) metrics documented in [Metrics](metrics.md): the two components
 measure different points in the same request path.
 
-## Subsystems and naming
+## Subsystem and naming
 
-Every series carries the subsystem prefix `llm_d_coordinator_`, so a metric's full Prometheus name is
-`llm_d_coordinator_<name>`. Names below omit the prefix. All metrics are ALPHA stage.
+A metric's full Prometheus name is `<subsystem>_<name>`. The coordinator uses a single subsystem:
 
-Naming mirrors the EPP request family (`pkg/epp/metrics`) so PromQL expressions and dashboard panels
+| Prefix | Scope |
+|---|---|
+| `llm_d_coordinator_` | Every coordinator metric: request, pipeline step, upstream phase, disaggregation decision, and decode cache. |
+
+Naming mirrors the EPP request family so PromQL expressions and dashboard panels
 translate between the two components. Where a name matches an EPP metric, the
 [Relationship to EPP metrics](#relationship-to-epp-metrics) section states what differs.
 
@@ -21,13 +24,14 @@ translate between the two components. Where a name matches an EPP metric, the
 ### Coordinator metrics endpoint
 
 Every metric on this page is exposed on a single `/metrics` endpoint served by the coordinator
-process, alongside the inference paths and `/healthz` and `/readyz` on the coordinator's chi router
-(`pkg/coordinator/server/server.go`). The registry it serves, the port or flag that selects it, and
-whether it is authenticated are open. EPP's Prometheus wiring is
-separate: it lives in `cmd/epp/runner` and serves the controller-runtime registry rather than the
-default one.
+process, alongside the inference paths and `/healthz` and `/readyz`. EPP's metrics endpoint is
+separate, served from its own process on the controller-runtime registry.
 
-### Metrics served elsewhere
+TBD: the registry the endpoint serves, its address, and whether it is authenticated. EPP authenticates
+its endpoint by default (`--metrics-endpoint-auth`), which requires RBAC for TokenReview and
+SubjectAccessReview; matching that would extend the coordinator's ServiceAccount permissions.
+
+### Other scrape targets
 
 All coordinator metrics are self-instrumented: the coordinator counts and times its own work
 in-process, and scrapes nothing. Two series record a signal that originates upstream but is still
@@ -40,14 +44,16 @@ the other two endpoints: per-request token counts and pool aggregates such as KV
 and queue depth on EPP's (see [Metrics](metrics.md)), multimodal cache counters on vLLM's. Scrape all
 three to follow a request end to end.
 
-## Label vocabularies
+## Labels
 
-Two vocabularies use the words `encode`, `prefill`, and `decode`. They are not interchangeable.
+Two labels use the words `encode`, `prefill`, and `decode`. They are not interchangeable.
 
-**`step`** is a stage of the coordinator's internal pipeline, observed once per request per stage. A
-step covers local work, orchestration, and any backend calls that stage makes.
+The **`step` label** names a stage of the coordinator's internal pipeline, observed once per request
+per stage. A step covers local work, orchestration, and any backend calls that stage makes. The
+values are the built-in step names; [Coordinator Architecture](coordinator_architecture.md) describes
+what each one does and how a pipeline is assembled from them.
 
-| Value | Stage |
+| `step` value | Stage |
 |---|---|
 | `render` | Call the render service to tokenize and apply the chat template. |
 | `replace-media-urls` | Rewrite media URLs in the request body (local work only). |
@@ -56,82 +62,85 @@ step covers local work, orchestration, and any backend calls that stage makes.
 | `conditional-decode` | Probe the decode cache for the 412 fast path. |
 | `decode` | Decode and generation, streamed back to the client. |
 
-**`phase`** is a single outbound backend call, counted once per call. Its values are `encode`,
-`prefill`, and `decode`, matching `gateway.EPPProfileHeader`.
+The **`phase` label** names a single outbound backend call, counted once per call. Its values are
+`encode`, `prefill`, `decode`, and `conditional-decode`.
 
-A step may issue zero or many backend calls and includes local work; a phase is one call. Only
-`render` and `replace-media-urls` have no phase counterpart.
+A step may issue zero or many backend calls and includes local work; a phase is one call. Only the
+`render` and `replace-media-urls` steps have no phase counterpart.
 
-`conditional-decode` issues a decode-phase call: `steps/decode_proxy.go` `newDecodeProxyRequest`
-stamps `EPPProfileHeader=PhaseDecode` unconditionally, and both the probe and the decode step go
-through it, so a cache-miss request sends two decode-phase calls. See the
-[open decision](#upstream-phase-family) on the phase family.
+The first three values match the epp-profile header the coordinator sends. `conditional-decode` does
+not: the probe carries the decode profile header, like the decode step, and is distinguished by the
+`Prefer: if-available` header it adds. See the [Upstream phase family](#upstream-phase-family).
 
 ## Error classes
 
-`error_code` on `request_error_total` and `pipeline_step_errors_total` uses one coarse set of values:
+`error_code` on `request_error_total` and `pipeline_step_errors_total` uses one set of four values:
 `bad_request`, `upstream_4xx`, `upstream_5xx`, `internal`.
 
-This classification is finer than `server/handlers.go` `classifyPipelineError`, which collapses
-upstream 5xx faults and internal faults into HTTP 502. The metrics helper inspects the error type
-directly: an `UpstreamError` carrying a 5xx `StatusCode` is `upstream_5xx`, and any other
-non-`ErrBadRequest` error is `internal`.
+This classification is finer than the handler's client-facing status mapping, which collapses upstream
+5xx faults and internal faults into HTTP 502. Classification inspects the error type directly: an
+upstream error carrying a 5xx status is `upstream_5xx`, and any other error that is not a bad request
+is `internal`.
 
-The conditional-decode probe's 412 is not an error in any class. `steps/conditional_decode.go`
-intercepts that status in `ModifyResponse` and converts it to a cache miss, so the step returns
-`nil` and the pipeline continues; a hit returns `ErrPipelineDone`, a successful early exit. Neither
-outcome reaches the classifier, which is why the probe has its own metric,
+The conditional-decode probe's 412 is not an error in any class. The step intercepts that status and
+converts it to a cache miss, so it returns no error and the pipeline continues; a hit ends the
+pipeline early, which is also not an error. Neither outcome reaches the classifier, which is why the
+probe has its own metric,
 [`decode_cache_lookups_total`](#decode_cache_lookups_total). The same 412 does count as an error on
 the EPP side, as `request_error_total{error_code="PreconditionFailed"}`.
 
 `upstream_4xx` and `upstream_5xx` therefore describe the render, prefill, and encode steps, the only
-ones that build an `UpstreamError` from a non-2xx response. The conditional-decode and decode steps
+ones that turn a non-2xx response into an error. The conditional-decode and decode steps
 proxy the upstream response straight to the client without constructing an error, so an upstream
 failure on the decode leg reaches the client but is absent from both error metrics.
 
 ## Metrics catalog
 
+Names below omit the subsystem prefix, which is `llm_d_coordinator_` throughout, and every metric is
+ALPHA stage. Each family states the label set its metrics share; a metric that carries an extra label
+says so in its own row.
+
 ### Request family
 
-Recorded in `server/handlers.go` `handleInference`. Requests that exit early because they are
-malformed (body-read error, 413, invalid JSON) count as `bad_request` with `model_name=unknown`.
-Unless otherwise noted, metrics in this family share the label `{model_name}`.
+Label set `{model_name}` (the request's model).
+
+Recorded by the request handler. Requests that exit early because they are malformed (body-read
+error, 413, invalid JSON) count as `bad_request` with `model_name=unknown`.
 
 | Name | Type | Notes |
 |---|---|---|
 | `request_total` | Counter | Every inbound client request, including malformed ones. |
-| `request_error_total` | Counter | Failed requests by coarse class; adds label `error_code`. |
+| `request_error_total` | Counter | Failed requests; adds label `error_code`. |
 | `request_duration_seconds` | Histogram | End-to-end request latency; `generalLatencyBuckets` (5ms to 1h). |
 | `request_size_bytes` | Histogram | Request body length; powers-of-2 buckets. |
 | `response_size_bytes` | Histogram | Bytes streamed to the client, measured by a counting `ResponseWriter` wrapper in the handler rather than by parsing the body. |
-| `request_running` | Gauge | Requests in flight; unlabelled. |
+| `request_running` | Gauge | Requests in flight. |
 
-`request_running` is fleet-wide while the rest of the family is labelled by `model_name`, so a
-dashboard panel that groups the family by model has no series for it. EPP's
-`llm_d_epp_request_running` is labelled by model, fairness ID, and priority.
+EPP's `llm_d_epp_request_running` adds `fairness_id` and `priority`. Both come from flow control,
+which the coordinator does not implement, so neither has a coordinator counterpart.
 
 ### Pipeline step family
 
-Recorded in `pipeline.go` `Execute`, one observation per step per request. This family measures each
+Label set `{step}` (a stage of the coordinator's internal pipeline, see [Labels](#labels)).
+
+Recorded by the pipeline executor, one observation per step per request. This family measures each
 stage's whole wall time, local work plus orchestration plus any backend calls the stage makes, not
 the individual outbound calls. It answers where time goes inside the coordinator and which internal
-stage failed. Metrics in this family share the label `{step}`.
+stage failed.
 
 | Name | Type | Notes |
 |---|---|---|
 | `pipeline_step_duration_seconds` | Histogram | Per-step latency, from the timings the pipeline already computes. |
-| `pipeline_step_errors_total` | Counter | Step failures by class; adds label `error_code`. |
+| `pipeline_step_errors_total` | Counter | Step failures; adds label `error_code`. |
 
 `pipeline_step_duration_seconds` uses a dedicated bucket set, not `generalLatencyBuckets`: steps span
 microseconds (render, a skipped encode) to seconds (upstream-bound decode), and a 5ms floor collapses
 every fast step into one bucket. `stepLatencyBuckets` is 100us, 250us, 500us, 1ms, 2.5ms, 5ms, 10ms,
 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s, 60s.
 
-`pipeline.Execute` pre-sizes its timings slice for all steps (`make([]stepTiming, len(p.steps))`). On
-an early exit (`ErrPipelineDone`, which every conditional-decode hit takes) or a step failure, the
-trailing entries stay zero-valued, so iterating the slice emits a `step=""` series with a 0s
-observation for every step that never ran. Record inside the loop, or skip entries with an empty
-name.
+Only steps that ran are observed. The executor pre-sizes its timings for the full step list, so on an
+early exit (every conditional-decode hit) or a step failure the trailing entries are unset; recording
+them would emit a `step=""` series with a 0s observation for every step that never ran.
 
 Each step that ran expands to its own histogram block. For three decode steps taking 1.9s, 2.1s and
 1.7s:
@@ -153,53 +162,73 @@ histogram_quantile(0.95, sum by (le) (rate(
 
 ### Upstream phase family
 
-Recorded in `steps/encode.go`, `prefill.go` and `decode_proxy.go`. This family counts and times the
-outbound sub-requests the coordinator sends to the gateway carrying the epp-profile header. Only
-gateway phase calls count: the render-service call and media-URL fetches are outbound too but carry
-no phase header, and their latency appears in
-`pipeline_step_duration_seconds{step="render"|"replace-media-urls"}`. Metrics in this family share the label `{phase}`.
+Label set `{phase}` (one outbound backend call, not a pipeline stage, see [Labels](#labels)).
+
+Recorded by the encode, prefill, and decode steps. This family counts and times the outbound
+sub-requests the coordinator sends to the gateway carrying the epp-profile header. Only gateway phase
+calls count: the render-service call and media-URL fetches are outbound too but carry no phase
+header, and their latency appears in
+`pipeline_step_duration_seconds{step="render"|"replace-media-urls"}`.
 
 | Name | Type | Notes |
 |---|---|---|
 | `upstream_request_total` | Counter | Gateway sub-requests, one per call; encode contributes one per image. |
-| `upstream_request_duration_seconds` | Histogram | Per-call encode latency (encode only). |
+| `upstream_request_duration_seconds` | Histogram | Latency of one encode call, so one observation per image (encode only). |
+
+One multimodal chat request with two images, in a pipeline whose conditional-decode probe misses,
+counts once inbound and five times outbound:
+
+```
+request_total{model_name="llama"}                  += 1
+upstream_request_total{phase="conditional-decode"} += 1
+upstream_request_total{phase="encode"}             += 2
+upstream_request_total{phase="prefill"}            += 1
+upstream_request_total{phase="decode"}             += 1
+```
+
+Had the probe hit, it would be the only outbound call: the pipeline stops there and the encode,
+prefill, and decode series do not move.
+
+Dividing outbound calls by inbound requests gives the fan-out. Over a live window both sides are
+rates, so the per-second units cancel and the result reads as calls per request:
+
+```promql
+# mean backend calls per client request, all phases: 5 if every request matched the example
+sum(rate(llm_d_coordinator_upstream_request_total[5m]))
+  / sum(rate(llm_d_coordinator_request_total[5m]))
+
+# mean encode calls per client request, so mean images per request: 2 for the example
+sum(rate(llm_d_coordinator_upstream_request_total{phase="encode"}[5m]))
+  / sum(rate(llm_d_coordinator_request_total[5m]))
+```
+
+`sum` is needed on both sides because the two counters carry different labels (`phase` against
+`model_name`), so they have no label pairs to divide against directly.
 
 The family is deliberately narrower than the step family it sits beside, because for prefill and
 decode one step is one gateway call:
 
-- `upstream_request_total` covers all three phases: the backend fan-out ratio
-  (`upstream_request_total / request_total`) is not derivable from the step family, and it costs
-  three series.
-- `upstream_request_duration_seconds` is encode-only: encode fans out N concurrent calls, so
-  `pipeline_step_duration_seconds{step="encode"}` is the fan-out envelope (slowest call plus the EC
-  merge) and hides per-image call latency. For prefill and decode the call latency already equals the
-  step duration. Two loose ends remain: the `phase` label then carries exactly one value, which
+- `upstream_request_total` covers all three phases: the fan-out ratios above are not derivable from
+  the step family, and it costs three series.
+- `upstream_request_duration_seconds` is encode-only, and is the per-image latency: encode fans out
+  one concurrent call per image, so `pipeline_step_duration_seconds{step="encode"}` observes the
+  whole stage once per request (the fan-out envelope: slowest call plus the EC merge) and hides what
+  a single image cost. A step p95 well above the call p95 means the width of the fan-out, not any one
+  image, is the expense. For prefill and decode the call latency already equals the step duration. Two loose ends remain: the `phase` label then carries exactly one value, which
   invites empty `phase="prefill"` queries, and `generalLatencyBuckets` runs to 1h, far past any
   single encode call. Either drop the label and name the metric for what it measures, or keep it
   explicitly for forward compatibility, and consider `stepLatencyBuckets`.
 - There is no `upstream_request_error_total`. A phase-call failure aborts its step and is already
-  counted by `pipeline_step_errors_total` under the same coarse class. Per-call encode fan-out
+  counted by `pipeline_step_errors_total` under the same `error_code`. Per-call encode fan-out
   failure granularity is the one gap, but the errgroup context cancels sibling calls on the first
   error, so a clean per-call failure count is not reliably available. This is a limitation, not a
   metric.
 
-**Open decision:** `phase="decode"` counts two different calls. The conditional-decode probe carries
-the same `PhaseDecode` header as the decode step, so a cache miss produces two `phase="decode"`
-increments for one client request, which makes the fan-out reading wrong. Pick one before
-implementing: add a `conditional-decode` value to the `phase` label (diverges from the header
-vocabulary, but each call type stays countable, and this is the recommended option); skip the probe
-in `upstream_request_total` (loses probe-call visibility, though `decode_cache_lookups_total` still
-counts probes); or accept the double count and document it.
-
-Inbound against outbound, for one multimodal chat request with two images in a pipeline without a
-conditional-decode step:
-
-```
-request_total{model_name="llama"}       += 1
-upstream_request_total{phase="encode"}  += 2
-upstream_request_total{phase="prefill"} += 1
-upstream_request_total{phase="decode"}  += 1
-```
+`phase="conditional-decode"` counts the probe, which is a real call to the decode worker and on a hit
+is the only backend call the request makes. It gets its own value rather than counting under
+`decode`: without it, the miss above would report two decode calls for one client request. Its volume
+matches `decode_cache_lookups_total`, which breaks the same probes down by outcome; carrying the
+probe here keeps the fan-out ratio complete and every outbound call attributable to one phase.
 
 ### Disaggregation decision and decode cache
 
@@ -239,8 +268,7 @@ then went `prefill-decode` or `encode-prefill-decode`, which is what `disagg_dec
 
 | Coordinator metric | EPP counterpart | Difference |
 |---|---|---|
-| `request_total`, `request_error_total`, `request_duration_seconds`, `request_size_bytes`, `response_size_bytes` | `llm_d_epp_*`, same names | The coordinator counts client requests at its own entry point; EPP counts what reaches the gateway, which for one client request includes each phase sub-request. |
-| `request_running` | `llm_d_epp_request_running` | The coordinator series is unlabelled; EPP labels by model, fairness ID and priority. |
+| `request_total`, `request_error_total`, `request_duration_seconds`, `request_size_bytes`, `response_size_bytes`, `request_running` | `llm_d_epp_*`, same names | The coordinator counts client requests at its own entry point; EPP counts what reaches the gateway, which for one client request includes each phase sub-request. EPP also labels by `fairness_id` and `priority`, which have no coordinator counterpart. |
 | `disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Same name and same `model_name`/`decision_type` labels, and EPP adds plugin identity labels. EPP counts the routing decision its profile handler makes; the coordinator counts the phases it actually executed. |
 | `pipeline_step_*`, `upstream_request_*`, `decode_cache_lookups_total` | none | Coordinator-only. |
 
@@ -256,11 +284,11 @@ observation, ext_proc streaming).
 The coordinator emits no token-count metrics. EPP owns per-request token accounting and the
 coordinator does not duplicate it.
 
-Input and prompt tokens are available cheaply in-process as `len(reqCtx.TokenIDs)` after the render
-step (`steps/render.go` sets `TokenIDs` from the render service or from client-supplied token IDs).
-Output and cached tokens are not: the decode step is a pure byte proxy (`steps/decode.go` streams
-`proxy.ServeHTTP` straight to the client), so extracting them means intercepting and parsing the
-streamed SSE, exactly the invasiveness `response_size_bytes` avoids by counting bytes.
+Input and prompt tokens are available cheaply in-process after the render step, which holds the token
+IDs from the render service or from client-supplied token IDs. Output and cached tokens are not: the
+decode step is a pure byte proxy that streams the response straight to the client, so extracting them
+means intercepting and parsing the streamed SSE, exactly the invasiveness `response_size_bytes` avoids
+by counting bytes.
 
 There is no coverage gap in coordinator-deployment mode. The decode phase call goes out through the
 gateway, where EPP parses the vLLM `usage` block and emits `request_input_tokens`,
@@ -270,7 +298,7 @@ per-step latency without a cross-component join. That is a candidate, not a comm
 
 | Candidate | Type | Source |
 |---|---|---|
-| `request_prompt_tokens` | Histogram | `len(reqCtx.TokenIDs)` after render; token-count buckets. Label: `model_name`. |
+| `request_prompt_tokens` | Histogram | Token count after render; token-count buckets. Label: `model_name`. |
 
 ### Per-request image visibility
 
@@ -279,8 +307,8 @@ the gap is documented:
 
 | Candidate | Type | Source |
 |---|---|---|
-| `request_images` | Histogram | `len(reqCtx.MultimodalEntries)`; small-integer buckets. Label: `model_name`. |
-| `image_placeholder_tokens` | Histogram | `MultimodalEntry.Placeholder.Length`; token-count buckets. Label: `model_name`. |
+| `request_images` | Histogram | Multimodal entries per request; small-integer buckets. Label: `model_name`. |
+| `image_placeholder_tokens` | Histogram | Placeholder length per entry; token-count buckets. Label: `model_name`. |
 
 Image count is visible only indirectly, as `upstream_request_total{phase="encode"}`, which is
 aggregate rather than per-request. Image byte size is not reliably available at all: inline base64
@@ -291,9 +319,9 @@ transport-independent measure of image size, and are already computed in render 
 
 ## Cardinality
 
-`model_name` labels five of the six request-family metrics, three of them histograms, and
-`server/handlers.go` takes it straight from the request body (`model, _ := parsed["model"].(string)`)
-without validation. An arbitrary set of client-supplied strings multiplied by the latency buckets is
+`model_name` labels every request-family metric, three of them histograms, and the handler takes it
+straight from the request body without validation. An arbitrary set of client-supplied strings
+multiplied by the latency buckets is
 a cardinality-explosion vector against the coordinator's own memory, reachable by any client. The
 mitigation has to be chosen before implementing: allowlist against configured models, cap the
 distinct values as EPP does, or accept the risk explicitly.
