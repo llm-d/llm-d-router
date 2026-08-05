@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,11 +59,11 @@ func NewMultiClusterMetricsExtractor(name string, params *multiClusterMetricsExt
 	if params == nil {
 		params = &multiClusterMetricsExtractorParams{}
 	}
-	kvSpec, err := parseStringToSpec(orDefault(params.KVCacheUtilizationMetric, defaultKVCacheUtilizationMetric))
+	kvSpec, err := parseStringToSpec(cmp.Or(params.KVCacheUtilizationMetric, defaultKVCacheUtilizationMetric))
 	if err != nil {
 		return nil, fmt.Errorf("kv-cache utilization metric: %w", err)
 	}
-	queueSpec, err := parseStringToSpec(orDefault(params.QueueSizeMetric, defaultQueueSizeMetric))
+	queueSpec, err := parseStringToSpec(cmp.Or(params.QueueSizeMetric, defaultQueueSizeMetric))
 	if err != nil {
 		return nil, fmt.Errorf("queue size metric: %w", err)
 	}
@@ -104,11 +105,4 @@ func MultiClusterMetricsExtractorFactory(name string, parameters *json.Decoder, 
 		}
 	}
 	return NewMultiClusterMetricsExtractor(name, params)
-}
-
-func orDefault(v, fallback string) string {
-	if v == "" {
-		return fallback
-	}
-	return v
 }
