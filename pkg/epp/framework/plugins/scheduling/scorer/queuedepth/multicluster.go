@@ -51,9 +51,16 @@ func (s *MultiClusterScorer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: MultiClusterScorerType, Name: s.QueueScorer.TypedName().Name}
 }
 
-// Consumes declares the pool queue-size attribute this scorer reads.
-func (s *MultiClusterScorer) Consumes() map[string]any {
-	return map[string]any{attrmetrics.MultiClusterQueueSizeKey: attrmetrics.ScalarMetricValue(0)}
+var _ fwkplugin.ConsumerPlugin = &MultiClusterScorer{}
+
+// Consumes marks the pool queue-size attribute Required, so a config missing the
+// multicluster metrics extractor fails at load rather than silently no-scoring.
+func (s *MultiClusterScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(attrmetrics.MultiClusterQueueSizeKey, ""): attrmetrics.ScalarMetricValue(0),
+		},
+	}
 }
 
 // Score scores each cluster endpoint by its pool queue depth, min-max normalized

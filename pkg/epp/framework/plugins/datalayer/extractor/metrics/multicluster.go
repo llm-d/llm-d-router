@@ -96,6 +96,18 @@ func (e *MultiClusterMetricsExtractor) Extract(_ context.Context, in fwkdl.PollI
 	return errors.Join(errs...)
 }
 
+var _ fwkplugin.ProducerPlugin = &MultiClusterMetricsExtractor{}
+
+// Produces advertises the pool attributes so the dependency graph can verify a
+// scorer's required key has a producer.
+func (e *MultiClusterMetricsExtractor) Produces() map[fwkplugin.DataKey]any {
+	out := make(map[fwkplugin.DataKey]any, len(e.metrics))
+	for _, m := range e.metrics {
+		out[fwkplugin.NewDataKey(m.key, "")] = attrmetrics.ScalarMetricValue(0)
+	}
+	return out
+}
+
 // MultiClusterMetricsExtractorFactory instantiates the extractor from configuration.
 func MultiClusterMetricsExtractorFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := &multiClusterMetricsExtractorParams{}

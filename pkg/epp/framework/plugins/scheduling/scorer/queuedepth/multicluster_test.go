@@ -40,8 +40,8 @@ func TestMultiClusterScorerFactory(t *testing.T) {
 	require.Equal(t, MultiClusterScorerType, p.TypedName().Type)
 	require.Equal(t, "mc", p.TypedName().Name)
 
-	_, ok := p.(*MultiClusterScorer).Consumes()[attrmetrics.MultiClusterQueueSizeKey]
-	require.True(t, ok, "Consumes must advertise the pool queue-size key")
+	_, ok := p.(*MultiClusterScorer).Consumes().Required[fwkplugin.NewDataKey(attrmetrics.MultiClusterQueueSizeKey, "")]
+	require.True(t, ok, "Consumes must require the pool queue-size key")
 }
 
 func newQueueEP(q float64, set bool) fwksched.Endpoint {

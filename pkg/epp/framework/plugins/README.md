@@ -33,7 +33,7 @@ The pure-delegation variants (`multicluster-session-affinity-filter`, `multiclus
 
 ### Dependencies
 
-The metric scorers are not standalone. `multicluster-kv-cache-utilization-scorer` and `multicluster-queue-scorer` read the `llm-d.ai/multicluster-kv-cache-utilization` and `llm-d.ai/multicluster-queue-size` attributes, which only exist if `multicluster-metrics-extractor` is configured to write them from what `multicluster-metrics-data-source` scrapes. Without the source and extractor in `dataLayer`, those scorers see no pool metrics and return no score.
+The metric scorers are not standalone. `multicluster-kv-cache-utilization-scorer` and `multicluster-queue-scorer` score a cluster from the pool-aggregate metrics that `multicluster-metrics-extractor` writes from what `multicluster-metrics-data-source` scrapes. Configure all three together in `dataLayer`. A config with the scorers but without the source and extractor fails to load.
 
 ### Example
 

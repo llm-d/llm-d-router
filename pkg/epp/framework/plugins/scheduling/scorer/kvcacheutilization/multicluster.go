@@ -50,9 +50,16 @@ func (s *MultiClusterScorer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: MultiClusterScorerType, Name: s.KVCacheUtilizationScorer.TypedName().Name}
 }
 
-// Consumes declares the pool KV-cache utilization attribute this scorer reads.
-func (s *MultiClusterScorer) Consumes() map[string]any {
-	return map[string]any{attrmetrics.MultiClusterKVCacheUtilizationKey: attrmetrics.ScalarMetricValue(0)}
+var _ fwkplugin.ConsumerPlugin = &MultiClusterScorer{}
+
+// Consumes marks the pool KV-cache utilization attribute Required, so a config missing
+// the multicluster metrics extractor fails at load rather than silently no-scoring.
+func (s *MultiClusterScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(attrmetrics.MultiClusterKVCacheUtilizationKey, ""): attrmetrics.ScalarMetricValue(0),
+		},
+	}
 }
 
 // Score scores each cluster endpoint as 1 - its pool KV-cache utilization.
