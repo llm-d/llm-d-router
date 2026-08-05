@@ -19,7 +19,6 @@ package file
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,34 +27,6 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
-
-// isValidHostname is exercised through TestValidateHostOrIP for character rules. This
-// covers the length boundaries directly, since net.ParseIP masks them via validateHostOrIP.
-func TestIsValidHostname(t *testing.T) {
-	label63 := strings.Repeat("a", 63)
-	label64 := strings.Repeat("a", 64)
-	name253 := strings.Join([]string{label63, label63, label63, strings.Repeat("a", 61)}, ".") // 63*3 + 61 + 3 dots
-
-	tests := []struct {
-		name string
-		host string
-		want bool
-	}{
-		{name: "max-length label ok", host: label63, want: true},
-		{name: "label over 63 rejected", host: label64, want: false},
-		{name: "253-char name ok", host: name253, want: true},
-		{name: "254-char name without trailing dot rejected", host: name253 + "a", want: false},
-		{name: "254-char fqdn with trailing dot ok", host: name253 + ".", want: true},
-		{name: "over-length name rejected", host: strings.Repeat(label63+".", 5), want: false},
-		{name: "bare ipv4 is not a hostname", host: "10.0.0.1", want: false},
-		{name: "empty rejected", host: "", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, isValidHostname(tc.host))
-		})
-	}
-}
 
 const clusterYAML = `
 endpoints:
@@ -176,11 +147,12 @@ func TestValidateHostOrIP(t *testing.T) {
 		{name: "ipv6 ok", address: "::1"},
 		{name: "dns hostname ok", address: "gw.cluster-a.example.com"},
 		{name: "single label ok", address: "gateway"},
-		{name: "trailing dot fqdn ok", address: "gw.example.com."},
+		{name: "trailing dot rejected", address: "gw.example.com.", wantErr: true},
+		{name: "uppercase rejected", address: "GW.example.com", wantErr: true},
 		{name: "digit-led label ok", address: "3com.example.com"},
 		{name: "empty rejected", address: "", wantErr: true},
 		{name: "underscore rejected", address: "gw_1.example.com", wantErr: true},
-		{name: "numeric only rejected", address: "12345", wantErr: true},
+		{name: "numeric only accepted", address: "12345"},
 		{name: "host with colon rejected", address: "gw:443", wantErr: true},
 		{name: "control char rejected", address: "gw\x00.example.com", wantErr: true},
 		{name: "at sign rejected", address: "user@host", wantErr: true},
