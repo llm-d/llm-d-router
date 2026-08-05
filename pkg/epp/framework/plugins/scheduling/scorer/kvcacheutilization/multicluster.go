@@ -36,19 +36,18 @@ func MultiClusterScorerFactory(name string, params *json.Decoder, handle fwkplug
 	if err != nil {
 		return nil, err
 	}
-	return &MultiClusterScorer{KVCacheUtilizationScorer: inner.(*KVCacheUtilizationScorer), name: name}, nil
+	return &MultiClusterScorer{KVCacheUtilizationScorer: inner.(*KVCacheUtilizationScorer)}, nil
 }
 
 // MultiClusterScorer scores cluster endpoints from a pool-level KV-cache
 // utilization summary, read by name, instead of a single pod's scrape.
 type MultiClusterScorer struct {
 	*KVCacheUtilizationScorer
-	name string
 }
 
 // TypedName reports the multi-cluster type with this instance's name.
 func (s *MultiClusterScorer) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: MultiClusterScorerType, Name: s.name}
+	return fwkplugin.TypedName{Type: MultiClusterScorerType, Name: s.KVCacheUtilizationScorer.TypedName().Name}
 }
 
 // Consumes declares the pool KV-cache utilization attribute this scorer reads.
