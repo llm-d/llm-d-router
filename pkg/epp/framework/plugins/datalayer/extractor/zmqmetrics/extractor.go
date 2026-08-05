@@ -19,6 +19,7 @@ package zmqmetrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -106,7 +107,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.StreamInput[[]byte])
 
 func decodeMsgpackPayload(payload []byte, target *sourcezmq.ZmqMetricsStats) error {
 	if len(payload) == 0 {
-		return fmt.Errorf("empty payload")
+		return errors.New("empty payload")
 	}
 
 	// 1. Try direct struct unmarshal
@@ -128,7 +129,7 @@ func decodeMsgpackPayload(payload []byte, target *sourcezmq.ZmqMetricsStats) err
 		return nil
 	}
 
-	return fmt.Errorf("invalid msgpack format")
+	return errors.New("invalid msgpack format")
 }
 
 func populateStatsFromMap(m map[string]any, target *sourcezmq.ZmqMetricsStats) {
