@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
@@ -55,9 +56,14 @@ func TestMetricsDataSourceFactory_TLS(t *testing.T) {
 
 func TestMetricsDataSourceFactory_PortOverride(t *testing.T) {
 	for _, params := range []string{`{"port":7080}`, `{"port":0}`, `{}`} {
-		ds, err := MetricsDataSourceFactory("m", json.NewDecoder(bytes.NewBufferString(params)), nil)
+		ds, err := MetricsDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
 		assert.NoError(t, err, params)
 		assert.NotNil(t, ds, params)
+	}
+
+	for _, params := range []string{`{"port":-1}`, `{"port":65536}`, `{"prt":7080}`} {
+		_, err := MetricsDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
+		assert.Error(t, err, params)
 	}
 }
 

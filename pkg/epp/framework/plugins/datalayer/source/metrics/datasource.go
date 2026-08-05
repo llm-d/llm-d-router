@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/prometheus/common/expfmt"
@@ -43,7 +44,7 @@ type metricsDatasourceParams struct {
 	Scheme string `json:"scheme"`
 	// Path defines the URL path used in metrics retrieval (e.g., "/metrics").
 	Path string `json:"path"`
-	// Port, when non-zero, overrides the endpoint's inference port for metrics retrieval.
+	// Port, when positive, overrides the endpoint's inference port for metrics retrieval.
 	// Use when the model server exposes metrics on a port other than the InferencePool target port.
 	Port int `json:"port"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
@@ -76,6 +77,10 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		if err := parameters.Decode(cfg); err != nil {
 			return nil, err
 		}
+	}
+
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 0 and 65535", cfg.Port)
 	}
 
 	intervalOpt, err := http.ParseIntervalOption(cfg.Interval)
