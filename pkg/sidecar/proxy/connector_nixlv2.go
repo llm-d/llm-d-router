@@ -134,7 +134,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldDoRemotePrefill:      false,
 			requestFieldRemoteEngineID:       nil,
 			requestFieldRemoteBlockIDs:       nil,
-			requestFieldRemoteHost:           s.config.MoRIIODecodePodIP,
+			requestFieldRemoteHost:           s.currentDecodePodIP(ctx),
 			requestFieldRemotePort:           nil,
 			requestFieldRemoteNotifyPort:     s.config.MoRIIODecodeNotifyPort,
 			requestFieldRemoteDPRank:         dpRank,
@@ -145,11 +145,12 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			"remote_dp_size":                 s.config.MoRIIODPSize,
 		}
 		// Wide-EP fan-out (prefill leg, serial path): remote_hosts must be the
-		// DECODE-side pod IPs so prefill handshakes the right pods.
-		if len(s.config.MoRIIODecodeHosts) > 0 {
+		// DECODE-side pod IPs so prefill handshakes the right pods. Re-resolved
+		// per request so peer restarts (new IP) are picked up within the TTL.
+		if decodeHosts := s.currentDecodeHosts(ctx); len(decodeHosts) > 0 {
 			pkv := completionRequest[requestFieldKVTransferParams].(map[string]any)
-			hosts := make([]any, len(s.config.MoRIIODecodeHosts))
-			for i, h := range s.config.MoRIIODecodeHosts {
+			hosts := make([]any, len(decodeHosts))
+			for i, h := range decodeHosts {
 				hosts[i] = h
 			}
 			pkv["remote_hosts"] = hosts
@@ -373,10 +374,11 @@ retryLoop:
 			}
 			// Wide-EP fan-out (decode leg, serial path): remote_hosts must be the
 			// PREFILL-side pod IPs so decode fans out handshakes across prefill pods.
-			if len(s.config.MoRIIORemoteHosts) > 0 {
+			// Re-resolved per request so peer restarts (new IP) are picked up.
+			if remoteHosts := s.currentRemoteHosts(ctx); len(remoteHosts) > 0 {
 				if _, present := dKVParams["remote_hosts"]; !present {
-					hosts := make([]any, len(s.config.MoRIIORemoteHosts))
-					for i, h := range s.config.MoRIIORemoteHosts {
+					hosts := make([]any, len(remoteHosts))
+					for i, h := range remoteHosts {
 						hosts[i] = h
 					}
 					dKVParams["remote_hosts"] = hosts
@@ -483,7 +485,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldDoRemotePrefill:      false,
 		requestFieldRemoteEngineID:       nil,
 		requestFieldRemoteBlockIDs:       nil,
-		requestFieldRemoteHost:           s.config.MoRIIODecodePodIP,
+		requestFieldRemoteHost:           s.currentDecodePodIP(parentCtx),
 		requestFieldRemotePort:           nil,
 		requestFieldRemoteNotifyPort:     s.config.MoRIIODecodeNotifyPort,
 		requestFieldRemoteDPRank:         dpRank,
@@ -495,11 +497,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 	// Wide-EP fan-out (prefill leg): remote_hosts must be the DECODE-side pod
 	// IPs so prefill handshakes the right pods. Omitted when unset, falling back
-	// to the single-host remote_host path.
-	if len(s.config.MoRIIODecodeHosts) > 0 {
+	// to the single-host remote_host path. Re-resolved per request so peer
+	// restarts (new IP) are picked up within the TTL.
+	if decodeHosts := s.currentDecodeHosts(parentCtx); len(decodeHosts) > 0 {
 		pkv := completionRequest[requestFieldKVTransferParams].(map[string]any)
-		hosts := make([]any, len(s.config.MoRIIODecodeHosts))
-		for i, h := range s.config.MoRIIODecodeHosts {
+		hosts := make([]any, len(decodeHosts))
+		for i, h := range decodeHosts {
 			hosts[i] = h
 		}
 		pkv["remote_hosts"] = hosts
@@ -576,11 +579,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
 	// Wide-EP fan-out (decode leg): the opposite host list, the PREFILL-side
-	// pod IPs. A multi-pod deployment must set both host flags.
-	if len(s.config.MoRIIORemoteHosts) > 0 {
+	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
+	// request so peer restarts (new IP) are picked up within the TTL.
+	if remoteHosts := s.currentRemoteHosts(parentCtx); len(remoteHosts) > 0 {
 		dkv := completionRequest[requestFieldKVTransferParams].(map[string]any)
-		hosts := make([]any, len(s.config.MoRIIORemoteHosts))
-		for i, h := range s.config.MoRIIORemoteHosts {
+		hosts := make([]any, len(remoteHosts))
+		for i, h := range remoteHosts {
 			hosts[i] = h
 		}
 		dkv["remote_hosts"] = hosts

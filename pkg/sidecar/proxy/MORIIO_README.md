@@ -85,14 +85,52 @@ still accepted for backward compatibility but are being phased out.
 ```
 
 **How host resolution works:**
-1. At startup, DNS names are resolved to IPs via Kubernetes DNS (IPv4 preferred).
+1. At startup (`Complete()`), DNS names are resolved to IPs via Kubernetes DNS
+   (IPv4 preferred) to seed the initial peer IPs, before the proxy starts.
 2. Raw IP addresses are passed through unchanged (backward compatibility).
-3. Resolution happens once during `Complete()`, before the proxy starts.
+3. On the request path, peer DNS names are **re-resolved under a short TTL**
+   (default 30s) when building `kv_transfer_params`, so a peer pod that restarts
+   with a new IP is picked up without a router restart. Re-resolution serves the
+   last-known-good IP on a transient lookup failure, de-duplicates concurrent
+   lookups for the same host via singleflight, and serves the cached IP
+   immediately once past the TTL while refreshing asynchronously (only the very
+   first, cold-start lookup blocks). Raw IPs still pass through with no lookup.
+
+Both the boot-time and request-path lookups share the same IPv4-preference and
+the same per-lookup timeout bound (see [Tuning](#tuning-environment-variables)).
 
 **Why DNS:**
 - Works with LeaderWorkerSet's predictable naming (`<lws-name>-<group>-<worker>`)
 - Enables scalable topologies without hardcoded IP coordination
 - Consistent with Kubernetes-native service discovery
+
+## Tuning (environment variables)
+
+The MoRI-IO DNS re-resolution behavior is tunable at runtime via environment
+variables. Each is parsed as a **positive integer**; any non-positive or
+non-numeric value falls back to the default.
+
+| Env var | Default | Semantics |
+|---------|---------|-----------|
+| `MORIIO_DNS_RESOLVE_TTL_SECONDS` | `30` | Maximum age of a cached peer IP before the next request-path lookup re-resolves it. Lower = faster pickup of peer IP changes; higher = fewer DNS lookups under steady state. |
+| `MORIIO_DNS_RESOLVE_TIMEOUT_SECONDS` | `5` | Per-lookup context deadline for a single DNS resolution (applied to both the boot-time and request-path lookups). Bounds how long a slow/hanging resolver can stall a cold-start lookup; the effective deadline is the smaller of this value and the remaining request-context deadline. |
+| `MORIIO_METRICS_ADDR` | _(unset — disabled)_ | Backward-compatible fallback for the metrics listen address (e.g. `:9090`) when `--metrics-port` is not set. The `--metrics-port` flag takes precedence. Kept on a separate address from the data-plane proxy port. |
+
+### Metrics
+
+The preferred way to expose metrics is the first-class **`--metrics-port`** flag
+(matching the EPP `--metrics-port` convention); `0` (the default) disables the
+endpoint, and any positive port serves metrics at `/metrics` on that port. The
+`MORIIO_METRICS_ADDR` env var remains as a backward-compatible fallback and is
+only consulted when `--metrics-port` is unset.
+
+When enabled, the following counters are exposed at `GET /metrics` (unlabeled):
+
+| Metric | Meaning |
+|--------|---------|
+| `moriio_dns_reresolve_total` | Successful request-path DNS re-resolutions (per actual lookup; singleflight-coalesced lookups count once). |
+| `moriio_dns_ip_changed_total` | Re-resolutions where a peer resolved to a different IP than the cached value (peer likely restarted). |
+| `moriio_dns_lookup_failures_total` | Failed request-path DNS lookups (resolver then serves the last-known-good IP, or the raw spec on cold start). |
 
 ## Example Configurations
 

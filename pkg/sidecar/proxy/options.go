@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -78,6 +79,7 @@ const (
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
 	tracingFlag               = "tracing"
+	metricsPort               = "metrics-port"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
@@ -122,6 +124,7 @@ type yamlConfiguration struct {
 	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
 	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
 	Tracing                 *bool    `json:"tracing,omitempty"`
+	MetricsPort             int      `json:"metrics-port,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -270,6 +273,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
+	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
 	// against vLLM engines running MoRI-IO in WRITE mode.
@@ -425,6 +429,14 @@ func (opts *Options) Complete() error {
 		return err
 	}
 
+	// Capture the ORIGINAL host specs before one-shot resolution rewrites the
+	// resolved fields. The request-path hostResolver re-resolves these on a
+	// short TTL so peer pod restarts (new IP) are eventually picked up. Raw IPs
+	// stored here pass through the resolver unchanged.
+	opts.MoRIIORemoteHostSpecs = append([]string(nil), opts.MoRIIORemoteHosts...)
+	opts.MoRIIODecodeHostSpecs = append([]string(nil), opts.MoRIIODecodeHosts...)
+	opts.MoRIIODecodePodIPSpec = opts.MoRIIODecodePodIP
+
 	// LWS-compatible DNS resolution: automatically resolve hostnames to IPs at startup.
 	// This aligns with Kubernetes LeaderWorkerSet patterns where pod addresses are
 	// DNS names (e.g., "moriio-prefill-0-0.namespace.svc") rather than hardcoded IPs.
@@ -525,27 +537,28 @@ func resolveHostsToIPs(hosts []string) ([]string, error) {
 			resolved[i] = host
 			continue
 		}
-		// Resolve DNS name to IP
-		ips, err := net.LookupIP(host)
+		// Resolve DNS name to IP (IPv4-preferred)
+		ip, err := resolveSingleHost(host)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve %q: %w", host, err)
+			return nil, err
 		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("no IPs found for %q", host)
-		}
-		// Prefer IPv4 if available
-		for _, ip := range ips {
-			if ipv4 := ip.To4(); ipv4 != nil {
-				resolved[i] = ipv4.String()
-				break
-			}
-		}
-		// Fall back to first IP if no IPv4 found
-		if resolved[i] == "" {
-			resolved[i] = ips[0].String()
-		}
+		resolved[i] = ip
 	}
 	return resolved, nil
+}
+
+// resolveSingleHost resolves one DNS name to a single IP string, preferring
+// IPv4 and falling back to the first returned address. Callers must handle raw
+// IP passthrough before calling this. The lookup is bounded by a context
+// timeout sourced from resolveTimeoutFromEnv() (default defaultResolveTimeout),
+// the same bound the request-path resolver uses, so a slow or hanging resolver
+// cannot stall startup indefinitely. Shares lookupIPv4Preferred with the
+// request-path TTL resolver so both apply identical bounding and
+// IPv4-preference semantics.
+func resolveSingleHost(host string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeoutFromEnv())
+	defer cancel()
+	return lookupIPv4Preferred(ctx, net.DefaultResolver.LookupIPAddr, host)
 }
 
 // Validate checks the Options for invalid or conflicting values.
@@ -817,6 +830,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.DecodeChunkSize != 0 && !opts.isFlagSet(decodeChunkSize) {
 		opts.DecodeChunkSize = cfg.DecodeChunkSize
+	}
+	if cfg.MetricsPort != 0 && !opts.isFlagSet(metricsPort) {
+		opts.MetricsPort = cfg.MetricsPort
 	}
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing
