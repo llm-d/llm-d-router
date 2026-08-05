@@ -90,9 +90,13 @@ probe has its own metric,
 the EPP side, as `request_error_total{error_code="PreconditionFailed"}`.
 
 `upstream_4xx` and `upstream_5xx` therefore describe the render, prefill, and encode steps, the only
-ones that turn a non-2xx response into an error. The conditional-decode and decode steps
-proxy the upstream response straight to the client without constructing an error, so an upstream
-failure on the decode leg reaches the client but is absent from both error metrics.
+ones that turn a non-2xx response into an error. The conditional-decode and decode steps proxy the
+upstream response straight to the client without constructing an error, so an upstream failure on the
+decode leg reaches the client but is absent from both error metrics. This covers the worst case: a
+worker that dies mid-generation truncates the client's response while the request still counts as a
+success. Both failure modes are already detected by the decode proxy, which writes 502 when the call
+fails before the response starts and logs a truncation when the copy fails after it, so closing the
+gap is a matter of recording those two points rather than adding detection.
 
 ## Metrics catalog
 
@@ -214,10 +218,13 @@ decode one step is one gateway call:
   one concurrent call per image, so `pipeline_step_duration_seconds{step="encode"}` observes the
   whole stage once per request (the fan-out envelope: slowest call plus the EC merge) and hides what
   a single image cost. A step p95 well above the call p95 means the width of the fan-out, not any one
-  image, is the expense. For prefill and decode the call latency already equals the step duration. Two loose ends remain: the `phase` label then carries exactly one value, which
-  invites empty `phase="prefill"` queries, and `generalLatencyBuckets` runs to 1h, far past any
-  single encode call. Either drop the label and name the metric for what it measures, or keep it
-  explicitly for forward compatibility, and consider `stepLatencyBuckets`.
+  image, is the expense. For prefill and decode the call latency already equals the step duration. Two
+  loose ends remain. The `phase` label carries exactly one value, which invites empty
+  `phase="prefill"` queries: either drop it and name the metric for what it measures, or keep it
+  explicitly for forward compatibility. And `generalLatencyBuckets` runs to 1h, far past any single
+  encode call, so `stepLatencyBuckets` fits the range better; note that `generalLatencyBuckets` is
+  EPP's own set, so switching gives up bucket-for-bucket comparison with
+  `llm_d_epp_request_duration_seconds`.
 - There is no `upstream_request_error_total`. A phase-call failure aborts its step and is already
   counted by `pipeline_step_errors_total` under the same `error_code`. Per-call encode fan-out
   failure granularity is the one gap, but the errgroup context cancels sibling calls on the first
@@ -320,11 +327,16 @@ transport-independent measure of image size, and are already computed in render 
 ## Cardinality
 
 `model_name` labels every request-family metric, three of them histograms, and the handler takes it
-straight from the request body without validation. An arbitrary set of client-supplied strings
-multiplied by the latency buckets is
-a cardinality-explosion vector against the coordinator's own memory, reachable by any client. The
-mitigation has to be chosen before implementing: allowlist against configured models, cap the
-distinct values as EPP does, or accept the risk explicitly.
+straight from the request body without validation. Each distinct value creates its own set of series,
+and a histogram multiplies that by its bucket count, so a client looping over invented model names
+grows the coordinator's memory without bound. This is reachable by any client, and it is a mitigation
+the implementation has to carry.
+
+Capping the distinct values is the approach that fits: EPP caps `model_name` at 1000 over the process
+lifetime and reports further values as `other`, and matching that keeps the two components
+consistent. An allowlist has no source of truth here, since the coordinator's config carries no model
+list and the coordinator is otherwise model-agnostic. The overflow value must not be `unknown`, which
+already means the request carried no model at all.
 
 ## Related documentation
 
