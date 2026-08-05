@@ -55,13 +55,13 @@ func TestMetricsDataSourceFactory_TLS(t *testing.T) {
 }
 
 func TestMetricsDataSourceFactory_PortOverride(t *testing.T) {
-	for _, params := range []string{`{"port":7080}`, `{"port":0}`, `{}`} {
+	for _, params := range []string{`{"port":7080}`, `{}`} {
 		ds, err := MetricsDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
 		assert.NoError(t, err, params)
 		assert.NotNil(t, ds, params)
 	}
 
-	for _, params := range []string{`{"port":-1}`, `{"port":65536}`, `{"prt":7080}`} {
+	for _, params := range []string{`{"port":0}`, `{"port":-1}`, `{"port":65536}`, `{"prt":7080}`} {
 		_, err := MetricsDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
 		assert.Error(t, err, params)
 	}
