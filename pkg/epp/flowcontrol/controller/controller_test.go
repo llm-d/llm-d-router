@@ -285,6 +285,7 @@ func (f *mockProcessorFactory) new(
 	_ flowcontrol.UsageLimitPolicy,
 	_ clock.WithTicker,
 	_ time.Duration,
+	_ time.Duration,
 	_ int,
 	_ logr.Logger,
 ) processor {
@@ -779,8 +780,11 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			}
 
 			const requestTTL = 50 * time.Millisecond
+			// Both budgets are set: the context backstop spans the longer of the two, so leaving the no-endpoint budget
+			// unbounded would leave this request bounded only by the mock processor, which never finalizes it.
 			h := newUnitHarness(t.Context(), t, &Config{
 				DefaultRequestTTL:     requestTTL,
+				NoEndpointRequestTTL:  requestTTL,
 				ExpiryCleanupInterval: time.Minute,
 			}, nil, processor, withHarnessClock(clock.RealClock{}))
 

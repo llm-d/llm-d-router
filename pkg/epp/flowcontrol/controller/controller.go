@@ -57,6 +57,7 @@ type processorFactory func(
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
 	clock clock.WithTicker,
+	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
@@ -144,6 +145,7 @@ func NewFlowController(
 			endpointCandidates contracts.EndpointCandidates,
 			usageLimitPolicy flowcontrol.UsageLimitPolicy,
 			clock clock.WithTicker,
+			noEndpointRequestTTL time.Duration,
 			cleanupSweepInterval time.Duration,
 			enqueueChannelBufferSize int,
 			logger logr.Logger,
@@ -157,6 +159,7 @@ func NewFlowController(
 				endpointCandidates,
 				usageLimitPolicy,
 				clock,
+				noEndpointRequestTTL,
 				cleanupSweepInterval,
 				enqueueChannelBufferSize,
 				logger,
@@ -175,6 +178,7 @@ func NewFlowController(
 		fc.endpointCandidates,
 		fc.usageLimitPolicy,
 		fc.clock,
+		fc.config.NoEndpointRequestTTL,
 		fc.config.ExpiryCleanupInterval,
 		fc.config.EnqueueChannelBufferSize,
 		fc.logger,
@@ -227,7 +231,7 @@ func (fc *FlowController) EnqueueAndWait(
 		req.ModelName(), req.TargetModelName(), reqBytes)
 
 	// 1. Create the derived context that governs this request's lifecycle (Parent Cancellation + TTL).
-	reqCtx, cancel, enqueueTime := fc.createRequestContext(ctx, req)
+	reqCtx, cancel, enqueueTime, saturationTTL := fc.createRequestContext(ctx, req)
 	defer cancel()
 
 	var finalOutcome types.QueueOutcome
@@ -246,7 +250,7 @@ func (fc *FlowController) EnqueueAndWait(
 		// Attempt to distribute the request once, passing the active connection.
 		// effectiveReq carries the fallback flow key when the requested band was not provisioned, so the
 		// item is enqueued under the band that was actually leased.
-		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, conn)
+		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, saturationTTL, conn)
 		if err != nil {
 			// Distribution failed terminally (e.g., context cancelled during blocking submit).
 			// The item has already been finalized by tryDistribution.
@@ -336,12 +340,14 @@ func (fc *FlowController) tryDistribution(
 	reqCtx context.Context,
 	req flowcontrol.FlowControlRequest,
 	enqueueTime time.Time,
+	saturationTTL time.Duration,
 	conn contracts.ActiveFlowConnection,
 ) (*internal.FlowItem, error) {
-	// Calculate effective TTL for item initialization (reqCtx is the enforcement mechanism).
-	effectiveTTL := fc.config.DefaultRequestTTL
+	// The item carries the saturation-regime budget: it is the request's own queue-wait budget, and ordering policies
+	// read it as such. A caller deadline that falls inside it clamps it, since the request cannot outlive its caller.
+	effectiveTTL := saturationTTL
 	if deadline, ok := reqCtx.Deadline(); ok {
-		if ttl := deadline.Sub(enqueueTime); ttl > 0 {
+		if ttl := deadline.Sub(enqueueTime); ttl > 0 && (effectiveTTL <= 0 || ttl < effectiveTTL) {
 			effectiveTTL = ttl
 		}
 	}
@@ -365,7 +371,17 @@ func (fc *FlowController) tryDistribution(
 		return item, err
 	}
 
-	outcome, err := fc.distributeRequest(reqCtx, item)
+	// Distribution is bounded by the saturation budget, not by the request context's backstop. A request still waiting
+	// for handoff has not reached a queue, so it is not waiting on an endpoint to appear and the no-endpoint budget does
+	// not describe it; the regime-aware budget takes over once the processor owns the item.
+	distributeCtx := reqCtx
+	if effectiveTTL > 0 {
+		var cancel context.CancelFunc
+		distributeCtx, cancel = context.WithDeadlineCause(reqCtx, enqueueTime.Add(effectiveTTL), types.ErrTTLExpired)
+		defer cancel()
+	}
+
+	outcome, err := fc.distributeRequest(distributeCtx, item)
 	if err == nil {
 		// Success: Ownership of the item has been transferred to the processor.
 		return item, nil
@@ -376,7 +392,7 @@ func (fc *FlowController) tryDistribution(
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		// We propagate the original context error here, EnqueueAndWait will rely on item.FinalState().Err.
 		finalErr = err
-		item.Finalize(context.Cause(reqCtx))
+		item.Finalize(context.Cause(distributeCtx))
 	} else { // e.g.,
 		finalErr = fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
 		item.FinalizeWithOutcome(outcome, finalErr)
@@ -422,23 +438,32 @@ func (fc *FlowController) awaitFinalization(
 	}
 }
 
-// createRequestContext derives the context that governs a request's lifecycle, enforcing the TTL deadline.
+// createRequestContext derives the context that governs a request's lifecycle. It returns the saturation-regime
+// queue-wait budget alongside the context, since the two are resolved from the same inputs.
+//
+// The context deadline is the outer backstop across both unavailability regimes, not the budget itself. Which budget is
+// in force depends on whether the pool is empty, which only the processor observes and which can change while the
+// request waits, so the processor enforces the regime-appropriate budget and finalizes the item. Deriving the deadline
+// from the longer of the two budgets keeps the context from pre-empting that decision; it still bounds a request that
+// never reaches a queue, and a caller deadline that fires sooner still wins.
 func (fc *FlowController) createRequestContext(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
-) (context.Context, context.CancelFunc, time.Time) {
+) (context.Context, context.CancelFunc, time.Time, time.Duration) {
 	enqueueTime := fc.clock.Now()
-	effectiveTTL := req.InitialEffectiveTTL()
-	if effectiveTTL <= 0 {
-		effectiveTTL = fc.config.DefaultRequestTTL
+	saturationTTL := req.InitialEffectiveTTL()
+	if saturationTTL <= 0 {
+		saturationTTL = fc.config.DefaultRequestTTL
 	}
 
-	if effectiveTTL > 0 {
-		reqCtx, cancel := context.WithDeadlineCause(ctx, enqueueTime.Add(effectiveTTL), types.ErrTTLExpired)
-		return reqCtx, cancel, enqueueTime
+	// A zero budget in either regime disables eviction there, so no backstop can be derived.
+	backstop := max(saturationTTL, fc.config.NoEndpointRequestTTL)
+	if saturationTTL > 0 && fc.config.NoEndpointRequestTTL > 0 {
+		reqCtx, cancel := context.WithDeadlineCause(ctx, enqueueTime.Add(backstop), types.ErrTTLExpired)
+		return reqCtx, cancel, enqueueTime, saturationTTL
 	}
 	reqCtx, cancel := context.WithCancel(ctx)
-	return reqCtx, cancel, enqueueTime
+	return reqCtx, cancel, enqueueTime, saturationTTL
 }
 
 // distributeRequest submits an item to the processor with graceful backpressure.

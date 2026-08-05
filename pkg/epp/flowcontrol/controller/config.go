@@ -31,6 +31,11 @@ const (
 	// gateway enforces a request deadline (the well-lit guides configure no gateway request timeout);
 	// where such deadlines exist and fire sooner, context cancellation evicts the request first.
 	defaultRequestTTL = 60 * time.Second
+	// defaultNoEndpointRequestTTL is the default queue-wait budget applied while the candidate pool has
+	// no endpoints. It is deliberately equal to `defaultRequestTTL`, so splitting the budget is opt-in:
+	// sizing the two regimes apart (a cold start is minutes, a time-to-first-token SLO is seconds) is a
+	// deployment-specific decision, not one a default can make.
+	defaultNoEndpointRequestTTL = 60 * time.Second
 	// defaultExpiryCleanupInterval is the default frequency for scanning for expired items.
 	defaultExpiryCleanupInterval = 1 * time.Second
 	// defaultEnqueueChannelBufferSize is the default size of a worker's incoming request buffer.
@@ -46,6 +51,14 @@ type Config struct {
 	// which case queued requests are bounded only by request context cancellation (client disconnect
 	// or gateway timeout).
 	DefaultRequestTTL time.Duration
+
+	// NoEndpointRequestTTL is the queue-wait budget that replaces `DefaultRequestTTL` while the candidate
+	// pool has no endpoints. Which budget is in force is re-evaluated as the request waits, and each
+	// change of regime starts a fresh budget, so a request queued against an empty pool is not shed the
+	// instant an endpoint appears and makes it dispatchable.
+	// Optional: Defaults to `defaultNoEndpointRequestTTL` (60s). An explicit zero disables eviction while
+	// the pool is empty, in which case such requests are bounded only by request context cancellation.
+	NoEndpointRequestTTL time.Duration
 
 	// ExpiryCleanupInterval is the interval at which each processor scans its queues for expired items.
 	// Optional: Defaults to `defaultExpiryCleanupInterval` (1 second).
@@ -74,10 +87,13 @@ type ConfigOption func(*Config)
 
 // NewConfigFromAPI creates a new Config from the API configuration.
 func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
-	opts := make([]ConfigOption, 0, 1)
+	opts := make([]ConfigOption, 0, 2)
 	if apiConfig != nil {
 		if apiConfig.DefaultRequestTTL != nil {
 			opts = append(opts, WithDefaultRequestTTL(apiConfig.DefaultRequestTTL.Duration))
+		}
+		if apiConfig.NoEndpointRequestTTL != nil {
+			opts = append(opts, WithNoEndpointRequestTTL(apiConfig.NoEndpointRequestTTL.Duration))
 		}
 	}
 	return NewConfig(opts...)
@@ -87,6 +103,7 @@ func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
 func NewConfig(opts ...ConfigOption) (*Config, error) {
 	c := &Config{
 		DefaultRequestTTL:        defaultRequestTTL,
+		NoEndpointRequestTTL:     defaultNoEndpointRequestTTL,
 		ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
 		EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
 	}
@@ -108,6 +125,13 @@ func WithDefaultRequestTTL(d time.Duration) ConfigOption {
 	}
 }
 
+// WithNoEndpointRequestTTL sets the queue-wait budget applied while the pool has no endpoints.
+func WithNoEndpointRequestTTL(d time.Duration) ConfigOption {
+	return func(c *Config) {
+		c.NoEndpointRequestTTL = d
+	}
+}
+
 // WithExpiryCleanupInterval sets the expiry cleanup interval.
 func WithExpiryCleanupInterval(d time.Duration) ConfigOption {
 	return func(c *Config) {
@@ -126,6 +150,9 @@ func WithEnqueueChannelBufferSize(size int) ConfigOption {
 func (c *Config) validate() error {
 	if c.DefaultRequestTTL < 0 {
 		return fmt.Errorf("DefaultRequestTTL cannot be negative, but got %v", c.DefaultRequestTTL)
+	}
+	if c.NoEndpointRequestTTL < 0 {
+		return fmt.Errorf("NoEndpointRequestTTL cannot be negative, but got %v", c.NoEndpointRequestTTL)
 	}
 	if c.ExpiryCleanupInterval <= 0 {
 		return fmt.Errorf("ExpiryCleanupInterval must be positive, but got %v", c.ExpiryCleanupInterval)
