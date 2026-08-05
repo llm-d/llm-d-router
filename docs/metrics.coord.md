@@ -46,7 +46,9 @@ three to follow a request end to end.
 
 ## Labels
 
-Two labels use the words `encode`, `prefill`, and `decode`. They are not interchangeable.
+The `step` and `phase` labels share the values `encode`, `prefill`, `decode`, and
+`conditional-decode`, but are not interchangeable: a step is a pipeline stage, a phase is a single
+backend call.
 
 The **`step` label** names a stage of the coordinator's internal pipeline, observed once per request
 per stage. A step covers local work, orchestration, and any backend calls that stage makes. The
@@ -71,6 +73,10 @@ A step may issue zero or many backend calls and includes local work; a phase is 
 The first three values match the epp-profile header the coordinator sends. `conditional-decode` does
 not: the probe carries the decode profile header, like the decode step, and is distinguished by the
 `Prefer: if-available` header it adds. See the [Upstream phase family](#upstream-phase-family).
+
+The **`decision_type` label** names which phases a request ended up running, one value per request
+rather than per stage or per call: `decode-only`, `prefill-decode`, or `encode-prefill-decode`. See
+[`disagg_decision_total`](#disagg_decision_total).
 
 ## Error classes
 
