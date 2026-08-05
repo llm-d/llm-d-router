@@ -62,6 +62,12 @@ func New(steps []Step) *Pipeline {
 	return &Pipeline{steps: steps}
 }
 
+// Steps returns the pipeline's steps in execution order. The server uses it
+// to discover steps that serve auxiliary HTTP routes.
+func (p *Pipeline) Steps() []Step {
+	return p.steps
+}
+
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
