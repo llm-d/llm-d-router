@@ -407,6 +407,20 @@ type FlowControlConfig struct {
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
 
 	// +optional
+	// NoEndpointRequestTTL bounds queue wait while the candidate pool has no endpoints, replacing
+	// DefaultRequestTTL for as long as that holds. The two regimes want opposite budgets: with no
+	// endpoint to dispatch to, waiting is the only path to success and the budget should cover a cold
+	// start (image pull plus weight load), whereas a saturated pool should shed early enough to keep
+	// time-to-first-token within an SLO. A request that exhausts this budget is evicted as genuine
+	// unavailability rather than as backpressure.
+	// The budget in force is re-evaluated while the request is queued, so a pool that scales from zero
+	// moves its queued requests onto DefaultRequestTTL, and each regime change starts a fresh budget.
+	// If omitted, it defaults to 60s. An explicit "0s" disables eviction while the pool is empty:
+	// requests then wait until an endpoint appears, the client disconnects, or the controller shuts
+	// down.
+	NoEndpointRequestTTL *metav1.Duration `json:"noEndpointRequestTTL,omitempty"`
+
+	// +optional
 	// DefaultPriorityBand allows you to define a template for handling traffic with priority levels
 	// that are not explicitly configured in `PriorityBands`.
 	// This ensures that unforeseen traffic classes are still managed (e.g., given a default capacity
@@ -470,6 +484,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.DefaultRequestTTL != nil {
 		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", fcc.DefaultRequestTTL.Duration))
+	}
+
+	if fcc.NoEndpointRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("NoEndpointRequestTTL: %s", fcc.NoEndpointRequestTTL.Duration))
 	}
 
 	if fcc.DefaultPriorityBand != nil {

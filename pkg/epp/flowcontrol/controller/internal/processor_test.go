@@ -44,10 +44,13 @@ import (
 )
 
 const (
-	testTTL         = 1 * time.Minute
-	testShortTTL    = 20 * time.Millisecond
-	testCleanupTick = 10 * time.Millisecond
-	testWaitTimeout = 1 * time.Second
+	testTTL = 1 * time.Minute
+	// testNoEndpointTTL matches testTTL so that harness defaults leave the two regimes indistinguishable; tests that
+	// exercise the split set processor.noEndpointRequestTTL explicitly.
+	testNoEndpointTTL = 1 * time.Minute
+	testShortTTL      = 20 * time.Millisecond
+	testCleanupTick   = 10 * time.Millisecond
+	testWaitTimeout   = 1 * time.Second
 )
 
 var testFlow = flowcontrol.FlowKey{ID: "flow-a", Priority: 10}
@@ -140,6 +143,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		h.endpointCandidates,
 		usagelimits.DefaultPolicy(),
 		h.clock,
+		testNoEndpointTTL,
 		expiryCleanupInterval,
 		100,
 		h.logger,
@@ -1571,5 +1575,216 @@ func TestProcessor_DropSummary(t *testing.T) {
 
 		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedOther].Load(),
 			"evictAll should count the unfinalized queued item exactly once")
+	})
+}
+
+// TestProcessor_QueueWaitBudget verifies that the queue-wait budget tracks the unavailability regime: the saturation
+// budget while the pool has endpoints, the no-endpoint budget while it does not, re-evaluated as the request waits
+// rather than fixed at admission.
+func TestProcessor_QueueWaitBudget(t *testing.T) {
+	t.Parallel()
+
+	const (
+		saturationTTL = 100 * time.Millisecond
+		noEndpointTTL = 2 * time.Second
+	)
+
+	t.Run("budget in force", func(t *testing.T) {
+		t.Parallel()
+
+		base := time.Now()
+		testCases := []struct {
+			name string
+			// itemTTL and noEndpointTTL default to the constants above when zero; use disabled to request an explicit
+			// zero, which is what disables eviction in that regime.
+			itemTTL       time.Duration
+			noEndpointTTL time.Duration
+			poolEmpty     bool
+			// regimeAfter is how long after enqueue the regime last changed; zero means it never has.
+			regimeAfter time.Duration
+			elapsed     time.Duration
+			wantOutcome types.QueueOutcome
+			wantExpired bool
+		}{
+			{
+				name:        "SaturatedPool_HoldsWithinSaturationBudget",
+				elapsed:     saturationTTL - time.Millisecond,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: false,
+			},
+			{
+				name:        "SaturatedPool_ShedsAtSaturationBudget",
+				elapsed:     saturationTTL,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: true,
+			},
+			{
+				name:        "EmptyPool_HoldsPastSaturationBudget",
+				poolEmpty:   true,
+				elapsed:     noEndpointTTL - time.Millisecond,
+				wantOutcome: types.QueueOutcomeEvictedNoEndpoints,
+				wantExpired: false,
+			},
+			{
+				name:        "EmptyPool_ShedsAtNoEndpointBudget",
+				poolEmpty:   true,
+				elapsed:     noEndpointTTL,
+				wantOutcome: types.QueueOutcomeEvictedNoEndpoints,
+				wantExpired: true,
+			},
+			{
+				name:          "EmptyPool_ZeroBudgetWaitsIndefinitely",
+				noEndpointTTL: -1, // Sentinel for an explicit zero; see the field comment.
+				poolEmpty:     true,
+				elapsed:       time.Hour,
+				wantOutcome:   types.QueueOutcomeEvictedNoEndpoints,
+				wantExpired:   false,
+			},
+			{
+				name:        "SaturatedPool_ZeroBudgetWaitsIndefinitely",
+				itemTTL:     -1, // Sentinel for an explicit zero; see the field comment.
+				elapsed:     time.Hour,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: false,
+			},
+			{
+				// The pool comes up long after the saturation budget would have elapsed. Charging against an already
+				// spent budget would shed the request the instant it became dispatchable.
+				name:        "PoolCameUp_StartsFreshSaturationBudget",
+				regimeAfter: noEndpointTTL / 2,
+				elapsed:     noEndpointTTL/2 + saturationTTL - time.Millisecond,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: false,
+			},
+			{
+				name:        "PoolCameUp_ShedsAfterFreshSaturationBudget",
+				regimeAfter: noEndpointTTL / 2,
+				elapsed:     noEndpointTTL/2 + saturationTTL,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: true,
+			},
+			{
+				// A regime change before the request arrived must not extend its budget.
+				name:        "RegimeChangeBeforeEnqueue_DoesNotExtendBudget",
+				regimeAfter: -saturationTTL,
+				elapsed:     saturationTTL,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: true,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				itemTTL := saturationTTL
+				if tc.itemTTL != 0 {
+					itemTTL = max(tc.itemTTL, 0)
+				}
+				noEndpoint := noEndpointTTL
+				if tc.noEndpointTTL != 0 {
+					noEndpoint = max(tc.noEndpointTTL, 0)
+				}
+				var regimeSince time.Time
+				if tc.regimeAfter != 0 {
+					regimeSince = base.Add(tc.regimeAfter)
+				}
+
+				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base)
+				outcome, expired := isExpired(item, base.Add(tc.elapsed), regimeSince, tc.poolEmpty, noEndpoint)
+
+				assert.Equal(t, tc.wantOutcome, outcome, "expiry should be attributed to the regime in force")
+				assert.Equal(t, tc.wantExpired, expired, "the budget in force decides whether the request is shed")
+			})
+		}
+	})
+
+	t.Run("sweep holds a queued request across a scale-from-zero", func(t *testing.T) {
+		t.Parallel()
+		// --- ARRANGE ---
+		h := newTestHarness(t, testCleanupTick)
+		h.processor.noEndpointRequestTTL = noEndpointTTL
+		h.processor.poolEmpty.Store(true)
+
+		item := h.newTestItem("req-cold-start", testFlow, testShortTTL)
+		q := h.addQueue(testFlow)
+		require.NoError(t, q.Add(item), "Failed to add item to queue")
+
+		// --- ACT & ASSERT ---
+		// Well past the saturation budget, but the pool is empty, so the cold-start budget governs.
+		h.clock.Step(2 * testShortTTL)
+		h.processor.sweepFinalizedItems()
+		assert.Nil(t, item.FinalState(), "an empty pool must not shed against the saturation budget")
+		assert.Equal(t, 1, q.Len(), "the item should still be queued")
+
+		// The pool comes up. The request only now became dispatchable, so it gets a fresh saturation budget.
+		h.processor.poolEmpty.Store(false)
+		h.processor.regimeSinceNanos.Store(h.clock.Now().UnixNano())
+		h.processor.sweepFinalizedItems()
+		assert.Nil(t, item.FinalState(), "a request must not be shed the moment it becomes dispatchable")
+
+		h.clock.Step(testShortTTL)
+		h.processor.sweepFinalizedItems()
+		require.NotNil(t, item.FinalState(), "the fresh saturation budget should have elapsed")
+		assert.Equal(t, types.QueueOutcomeEvictedTTL, item.FinalState().Outcome,
+			"a shed under a non-empty pool is backpressure, not unavailability")
+		assert.Equal(t, 0, q.Len(), "the evicted item should be swept from the queue")
+	})
+
+	t.Run("sweep sheds an empty-pool request as unavailability", func(t *testing.T) {
+		t.Parallel()
+		// --- ARRANGE ---
+		h := newTestHarness(t, testCleanupTick)
+		h.processor.noEndpointRequestTTL = testShortTTL
+		h.processor.poolEmpty.Store(true)
+
+		// The saturation budget is long; only the no-endpoint budget can shed this request.
+		item := h.newTestItem("req-no-endpoints", testFlow, testTTL)
+		q := h.addQueue(testFlow)
+		require.NoError(t, q.Add(item), "Failed to add item to queue")
+
+		// --- ACT ---
+		h.clock.Step(testShortTTL)
+		h.processor.sweepFinalizedItems()
+
+		// --- ASSERT ---
+		require.NotNil(t, item.FinalState(), "the no-endpoint budget should have elapsed")
+		finalState := item.FinalState()
+		assert.Equal(t, types.QueueOutcomeEvictedNoEndpoints, finalState.Outcome,
+			"Outcome should be EvictedNoEndpoints")
+		assert.ErrorIs(t, finalState.Err, types.ErrEvicted, "Error should wrap ErrEvicted")
+		assert.ErrorIs(t, finalState.Err, types.ErrTTLExpired, "Error should wrap ErrTTLExpired")
+		assert.ErrorIs(t, finalState.Err, types.ErrNoEndpoints, "Error should wrap ErrNoEndpoints")
+		assert.Equal(t, 0, q.Len(), "the evicted item should be swept from the queue")
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedNoEndpoints].Load(),
+			"Drop should be recorded for EvictedNoEndpoints")
+	})
+
+	t.Run("dispatch cycle timestamps the regime change", func(t *testing.T) {
+		t.Parallel()
+		// --- ARRANGE ---
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+		ctx := context.Background()
+
+		// --- ACT & ASSERT ---
+		// The harness pool is non-empty; the first cycle establishes the regime without recording a change.
+		h.processor.dispatchCycle(ctx)
+		assert.False(t, h.processor.poolEmpty.Load(), "the harness pool starts non-empty")
+		assert.Zero(t, h.processor.regimeSinceNanos.Load(), "settling on the initial regime is not a change")
+
+		// The pool scales to zero.
+		h.clock.Step(testShortTTL)
+		h.endpointCandidates.Candidates = nil
+		h.processor.dispatchCycle(ctx)
+		require.True(t, h.processor.poolEmpty.Load(), "the pool should now read as empty")
+		scaledDown := h.processor.regimeSinceNanos.Load()
+		assert.Equal(t, h.clock.Now().UnixNano(), scaledDown, "the regime change should be timestamped")
+
+		// A cycle that does not change the regime leaves the timestamp alone, so the budget keeps running.
+		h.clock.Step(testShortTTL)
+		h.processor.dispatchCycle(ctx)
+		assert.Equal(t, scaledDown, h.processor.regimeSinceNanos.Load(),
+			"an unchanged regime must not restart the budget")
 	})
 }

@@ -42,6 +42,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           defaultRequestTTL,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
@@ -57,6 +58,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           0,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
@@ -72,6 +74,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           10 * time.Second,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
@@ -83,14 +86,32 @@ func TestNewConfig(t *testing.T) {
 			name: "WithAllOptions_ShouldUpdateConfig",
 			opts: []ConfigOption{
 				WithDefaultRequestTTL(10 * time.Second),
+				WithNoEndpointRequestTTL(5 * time.Minute),
 				WithExpiryCleanupInterval(2 * time.Second),
 				WithEnqueueChannelBufferSize(50),
 			},
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           10 * time.Second,
+				NoEndpointRequestTTL:        5 * time.Minute,
 				ExpiryCleanupInterval:       2 * time.Second,
 				EnqueueChannelBufferSize:    50,
+				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
+				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
+				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
+			},
+		},
+		{
+			name: "ZeroNoEndpointRequestTTL_ShouldDisableEvictionWhilePoolIsEmpty",
+			opts: []ConfigOption{
+				WithNoEndpointRequestTTL(0),
+			},
+			expectErr: false,
+			expectedCfg: Config{
+				DefaultRequestTTL:           defaultRequestTTL,
+				NoEndpointRequestTTL:        0,
+				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
 				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
 				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
@@ -100,6 +121,13 @@ func TestNewConfig(t *testing.T) {
 			name: "NegativeDefaultRequestTTL_ShouldError",
 			opts: []ConfigOption{
 				WithDefaultRequestTTL(-1 * time.Second),
+			},
+			expectErr: true,
+		},
+		{
+			name: "NegativeNoEndpointRequestTTL_ShouldError",
+			opts: []ConfigOption{
+				WithNoEndpointRequestTTL(-1 * time.Second),
 			},
 			expectErr: true,
 		},
@@ -135,6 +163,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           defaultRequestTTL,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				EnableEviction:              true,

@@ -389,6 +389,14 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 			wantReason:   string(errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
+			// The regime is carried by the outcome itself, so the mapping must not depend on a pool probe.
+			name:       "no-endpoint budget expiry returns 503",
+			outcome:    fctypes.QueueOutcomeEvictedNoEndpoints,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrTTLExpired, fctypes.ErrNoEndpoints),
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonNoEndpoints),
+		},
+		{
 			name:       "context cancellation returns 503",
 			outcome:    fctypes.QueueOutcomeEvictedContextCancelled,
 			err:        fctypes.ErrContextCancelled,
