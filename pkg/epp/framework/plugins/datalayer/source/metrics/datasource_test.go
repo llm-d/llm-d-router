@@ -53,6 +53,14 @@ func TestMetricsDataSourceFactory_TLS(t *testing.T) {
 	}
 }
 
+func TestMetricsDataSourceFactory_PortOverride(t *testing.T) {
+	for _, params := range []string{`{"port":7080}`, `{"port":0}`, `{}`} {
+		ds, err := MetricsDataSourceFactory("m", json.NewDecoder(bytes.NewBufferString(params)), nil)
+		assert.NoError(t, err, params)
+		assert.NotNil(t, ds, params)
+	}
+}
+
 func TestDatasource(t *testing.T) {
 	_, err := http.NewHTTPDataSource("invalid", "/metrics", http.TLSOptions{SkipVerify: true}, MetricsDataSourceType,
 		"metrics-data-source", parseMetrics)

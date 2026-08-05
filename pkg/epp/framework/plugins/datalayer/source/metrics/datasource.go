@@ -43,6 +43,9 @@ type metricsDatasourceParams struct {
 	Scheme string `json:"scheme"`
 	// Path defines the URL path used in metrics retrieval (e.g., "/metrics").
 	Path string `json:"path"`
+	// Port, when non-zero, overrides the endpoint's inference port for metrics retrieval.
+	// Use when the model server exposes metrics on a port other than the InferencePool target port.
+	Port int `json:"port"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
 	InsecureSkipVerify bool `json:"insecureSkipVerify"`
 	// CACertPath is an optional PEM CA bundle to verify the scrape target cert.
@@ -80,6 +83,11 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		return nil, err
 	}
 
+	opts := []http.Option{intervalOpt}
+	if cfg.Port > 0 {
+		opts = append(opts, http.WithPortOverride(cfg.Port))
+	}
+
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
 			SkipVerify:     cfg.InsecureSkipVerify,
@@ -87,7 +95,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MetricsDataSourceType, name, parseMetrics, intervalOpt)
+		MetricsDataSourceType, name, parseMetrics, opts...)
 }
 
 func defaultDataSourceConfigParams() *metricsDatasourceParams {
