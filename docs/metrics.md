@@ -202,6 +202,15 @@ are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin
 *   **Labels:** `model_name`; `decision_type` (`decode-only` or `prefill-decode`).
 *   **Description:** Counts requests by the Prefill/Decode disaggregation decision.
 
+#### DisaggregatedSet rollout
+
+These metrics are exposed by the Alpha `disaggregatedset-rollout-screener` plugin.
+
+| Name | Type | Labels | Notes |
+|---|---|---|---|
+| `disaggregatedset_strict_header_no_match_total` | Counter | `plugin_type`, `plugin_name`, `selector` | Strict header selections that matched no endpoint and failed closed. |
+| `disaggregatedset_revision_gating_share` | Gauge | `plugin_type`, `plugin_name`, `mode`, `revision` | Current weighted share from `0` to `1`. Incomplete revisions report `0`; a revision's series is removed when it disappears from the observed Pod set. |
+
 ### Flow control
 
 Exposed when the `flowControl` feature gate is enabled.
