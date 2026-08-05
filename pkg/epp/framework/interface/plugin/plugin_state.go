@@ -28,17 +28,32 @@ import (
 )
 
 const (
-	// stalenessThreshold defines the threshold for considering data as stale.
-	// if data of a request hasn't been read/write in the last "stalenessThreshold", it is considered as stale data
-	// and will be cleaned in the next cleanup cycle.
-	stalenessThreshold = time.Minute * 5
-	// cleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
+	// DefaultStalenessThreshold is the built-in threshold for considering data as stale: if a
+	// request's data has not been read/written within this duration it is reaped in the next cleanup
+	// cycle. It applies when no process-wide (SetDefaultStalenessThreshold) override is set.
+	DefaultStalenessThreshold = time.Minute * 5
+	// cleanupInterval defines the periodic interval that the cleanup goroutine uses to check for stale data.
 	cleanupInterval = time.Minute
 )
 
-// NewPluginState initializes a new PluginState and returns its pointer.
+// defaultStalenessThreshold is the process-wide default applied to PluginState instances.
+// It may be overridden once during startup via SetDefaultStalenessThreshold.
+var defaultStalenessThreshold = DefaultStalenessThreshold
+
+// SetDefaultStalenessThreshold overrides the process-wide default staleness threshold used by
+// PluginState instances created via NewPluginState. It is intended to be called once at startup,
+// before any plugin is instantiated. Non-positive values are ignored.
+func SetDefaultStalenessThreshold(d time.Duration) {
+	if d > 0 {
+		defaultStalenessThreshold = d
+	}
+}
+
+// NewPluginState initializes a new PluginState and returns its pointer. Each instance captures the
+// process-wide staleness threshold at construction; configure it via SetDefaultStalenessThreshold
+// before instantiating plugins.
 func NewPluginState(ctx context.Context) *PluginState {
-	pluginState := &PluginState{}
+	pluginState := &PluginState{stalenessThreshold: defaultStalenessThreshold}
 	go pluginState.cleanup(ctx)
 	return pluginState
 }
@@ -60,6 +75,8 @@ type PluginState struct {
 	storage sync.Map
 	// key: RequestID, value: time.Time
 	requestToLastAccessTime sync.Map
+	// stalenessThreshold is the inactivity duration after which a request's data is reaped.
+	stalenessThreshold time.Duration
 }
 
 // Read retrieves data with the given "key" in the context of "requestID" from PluginState.
@@ -167,14 +184,14 @@ func (s *PluginState) cleanup(ctx context.Context) {
 }
 
 // cleanStaleRequests iterates through all requests and removes those that haven't been
-// accessed for longer than stalenessThreshold. This operation is safe to run concurrently
+// accessed for longer than the staleness threshold. This operation is safe to run concurrently
 // with other operations on the PluginState.
 func (s *PluginState) cleanStaleRequests() {
 	s.requestToLastAccessTime.Range(func(k, v any) bool {
 		requestID := k.(string)
 		lastAccessTime := v.(time.Time)
-		if time.Since(lastAccessTime) > stalenessThreshold {
-			log.Log.V(logutil.DEBUG).Info("Cleaning up stale request from PluginState", "requestID", requestID, "lastAccessTime", lastAccessTime)
+		if time.Since(lastAccessTime) > s.stalenessThreshold {
+			log.Log.V(logutil.DEBUG).Info("Cleaning up stale request from PluginState", "requestID", requestID, "lastAccessTime", lastAccessTime, "stalenessThreshold", s.stalenessThreshold)
 			s.Delete(requestID) // cleanup stale requests (this is safe in sync.Map)
 		}
 		return true
