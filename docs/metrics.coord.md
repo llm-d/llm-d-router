@@ -108,7 +108,7 @@ Recorded by the pipeline executor, one observation per step per request. This fa
 
 Label set `{phase}` (one outbound backend call, not a pipeline stage, see [Labels](#labels)).
 
-Recorded by the encode, prefill, and decode steps. This family counts and times the outbound sub-requests to the gateway. (Render and media fetches are not included, their latency is tracked in `pipeline_step_duration_seconds`).
+Recorded by the conditional-decode, encode, prefill, and decode steps. This family counts and times the outbound sub-requests to the gateway. (Render and media fetches are not included, their latency is tracked in `pipeline_step_duration_seconds`).
 
 | Name | Type | Notes |
 |---|---|---|
@@ -120,7 +120,7 @@ Recorded by the encode, prefill, and decode steps. This family counts and times 
 *   **Narrower scope than steps:** 
     *   `upstream_request_duration_seconds` is encode-only because it tracks per-image latency. Prefill and decode already have a 1:1 mapping between call latency and step duration, so their timings are tracked solely in `pipeline_step_duration_seconds`.
     *   There is no `upstream_request_error_total`. A phase-call failure aborts its step and is already counted by `pipeline_step_errors_total`.
-*   **Conditional-decode:** The `phase="conditional-decode"` counts the cache probe. It gets its own phase to distinguish it from the actual `decode` phase, maintaining accurate fan-out ratios.
+*   **Conditional-decode:** The probe gets its own phase rather than counting as `decode`, keeping fan-out ratios accurate.
 
 ### Disaggregation decision and decode cache
 
@@ -139,54 +139,27 @@ Recorded by the encode, prefill, and decode steps. This family counts and times 
 
 | Coordinator metric | EPP counterpart | Difference |
 |---|---|---|
-| `request_total`, `request_error_total`, `request_duration_seconds`, `request_size_bytes`, `response_size_bytes`, `request_running` | `llm_d_epp_*`, same names | The coordinator counts client requests at its own entry point; EPP counts what reaches the gateway, which for one client request includes each phase sub-request. EPP also labels by `fairness_id` and `priority`, which have no coordinator counterpart. |
-| `disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Same name and same `model_name`/`decision_type` labels, and EPP adds plugin identity labels. EPP counts the routing decision its profile handler makes; the coordinator counts the phases it actually executed. |
-| `pipeline_step_*`, `upstream_request_*`, `decode_cache_lookups_total` | none | Coordinator-only. |
+| Request family (`request_total`, etc.) | `llm_d_epp_*` (same names) | Coordinator counts single client requests at entry; EPP counts every sub-request reaching the gateway. EPP adds flow-control labels (`fairness_id`, `priority`). |
+| `disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Coordinator counts phases *executed*; EPP counts routing decisions *made* and adds plugin labels. |
+| `pipeline_step_*`, `upstream_request_*`, `decode_cache_lookups_total` | None | Unique to coordinator. |
 
-EPP exposes many metrics the coordinator does not: token counts, TTFT/TPOT/ITL, `scheduler_*`,
-`plugin_duration_seconds`, pool aggregates, `flow_control_*`, `extproc_*` and `datalayer_*`. These
-measure responsibilities the coordinator does not have (endpoint scheduling, flow control, pool
-observation, ext_proc streaming).
+**EPP-only metrics:** EPP exposes token counts, latencies (TTFT/TPOT/ITL), and metrics for scheduling, flow control, and pool aggregates. The coordinator does not measure these as they are outside its scope.
 
 ## Deliberate omissions
 
 ### Token counts
 
-The coordinator emits no token-count metrics. EPP owns per-request token accounting and the
-coordinator does not duplicate it.
+The coordinator emits no token-count metrics. EPP already parses the vLLM `usage` block to emit `request_input_tokens`, `request_output_tokens`, and `request_cached_tokens`, and the coordinator avoids duplicating this effort. Furthermore, extracting output tokens would require the coordinator to parse the streamed SSE response, defeating the purpose of a pure byte proxy (which is why we use `response_size_bytes`).
 
-Input and prompt tokens are available cheaply in-process after the render step, which holds the token
-IDs from the render service or from client-supplied token IDs. Output and cached tokens are not: the
-decode step is a pure byte proxy that streams the response straight to the client, so extracting them
-means intercepting and parsing the streamed SSE, exactly the invasiveness `response_size_bytes` avoids
-by counting bytes.
-
-There is no coverage gap in coordinator-deployment mode. The decode phase call goes out through the
-gateway, where EPP parses the vLLM `usage` block and emits `request_input_tokens`,
-`request_output_tokens` and `request_cached_tokens`. The one coordinator-native cheap signal, prompt
-tokens, overlaps EPP's; its only unique value is correlating prompt size with encode fan-out or
-per-step latency without a cross-component join. That is a candidate, not a commitment:
-
-| Candidate | Type | Source |
-|---|---|---|
-| `request_prompt_tokens` | Histogram | Token count after render; token-count buckets. Label: `model_name`. |
+*Future candidate:* `request_prompt_tokens` (Histogram, after render) could be added to correlate prompt size with encode fan-out without needing a cross-component join.
 
 ### Per-request image visibility
 
-Neither the coordinator nor EPP exposes per-request image count or image size. Candidates, listed so
-the gap is documented:
+Neither the coordinator nor EPP tracks per-request image count or size. Currently, image count is only visible in aggregate via `upstream_request_total{phase="encode"}`. Image byte size is unreliable because URL images are fetched by `replace-media-urls` and do not traverse the coordinator.
 
-| Candidate | Type | Source |
-|---|---|---|
-| `request_images` | Histogram | Multimodal entries per request; small-integer buckets. Label: `model_name`. |
-| `image_placeholder_tokens` | Histogram | Placeholder length per entry; token-count buckets. Label: `model_name`. |
-
-Image count is visible only indirectly, as `upstream_request_total{phase="encode"}`, which is
-aggregate rather than per-request. Image byte size is not reliably available at all: inline base64
-images fall under `request_size_bytes`, but URL images are fetched by `replace-media-urls` and never
-traverse the coordinator. Placeholder tokens are the coordinator's only uniform,
-transport-independent measure of image size, and are already computed in render for the
-`max_total_placeholder_tokens` check.
+*Future candidates:* 
+*   `request_images`: Histogram of multimodal entries per request.
+*   `image_placeholder_tokens`: Histogram of placeholder length per entry (the only uniform measure of image size).
 
 ## Cardinality
 
