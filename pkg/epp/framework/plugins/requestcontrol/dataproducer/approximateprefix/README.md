@@ -16,8 +16,10 @@ For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs)
 - `maxPrefixTokensToMatch` (int, optional, default: `131072`): Cap expressed in tokens instead of blocks (`maxBlocks = maxPrefixTokensToMatch / blockSizeTokens`). Not auto-tuned. Takes precedence over `maxPrefixBlocksToMatch` when set (> 0); set to `0` to fall back to the block-based cap. The `131072` default (128K, the context window of large production models such as gpt-oss 120b) is a reasonable upper bound that covers the long-prompt use cases seen in production.
 
 Setting both caps to `0` matches the whole prompt. Prompt length is bounded by the model server's context window, so this caps matching at one context window without needing to name a token count. It raises EPP CPU on long prompts (see [operations](../../../../../../../docs/operations.md)); to turn prefix matching off, remove this producer from the configuration rather than zeroing the caps.
-- `lruCapacityPerServer` (int, optional, default: `31250`): Per-pod LRU index capacity. Used when `autoTune` is false or endpoint metrics are unavailable; ignored when auto-tuned from metrics.
+- `lruCapacityPerServer` (int, optional, default: `31250`): Per-pod LRU index capacity. Used when `autoTune` is false or endpoint metrics are unavailable; ignored when auto-tuned from metrics. Also the escape hatch for deployments with KV cache offloading whose model servers report only GPU capacity (e.g. vLLM with an offload connector, SGLang older than v0.5.10 with hicache, trtllm-serve's V2 KV cache manager): disable `autoTune` and size this to the offload-extended cache. A warning is logged when offloading is detected but unaccounted for (vLLM OffloadingConnector metrics) so the undercount is not silent.
 - `blockSize` (int, optional): Deprecated — character-based block size. Use `blockSizeTokens` instead.
+
+**Auto-tuned capacity resolution order** (per pod, when `autoTune` is true): total token capacity metric across tiers divided by the server block size (e.g. SGLang `max(hicache_host_total_tokens, max_total_num_tokens)`), then GPU blocks, then `lruCapacityPerServer`, then the built-in default. The chosen capacity and its source are logged when a pod's LRU is created or resized.
 
 **Configuration Examples:**
 

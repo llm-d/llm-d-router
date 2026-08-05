@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -32,9 +33,11 @@ type indexer struct {
 	mu             sync.RWMutex
 	hashToPods     map[blockHash]podSet                         // the lookup data structure to find pods that have the blockHash cached
 	podToLRU       map[ServerID]*lru.Cache[blockHash, struct{}] // key is pod namespacedName, value is an LRU cache
+	podToCapacity  map[ServerID]int                             // current LRU capacity per pod, for resize-on-change
 	defaultLRUSize int
 	pluginName     string
 	pluginType     string
+	logger         logr.Logger
 }
 
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
@@ -42,9 +45,11 @@ func newIndexer(ctx context.Context, defaultLRUSize int, pluginName, pluginType 
 	i := &indexer{
 		hashToPods:     make(map[blockHash]podSet),
 		podToLRU:       make(map[ServerID]*lru.Cache[blockHash, struct{}]),
+		podToCapacity:  make(map[ServerID]int),
 		defaultLRUSize: defaultLRUSize,
 		pluginName:     pluginName,
 		pluginType:     pluginType,
+		logger:         log.FromContext(ctx).WithName(pluginName),
 	}
 
 	go i.reportLRUSize(ctx, time.Second)
@@ -56,17 +61,27 @@ func (i *indexer) Add(hashes []blockHash, pod server) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
+	lruSize := pod.LRUCapacityBlocks
+	if lruSize <= 0 {
+		lruSize = i.defaultLRUSize
+	}
+
 	// Check if the LRU pod exist
 	lruForPod, exists := i.podToLRU[pod.ServerID]
 	if !exists {
-		lruSize := pod.NumOfGPUBlocks
-		if lruSize <= 0 {
-			lruSize = i.defaultLRUSize
-		}
 		// We ignore the error since the only possible error is if size <= 0.
 		newLRU, _ := lru.NewWithEvict(lruSize, i.makeEvictionFn(pod.ServerID))
 		i.podToLRU[pod.ServerID] = newLRU
+		i.podToCapacity[pod.ServerID] = lruSize
 		lruForPod = newLRU
+		i.logCapacity("Created prefix cache LRU for pod", pod, lruSize)
+	} else if current := i.podToCapacity[pod.ServerID]; current != lruSize {
+		// Capacity can legitimately change after creation: metrics may not have
+		// been scraped before the pod's first request, and tier capacity gauges
+		// (e.g. SGLang hicache) can appear later than the device gauge.
+		lruForPod.Resize(lruSize)
+		i.podToCapacity[pod.ServerID] = lruSize
+		i.logCapacity("Resized prefix cache LRU for pod", pod, lruSize)
 	}
 
 	// Add to LRU (may evict)
@@ -102,6 +117,20 @@ func (i *indexer) Get(hash blockHash) podSet {
 	}
 
 	return res
+}
+
+// logCapacity emits one line per LRU creation or capacity change so operators
+// can see the effective per-pod capacity and where it came from. It warns when
+// KV cache offload was detected but the offload tier's capacity is unknown,
+// since prefix matches will then be under-reported.
+func (i *indexer) logCapacity(msg string, pod server, lruSize int) {
+	i.logger.Info(msg, "pod", pod.ServerID, "capacityBlocks", lruSize, "capacitySource", pod.CapacitySource)
+	if pod.CapacitySource == capacitySourceGPUBlocksUndercount {
+		i.logger.Info("WARNING: KV cache offload detected but the offload tier capacity is not reported by the model server; "+
+			"the prefix cache LRU is sized to GPU blocks only and prefix matches will be under-reported. "+
+			"Disable autoTune and set lruCapacityPerServer to size it to the offload-extended cache.",
+			"pod", pod.ServerID, "capacityBlocks", lruSize)
+	}
 }
 
 // makeEvictionFn returns a per-pod LRU eviction callback that removes the pod from hashToPods on eviction.
@@ -182,6 +211,7 @@ func (i *indexer) RemovePod(pod ServerID) {
 	}
 
 	delete(i.podToLRU, pod)
+	delete(i.podToCapacity, pod)
 }
 
 // Pods returns the list of all pods currently tracked in the indexer.
