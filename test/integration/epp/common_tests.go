@@ -136,9 +136,9 @@ func ReqRequestHeadersAndResponseGRPC(
 
 // --- Response Expectations ---
 
-func buildRouteResponse(endpoint, targetModel, prompt string, stream bool) []*extProcPb.ProcessingResponse {
+func buildRouteResponse(endpoint, targetModel, prompt string, priority int, stream bool) []*extProcPb.ProcessingResponse {
 	bodyMap := map[string]any{
-		"max_tokens": 100, "model": targetModel, "prompt": prompt, "temperature": 0,
+		"max_tokens": 100, "model": targetModel, "prompt": prompt, "temperature": 0, "priority": priority,
 	}
 	if stream {
 		bodyMap["stream"] = true
@@ -170,14 +170,14 @@ func buildGRPCRouteResponse(endpoint, prompt, methodName string, stream bool) []
 }
 
 // ExpectRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
-// rewritten to match the target model.
-func ExpectRouteTo(endpoint, targetModel, prompt string) []*extProcPb.ProcessingResponse {
-	return buildRouteResponse(endpoint, targetModel, prompt, false)
+// rewritten to match the target model. priority is the resolved InferenceObjective priority injected into the body.
+func ExpectRouteTo(endpoint, targetModel, prompt string, priority int) []*extProcPb.ProcessingResponse {
+	return buildRouteResponse(endpoint, targetModel, prompt, priority, false)
 }
 
 // ExpectRouteToWithStream asserts that the request was successfully routed with streaming enabled.
-func ExpectRouteToWithStream(endpoint, targetModel, prompt string) []*extProcPb.ProcessingResponse {
-	return buildRouteResponse(endpoint, targetModel, prompt, true)
+func ExpectRouteToWithStream(endpoint, targetModel, prompt string, priority int) []*extProcPb.ProcessingResponse {
+	return buildRouteResponse(endpoint, targetModel, prompt, priority, true)
 }
 
 // ExpectPassthroughRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
@@ -300,7 +300,7 @@ func commonTestCases(prio func(int) int) []testCase {
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
 				P(2, 10, 0.2),
 			},
-			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1"),
+			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1", prio(2)),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
 				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
@@ -315,7 +315,7 @@ func commonTestCases(prio func(int) int) []testCase {
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Has LoRA)
 				P(2, 10, 0.2, "foo", "bar"),
 			},
-			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
+			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2", prio(2)),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 			},
