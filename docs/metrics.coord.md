@@ -46,63 +46,24 @@ three to follow a request end to end.
 
 ## Labels
 
-The `step` and `phase` labels share the values `encode`, `prefill`, `decode`, and
-`conditional-decode`, but are not interchangeable: a step is a pipeline stage, a phase is a single
-backend call.
+The `step` and `phase` labels share most of their values, but measure different boundaries: a step is a pipeline stage (which may make multiple calls), while a phase is a single backend call.
 
-The **`step` label** names a stage of the coordinator's internal pipeline, observed once per request
-per stage. A step covers local work, orchestration, and any backend calls that stage makes. The
-values are the built-in step names; [Coordinator Architecture](coordinator_architecture.md) describes
-what each one does and how a pipeline is assembled from them.
-
-| `step` value | Stage |
-|---|---|
-| `render` | Call the render service to tokenize and apply the chat template. |
-| `replace-media-urls` | Rewrite media URLs in the request body (local work only). |
-| `encode` | Encode multimodal inputs; fans out one call per image. |
-| `prefill` | Prefill sub-request, producing KV transfer parameters. |
-| `conditional-decode` | Probe the decode cache for the 412 fast path. |
-| `decode` | Decode and generation, streamed back to the client. |
-
-The **`phase` label** names a single outbound backend call, counted once per call. Its values are
-`encode`, `prefill`, `decode`, and `conditional-decode`.
-
-A step may issue zero or many backend calls and includes local work; a phase is one call. Only the
-`render` and `replace-media-urls` steps have no phase counterpart.
-
-The first three values match the epp-profile header the coordinator sends. `conditional-decode` does
-not: the probe carries the decode profile header, like the decode step, and is distinguished by the
-`Prefer: if-available` header it adds. See the [Upstream phase family](#upstream-phase-family).
-
-The **`decision_type` label** names which phases a request ended up running, one value per request
-rather than per stage or per call: `decode-only`, `prefill-decode`, or `encode-prefill-decode`. See
-[`disagg_decision_total`](#disagg_decision_total).
+- **`step`**: A stage of the internal pipeline, observed once per request per stage. Covers local work and all backend calls made by that stage. Values: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. See [Coordinator Architecture](coordinator_architecture.md).
+- **`phase`**: A single outbound backend call. Values: `encode`, `prefill`, `decode`, `conditional-decode`.
+- **`decision_type`**: The sequence of phases a request actually executed. Values: `decode-only`, `prefill-decode`, `encode-prefill-decode`.
 
 ## Error classes
 
-`error_code` on `request_error_total` and `pipeline_step_errors_total` uses one set of four values:
-`bad_request`, `upstream_4xx`, `upstream_5xx`, `internal`.
+The `error_code` label on `request_error_total` and `pipeline_step_errors_total` uses four values:
 
-This classification is finer than the handler's client-facing status mapping, which collapses upstream
-5xx faults and internal faults into HTTP 502. Classification inspects the error type directly: an
-upstream error carrying a 5xx status is `upstream_5xx`, and any other error that is not a bad request
-is `internal`.
+- **`bad_request`**: Client-side errors (e.g., malformed body).
+- **`upstream_4xx`**: 4xx errors from upstream (e.g., render, prefill, encode).
+- **`upstream_5xx`**: 5xx errors from upstream.
+- **`internal`**: All other coordinator-internal faults.
 
-The conditional-decode probe's 412 is not an error in any class. The step intercepts that status and
-converts it to a cache miss, so it returns no error and the pipeline continues; a hit ends the
-pipeline early, which is also not an error. Neither outcome reaches the classifier, which is why the
-probe has its own metric,
-[`decode_cache_lookups_total`](#decode_cache_lookups_total). The same 412 does count as an error on
-the EPP side, as `request_error_total{error_code="PreconditionFailed"}`.
-
-`upstream_4xx` and `upstream_5xx` therefore describe the render, prefill, and encode steps, the only
-ones that turn a non-2xx response into an error. The conditional-decode and decode steps proxy the
-upstream response straight to the client without constructing an error, so an upstream failure on the
-decode leg reaches the client but is absent from both error metrics. This covers the worst case: a
-worker that dies mid-generation truncates the client's response while the request still counts as a
-success. Both failure modes are already detected by the decode proxy, which writes 502 when the call
-fails before the response starts and logs a truncation when the copy fails after it, so closing the
-gap is a matter of recording those two points rather than adding detection.
+**Key behaviors:**
+- The conditional-decode probe's HTTP 412 (cache miss) is handled internally and is **not** an error. It is tracked separately by [`decode_cache_lookups_total`](#decode_cache_lookups_total).
+- `upstream_4xx` and `upstream_5xx` only apply to the `render`, `prefill`, and `encode` steps. The `decode` and `conditional-decode` steps proxy responses directly to the client, so upstream failures during decode currently reach the client without incrementing these error metrics.
 
 ## Metrics catalog
 
@@ -133,149 +94,46 @@ which the coordinator does not implement, so neither has a coordinator counterpa
 
 Label set `{step}` (a stage of the coordinator's internal pipeline, see [Labels](#labels)).
 
-Recorded by the pipeline executor, one observation per step per request. This family measures each
-stage's whole wall time, local work plus orchestration plus any backend calls the stage makes, not
-the individual outbound calls. It answers where time goes inside the coordinator and which internal
-stage failed.
+Recorded by the pipeline executor, one observation per step per request. This family measures each stage's total wall time (local work, orchestration, and all backend calls made by the stage). It answers where time goes inside the coordinator and which internal stage failed.
 
 | Name | Type | Notes |
 |---|---|---|
-| `pipeline_step_duration_seconds` | Histogram | Per-step latency, from the timings the pipeline already computes. |
+| `pipeline_step_duration_seconds` | Histogram | Per-step latency. Uses fine-grained `stepLatencyBuckets` (100us to 60s) to capture both microsecond steps (render) and seconds-long steps (decode). |
 | `pipeline_step_errors_total` | Counter | Step failures; adds label `error_code`. |
 
-`pipeline_step_duration_seconds` uses a dedicated bucket set, not `generalLatencyBuckets`: steps span
-microseconds (render, a skipped encode) to seconds (upstream-bound decode), and a 5ms floor collapses
-every fast step into one bucket. `stepLatencyBuckets` is 100us, 250us, 500us, 1ms, 2.5ms, 5ms, 10ms,
-25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s, 60s.
-
-Only steps that ran are observed. The executor pre-sizes its timings for the full step list, so on an
-early exit (every conditional-decode hit) or a step failure the trailing entries are unset; recording
-them would emit a `step=""` series with a 0s observation for every step that never ran.
-
-Each step that ran expands to its own histogram block. For three decode steps taking 1.9s, 2.1s and
-1.7s:
-
-```
-..._bucket{step="decode",le="1"}    0
-..._bucket{step="decode",le="2.5"}  3
-..._bucket{step="decode",le="+Inf"} 3
-..._sum{step="decode"}   5.7
-..._count{step="decode"} 3
-```
-
-p95 of the decode step:
-
-```promql
-histogram_quantile(0.95, sum by (le) (rate(
-  llm_d_coordinator_pipeline_step_duration_seconds_bucket{step="decode"}[5m])))
-```
+**Key details:**
+*   Only steps that actually executed are recorded. Trailing steps from early exits (e.g., conditional-decode hit) or failures are not emitted.
 
 ### Upstream phase family
 
 Label set `{phase}` (one outbound backend call, not a pipeline stage, see [Labels](#labels)).
 
-Recorded by the encode, prefill, and decode steps. This family counts and times the outbound
-sub-requests the coordinator sends to the gateway carrying the epp-profile header. Only gateway phase
-calls count: the render-service call and media-URL fetches are outbound too but carry no phase
-header, and their latency appears in
-`pipeline_step_duration_seconds{step="render"|"replace-media-urls"}`.
+Recorded by the encode, prefill, and decode steps. This family counts and times the outbound sub-requests to the gateway. (Render and media fetches are not included, their latency is tracked in `pipeline_step_duration_seconds`).
 
 | Name | Type | Notes |
 |---|---|---|
-| `upstream_request_total` | Counter | Gateway sub-requests, one per call; encode contributes one per image. |
-| `upstream_request_duration_seconds` | Histogram | Latency of one encode call, so one observation per image (encode only). |
+| `upstream_request_total` | Counter | Gateway sub-requests, one per call. (e.g. encode contributes one per image). |
+| `upstream_request_duration_seconds` | Histogram | Latency of one encode call (encode only). |
 
-One multimodal chat request with two images, in a pipeline whose conditional-decode probe misses,
-counts once inbound and five times outbound:
-
-```
-request_total{model_name="llama"}                  += 1
-upstream_request_total{phase="conditional-decode"} += 1
-upstream_request_total{phase="encode"}             += 2
-upstream_request_total{phase="prefill"}            += 1
-upstream_request_total{phase="decode"}             += 1
-```
-
-Had the probe hit, it would be the only outbound call: the pipeline stops there and the encode,
-prefill, and decode series do not move.
-
-Dividing outbound calls by inbound requests gives the fan-out. Over a live window both sides are
-rates, so the per-second units cancel and the result reads as calls per request:
-
-```promql
-# mean backend calls per client request, all phases: 5 if every request matched the example
-sum(rate(llm_d_coordinator_upstream_request_total[5m]))
-  / sum(rate(llm_d_coordinator_request_total[5m]))
-
-# mean encode calls per client request, so mean images per request: 2 for the example
-sum(rate(llm_d_coordinator_upstream_request_total{phase="encode"}[5m]))
-  / sum(rate(llm_d_coordinator_request_total[5m]))
-```
-
-`sum` is needed on both sides because the two counters carry different labels (`phase` against
-`model_name`), so they have no label pairs to divide against directly.
-
-The family is deliberately narrower than the step family it sits beside, because for prefill and
-decode one step is one gateway call:
-
-- `upstream_request_total` covers all three phases: the fan-out ratios above are not derivable from
-  the step family, and it costs three series.
-- `upstream_request_duration_seconds` is encode-only, and is the per-image latency: encode fans out
-  one concurrent call per image, so `pipeline_step_duration_seconds{step="encode"}` observes the
-  whole stage once per request (the fan-out envelope: slowest call plus the EC merge) and hides what
-  a single image cost. A step p95 well above the call p95 means the width of the fan-out, not any one
-  image, is the expense. For prefill and decode the call latency already equals the step duration. Two
-  loose ends remain. The `phase` label carries exactly one value, which invites empty
-  `phase="prefill"` queries: either drop it and name the metric for what it measures, or keep it
-  explicitly for forward compatibility. And `generalLatencyBuckets` runs to 1h, far past any single
-  encode call, so `stepLatencyBuckets` fits the range better; note that `generalLatencyBuckets` is
-  EPP's own set, so switching gives up bucket-for-bucket comparison with
-  `llm_d_epp_request_duration_seconds`.
-- There is no `upstream_request_error_total`. A phase-call failure aborts its step and is already
-  counted by `pipeline_step_errors_total` under the same `error_code`. Per-call encode fan-out
-  failure granularity is the one gap, but the errgroup context cancels sibling calls on the first
-  error, so a clean per-call failure count is not reliably available. This is a limitation, not a
-  metric.
-
-`phase="conditional-decode"` counts the probe, which is a real call to the decode worker and on a hit
-is the only backend call the request makes. It gets its own value rather than counting under
-`decode`: without it, the miss above would report two decode calls for one client request. Its volume
-matches `decode_cache_lookups_total`, which breaks the same probes down by outcome; carrying the
-probe here keeps the fan-out ratio complete and every outbound call attributable to one phase.
+**Key details:**
+*   **Fan-out:** A single client request can result in multiple backend calls (e.g., one conditional-decode probe, two encode calls for two images, one prefill, one decode).
+*   **Narrower scope than steps:** 
+    *   `upstream_request_duration_seconds` is encode-only because it tracks per-image latency. Prefill and decode already have a 1:1 mapping between call latency and step duration, so their timings are tracked solely in `pipeline_step_duration_seconds`.
+    *   There is no `upstream_request_error_total`. A phase-call failure aborts its step and is already counted by `pipeline_step_errors_total`.
+*   **Conditional-decode:** The `phase="conditional-decode"` counts the cache probe. It gets its own phase to distinguish it from the actual `decode` phase, maintaining accurate fan-out ratios.
 
 ### Disaggregation decision and decode cache
 
-#### `disagg_decision_total`
-
-*   **Type:** Counter
+#### `disagg_decision_total` (Counter)
 *   **Labels:** `model_name`, `decision_type` (`decode-only`, `prefill-decode`, `encode-prefill-decode`)
-*   **Description:** Which phases actually ran.
+*   **Description:** Records which phases actually ran for a request. Unlike EPP, it lacks `encode-decode` because encode always implies prefill in the coordinator.
 
-`disagg_decision_total`'s value set is narrower than EPP's, which also has `encode-decode`. In the
-coordinator encode always implies prefill, because encode produces the EC transfer parameters prefill
-consumes, so encode without prefill is not a reachable path.
-
-#### `decode_cache_lookups_total`
-
-*   **Type:** Counter
+#### `decode_cache_lookups_total` (Counter)
 *   **Labels:** `result` (`hit` or `miss`)
-*   **Description:** Conditional-decode probe outcome.
-
-`decode_cache_lookups_total` is emitted by exactly one place, the conditional-decode step, once per
-request that runs it. The step optimistically sends the request to the decode worker with
-`Prefer: if-available`. On a `hit` the worker already held the prompt in its KV cache and streamed
-the response directly, so the pipeline stops early and the request's disaggregation path is
-decode-only. On a `miss` the worker returns 412 and the pipeline continues through the full
-encode/prefill/decode path. If the pipeline is configured without a conditional-decode step, the
-metric never moves.
-
-`hit / (hit + miss)` is the fraction of probed requests served straight from the decode worker's
-cache; `hit / request_total` is the share of all client requests. The name follows the
-`*_cache_*_total{result}` convention used by EPP's `encoder_cache_queries_total` and vLLM's
-`mm_cache_queries` rather than repeating the step name.
-
-The two are not redundant: on a miss, `decode_cache_lookups_total` cannot tell whether the request
-then went `prefill-decode` or `encode-prefill-decode`, which is what `disagg_decision_total` records.
+*   **Description:** Records the outcome of the conditional-decode probe. 
+    *   `hit`: The decode worker already had the prompt in its KV cache and served the response directly. The pipeline stops early (`decode-only`).
+    *   `miss`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
+*   **Note:** Not redundant with `disagg_decision_total` since a cache miss does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
 
 ## Relationship to EPP metrics
 
