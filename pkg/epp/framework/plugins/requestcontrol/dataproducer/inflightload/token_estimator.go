@@ -159,7 +159,12 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 		return est
 
 	default:
-		// OSLBucketUnknown (or missing attribute): fall back to the ratio-based estimate.
+		// OSLBucketUnknown (or missing attribute): fall back to the ratio-based
+		// (1.5×ISL) estimate.
+		//
+		// TODO(osl): this fallback is known to be wrong and is only an interim
+		// default. Input and output length are near-independent in agentic
+		// workloads. A follow-up change will replace it with a better UNKNOWN estimate 
 		return e.EstimateOutput(e.EstimateInput(request), body.MaxOutputTokens)
 	}
 }
