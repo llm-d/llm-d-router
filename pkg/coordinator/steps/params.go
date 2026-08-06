@@ -20,13 +20,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
 // Parameter key constants for step configuration maps.
 const (
-	ParamKVConnector = "kv_connector"
-	ParamECConnector = "ec_connector"
+	ParamKVConnector            = "kv_connector"
+	ParamECConnector            = "ec_connector"
+	ParamForwardResponseHeaders = "forward_response_headers"
 )
 
 const ModalityImage = "image"
@@ -134,6 +136,26 @@ func paramStringSlice(params map[string]any, key string) ([]string, error) {
 		values[index] = value
 	}
 	return values, nil
+}
+
+func paramForwardResponseHeaders(params map[string]any, stepName string) ([]string, error) {
+	headers, err := paramStringSlice(params, ParamForwardResponseHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", stepName, err)
+	}
+	seen := make(map[string]struct{}, len(headers))
+	for index, name := range headers {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return nil, fmt.Errorf("%s: %s[%d] must not be empty", stepName, ParamForwardResponseHeaders, index)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("%s: %s contains duplicate header %q", stepName, ParamForwardResponseHeaders, name)
+		}
+		seen[name] = struct{}{}
+		headers[index] = name
+	}
+	return headers, nil
 }
 
 // paramBool reads a boolean step parameter. A missing key returns ok=false so

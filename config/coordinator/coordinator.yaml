@@ -93,6 +93,13 @@ pipeline:
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
 
+  # Carries selected response headers from each upstream phase into every
+  # later phase. Only listed headers are forwarded. This allows EPP-stamped
+  # scheduling metadata to constrain all roles in a disaggregated pipeline.
+  # forward_response_headers:
+  #   - x-disagg-revision
+  #   - x-disagg-slice
+
   steps:
     # -------------------------------------------------------------------
     # replace-media-urls: first step. Downloads any http(s) image_url
@@ -214,13 +221,6 @@ pipeline:
       #   use_openai_format: true   # see notes above
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
-
-      #   # Copies selected prefill response headers into the decode request.
-      #   # Only the listed headers are forwarded. This allows a decode EPP to
-      #   # consume scheduling metadata stamped by the prefill EPP.
-      #   forward_response_headers:
-      #     - x-disagg-revision
-      #     - x-disagg-slice
 
     # -------------------------------------------------------------------
     # decode: streams the completion back to the client. Last step.

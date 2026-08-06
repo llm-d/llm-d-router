@@ -265,14 +265,14 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
-| Downstream headers | `prefill` response | later upstream requests such as `decode` |
+| Downstream headers | `encode` and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`. A prefill step can
-also allowlist response headers with `forward_response_headers`; these values are stored
-on the request context and override client-provided values on later upstream requests.
+it as the base header set, then stamp the request ID and `EPP-Profile`. The pipeline can
+allowlist response headers with `forward_response_headers`; values returned by one phase
+are stored on the request context and override client-provided values on later requests.
 
 ### EPP-Profile routing
 
@@ -318,21 +318,21 @@ for the comparison.
 
 ### Cross-phase scheduling headers
 
-An EPP plugin can stamp scheduling metadata from the selected prefill endpoint
-onto the prefill response. Configure the prefill step to carry selected headers
-into the decode request:
+An EPP plugin can stamp scheduling metadata from a selected endpoint onto its
+response. Configure the pipeline once to carry selected headers through every
+later phase:
 
 ```yaml
-- type: prefill
-  params:
-    forward_response_headers:
+pipeline:
+  forward_response_headers:
     - x-disagg-revision
     - x-disagg-slice
 ```
 
-Only listed response headers are carried. This lets a decode profile strictly
-select the prefill revision and prefer the same topology slice without
-forwarding unrelated worker response headers.
+Only listed response headers are carried. In E/P/D, the first encode request
+establishes the revision for the remaining encode requests, prefill, and decode.
+Each later response can update the carried values, so decode can prefer the
+prefill slice without forwarding unrelated worker response headers.
 
 ### Decode disaggregation deciders
 

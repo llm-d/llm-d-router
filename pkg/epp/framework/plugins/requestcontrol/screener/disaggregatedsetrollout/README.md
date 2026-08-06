@@ -127,21 +127,19 @@ roles and keeps only endpoints with that revision.
 
 ### Two EPPs
 
-Separate prefill and decode EPPs require the coordinator to copy the stamped
-headers from the prefill response into the decode request. Configure this on
-the coordinator's prefill step:
+Separate phase EPPs require the coordinator to copy stamped headers from each
+response into the next phase. Configure the coordinator pipeline once:
 
 ```yaml
-- type: prefill
-  params:
-    forward_response_headers:
+pipeline:
+  forward_response_headers:
     - x-disagg-revision
     - x-disagg-slice
 ```
 
-The prefill EPP chooses a covered revision and stamps it when the selected
-prefill begins responding. The decode EPP then applies the forwarded revision
-strictly:
+In P/D, the prefill EPP chooses a covered revision and stamps it when the
+selected prefill begins responding. The decode EPP then applies the forwarded
+revision strictly:
 
 ```text
 prefill request -> choose revision A -> stamp revision A
@@ -149,6 +147,10 @@ prefill request -> choose revision A -> stamp revision A
                                              v
 decode request with revision A -> keep only revision A decodes
 ```
+
+In E/P/D, the first encode selection establishes the revision. The remaining
+encode requests, prefill, and decode receive that revision, so all selected
+roles stay within the same DisaggregatedSet compatibility boundary.
 
 ### One EPP
 

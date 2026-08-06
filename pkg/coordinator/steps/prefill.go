@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -37,10 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-const (
-	PrefillStepName             = "prefill"
-	ParamForwardResponseHeaders = "forward_response_headers"
-)
+const PrefillStepName = "prefill"
 
 func init() {
 	pipeline.Register(PrefillStepName, NewPrefillStep)
@@ -78,21 +74,9 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	forwardResponseHeaders, err := paramStringSlice(params, ParamForwardResponseHeaders)
+	forwardResponseHeaders, err := paramForwardResponseHeaders(params, PrefillStepName)
 	if err != nil {
-		return nil, fmt.Errorf("prefill: %w", err)
-	}
-	seenHeaders := make(map[string]struct{}, len(forwardResponseHeaders))
-	for index, name := range forwardResponseHeaders {
-		name = strings.ToLower(strings.TrimSpace(name))
-		if name == "" {
-			return nil, fmt.Errorf("prefill: %s[%d] must not be empty", ParamForwardResponseHeaders, index)
-		}
-		if _, duplicate := seenHeaders[name]; duplicate {
-			return nil, fmt.Errorf("prefill: %s contains duplicate header %q", ParamForwardResponseHeaders, name)
-		}
-		seenHeaders[name] = struct{}{}
-		forwardResponseHeaders[index] = name
+		return nil, err
 	}
 	return &PrefillStep{
 		useOpenAIFormat:        useOpenAI,
