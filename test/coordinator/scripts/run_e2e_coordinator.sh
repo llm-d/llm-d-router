@@ -31,7 +31,4 @@ trap 'e2e_handle_interrupt "e2e-coordinator-tests"' INT TERM
 
 echo "Running coordinator end-to-end tests"
 
-# Every spec deploys its own encode/prefill/decode workers and coordinator, so
-# each parallel process carries several full workload cycles; 90m leaves the
-# slowest process headroom over the shared 45m default.
-run_ginkgo_suite "${DIR}/../e2e/coordinator/" 90m
+run_ginkgo_suite "${DIR}/../e2e/coordinator/"
