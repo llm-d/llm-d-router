@@ -210,9 +210,7 @@ func TestResponseHeaders_FlowFromPrefillToDecode(t *testing.T) {
 	defer gwServer.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
-	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
-		"forward_response_headers": []any{"X-Disagg-Revision", "x-disagg-slice"},
-	})
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{})
 	if err != nil {
 		t.Fatalf("build prefill step: %v", err)
 	}
@@ -230,17 +228,20 @@ func TestResponseHeaders_FlowFromPrefillToDecode(t *testing.T) {
 		},
 	}
 
-	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("prefill failed: %v", err)
-	}
-
 	decodeStep, err := NewDecodeStep(gwClient, map[string]any{})
 	if err != nil {
 		t.Fatalf("build decode step: %v", err)
 	}
 	reqCtx.ResponseWriter = httptest.NewRecorder()
-	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("decode failed: %v", err)
+	p, err := pipeline.NewWithForwardResponseHeaders(
+		[]pipeline.Step{prefillStep, decodeStep},
+		[]string{"X-Disagg-Revision", "x-disagg-slice"},
+	)
+	if err != nil {
+		t.Fatalf("build pipeline: %v", err)
+	}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
 	}
 
 	if got := decodeHeaders.Get("X-Disagg-Revision"); got != "revision-b" {

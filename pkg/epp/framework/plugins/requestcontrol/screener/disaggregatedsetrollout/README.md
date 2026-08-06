@@ -137,6 +137,9 @@ pipeline:
     - x-disagg-slice
 ```
 
+The coordinator reserves these names for upstream responses. Values supplied
+by the original client are discarded until an upstream phase stamps them.
+
 In P/D, the prefill EPP chooses a covered revision and stamps it when the
 selected prefill begins responding. The decode EPP then applies the forwarded
 revision strictly:

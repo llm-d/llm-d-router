@@ -164,8 +164,7 @@ func TestEncodeStep_ResponseHeadersConstrainRemainingFanOut(t *testing.T) {
 	defer server.Close()
 
 	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
-		"use_openai_format":         false,
-		ParamForwardResponseHeaders: []any{"X-Disagg-Revision"},
+		"use_openai_format": false,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +181,11 @@ func TestEncodeStep_ResponseHeadersConstrainRemainingFanOut(t *testing.T) {
 		},
 	}
 
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
+	p, err := pipeline.NewWithForwardResponseHeaders([]pipeline.Step{step}, []string{"X-Disagg-Revision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("encode failed: %v", err)
 	}
 	if got := reqCtx.ForwardedHeaders()["x-disagg-revision"]; got != "revision-b" {

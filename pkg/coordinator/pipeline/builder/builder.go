@@ -54,9 +54,6 @@ func mergePipelineDefaults(params map[string]any, cfg config.PipelineConfig) map
 	if _, ok := out[steps.ParamECConnector]; !ok && cfg.ECConnector != "" {
 		out[steps.ParamECConnector] = cfg.ECConnector
 	}
-	if len(cfg.ForwardResponseHeaders) > 0 {
-		out[steps.ParamForwardResponseHeaders] = cfg.ForwardResponseHeaders
-	}
 	return out
 }
 

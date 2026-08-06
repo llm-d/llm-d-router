@@ -18,7 +18,6 @@ package steps
 
 import (
 	"encoding/json"
-	"reflect"
 	"testing"
 	"time"
 
@@ -143,43 +142,6 @@ func TestParamString(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("value = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParamStringSlice(t *testing.T) {
-	tests := []struct {
-		name    string
-		value   any
-		want    []string
-		wantErr bool
-	}{
-		{name: "absent"},
-		{name: "yaml list", value: []any{"first", "second"}, want: []string{"first", "second"}},
-		{name: "string list", value: []string{"first", "second"}, want: []string{"first", "second"}},
-		{name: "not a list", value: "first", wantErr: true},
-		{name: "non-string entry", value: []any{"first", 2}, wantErr: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			params := map[string]any{}
-			if test.value != nil {
-				params["key"] = test.value
-			}
-			got, err := paramStringSlice(params, "key")
-			if test.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got %v", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("value = %v, want %v", got, test.want)
 			}
 		})
 	}

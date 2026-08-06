@@ -17,7 +17,6 @@ limitations under the License.
 package builder
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -60,10 +59,11 @@ func TestValidatePipeline(t *testing.T) {
 	}
 }
 
-func TestMergePipelineDefaultsForwardsResponseHeaders(t *testing.T) {
-	forwardHeaders := []string{"x-disagg-revision", "x-disagg-slice"}
-	params := mergePipelineDefaults(nil, config.PipelineConfig{ForwardResponseHeaders: forwardHeaders})
-	if got := params[steps.ParamForwardResponseHeaders]; !reflect.DeepEqual(got, forwardHeaders) {
-		t.Fatalf("forward response headers = %v, want %v", got, forwardHeaders)
+func TestMergePipelineDefaultsDoesNotInjectResponseHeadersIntoSteps(t *testing.T) {
+	params := mergePipelineDefaults(nil, config.PipelineConfig{
+		ForwardResponseHeaders: []string{"x-disagg-revision"},
+	})
+	if _, found := params["forward_response_headers"]; found {
+		t.Fatalf("pipeline response headers leaked into step parameters: %v", params)
 	}
 }

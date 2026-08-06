@@ -20,15 +20,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 )
 
 // Parameter key constants for step configuration maps.
 const (
-	ParamKVConnector            = "kv_connector"
-	ParamECConnector            = "ec_connector"
-	ParamForwardResponseHeaders = "forward_response_headers"
+	ParamKVConnector = "kv_connector"
+	ParamECConnector = "ec_connector"
 )
 
 const ModalityImage = "image"
@@ -104,58 +102,6 @@ func paramString(params map[string]any, key string) (string, error) {
 	default:
 		return "", fmt.Errorf("%s: expected string, got %T", key, v)
 	}
-}
-
-// paramStringSlice reads a list of strings from YAML-decoded []any or a
-// programmatically supplied []string. A missing key returns nil.
-func paramStringSlice(params map[string]any, key string) ([]string, error) {
-	raw, ok := params[key]
-	if !ok || raw == nil {
-		return nil, nil
-	}
-
-	var entries []any
-	switch value := raw.(type) {
-	case []any:
-		entries = value
-	case []string:
-		entries = make([]any, len(value))
-		for index, entry := range value {
-			entries[index] = entry
-		}
-	default:
-		return nil, fmt.Errorf("%s: expected list of strings, got %T", key, raw)
-	}
-
-	values := make([]string, len(entries))
-	for index, entry := range entries {
-		value, ok := entry.(string)
-		if !ok {
-			return nil, fmt.Errorf("%s[%d]: expected string, got %T", key, index, entry)
-		}
-		values[index] = value
-	}
-	return values, nil
-}
-
-func paramForwardResponseHeaders(params map[string]any, stepName string) ([]string, error) {
-	headers, err := paramStringSlice(params, ParamForwardResponseHeaders)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", stepName, err)
-	}
-	seen := make(map[string]struct{}, len(headers))
-	for index, name := range headers {
-		name = strings.ToLower(strings.TrimSpace(name))
-		if name == "" {
-			return nil, fmt.Errorf("%s: %s[%d] must not be empty", stepName, ParamForwardResponseHeaders, index)
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return nil, fmt.Errorf("%s: %s contains duplicate header %q", stepName, ParamForwardResponseHeaders, name)
-		}
-		seen[name] = struct{}{}
-		headers[index] = name
-	}
-	return headers, nil
 }
 
 // paramBool reads a boolean step parameter. A missing key returns ok=false so

@@ -265,14 +265,15 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
-| Downstream headers | `encode` and `prefill` responses | later upstream requests |
+| Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
 it as the base header set, then stamp the request ID and `EPP-Profile`. The pipeline can
-allowlist response headers with `forward_response_headers`; values returned by one phase
-are stored on the request context and override client-provided values on later requests.
+allowlist response headers with `forward_response_headers`; values returned by any
+response-producing step are stored on the request context for later requests. Configured
+names are reserved for this relay, so client-provided values are not sent upstream.
 
 ### EPP-Profile routing
 
@@ -329,7 +330,8 @@ pipeline:
     - x-disagg-slice
 ```
 
-Only listed response headers are carried. In E/P/D, the first encode request
+Only listed response headers are carried, and client-provided values for those
+names are discarded. In E/P/D, the first encode request
 establishes the revision for the remaining encode requests, prefill, and decode.
 Each later response can update the carried values, so decode can prefer the
 prefill slice without forwarding unrelated worker response headers.

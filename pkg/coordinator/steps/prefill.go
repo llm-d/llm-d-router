@@ -43,11 +43,10 @@ func init() {
 }
 
 type PrefillStep struct {
-	useOpenAIFormat        bool
-	gwClient               *gateway.Client
-	kv                     kv.Connector
-	ec                     ec.Connector
-	forwardResponseHeaders []string
+	useOpenAIFormat bool
+	gwClient        *gateway.Client
+	kv              kv.Connector
+	ec              ec.Connector
 }
 
 func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -74,16 +73,11 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	forwardResponseHeaders, err := paramForwardResponseHeaders(params, PrefillStepName)
-	if err != nil {
-		return nil, err
-	}
 	return &PrefillStep{
-		useOpenAIFormat:        useOpenAI,
-		gwClient:               gwClient,
-		kv:                     kvConn,
-		ec:                     ecConn,
-		forwardResponseHeaders: forwardResponseHeaders,
+		useOpenAIFormat: useOpenAI,
+		gwClient:        gwClient,
+		kv:              kvConn,
+		ec:              ecConn,
 	}, nil
 }
 
@@ -133,11 +127,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
-	for _, name := range s.forwardResponseHeaders {
-		if values := resp.Header.Values(name); len(values) > 0 {
-			reqCtx.SetDownstreamHeader(name, values[0])
-		}
-	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil

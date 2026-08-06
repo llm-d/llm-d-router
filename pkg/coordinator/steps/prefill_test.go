@@ -22,7 +22,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -31,39 +30,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
-
-func TestNewPrefillStep_ForwardResponseHeaders(t *testing.T) {
-	gwClient := gateway.New(config.GatewayConfig{Address: "http://gateway.example"})
-
-	step, err := NewPrefillStep(gwClient, map[string]any{
-		ParamForwardResponseHeaders: []any{" X-Disagg-Revision ", "x-disagg-slice"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	prefillStep := step.(*PrefillStep)
-	want := []string{"x-disagg-revision", "x-disagg-slice"}
-	if !reflect.DeepEqual(prefillStep.forwardResponseHeaders, want) {
-		t.Fatalf("forward response headers = %v, want %v", prefillStep.forwardResponseHeaders, want)
-	}
-
-	for _, test := range []struct {
-		name  string
-		value any
-	}{
-		{name: "empty", value: []any{""}},
-		{name: "duplicate", value: []any{"x-disagg-revision", "X-Disagg-Revision"}},
-		{name: "not a list", value: "x-disagg-revision"},
-		{name: "non-string entry", value: []any{1}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := NewPrefillStep(gwClient, map[string]any{ParamForwardResponseHeaders: test.value})
-			if err == nil {
-				t.Fatal("expected configuration error")
-			}
-		})
-	}
-}
 
 func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	var prefillBody map[string]any
