@@ -12,11 +12,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
-	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -119,7 +116,7 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() {
 	setupK8sClient()
 	createCRDs()
 	// If we are running tests in parallel, create the renderer in the "base namespace"
-	createdRendererNS = setupNameSpaceHelper(baseNsName)
+	createdRendererNS = testutils.SetupNamespace(testConfig, baseNsName)
 	renderObjects = createRender(baseNsName)
 }, func() {
 	if ginkgo.GinkgoParallelProcess() != 1 {
@@ -162,7 +159,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			ginkgo.By("Deleting created Kubernetes objects")
 			testutils.DeleteObjects(testConfig, renderObjects, baseNsName)
 			if createdRendererNS {
-				deleteNameSpace(baseNsName)
+				testutils.DeleteNamespace(testConfig, baseNsName)
 			}
 			testutils.DeleteObjects(testConfig, crdObjects, "")
 		}
@@ -249,47 +246,6 @@ func setupK8sClient() {
 	testConfig.CreateCli()
 
 	k8slog.SetLogger(ginkgo.GinkgoLogr)
-}
-
-// setupNameSpace sets up the specified namespace if it doesn't exist
-func setupNameSpace() bool {
-	return setupNameSpaceHelper(getNamespace())
-}
-
-func setupNameSpaceHelper(nsName string) bool {
-	ginkgo.By("Setup namespace " + nsName)
-	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
-	if err == nil {
-		return false
-	}
-	gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
-
-	ginkgo.By("Creating namespace " + nsName)
-	namespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
-		},
-	}
-	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	ginkgo.By("Ensuring namespace exists: " + nsName)
-	testutils.EventuallyExists(testConfig, func() error {
-		return testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
-	})
-
-	return true
-}
-
-func deleteNameSpace(nsName string) {
-	ginkgo.By("Deleting namespace " + nsName)
-	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(func() bool {
-		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
-		return apierrors.IsNotFound(err)
-	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.

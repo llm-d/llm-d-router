@@ -113,9 +113,13 @@ else
 BUILDER_E2E_KUBECONFIG_FLAGS =
 endif
 
-# Env vars forwarded into the e2e test container.
+E2E_NUM_PROCS ?= 5
+
+# Env vars forwarded into the e2e test container. E2E_NUM_PROCS reaches both
+# `ginkgo --procs` (via the runner script) and the suite's numProcesses; the
+# suite fails fast if the two disagree.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
-               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
+               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE E2E_NUM_PROCS \
                E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
