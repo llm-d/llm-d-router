@@ -20,6 +20,7 @@ import (
 	"math"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
 )
 
 // TokenEstimator estimates the number of tokens for an LLM request.
@@ -32,11 +33,26 @@ type TokenEstimator interface {
 	// count, bounded by the client-requested cap (maxOutputTokens, nil if unset)
 	// and the estimator's configured operator cap.
 	EstimateOutput(inputTokens int64, maxOutputTokens *int64) int64
+	// EstimateOutputFromRequest returns the estimated output token count from the
+	// OSL bucket published as a request attribute by the osl-bucket plugin,
+	// falling back to the ratio-based estimate for UNKNOWN or unclassified requests.
+	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 }
 
 // DefaultOutputRatio is the estimated output-to-input token ratio used when no
 // ratio is configured.
 const DefaultOutputRatio = 1.5
+
+const (
+	// longOutputEstimateTokens is the flat output-token estimate for a LONG
+	// (reasoning) request. It is deliberately a fixed value rather than the
+	// client's thinking_budget: the estimate exists to rank requests by load,
+	// where the LONG-vs-SHORT separation dominates, not to predict exact length.
+	longOutputEstimateTokens int64 = 4096
+	// shortOutputEstimateTokens is the flat output-token estimate for a SHORT
+	// (tool-call) request.
+	shortOutputEstimateTokens int64 = 100
+)
 
 // SimpleTokenEstimator derives input tokens from the tokenized prompt and
 // estimates output tokens as inputTokens * OutputRatio, bounded by the
@@ -109,4 +125,41 @@ func (e *SimpleTokenEstimator) EstimateOutput(inputTokens int64, maxOutputTokens
 		est = *e.MaxEstimatedOutputTokens
 	}
 	return est
+}
+
+// EstimateOutputFromRequest returns the estimated output token count from the OSL
+// bucket published by the osl-bucket plugin as a request attribute. LONG requests
+// (reasoning mode) use a flat 4096-token estimate and SHORT requests (tool-call)
+// use 100, each bounded by the client-requested cap. UNKNOWN — or a missing
+// attribute, e.g. when the osl-bucket plugin is not enabled — falls back to the
+// ratio-based EstimateOutput.
+func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
+	if request == nil || request.Body == nil {
+		return 0
+	}
+	body := request.Body
+
+	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+	switch bucket {
+	case oslbucket.OSLBucketLong:
+		est := longOutputEstimateTokens
+		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
+			est = *body.MaxOutputTokens
+		}
+		if e.MaxEstimatedOutputTokens != nil && *e.MaxEstimatedOutputTokens >= 0 && *e.MaxEstimatedOutputTokens < est {
+			est = *e.MaxEstimatedOutputTokens
+		}
+		return est
+
+	case oslbucket.OSLBucketShort:
+		est := shortOutputEstimateTokens
+		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
+			est = *body.MaxOutputTokens
+		}
+		return est
+
+	default:
+		// OSLBucketUnknown (or missing attribute): fall back to the ratio-based estimate.
+		return e.EstimateOutput(e.EstimateInput(request), body.MaxOutputTokens)
+	}
 }

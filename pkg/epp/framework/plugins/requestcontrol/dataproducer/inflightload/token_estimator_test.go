@@ -24,6 +24,7 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
 )
 
 // tokenizedRequest builds a request whose body carries a tokenized prompt of n tokens.
@@ -35,6 +36,16 @@ func tokenizedRequest(n int) *fwksched.InferenceRequest {
 			},
 		},
 	}
+}
+
+// requestWithBucket builds a request whose OSL bucket attribute is set (as the
+// osl-bucket plugin would), plus an optional client output cap.
+func requestWithBucket(bucket oslbucket.OSLBucket, maxOut *int64) *fwksched.InferenceRequest {
+	req := &fwksched.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{MaxOutputTokens: maxOut},
+	}
+	req.PutAttribute(oslbucket.OSLBucketKey, bucket)
+	return req
 }
 
 func TestSimpleTokenEstimator_Estimate(t *testing.T) {
@@ -215,4 +226,43 @@ func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
 			require.Equal(t, tc.expected, actual)
 		})
 	}
+}
+
+func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
+	e := NewSimpleTokenEstimator()
+
+	t.Run("nil request → 0", func(t *testing.T) {
+		require.Equal(t, int64(0), e.EstimateOutputFromRequest(nil))
+	})
+
+	t.Run("LONG bucket → flat 4096", func(t *testing.T) {
+		req := requestWithBucket(oslbucket.OSLBucketLong, nil)
+		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("LONG capped by max_output_tokens", func(t *testing.T) {
+		req := requestWithBucket(oslbucket.OSLBucketLong, ptr.To(int64(2000)))
+		require.Equal(t, int64(2000), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("SHORT bucket → 100", func(t *testing.T) {
+		req := requestWithBucket(oslbucket.OSLBucketShort, nil)
+		require.Equal(t, int64(100), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("SHORT capped below 100 by max_output_tokens", func(t *testing.T) {
+		req := requestWithBucket(oslbucket.OSLBucketShort, ptr.To(int64(50)))
+		require.Equal(t, int64(50), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("UNKNOWN bucket falls back to ratio-based estimate", func(t *testing.T) {
+		req := tokenizedRequest(100) // 100 input tokens, ratio 1.5 → 150 output
+		req.PutAttribute(oslbucket.OSLBucketKey, oslbucket.OSLBucketUnknown)
+		require.Equal(t, int64(150), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("missing attribute falls back to ratio-based estimate", func(t *testing.T) {
+		req := tokenizedRequest(100) // no osl-bucket attribute set
+		require.Equal(t, int64(150), e.EstimateOutputFromRequest(req))
+	})
 }
