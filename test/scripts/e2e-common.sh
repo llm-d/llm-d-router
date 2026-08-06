@@ -30,7 +30,10 @@ e2e_handle_interrupt() {
 }
 
 # run_ginkgo_suite runs the Ginkgo e2e suite in the given package directory.
+# The optional second argument overrides the 45m default timeout for suites
+# whose specs each stand up their own model servers.
 run_ginkgo_suite() {
   local pkg="$1"
-  ginkgo run --procs="${E2E_NUM_PROCS}" --timeout 45m -v --fail-fast "${pkg}"
+  local timeout="${2:-45m}"
+  ginkgo run --procs="${E2E_NUM_PROCS}" --timeout "${timeout}" -v --fail-fast "${pkg}"
 }
