@@ -495,9 +495,9 @@ func TestProduce_NilMetrics_NeutralLoad(t *testing.T) {
 // per-tier cached-block map alongside the unweighted total.
 func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier map[string]int) scheduling.Endpoint {
 	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: name},
-		Address:        address,
-		Port:           "8080",
+		ID:      k8stypes.NamespacedName{Name: name},
+		Address: address,
+		Port:    "8080",
 	}, nil, nil)
 	e.Put(p.prefixMatchDataKey.String(),
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).
@@ -506,8 +506,7 @@ func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier ma
 	return e
 }
 
-// A source whose blocks are GPU-only cannot serve a pull and must never be
-// chosen over a CPU-tier holder, whatever its unweighted total says.
+// A GPU-only holder cannot serve a pull and must lose to a CPU-tier holder.
 func TestProduce_GPUOnlySource_NotChosen(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
@@ -525,8 +524,7 @@ func TestProduce_GPUOnlySource_NotChosen(t *testing.T) {
 	assert.Equal(t, 3*testBlockSize, best.cachedTokens)
 }
 
-// Speculative entries carry no engine-confirmed placement and must not make
-// an endpoint a pull source.
+// Speculative entries must not make an endpoint a pull source.
 func TestProduce_SpeculativeOnlySource_NoStash(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
@@ -542,8 +540,7 @@ func TestProduce_SpeculativeOnlySource_NoStash(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// Producers that supply no tier data (the approximate CPU producer) keep the
-// unweighted count: their index is tier-scoped by construction.
+// Producers without tier data keep the unweighted count.
 func TestProduce_NoTierData_FallsBackToUnweighted(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
@@ -559,9 +556,7 @@ func TestProduce_NoTierData_FallsBackToUnweighted(t *testing.T) {
 	assert.Equal(t, 4*testBlockSize, best.cachedTokens)
 }
 
-// The computing side of the delta stays tier-blind: local blocks need no pull
-// regardless of the tier holding them, so a GPU-only computing pod still
-// suppresses the header when the delta is below threshold.
+// The computing side of the delta stays tier-blind.
 func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 2 * testBlockSize})
