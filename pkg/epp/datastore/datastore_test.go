@@ -18,6 +18,7 @@ package datastore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"reflect"
@@ -43,6 +44,7 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
@@ -1625,4 +1627,209 @@ func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
 	eps := ds.PodList(AllPodsPredicate)
 	assert.Len(t, eps, 1)
 	assert.Equal(t, "10.0.0.1", eps[0].GetMetadata().Address)
+}
+
+// endpointWithModels builds a scraped endpoint carrying the given models as its collected attribute.
+func endpointWithModels(models ...attrmodels.ModelData) fwkdl.Endpoint {
+	ep := fwkdl.NewEndpoint(nil, nil)
+	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection(models))
+	return ep
+}
+
+// endpointWithIDAndModels is endpointWithModels with an explicit endpoint identity, used to assert
+// the identity-ordered dedup winner when the same model ID is reported by multiple endpoints.
+func endpointWithIDAndModels(id string, models ...attrmodels.ModelData) fwkdl.Endpoint {
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: id}}, nil)
+	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection(models))
+	return ep
+}
+
+func modelIDs(data []attrmodels.ModelData) []string {
+	ids := make([]string, 0, len(data))
+	for _, m := range data {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+func unmarshalModelResponse(t *testing.T, body json.RawMessage) attrmodels.ModelResponse {
+	t.Helper()
+	var resp attrmodels.ModelResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	return resp
+}
+
+func TestAggregateModels_DuplicateModelFromMultipleEndpoints(t *testing.T) {
+	t.Parallel()
+
+	endpoints := []fwkdl.Endpoint{
+		endpointWithModels(
+			attrmodels.ModelData{ID: "base"},
+			attrmodels.ModelData{ID: "legal", Parent: "base"},
+		),
+		endpointWithModels(
+			attrmodels.ModelData{ID: "base"},
+			attrmodels.ModelData{ID: "finance", Parent: "base"},
+		),
+		fwkdl.NewEndpoint(nil, nil), // registered but not yet scraped
+	}
+
+	body, gotCollected := aggregateModels(endpoints)
+
+	// Two of the three endpoints have been scraped; the unscraped one does not count.
+	assert.Equal(t, 2, gotCollected)
+	resp := unmarshalModelResponse(t, body)
+	assert.Equal(t, "list", resp.Object)
+	// Union across endpoints, deduplicated by ID, sorted for stable output.
+	assert.Equal(t, []string{"base", "finance", "legal"}, modelIDs(resp.Data))
+	for _, m := range resp.Data {
+		if m.ID == "legal" || m.ID == "finance" {
+			assert.Equal(t, "base", m.Parent, "adapter %q should carry its parent", m.ID)
+		}
+	}
+}
+
+func TestAggregateModels_DuplicateModelOnSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	// A single endpoint reports the same model ID twice.
+	// aggregator should deduplicate within a single endpoint too, keep only the first occurrence.
+	endpoints := []fwkdl.Endpoint{
+		endpointWithModels(
+			attrmodels.ModelData{ID: "base", OwnedBy: "second"},
+			attrmodels.ModelData{ID: "base", OwnedBy: "first"},
+			attrmodels.ModelData{ID: "unique"},
+		),
+	}
+
+	body, gotCollected := aggregateModels(endpoints)
+
+	assert.Equal(t, 1, gotCollected)
+	resp := unmarshalModelResponse(t, body)
+	assert.Equal(t, []string{"base", "unique"}, modelIDs(resp.Data))
+	// The first occurrence wins
+	assert.Equal(t, "second", resp.Data[0].OwnedBy)
+}
+
+func TestAggregateModels_PreservesOpenAIFields(t *testing.T) {
+	t.Parallel()
+
+	endpoints := []fwkdl.Endpoint{
+		endpointWithModels(attrmodels.ModelData{
+			ID:      "base",
+			Object:  "model",
+			Created: 1699999999,
+			OwnedBy: "vllm",
+		}),
+	}
+
+	body, _ := aggregateModels(endpoints)
+
+	resp := unmarshalModelResponse(t, body)
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, attrmodels.ModelData{
+		ID:      "base",
+		Object:  "model",
+		Created: 1699999999,
+		OwnedBy: "vllm",
+	}, resp.Data[0])
+}
+
+func TestAggregateModels_DeterministicDedupWinner(t *testing.T) {
+	t.Parallel()
+
+	// The same model ID is reported by two endpoints with differing metadata. The lower-ID
+	// endpoint's entry wins because aggregateModels sorts by endpoint identity before deduping;
+	// ep-b is listed first here to prove ordering, not slice position, determines the winner.
+	endpoints := []fwkdl.Endpoint{
+		endpointWithIDAndModels("ep-b", attrmodels.ModelData{ID: "shared", OwnedBy: "from-b", Created: 200}),
+		endpointWithIDAndModels("ep-a", attrmodels.ModelData{ID: "shared", OwnedBy: "from-a", Created: 100}),
+	}
+
+	body, _ := aggregateModels(endpoints)
+
+	resp := unmarshalModelResponse(t, body)
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, attrmodels.ModelData{ID: "shared", OwnedBy: "from-a", Created: 100}, resp.Data[0])
+}
+
+func TestAggregateModels_NoEndpoints(t *testing.T) {
+	t.Parallel()
+
+	body, gotCollected := aggregateModels(nil)
+
+	assert.Equal(t, 0, gotCollected)
+	resp := unmarshalModelResponse(t, body)
+	assert.Equal(t, "list", resp.Object)
+	assert.Empty(t, resp.Data)
+}
+
+func TestAggregateModels_NotScrapedYet(t *testing.T) {
+	t.Parallel()
+
+	// Endpoints are registered but none have been scraped yet (no attribute key present).
+	endpoints := []fwkdl.Endpoint{
+		fwkdl.NewEndpoint(nil, nil),
+		fwkdl.NewEndpoint(nil, nil),
+	}
+
+	_, gotCollected := aggregateModels(endpoints)
+
+	assert.Equal(t, 0, gotCollected)
+}
+
+func TestAggregateModels_ConcurrentWithPodChurn(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
+
+	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(inferencePool)))
+
+	const goroutines = 8
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				// 4 concurrent create endpoints then add metadata, delete endpoint immediately
+				for j := 0; j < iterations; j++ {
+					id := types.NamespacedName{Namespace: "default", Name: "pod-" + strconv.Itoa(i) + "-" + strconv.Itoa(j)}
+					meta := &fwkdl.EndpointMetadata{
+						ID:      id,
+						Address: net.IPv4(10, 0, byte(i), byte(j%256)).String(),
+						Port:    "8000",
+					}
+					ds.EndpointUpsert(ctx, meta)
+					// EndpointUpsert does not return the endpoint, so retrieve it from datastore and set model attributes on it.
+					eps := ds.PodList(func(ep fwkdl.Endpoint) bool {
+						return ep.GetMetadata().ID == id
+					})
+					for _, ep := range eps {
+						ep.GetAttributes().Put(
+							attrmodels.ModelsAttributeKey,
+							attrmodels.ModelDataCollection{{ID: "model-" + id.Name}},
+						)
+					}
+					ds.EndpointDelete(id)
+				}
+			} else {
+				// rest 4 concurrent reads via AggregateModels.
+				for j := 0; j < iterations; j++ {
+					body, collected := ds.AggregateModels()
+					if collected > 0 {
+						assert.NotNil(t, body, "non-zero collected but nil body")
+						resp := unmarshalModelResponse(t, body)
+						assert.Equal(t, "list", resp.Object)
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }

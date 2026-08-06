@@ -40,8 +40,11 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	extractormodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcemodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
@@ -886,13 +889,18 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, rawCfg.DataLayer, "Data section should be injected by default")
-				require.Len(t, rawCfg.DataLayer.Sources, 1, "Should have one default source")
+				require.Len(t, rawCfg.DataLayer.Sources, 2, "Should have the metrics and models default sources")
 				require.Equal(t, sourcemetrics.MetricsDataSourceType, rawCfg.DataLayer.Sources[0].PluginRef)
 				require.Len(t, rawCfg.DataLayer.Sources[0].Extractors, 1)
 				require.Equal(t, extractormetrics.MetricsExtractorType, rawCfg.DataLayer.Sources[0].Extractors[0].PluginRef)
+				require.Equal(t, sourcemodels.ModelsDataSourceType, rawCfg.DataLayer.Sources[1].PluginRef)
+				require.Len(t, rawCfg.DataLayer.Sources[1].Extractors, 1)
+				require.Equal(t, attrmodels.ModelsExtractorType, rawCfg.DataLayer.Sources[1].Extractors[0].PluginRef)
 				require.NotNil(t, cfg.DataConfig, "DataConfig should be built")
 				require.NotNil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource plugin should be instantiated")
 				require.NotNil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor plugin should be instantiated")
+				require.NotNil(t, handle.Plugin(sourcemodels.ModelsDataSourceType), "ModelsDataSource plugin should be instantiated")
+				require.NotNil(t, handle.Plugin(attrmodels.ModelsExtractorType), "ModelsExtractor plugin should be instantiated")
 			},
 		},
 		{
@@ -901,12 +909,15 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, rawCfg.DataLayer, "DataLayer section should be present")
-				require.Len(t, rawCfg.DataLayer.Sources, 1, "Default metrics source should be injected")
+				require.Len(t, rawCfg.DataLayer.Sources, 2, "Default metrics and models sources should be injected")
 				require.Equal(t, sourcemetrics.MetricsDataSourceType, rawCfg.DataLayer.Sources[0].PluginRef)
+				require.Equal(t, sourcemodels.ModelsDataSourceType, rawCfg.DataLayer.Sources[1].PluginRef)
 				require.NotNil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource should be instantiated")
 				require.NotNil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor should be instantiated")
+				require.NotNil(t, handle.Plugin(sourcemodels.ModelsDataSourceType), "ModelsDataSource should be instantiated")
+				require.NotNil(t, handle.Plugin(attrmodels.ModelsExtractorType), "ModelsExtractor should be instantiated")
 				require.NotNil(t, cfg.DataConfig)
-				require.Len(t, cfg.DataConfig.Sources, 1)
+				require.Len(t, cfg.DataConfig.Sources, 2)
 			},
 		},
 		{
@@ -918,6 +929,8 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Empty(t, rawCfg.DataLayer.Sources, "No sources should be present when InjectDefaults is false")
 				require.Nil(t, handle.Plugin(sourcemetrics.MetricsDataSourceType), "MetricsDataSource should not be instantiated")
 				require.Nil(t, handle.Plugin(extractormetrics.MetricsExtractorType), "MetricsExtractor should not be instantiated")
+				require.Nil(t, handle.Plugin(sourcemodels.ModelsDataSourceType), "ModelsDataSource should not be instantiated")
+				require.Nil(t, handle.Plugin(attrmodels.ModelsExtractorType), "ModelsExtractor should not be instantiated")
 				require.NotNil(t, cfg.DataConfig, "DataConfig is built but empty")
 				require.Empty(t, cfg.DataConfig.Sources)
 			},
@@ -928,10 +941,14 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, rawCfg.DataLayer, "Data config should be present")
-				require.Len(t, rawCfg.DataLayer.Sources, 2, "User source + injected metrics source")
-				pluginRefs := []string{rawCfg.DataLayer.Sources[0].PluginRef, rawCfg.DataLayer.Sources[1].PluginRef}
+				require.Len(t, rawCfg.DataLayer.Sources, 3, "User source + injected metrics and models sources")
+				pluginRefs := make([]string, 0, len(rawCfg.DataLayer.Sources))
+				for _, source := range rawCfg.DataLayer.Sources {
+					pluginRefs = append(pluginRefs, source.PluginRef)
+				}
 				require.Contains(t, pluginRefs, "testSource", "User source should be preserved")
 				require.Contains(t, pluginRefs, sourcemetrics.MetricsDataSourceType, "Default metrics source should be injected")
+				require.Contains(t, pluginRefs, sourcemodels.ModelsDataSourceType, "Default models source should be injected")
 			},
 		},
 		{
@@ -1347,6 +1364,8 @@ func registerTestPlugins(t *testing.T) {
 	// Datalayer plugins are now defaults; register their real factories.
 	fwkplugin.Register(sourcemetrics.MetricsDataSourceType, fwkplugin.StabilityStable, sourcemetrics.MetricsDataSourceFactory)
 	fwkplugin.Register(extractormetrics.MetricsExtractorType, fwkplugin.StabilityStable, extractormetrics.CoreMetricsExtractorFactory)
+	fwkplugin.Register(sourcemodels.ModelsDataSourceType, fwkplugin.StabilityBeta, sourcemodels.ModelDataSourceFactory)
+	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityBeta, extractormodels.ModelServerExtractorFactory)
 }
 
 func TestValidateSaturationDetector(t *testing.T) {
