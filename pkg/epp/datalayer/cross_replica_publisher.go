@@ -35,9 +35,7 @@ const (
 )
 
 // crossReplicaPublisher publishes each endpoint's local state to the syncer.
-// It runs on its own per-endpoint ticker (started by Runtime.NewEndpoint),
-// decoupled from the datalayer collector's base tick so the sync interval
-// is not clamped to the metric-scrape cadence.
+// It runs on its own per-endpoint ticker (started by Runtime.NewEndpoint).
 type crossReplicaPublisher struct {
 	syncer       fwkdl.CrossReplicaSyncer
 	contributors []fwkdl.CrossReplicaContributor
