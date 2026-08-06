@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	approximateprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 )
 
 const (
@@ -50,18 +51,24 @@ type speculativeEntries struct {
 // via PluginState, avoiding a second hash on the same request.
 // perPromptKeys holds one slice of block keys per prompt; single-prompt
 // requests use a length-1 outer slice.
+// prefixCacheMatches is a map of pod identifier to its longest prefix cache match length.
 type blockKeysState struct {
-	perPromptKeys [][]kvblock.BlockHash
+	perPromptKeys           [][]kvblock.BlockHash
+	prefixCacheMatchLengths map[string]float64
 }
 
 // Clone implements plugin.StateData.
 func (s *blockKeysState) Clone() plugin.StateData {
 	cp := make([][]kvblock.BlockHash, len(s.perPromptKeys))
+	pm := make(map[string]float64, len(s.prefixCacheMatchLengths))
+	for k, v := range s.prefixCacheMatchLengths {
+		pm[k] = v
+	}
 	for i, keys := range s.perPromptKeys {
 		cp[i] = make([]kvblock.BlockHash, len(keys))
 		copy(cp[i], keys)
 	}
-	return &blockKeysState{perPromptKeys: cp}
+	return &blockKeysState{perPromptKeys: cp, prefixCacheMatchLengths: pm}
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -158,17 +165,19 @@ func (p *Producer) PreRequest(ctx context.Context,
 		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
 		Speculative:   true,
 	}
-
+	allPodEntries := []kvblock.PodEntry{speculativePod}
+	totalBlocks := 0
 	index := p.kvCacheIndexer.KVBlockIndex()
 	// Insert per-prompt keys separately to preserve correct block adjacency.
 	for _, promptKeys := range state.perPromptKeys {
-		if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{speculativePod}); err != nil {
+		if err := index.Add(ctx, nil, promptKeys, allPodEntries); err != nil {
 			logger.Error(err, "Failed to add speculative entries to index",
 				"pod", speculativePod.PodIdentifier)
 		}
+		totalBlocks += len(promptKeys)
 	}
-
-	allPodEntries := []kvblock.PodEntry{speculativePod}
+	matchLen := state.prefixCacheMatchLengths[speculativePod.PodIdentifier]
+	approximateprefix.RecordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, int(matchLen), totalBlocks)
 
 	// P/D disagg: seed the prefill endpoint too.
 	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {

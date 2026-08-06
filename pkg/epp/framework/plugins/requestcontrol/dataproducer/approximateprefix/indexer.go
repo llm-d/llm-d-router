@@ -154,7 +154,7 @@ func (i *indexer) reportOnce(ctx context.Context) {
 		avg = float64(totalEntries) / float64(numPods)
 	}
 
-	recordPrefixCacheSize(i.pluginName, i.pluginType, int64(totalEntries))
+	RecordPrefixCacheSize(i.pluginName, i.pluginType, int64(totalEntries))
 
 	log.FromContext(ctx).V(logutil.TRACE).Info("Prefix cache state",
 		"total entries", totalEntries,
