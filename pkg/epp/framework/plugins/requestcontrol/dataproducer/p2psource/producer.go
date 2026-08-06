@@ -229,10 +229,6 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 
 // waitingQueueSize returns the endpoint's waiting-queue depth, or 0 when
 // metrics are absent so metric-less endpoints keep the delta-only behavior.
-// The waiting queue reflects inference admission, not pull-serve fanout; it
-// is a proxy for engine-step responsiveness (a busy engine serves its P2P
-// session slower), which is why equally-queued sources share traffic by
-// request hash rather than by any per-pod pull accounting.
 func waitingQueueSize(ep scheduling.Endpoint) int {
 	m := ep.GetMetrics()
 	if m == nil {
@@ -297,17 +293,15 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	logger.Info("set KV cache source header", "requestID", request.RequestID, "value", best.hostPort)
 }
 
-// cpuDeviceTier is the CachedBlocksByTier key for the CPU tier, as normalized
-// by the KV-event pipeline (device tiers are lowercased; offload events carry
-// DeviceTier=CPU).
+// cpuDeviceTier is the CachedBlocksByTier key for the CPU tier (device tiers
+// are lowercased by the KV-event pipeline).
 const cpuDeviceTier = "cpu"
 
 // sourceCachedTokens returns the prompt tokens the endpoint can serve a P2P
-// pull from, and its block size. A pull is served from the source's CPU tier,
-// so when per-tier data is present only the contiguous CPU-tier prefix
-// counts; GPU-only and speculative blocks cannot serve a pull. Producers that
-// supply no tier data (the approximate CPU producer) are tier-scoped by
-// construction, so their unweighted count stands.
+// pull from, and its block size. Pulls are served from the source's CPU tier,
+// so with per-tier data only the contiguous CPU-tier prefix counts; producers
+// without tier data are trusted as-is - the configured producer instance must
+// approximate the pull-servable (CPU) tier.
 func (p *Producer) sourceCachedTokens(ep scheduling.Endpoint) (tokens, blockSize int) {
 	info := p.matchInfo(ep)
 	if info == nil {
@@ -320,9 +314,8 @@ func (p *Producer) sourceCachedTokens(ep scheduling.Endpoint) (tokens, blockSize
 }
 
 // cachedTokenCount returns the endpoint's cached prompt tokens across all
-// tiers, or 0 when its PrefixCacheMatchInfo is absent. The computing pod's
-// local blocks need no pull regardless of the tier holding them, so this
-// side stays tier-blind.
+// tiers, or 0 when its PrefixCacheMatchInfo is absent. Local blocks need no
+// pull whatever their tier, so the computing side stays tier-blind.
 func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
 	info := p.matchInfo(ep)
 	if info == nil {
