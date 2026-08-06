@@ -490,3 +490,89 @@ func TestProduce_NilMetrics_NeutralLoad(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 }
+
+// tierEndpoint builds a candidate whose PrefixCacheMatchInfo carries a
+// per-tier cached-block map alongside the unweighted total.
+func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier map[string]int) scheduling.Endpoint {
+	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		NamespacedName: k8stypes.NamespacedName{Name: name},
+		Address:        address,
+		Port:           "8080",
+	}, nil, nil)
+	e.Put(p.prefixMatchDataKey.String(),
+		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).
+			WithCachedBlockCount(cachedBlocks).
+			WithCachedBlocksByTier(byTier))
+	return e
+}
+
+// A source whose blocks are GPU-only cannot serve a pull and must never be
+// chosen over a CPU-tier holder, whatever its unweighted total says.
+func TestProduce_GPUOnlySource_NotChosen(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-gpu-only"}
+	eps := []scheduling.Endpoint{
+		tierEndpoint(p, "pod-gpu", "10.0.0.1", 10, map[string]int{"gpu": 10}),
+		tierEndpoint(p, "pod-cpu", "10.0.0.2", 3, map[string]int{"gpu": 3, cpuDeviceTier: 3}),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
+	assert.Equal(t, 3*testBlockSize, best.cachedTokens)
+}
+
+// Speculative entries carry no engine-confirmed placement and must not make
+// an endpoint a pull source.
+func TestProduce_SpeculativeOnlySource_NoStash(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-spec"}
+	eps := []scheduling.Endpoint{
+		tierEndpoint(p, "pod-spec", "10.0.0.1", 10,
+			map[string]int{attrprefix.SpeculativeTierKey: 10}),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	_, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	assert.False(t, ok)
+}
+
+// Producers that supply no tier data (the approximate CPU producer) keep the
+// unweighted count: their index is tier-scoped by construction.
+func TestProduce_NoTierData_FallsBackToUnweighted(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-no-tier"}
+	eps := []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 4),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, 4*testBlockSize, best.cachedTokens)
+}
+
+// The computing side of the delta stays tier-blind: local blocks need no pull
+// regardless of the tier holding them, so a GPU-only computing pod still
+// suppresses the header when the delta is below threshold.
+func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 2 * testBlockSize})
+
+	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
+	computing := tierEndpoint(p, "pod-comp", "10.0.0.2", 5, map[string]int{"gpu": 5})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-comp-tiers"}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
+	p.PreRequest(ctx, req, decodeOnly(computing))
+
+	// source 6 cpu blocks minus computing 5 (gpu, but local) = 1 block < delta.
+	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
+}
