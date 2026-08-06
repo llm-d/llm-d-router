@@ -28,7 +28,6 @@ import (
 )
 
 const (
-	crossReplicaPublisherType = "cross-replica-publisher"
 	// defaultCrossReplicaSyncInterval is the fallback cadence at which local
 	// per-endpoint state is pushed to the syncer when none is configured.
 	defaultCrossReplicaSyncInterval = 200 * time.Millisecond
