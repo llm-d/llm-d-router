@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,11 +59,11 @@ func NewMultiClusterMetricsExtractor(name string, params *multiClusterMetricsExt
 	if params == nil {
 		params = &multiClusterMetricsExtractorParams{}
 	}
-	kvSpec, err := parseStringToSpec(orDefault(params.KVCacheUtilizationMetric, defaultKVCacheUtilizationMetric))
+	kvSpec, err := parseStringToSpec(cmp.Or(params.KVCacheUtilizationMetric, defaultKVCacheUtilizationMetric))
 	if err != nil {
 		return nil, fmt.Errorf("kv-cache utilization metric: %w", err)
 	}
-	queueSpec, err := parseStringToSpec(orDefault(params.QueueSizeMetric, defaultQueueSizeMetric))
+	queueSpec, err := parseStringToSpec(cmp.Or(params.QueueSizeMetric, defaultQueueSizeMetric))
 	if err != nil {
 		return nil, fmt.Errorf("queue size metric: %w", err)
 	}
@@ -95,6 +96,18 @@ func (e *MultiClusterMetricsExtractor) Extract(_ context.Context, in fwkdl.PollI
 	return errors.Join(errs...)
 }
 
+var _ fwkplugin.ProducerPlugin = &MultiClusterMetricsExtractor{}
+
+// Produces advertises the pool attributes so the dependency graph can verify a
+// scorer's required key has a producer.
+func (e *MultiClusterMetricsExtractor) Produces() map[fwkplugin.DataKey]any {
+	out := make(map[fwkplugin.DataKey]any, len(e.metrics))
+	for _, m := range e.metrics {
+		out[fwkplugin.NewDataKey(m.key, "")] = attrmetrics.ScalarMetricValue(0)
+	}
+	return out
+}
+
 // MultiClusterMetricsExtractorFactory instantiates the extractor from configuration.
 func MultiClusterMetricsExtractorFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := &multiClusterMetricsExtractorParams{}
@@ -104,11 +117,4 @@ func MultiClusterMetricsExtractorFactory(name string, parameters *json.Decoder, 
 		}
 	}
 	return NewMultiClusterMetricsExtractor(name, params)
-}
-
-func orDefault(v, fallback string) string {
-	if v == "" {
-		return fallback
-	}
-	return v
 }

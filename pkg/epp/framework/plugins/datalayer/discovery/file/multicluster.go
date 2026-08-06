@@ -24,6 +24,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // MultiClusterPluginType discovers peer clusters as endpoints for a cluster-scoped EPP.
@@ -80,58 +81,14 @@ func metricsHostFromLabels(meta *fwkdl.EndpointMetadata) {
 	meta.MetricsHost = net.JoinHostPort(addr, port)
 }
 
-// validateHostOrIP accepts an IP literal (v4 or v6) or an RFC-1123 DNS hostname, since a
+// validateHostOrIP accepts an IP literal (v4 or v6) or a DNS-1123 subdomain, since a
 // cluster gateway may be reached by either.
 func validateHostOrIP(address string) error {
 	if net.ParseIP(address) != nil {
 		return nil
 	}
-	if isValidHostname(address) {
+	if len(validation.IsDNS1123Subdomain(address)) == 0 {
 		return nil
 	}
 	return fmt.Errorf("invalid host %q", address)
-}
-
-// isValidHostname reports whether h is an RFC-1123 hostname: dot-separated LDH labels
-// (letters, digits, hyphen) of 1-63 chars, no label starting or ending with a hyphen, an
-// optional trailing dot, and at least one letter so a numeric string cannot pass as a
-// host. It is a character scan rather than a regexp, mirroring net.isDomainName.
-func isValidHostname(h string) bool {
-	l := len(h)
-	if l == 0 || l > 254 || (l == 254 && h[l-1] != '.') {
-		return false
-	}
-	last := byte('.')
-	hasLetter := false
-	partLen := 0
-	for i := 0; i < len(h); i++ {
-		c := h[i]
-		switch {
-		default:
-			return false
-		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z':
-			hasLetter = true
-			partLen++
-		case '0' <= c && c <= '9':
-			partLen++
-		case c == '-':
-			if last == '.' { // label cannot start with a hyphen
-				return false
-			}
-			partLen++
-		case c == '.':
-			if last == '.' || last == '-' { // empty label or trailing hyphen
-				return false
-			}
-			if partLen > 63 {
-				return false
-			}
-			partLen = 0
-		}
-		last = c
-	}
-	if last == '-' || partLen > 63 {
-		return false
-	}
-	return hasLetter
 }

@@ -34,7 +34,6 @@ var _ fwksched.Scorer = &MultiClusterScorer{}
 // explicit cluster-scoped type for a complete multicluster plugin family.
 type MultiClusterScorer struct {
 	*Plugin
-	name string
 }
 
 // MultiClusterScorerFactory builds the cluster-scoped prefix-cache scorer.
@@ -43,10 +42,10 @@ func MultiClusterScorerFactory(name string, decoder *json.Decoder, handle plugin
 	if err != nil {
 		return nil, err
 	}
-	return &MultiClusterScorer{Plugin: inner.(*Plugin), name: name}, nil
+	return &MultiClusterScorer{Plugin: inner.(*Plugin)}, nil
 }
 
 // TypedName reports the multi-cluster type with this instance's name.
 func (s *MultiClusterScorer) TypedName() plugin.TypedName {
-	return plugin.TypedName{Type: MultiClusterScorerType, Name: s.name}
+	return plugin.TypedName{Type: MultiClusterScorerType, Name: s.Plugin.TypedName().Name}
 }
