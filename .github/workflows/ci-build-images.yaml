@@ -146,7 +146,7 @@ jobs:
           additional-tags: ${{ inputs.coordinator-additional-tags }}
 
   push-helm-charts:
-    needs: [build-epp, build-sidecar]
+    needs: [build-epp, build-sidecar, build-coordinator]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
