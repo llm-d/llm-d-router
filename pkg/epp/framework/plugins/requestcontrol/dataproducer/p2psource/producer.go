@@ -181,7 +181,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		hasTierData bool
 	}
 	maxCached := 0
-	var matches []sourceMatch
+	matches := make([]sourceMatch, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if ep.GetMetadata() == nil {
 			continue

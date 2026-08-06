@@ -51,7 +51,7 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 		return nil, nil, nil
 	}
 
-	var result [][]kvblock.BlockHash
+	result := make([][]kvblock.BlockHash, 0, len(tp.Prompts))
 	var mmBlockIndices []int
 	for _, p := range tp.Prompts {
 		if len(p.TokenIDs) == 0 {
