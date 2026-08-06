@@ -19,6 +19,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -98,6 +99,10 @@ type Director interface {
 
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
+	// AggregateModels returns the combined, deduplicated, alphabetically sorted model list across
+	// all endpoints as a pre-serialized JSON body, and the count of endpoints that have reported
+	// their model list. A count of zero means no endpoint has been scraped yet.
+	AggregateModels() (json.RawMessage, int)
 }
 
 // Server implements the Envoy external processing server.
@@ -172,6 +177,7 @@ type RequestContext struct {
 	respHeaderResp  *extProcPb.ProcessingResponse
 	respBodyResp    []*extProcPb.ProcessingResponse
 	respTrailerResp *extProcPb.ProcessingResponse
+	localResp       *extProcPb.ProcessingResponse
 }
 
 type Request struct {
@@ -198,7 +204,11 @@ const (
 	// requestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
 	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
 	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
-	requestResponseProcessingSkipped
+	RequestResponseProcessingSkipped
+	// RequestAnsweredLocal indicates EPP answered the request itself with an ImmediateResponse
+	// (e.g. GET /v1/models aggregated across endpoints) rather than routing to a backend model server.
+	// The state machine sends the stored response and gracefully closes the stream.
+	RequestAnsweredLocal
 )
 
 // recvResult holds the result of a srv.Recv() call from the reader goroutine.
@@ -618,6 +628,11 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// See: https://github.com/envoyproxy/envoy/blob/0533de0acca281110945e5726bbb306fbb12bde5/api/envoy/service/ext_proc/v3/external_processor.proto#L40-L41
 			return nil
 		}
+		if reqCtx.RequestState == RequestAnsweredLocal {
+			// Request fully answered locally (e.g. GET /v1/models); close the gRPC stream without routing.
+			recordRequestProcessing()
+			return nil
+		}
 	}
 }
 
@@ -724,6 +739,15 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 			}
 		}
 		return nil
+	}
+
+	// EPP produced the full response itself (e.g. GET /v1/models).
+	if r.RequestState == RequestAnsweredLocal {
+		if r.localResp == nil {
+			return nil
+		}
+		loggerTrace.Info("Sending ImmediateResponse for locally-answered request", "obj", r.localResp)
+		return srv.Send(r.localResp)
 	}
 
 	// No switch statement as we could send multiple responses in one pass.

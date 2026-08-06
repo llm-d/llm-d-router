@@ -475,7 +475,7 @@ schedulingProfiles:
 `
 
 // successDataLayerNoSourcesText has an explicit empty dataLayer section with no sources.
-// The loader should additively inject the default metrics source because InjectDefaults is unset (default: true).
+// The loader should additively inject the default sources because InjectDefaults is unset (default: true).
 const successDataLayerNoSourcesText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
@@ -505,7 +505,7 @@ dataLayer:
 `
 
 // successDataLayerExplicitConfigText has the datalayer enabled with an explicit non-metrics source.
-// The loader should inject the default metrics source in addition to the user's source (additive).
+// The loader should inject the default sources in addition to the user's source (additive).
 const successDataLayerExplicitConfigText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
