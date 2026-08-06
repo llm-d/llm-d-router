@@ -39,14 +39,14 @@ This plugin produces:
 The producer supports the following runtime parameters:
 
 - `cacheSizeInMBPerServer` (integer, default: `4096`, 4 GiB): per-endpoint budget in
-  mebibytes (MiB) for the best-effort pod-affinity LRU. Values `<= 0` fall back to the
-  default.
+  mebibytes (MiB) for the best-effort pod-affinity LRU. Values `<= 0` or unspecified fall back
+  to the default.
 
 ### Sizing `cacheSizeInMBPerServer`
 
 This budget describes the **model server's** encoder cache, not the EPP's memory. The LRU
-holds content hashes (a few tens of bytes each), so the MiB figure is used only to derive
-how many entries to remember per endpoint:
+holds content encode hashes (a few tens of bytes each), so the MiB figure is used only to
+derive how many entries to remember per endpoint:
 
 ```
 entries per endpoint = cacheSizeInMBPerServer MiB / 2 MiB    (assumed size per tracked item)
@@ -63,9 +63,10 @@ pool routes to:
   degrades quietly; watch `encoder_cache_hit_ratio` rather than expecting an error.
 - **Too low** — real cache hits are forgotten early and affinity opportunities are missed.
 
-If your median item is much larger or smaller than 2 MiB (long video versus small images),
-scale the configured MiB accordingly: what the plugin ultimately needs is the right *entry
-count*, and the MiB value is just that count multiplied by 2 MiB.
+What the plugin ultimately needs is the correct target entry count. The configuration is
+expressed in MiB, and the entry count is derived from it using a fixed 2 MiB per entry
+baseline. If your workload deviates from that baseline (long video versus small images),
+scale the configured MiB so the plugin allocates the right number of slots.
 
 **Configuration Examples:**
 
@@ -107,11 +108,19 @@ schedulingProfiles:
 ## Operational Notes
 
 - The cache is a best-effort routing signal, not a correctness dependency.
-- Per-endpoint state is dropped when an endpoint goes away: immediately on an endpoint delete
-  event, and otherwise by a sweep every 2 minutes that discards entries for pods no longer in
-  the pod list. Nothing needs to be pruned by hand.
-- `encoder_cache_queries_total`, `encoder_cache_hits_total`, and `encoder_cache_hit_ratio`
-  report how often the affinity signal is finding a match.
+- Per-endpoint state is managed and cleaned up automatically, with no manual intervention
+  required. State removal happens through two distinct mechanisms:
+  - **Event-driven:** an endpoint delete event drops that endpoint's state immediately.
+  - **Periodic sweep:** every 2 minutes, entries for pods no longer in the pod list are
+    discarded, covering any delete event that was missed.
+- The producer emits three metrics on the EPP's own `/metrics` endpoint, under the
+  `llm_d_epp_` subsystem, to show how often the affinity signal finds a match:
+  - `encoder_cache_queries_total` — every item-hash lookup against the LRU;
+    labels `{plugin_type, plugin_name, modality}`.
+  - `encoder_cache_hits_total` — the subset of those lookups that matched, per endpoint;
+    labels `{plugin_type, plugin_name, pod, modality}`.
+  - `encoder_cache_hit_ratio` — histogram of matched items over total items per endpoint
+    for a single lookup; labels `{plugin_type, plugin_name}`.
 - The producer remains tokenizer-free for request shapes where typed media blocks are
   sufficient; `token-producer` is only required when relying on upstream multimodal
   metadata.
