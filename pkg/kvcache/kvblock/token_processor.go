@@ -38,10 +38,10 @@ const (
 	// HashAlgorithmCBORFNV hashes each block with FNV-64a over the canonical
 	// CBOR encoding of [parent, tokens, extra]. This is the default.
 	HashAlgorithmCBORFNV = "cbor-fnv"
-	// HashAlgorithmXXHash hashes each block with a single xxhash digest over
+	// HashAlgorithmXXH64 hashes each block with a single XXH64 digest over
 	// the parent hash (8 bytes little-endian), the raw token-ID bytes, and
 	// each extra-feature string prefixed with its 8-byte little-endian length.
-	HashAlgorithmXXHash = "xxhash"
+	HashAlgorithmXXH64 = "xxh64"
 )
 
 // TokenProcessorConfig holds the configuration for the token processor.
@@ -59,7 +59,7 @@ type TokenProcessorConfig struct {
 	// with the same seed value.
 	HashSeed string `json:"hashSeed"`
 	// HashAlgorithm selects the block hashing chain: HashAlgorithmCBORFNV
-	// (the default when empty) or HashAlgorithmXXHash. Block keys are
+	// (the default when empty) or HashAlgorithmXXH64. Block keys are
 	// internal to the index and need not match vLLM's hashes, but they must
 	// be consistent across the index's whole lifetime: like HashSeed, the
 	// algorithm must not change while a persisted or shared index (e.g. the
@@ -137,14 +137,14 @@ func NewChunkedTokenDatabase(config *TokenProcessorConfig) (TokenProcessor, erro
 	}
 
 	switch cfg.HashAlgorithm {
-	case "", HashAlgorithmCBORFNV, HashAlgorithmXXHash:
+	case "", HashAlgorithmCBORFNV, HashAlgorithmXXH64:
 	default:
 		return nil, fmt.Errorf("unsupported hashAlgorithm %q: accepted values are %q and %q",
-			cfg.HashAlgorithm, HashAlgorithmCBORFNV, HashAlgorithmXXHash)
+			cfg.HashAlgorithm, HashAlgorithmCBORFNV, HashAlgorithmXXH64)
 	}
 
 	if cfg.initHash == 0 {
-		if cfg.HashAlgorithm == HashAlgorithmXXHash {
+		if cfg.HashAlgorithm == HashAlgorithmXXH64 {
 			cfg.initHash = xxhash.Sum64String(cfg.HashSeed)
 		} else {
 			h := fnv.New64a()
@@ -165,11 +165,11 @@ func NewChunkedTokenDatabase(config *TokenProcessorConfig) (TokenProcessor, erro
 }
 
 // getInitHash returns the initial hash for the given model name.
-func (db *chunkedTokenDatabase) getInitHash(modelName string) uint64 {
-	if db.HashAlgorithm == HashAlgorithmXXHash {
+func (db *chunkedTokenDatabase) getInitHash(modelName string, digest *xxhash.Digest) uint64 {
+	if digest != nil {
 		// The model name occupies the extra-string position, mirroring the
 		// CBOR chain where it is passed as the extra of the seed hash.
-		return hashXX(xxhash.New(), db.initHash, nil, []MMHash{{Hash: modelName}})
+		return hashXXH64(digest, db.initHash, nil, []MMHash{{Hash: modelName}})
 	}
 	return db.hash(db.initHash, nil, modelName)
 }
@@ -198,14 +198,14 @@ func (db *chunkedTokenDatabase) hash(parent uint64, tokens []uint32, extra inter
 	return h.Sum64()
 }
 
-// hashXX computes one xxhash digest over the parent hash (8 bytes
+// hashXXH64 computes one XXH64 digest over the parent hash (8 bytes
 // little-endian), the token IDs (4 bytes little-endian each, so keys are
 // identical across architectures and shareable through a Redis-backed index),
 // and each extra string prefixed with its 8-byte little-endian length. The
 // length prefix prevents concatenation ambiguity between adjacent extra
 // strings. The digest is reset before use so callers can reuse one across
 // blocks.
-func hashXX(h *xxhash.Digest, parent uint64, tokens []uint32, extras []MMHash) uint64 {
+func hashXXH64(h *xxhash.Digest, parent uint64, tokens []uint32, extras []MMHash) uint64 {
 	h.Reset()
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], parent)
@@ -231,26 +231,19 @@ func hashXX(h *xxhash.Digest, parent uint64, tokens []uint32, extras []MMHash) u
 // extraFeatures must be the same length as tokenChunks (callers guarantee this).
 func (db *chunkedTokenDatabase) prefixHashes(
 	parentHash uint64, tokenChunks [][]uint32, extraFeatures []*BlockExtraFeatures,
+	digest *xxhash.Digest,
 ) []uint64 {
-	var digest *xxhash.Digest // one per call: the processor is shared across goroutines
-	if db.HashAlgorithm == HashAlgorithmXXHash {
-		digest = xxhash.New()
-	}
 	prefix := parentHash
 	hashes := make([]uint64, len(tokenChunks))
 	for i, chunk := range tokenChunks {
+		var extras []MMHash
+		if extraFeatures[i] != nil {
+			extras = extraFeatures[i].MMHashes
+		}
 		if digest != nil {
-			var extras []MMHash
-			if extraFeatures[i] != nil {
-				extras = extraFeatures[i].MMHashes
-			}
-			prefix = hashXX(digest, prefix, chunk, extras)
+			prefix = hashXXH64(digest, prefix, chunk, extras)
 		} else {
-			var extra interface{}
-			if extraFeatures[i] != nil {
-				extra = extraFeatures[i].MMHashes
-			}
-			prefix = db.hash(prefix, chunk, extra)
+			prefix = db.hash(prefix, chunk, extras)
 		}
 		hashes[i] = prefix
 	}
@@ -283,16 +276,21 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 	parentKey BlockHash, tokens []uint32, modelName string,
 	extraFeatures []*BlockExtraFeatures,
 ) ([]BlockHash, error) {
+	chunks := db.chunkTokens(tokens)
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	var digest *xxhash.Digest // one per call: the processor is shared across goroutines
+	if db.HashAlgorithm == HashAlgorithmXXH64 {
+		digest = xxhash.New()
+	}
+
 	var currentParentHash uint64
 	if parentKey != EmptyBlockHash {
 		currentParentHash = uint64(parentKey)
 	} else {
-		currentParentHash = db.getInitHash(modelName)
-	}
-
-	chunks := db.chunkTokens(tokens)
-	if len(chunks) == 0 {
-		return nil, nil
+		currentParentHash = db.getInitHash(modelName, digest)
 	}
 
 	if extraFeatures == nil {
@@ -302,7 +300,7 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 			len(extraFeatures), len(chunks), db.BlockSizeTokens, len(tokens))
 	}
 
-	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures)
+	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures, digest)
 
 	return utils.SliceMap(ph, func(hashVal uint64) BlockHash {
 		return BlockHash(hashVal)

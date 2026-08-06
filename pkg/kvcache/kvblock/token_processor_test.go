@@ -869,7 +869,8 @@ func TestNewChunkedTokenDatabase_HashAlgorithmValidation(t *testing.T) {
 	}{
 		{name: "empty defaults to cbor-fnv", algorithm: ""},
 		{name: "cbor-fnv accepted", algorithm: kvblock.HashAlgorithmCBORFNV},
-		{name: "xxhash accepted", algorithm: kvblock.HashAlgorithmXXHash},
+		{name: "xxh64 accepted", algorithm: kvblock.HashAlgorithmXXH64},
+		{name: "xxhash rejected", algorithm: "xxhash", wantErr: true},
 		{name: "unknown value rejected", algorithm: "sha256", wantErr: true},
 	}
 
@@ -891,27 +892,26 @@ func TestNewChunkedTokenDatabase_HashAlgorithmValidation(t *testing.T) {
 	}
 }
 
-// newXXHashProcessor creates an xxhash-mode processor with the given seed.
-func newXXHashProcessor(t *testing.T, seed string) kvblock.TokenProcessor {
+func newXXH64Processor(t *testing.T, seed string) kvblock.TokenProcessor {
 	t.Helper()
 	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
 		BlockSizeTokens: 16,
 		HashSeed:        seed,
-		HashAlgorithm:   kvblock.HashAlgorithmXXHash,
+		HashAlgorithm:   kvblock.HashAlgorithmXXH64,
 	})
 	require.NoError(t, err)
 	return processor
 }
 
-func TestXXHash_Deterministic(t *testing.T) {
+func TestXXH64_Deterministic(t *testing.T) {
 	tokens := make([]uint32, 32)
 	for i := range tokens {
 		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
 	}
 
 	// Across calls on one instance and across instances with the same config.
-	proc1 := newXXHashProcessor(t, "test-seed")
-	proc2 := newXXHashProcessor(t, "test-seed")
+	proc1 := newXXH64Processor(t, "test-seed")
+	proc2 := newXXH64Processor(t, "test-seed")
 
 	keys1, err := proc1.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
 	require.NoError(t, err)
@@ -926,8 +926,8 @@ func TestXXHash_Deterministic(t *testing.T) {
 	assert.NotEqual(t, kvblock.EmptyBlockHash, keys1[0], "hash should not be zero")
 }
 
-func TestXXHash_DifferentModelsProduceDifferentChains(t *testing.T) {
-	processor := newXXHashProcessor(t, "test-seed")
+func TestXXH64_DifferentModelsProduceDifferentChains(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
 
 	tokens := make([]uint32, 16)
 	for i := range tokens {
@@ -948,7 +948,7 @@ func TestXXHash_DifferentModelsProduceDifferentChains(t *testing.T) {
 	}
 }
 
-func TestXXHash_DifferentSeedsProduceDifferentChains(t *testing.T) {
+func TestXXH64_DifferentSeedsProduceDifferentChains(t *testing.T) {
 	tokens := make([]uint32, 16)
 	for i := range tokens {
 		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
@@ -957,7 +957,7 @@ func TestXXHash_DifferentSeedsProduceDifferentChains(t *testing.T) {
 	seeds := []string{"", "seed1", "seed2"}
 	seenHashes := make(map[kvblock.BlockHash]string)
 	for _, seed := range seeds {
-		processor := newXXHashProcessor(t, seed)
+		processor := newXXH64Processor(t, seed)
 		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, keys, "should generate keys for seed: %s", seed)
@@ -969,8 +969,8 @@ func TestXXHash_DifferentSeedsProduceDifferentChains(t *testing.T) {
 	}
 }
 
-func TestXXHash_ExtraFeaturesTaintBlockHash(t *testing.T) {
-	processor := newXXHashProcessor(t, "test-seed")
+func TestXXH64_ExtraFeaturesTaintBlockHash(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
 
 	tokens := make([]uint32, 32) // 2 blocks
 	for i := range tokens {
@@ -1006,8 +1006,8 @@ func TestXXHash_ExtraFeaturesTaintBlockHash(t *testing.T) {
 	assert.NotEqual(t, splitKeys[0], joinedKeys[0], "[ab, c] must not collide with [abc]")
 }
 
-func TestXXHash_ParentKeyContinuation(t *testing.T) {
-	processor := newXXHashProcessor(t, "test-seed")
+func TestXXH64_ParentKeyContinuation(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
 
 	tokens := make([]uint32, 64) // 4 blocks
 	for i := range tokens {
@@ -1030,8 +1030,8 @@ func TestXXHash_ParentKeyContinuation(t *testing.T) {
 	assert.NotEqual(t, tailKeys[0], otherKeys[0], "different parent keys must produce different chains")
 }
 
-func TestXXHash_PartialTrailingBlockExcluded(t *testing.T) {
-	processor := newXXHashProcessor(t, "test-seed")
+func TestXXH64_PartialTrailingBlockExcluded(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
 
 	tokens := make([]uint32, 40) // 2 full blocks of 16, 8 leftover tokens
 	for i := range tokens {
@@ -1075,6 +1075,6 @@ func BenchmarkTokensToKVBlockKeysCBORFNV(b *testing.B) {
 	benchmarkTokensToKVBlockKeys(b, kvblock.HashAlgorithmCBORFNV)
 }
 
-func BenchmarkTokensToKVBlockKeysXXHash(b *testing.B) {
-	benchmarkTokensToKVBlockKeys(b, kvblock.HashAlgorithmXXHash)
+func BenchmarkTokensToKVBlockKeysXXH64(b *testing.B) {
+	benchmarkTokensToKVBlockKeys(b, kvblock.HashAlgorithmXXH64)
 }
