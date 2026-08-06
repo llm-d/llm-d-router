@@ -57,6 +57,8 @@ type Runtime struct {
 	syncer       fwkdl.CrossReplicaSyncer
 	syncInterval time.Duration
 
+	crossReplicaPub *crossReplicaPublisher
+
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
 
@@ -244,17 +246,12 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		markBound(srcName, extType)
 	}
 
-	// Register the cross-replica publisher as a polling source so the datalayer
-	// drives it per endpoint at its own interval, like any other dispatcher.
-	if pub := newCrossReplicaPublisher(r.syncer, r.extractors, r.syncInterval); pub != nil {
-		period, err := periodTicks(pub.Interval(), r.pollingInterval)
-		if err != nil {
-			return fmt.Errorf("cross-replica publisher: %w", err)
-		}
-		if err := r.dispatchers.Register(newIntervalDispatcher(pub, period)); err != nil {
-			return fmt.Errorf("register cross-replica publisher: %w", err)
-		}
-	}
+	// Build the cross-replica publisher but do NOT register it as a polling
+	// dispatcher. The publisher runs on its own ticker per endpoint (started
+	// in NewEndpoint) so its cadence is independent of the datalayer base
+	// tick. This avoids the sync interval being silently clamped to the
+	// (much slower) metric-scrape interval.
+	r.crossReplicaPub = newCrossReplicaPublisher(r.syncer, r.extractors, r.syncInterval)
 
 	logger.Info("Datalayer runtime configured",
 		"pollers", r.dispatchers.Count(),
@@ -454,7 +451,30 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	}
 
 	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
+
+	// Start an independent ticker for cross-replica sync, decoupled from the
+	// collector's base tick so the configured sync interval is honoured even
+	// when the metric-scrape interval is much longer.
+	if r.crossReplicaPub != nil {
+		go r.runCrossReplicaSync(ctx, endpoint)
+	}
+
 	return endpoint
+}
+
+// runCrossReplicaSync publishes local per-endpoint state to the syncer on
+// its own ticker. Runs for the lifetime of the endpoint (cancelled via ctx).
+func (r *Runtime) runCrossReplicaSync(ctx context.Context, ep fwkdl.Endpoint) {
+	ticker := time.NewTicker(r.crossReplicaPub.Interval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = r.crossReplicaPub.Dispatch(ctx, ep)
+		}
+	}
 }
 
 // ReleaseEndpoint terminates polling for data on the given endpoint.

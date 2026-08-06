@@ -18,7 +18,6 @@ package datalayer
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,9 +34,10 @@ const (
 	defaultCrossReplicaSyncInterval = 200 * time.Millisecond
 )
 
-// crossReplicaPublisher is a PollingDispatcher that publishes each endpoint's
-// local state to the syncer. The datalayer drives it per endpoint at interval,
-// like any other polling source.
+// crossReplicaPublisher publishes each endpoint's local state to the syncer.
+// It runs on its own per-endpoint ticker (started by Runtime.NewEndpoint),
+// decoupled from the datalayer collector's base tick so the sync interval
+// is not clamped to the metric-scrape cadence.
 type crossReplicaPublisher struct {
 	syncer       fwkdl.CrossReplicaSyncer
 	contributors []fwkdl.CrossReplicaContributor
@@ -69,17 +69,12 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	return &crossReplicaPublisher{syncer: syncer, contributors: contributors, interval: interval}
 }
 
-func (p *crossReplicaPublisher) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: crossReplicaPublisherType, Name: crossReplicaPublisherType}
-}
-
-// Interval is the cadence at which the datalayer calls Dispatch.
+// Interval returns the configured sync cadence.
 func (p *crossReplicaPublisher) Interval() time.Duration {
 	return p.interval
 }
 
-// Dispatch publishes each contributor's local value for ep. Set failures are
-// logged, not returned, so the Collector doesn't count them as poll errors.
+// Dispatch publishes each contributor's local value for ep.
 func (p *crossReplicaPublisher) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	endpointID := ep.GetMetadata().GetNamespacedName().String()
 	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
@@ -90,9 +85,4 @@ func (p *crossReplicaPublisher) Dispatch(ctx context.Context, ep fwkdl.Endpoint)
 		}
 	}
 	return nil
-}
-
-// AppendExtractor is unused: the publisher pushes state, it has no extractors.
-func (p *crossReplicaPublisher) AppendExtractor(fwkplugin.Plugin) error {
-	return errors.New("cross-replica publisher does not accept extractors")
 }
