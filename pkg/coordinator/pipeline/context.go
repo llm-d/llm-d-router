@@ -37,6 +37,10 @@ var internalForwardingHeaders = map[string]bool{
 	"epp-profile": true,
 }
 
+func isForwardableHeader(name string) bool {
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+}
+
 // ForwardedHeaders returns original request headers suitable for forwarding
 // to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
 // coordinator-owned routing headers.
@@ -44,19 +48,32 @@ var internalForwardingHeaders = map[string]bool{
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
 	out := make(map[string]string)
-	if rc.OriginalHeaders == nil {
-		return out
-	}
 	for key, vals := range rc.OriginalHeaders {
 		lower := strings.ToLower(key)
-		if hopByHopHeaders[lower] || internalForwardingHeaders[lower] || lower == "content-length" || lower == "host" || lower == "content-type" {
+		if !isForwardableHeader(lower) {
 			continue
 		}
 		if len(vals) > 0 {
 			out[lower] = vals[0]
 		}
 	}
+	for key, value := range rc.downstreamHeaders {
+		if !isForwardableHeader(key) {
+			continue
+		}
+		out[key] = value
+	}
 	return out
+}
+
+// SetDownstreamHeader records a header produced by one pipeline step for
+// forwarding to subsequent upstream requests. These values override headers
+// supplied on the original client request.
+func (rc *RequestContext) SetDownstreamHeader(key, value string) {
+	if rc.downstreamHeaders == nil {
+		rc.downstreamHeaders = make(map[string]string)
+	}
+	rc.downstreamHeaders[strings.ToLower(key)] = value
 }
 
 // RequestContext carries all state for a single request through the pipeline.
@@ -85,7 +102,8 @@ type RequestContext struct {
 	// KVTransferParams carries the prefill pod's KV-cache transfer hints to the
 	// decode step. Populated by PrefillStep from the prefill response; consumed
 	// by the KV connector when building the decode request.
-	KVTransferParams map[string]any
+	KVTransferParams  map[string]any
+	downstreamHeaders map[string]string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter

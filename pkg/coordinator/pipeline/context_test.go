@@ -118,3 +118,25 @@ func TestForwardedHeaders_NilOriginalHeaders(t *testing.T) {
 		t.Fatalf("expected empty map for nil OriginalHeaders, got %v", out)
 	}
 }
+
+func TestForwardedHeaders_DownstreamHeadersOverrideOriginal(t *testing.T) {
+	rc := &RequestContext{
+		OriginalHeaders: http.Header{
+			"X-Disagg-Revision": {"client-revision"},
+		},
+	}
+	rc.SetDownstreamHeader("X-Disagg-Revision", "selected-revision")
+	rc.SetDownstreamHeader("X-Disagg-Slice", "selected-slice")
+	rc.SetDownstreamHeader("Content-Type", "text/plain")
+
+	headers := rc.ForwardedHeaders()
+	if got := headers["x-disagg-revision"]; got != "selected-revision" {
+		t.Errorf("x-disagg-revision = %q, want %q", got, "selected-revision")
+	}
+	if got := headers["x-disagg-slice"]; got != "selected-slice" {
+		t.Errorf("x-disagg-slice = %q, want %q", got, "selected-slice")
+	}
+	if _, ok := headers["content-type"]; ok {
+		t.Error("downstream content-type should not be forwarded")
+	}
+}

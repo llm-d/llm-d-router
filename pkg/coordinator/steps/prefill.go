@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -36,17 +37,21 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-const PrefillStepName = "prefill"
+const (
+	PrefillStepName             = "prefill"
+	ParamForwardResponseHeaders = "forward_response_headers"
+)
 
 func init() {
 	pipeline.Register(PrefillStepName, NewPrefillStep)
 }
 
 type PrefillStep struct {
-	useOpenAIFormat bool
-	gwClient        *gateway.Client
-	kv              kv.Connector
-	ec              ec.Connector
+	useOpenAIFormat        bool
+	gwClient               *gateway.Client
+	kv                     kv.Connector
+	ec                     ec.Connector
+	forwardResponseHeaders []string
 }
 
 func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -73,7 +78,29 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	return &PrefillStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn, ec: ecConn}, nil
+	forwardResponseHeaders, err := paramStringSlice(params, ParamForwardResponseHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("prefill: %w", err)
+	}
+	seenHeaders := make(map[string]struct{}, len(forwardResponseHeaders))
+	for index, name := range forwardResponseHeaders {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return nil, fmt.Errorf("prefill: %s[%d] must not be empty", ParamForwardResponseHeaders, index)
+		}
+		if _, duplicate := seenHeaders[name]; duplicate {
+			return nil, fmt.Errorf("prefill: %s contains duplicate header %q", ParamForwardResponseHeaders, name)
+		}
+		seenHeaders[name] = struct{}{}
+		forwardResponseHeaders[index] = name
+	}
+	return &PrefillStep{
+		useOpenAIFormat:        useOpenAI,
+		gwClient:               gwClient,
+		kv:                     kvConn,
+		ec:                     ecConn,
+		forwardResponseHeaders: forwardResponseHeaders,
+	}, nil
 }
 
 func (s *PrefillStep) Name() string { return PrefillStepName }
@@ -122,6 +149,11 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
+	for _, name := range s.forwardResponseHeaders {
+		if values := resp.Header.Values(name); len(values) > 0 {
+			reqCtx.SetDownstreamHeader(name, values[0])
+		}
+	}
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil

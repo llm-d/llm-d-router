@@ -604,6 +604,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 - `ec_transfer_params` is a flat map keyed by mm_hash (same format as the encode response), merging all per-image entries from the encode stage
 - `kv_transfer_params.do_remote_decode = true, do_remote_prefill = false` tells the prefill worker to store KV cache for remote decode
 - `mm_placeholders` use the original offsets from the render response (positions in the full token sequence)
+- Response headers listed in the prefill step's `forward_response_headers` parameter are copied into later upstream requests. This can carry EPP-stamped revision and topology metadata into the decode request.
 
 ---
 

@@ -104,6 +104,38 @@ func paramString(params map[string]any, key string) (string, error) {
 	}
 }
 
+// paramStringSlice reads a list of strings from YAML-decoded []any or a
+// programmatically supplied []string. A missing key returns nil.
+func paramStringSlice(params map[string]any, key string) ([]string, error) {
+	raw, ok := params[key]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+
+	var entries []any
+	switch value := raw.(type) {
+	case []any:
+		entries = value
+	case []string:
+		entries = make([]any, len(value))
+		for index, entry := range value {
+			entries[index] = entry
+		}
+	default:
+		return nil, fmt.Errorf("%s: expected list of strings, got %T", key, raw)
+	}
+
+	values := make([]string, len(entries))
+	for index, entry := range entries {
+		value, ok := entry.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d]: expected string, got %T", key, index, entry)
+		}
+		values[index] = value
+	}
+	return values, nil
+}
+
 // paramBool reads a boolean step parameter. A missing key returns ok=false so
 // the caller can apply its default; a key present with a non-bool value is a
 // configuration error.

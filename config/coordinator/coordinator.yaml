@@ -215,6 +215,13 @@ pipeline:
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
 
+      #   # Copies selected prefill response headers into the decode request.
+      #   # Only the listed headers are forwarded. This allows a decode EPP to
+      #   # consume scheduling metadata stamped by the prefill EPP.
+      #   forward_response_headers:
+      #     - x-disagg-revision
+      #     - x-disagg-slice
+
     # -------------------------------------------------------------------
     # decode: streams the completion back to the client. Last step.
     # -------------------------------------------------------------------

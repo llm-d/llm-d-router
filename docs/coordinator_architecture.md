@@ -265,11 +265,14 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| Downstream headers | `prefill` response | later upstream requests such as `decode` |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`.
+it as the base header set, then stamp the request ID and `EPP-Profile`. A prefill step can
+also allowlist response headers with `forward_response_headers`; these values are stored
+on the request context and override client-provided values on later upstream requests.
 
 ### EPP-Profile routing
 
@@ -312,6 +315,24 @@ selection swaps in `header-profile-handler` for that one plugin.
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
+
+### Cross-phase scheduling headers
+
+An EPP plugin can stamp scheduling metadata from the selected prefill endpoint
+onto the prefill response. Configure the prefill step to carry selected headers
+into the decode request:
+
+```yaml
+- type: prefill
+  params:
+    forward_response_headers:
+    - x-disagg-revision
+    - x-disagg-slice
+```
+
+Only listed response headers are carried. This lets a decode profile strictly
+select the prefill revision and prefer the same topology slice without
+forwarding unrelated worker response headers.
 
 ### Decode disaggregation deciders
 
