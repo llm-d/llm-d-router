@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -32,12 +33,12 @@ func TestHostResolver_RawIPPassthrough(t *testing.T) {
 	ctx := context.Background()
 	r := newHostResolver(logr.Discard(), time.Minute)
 	// Raw IPs must pass through unchanged and never be cached (no lookup).
-	require.Equal(t, "10.0.0.1", r.resolveOne(ctx, "10.0.0.1"))
-	require.Equal(t, "::1", r.resolveOne(ctx, "::1"))
+	require.Equal(t, testPrefillHostIP1, r.resolveOne(ctx, testPrefillHostIP1))
+	require.Equal(t, testLoopbackIPv6, r.resolveOne(ctx, testLoopbackIPv6))
 	require.Empty(t, r.cache)
 
-	require.Equal(t, []string{"10.0.0.1", "10.0.0.2"},
-		r.resolve(ctx, []string{"10.0.0.1", "10.0.0.2"}))
+	require.Equal(t, []string{testPrefillHostIP1, testPrefillHostIP2},
+		r.resolve(ctx, []string{testPrefillHostIP1, testPrefillHostIP2}))
 }
 
 func TestHostResolver_EmptyPassthrough(t *testing.T) {
@@ -51,15 +52,15 @@ func TestHostResolver_CachesWithinTTL(t *testing.T) {
 	ctx := context.Background()
 	r := newHostResolver(logr.Discard(), time.Minute)
 	// localhost resolves to a loopback address on all supported platforms.
-	first := r.resolveOne(ctx, "localhost")
-	require.True(t, first == "127.0.0.1" || first == "::1", "unexpected localhost IP %q", first)
+	first := r.resolveOne(ctx, testLocalHostname)
+	require.True(t, first == testLoopbackIP || first == testLoopbackIPv6, "unexpected localhost IP %q", first)
 	require.Len(t, r.cache, 1)
 
-	entry := r.cache["localhost"]
+	entry := r.cache[testLocalHostname]
 	// A second call within the TTL must reuse the cached entry (same resolved time).
-	second := r.resolveOne(ctx, "localhost")
+	second := r.resolveOne(ctx, testLocalHostname)
 	require.Equal(t, first, second)
-	require.Equal(t, entry.resolved, r.cache["localhost"].resolved)
+	require.Equal(t, entry.resolved, r.cache[testLocalHostname].resolved)
 }
 
 func TestHostResolver_HardFailurePassesThroughSpec(t *testing.T) {
@@ -225,4 +226,70 @@ func TestHostResolver_ServeStaleWhileRevalidate(t *testing.T) {
 		defer r.mu.Unlock()
 		return r.cache["peer"].ip == "2.2.2.2"
 	}, 2*time.Second, 5*time.Millisecond, "background refresh did not update cache to new IP")
+}
+
+// TestHostResolver_SeedServesStartupIPOnDNSFailure verifies that a resolver
+// seeded with the startup-resolved spec->IP serves that IP on the request path
+// even when DNS is unavailable, instead of falling back to the raw hostname
+// (which would hang the MoRI-IO handshake). This is the request-time DNS
+// failure case raised in review.
+func TestHostResolver_SeedServesStartupIPOnDNSFailure(t *testing.T) {
+	ctx := context.Background()
+	r := newHostResolver(logr.Discard(), 30*time.Millisecond)
+
+	var calls int32
+	r.lookupIP = func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, errors.New("dns unavailable")
+	}
+
+	const spec = "decode-0.ns.svc"
+	const bootIP = "10.0.0.5"
+	r.seed(spec, bootIP)
+
+	// Within TTL: served straight from the seeded entry, no lookup attempted
+	// even though DNS is down.
+	require.Equal(t, bootIP, r.resolveOne(ctx, spec))
+	require.Equal(t, int32(0), atomic.LoadInt32(&calls))
+
+	// Past TTL: serve-stale returns the seeded (last-known-good) IP immediately
+	// and triggers a background refresh that fails; the good IP is retained.
+	time.Sleep(40 * time.Millisecond)
+	require.Equal(t, bootIP, r.resolveOne(ctx, spec))
+	require.Eventually(t, func() bool { return atomic.LoadInt32(&calls) >= 1 },
+		time.Second, 5*time.Millisecond, "background refresh should have attempted a lookup")
+	require.Equal(t, bootIP, r.resolveOne(ctx, spec))
+}
+
+// TestHostResolver_SeedNoOps verifies seed ignores empty values and literal-IP
+// specs (which are never cached).
+func TestHostResolver_SeedNoOps(t *testing.T) {
+	r := newHostResolver(logr.Discard(), time.Minute)
+	r.seed("", testPrefillHostIP1)
+	r.seed("host.ns.svc", "")
+	r.seed(testPrefillHostIP1, testPrefillHostIP1) // literal IP spec: never cached
+	require.Empty(t, r.cache)
+}
+
+// TestServer_ResolverSeededFromStartup verifies the Server seeds its request-
+// path resolver with the startup-resolved spec->IP values, so the first request
+// serves the boot IP even if DNS has since gone down (rather than the raw spec).
+func TestServer_ResolverSeededFromStartup(t *testing.T) {
+	s := &Server{
+		config: Config{
+			MoRIIODecodePodIP:     "10.0.0.9",
+			MoRIIODecodePodIPSpec: "localpod.ns.svc",
+			MoRIIODecodeHosts:     []string{testDecodeHostIP2, testDecodeHostIP3},
+			MoRIIODecodeHostSpecs: []string{"decode-0.ns.svc", "decode-1.ns.svc"},
+		},
+	}
+	// Trigger lazy creation + seeding, then simulate DNS being unavailable.
+	r := s.resolver()
+	r.lookupIP = func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return nil, errors.New("dns unavailable")
+	}
+	// The request path must return the startup-resolved IPs, not the raw specs.
+	require.Equal(t, "10.0.0.9", s.currentDecodePodIP(context.Background()))
+	require.Equal(t, []string{testDecodeHostIP2, testDecodeHostIP3},
+		s.currentDecodeHosts(context.Background()))
 }

@@ -137,6 +137,25 @@ func newHostResolver(logger logr.Logger, ttl time.Duration) *hostResolver {
 	}
 }
 
+// seed pre-populates the cache with a boot-time resolved spec->IP mapping so
+// the first request serves the startup IP instead of repeating the lookup, and
+// so a request-time DNS outage still yields the last-known-good IP that startup
+// resolved (rather than passing the raw hostname through to the MoRI-IO
+// handshake). A no-op for empty values, for a spec that is already a literal IP
+// (never cached), or when an entry already exists. The seeded entry is marked
+// fresh (resolved=now) so it is served without a lookup for one TTL window,
+// then refreshed asynchronously via the normal serve-stale path.
+func (r *hostResolver) seed(spec, ip string) {
+	if spec == "" || ip == "" || net.ParseIP(spec) != nil {
+		return
+	}
+	r.mu.Lock()
+	if _, exists := r.cache[spec]; !exists {
+		r.cache[spec] = resolvedHost{ip: ip, resolved: time.Now()}
+	}
+	r.mu.Unlock()
+}
+
 // lookup resolves one DNS name to a single IP string using the caller's
 // context, preferring IPv4 (falling back to the first returned address). The
 // effective deadline is the smaller of the resolver's configured timeout and

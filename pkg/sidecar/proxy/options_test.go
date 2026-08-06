@@ -956,7 +956,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 		{
 			name:    "2P2D DP16 valid (2 pods, local 8)",
 			flag:    "--moriio-decode-hosts",
-			hosts:   []string{"10.0.1.1", "10.0.1.2"},
+			hosts:   []string{testDecodeHostIP, testDecodeHostIP2},
 			dpSize:  16,
 			dpLocal: 8,
 			wantErr: "",
@@ -972,7 +972,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 		{
 			name:    "single host is degenerate, tolerated",
 			flag:    "--moriio-remote-hosts",
-			hosts:   []string{"10.0.0.1"},
+			hosts:   []string{testPrefillHostIP1},
 			dpSize:  8,
 			dpLocal: 0,
 			wantErr: "",
@@ -980,7 +980,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 		{
 			name:    "multi-pod missing dp-size-local",
 			flag:    "--moriio-remote-hosts",
-			hosts:   []string{"10.0.0.1", "10.0.0.2"},
+			hosts:   []string{testPrefillHostIP1, testPrefillHostIP2},
 			dpSize:  16,
 			dpLocal: 0,
 			wantErr: "requires dp-size-local > 0",
@@ -988,7 +988,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 		{
 			name:    "dp-size not divisible by dp-size-local",
 			flag:    "--moriio-decode-hosts",
-			hosts:   []string{"10.0.1.1", "10.0.1.2"},
+			hosts:   []string{testDecodeHostIP, testDecodeHostIP2},
 			dpSize:  15,
 			dpLocal: 8,
 			wantErr: "must be divisible",
@@ -996,7 +996,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 		{
 			name:    "host count does not match pod count",
 			flag:    "--moriio-remote-hosts",
-			hosts:   []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			hosts:   []string{testPrefillHostIP1, testPrefillHostIP2, "10.0.0.3"},
 			dpSize:  16,
 			dpLocal: 8,
 			wantErr: "dp-size/dp-size-local = 2",
@@ -1036,8 +1036,8 @@ func TestCompleteWideEPValidation(t *testing.T) {
 	}{
 		{
 			name:        "valid 2P2D DP16 both legs",
-			remoteHosts: []string{"localhost", "localhost"},
-			decodeHosts: []string{"localhost", "localhost"},
+			remoteHosts: []string{testLocalHostname, testLocalHostname},
+			decodeHosts: []string{testLocalHostname, testLocalHostname},
 			dpSize:      16,
 			dpLocal:     8,
 			wantErr:     "",
@@ -1052,7 +1052,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 		},
 		{
 			name:        "remote-hosts leg invalid",
-			remoteHosts: []string{"10.0.0.1", "10.0.0.2"},
+			remoteHosts: []string{testPrefillHostIP1, testPrefillHostIP2},
 			decodeHosts: nil,
 			dpSize:      16,
 			dpLocal:     0,
@@ -1061,7 +1061,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 		{
 			name:        "decode-hosts leg invalid",
 			remoteHosts: nil,
-			decodeHosts: []string{"10.0.1.1", "10.0.1.2", "10.0.1.3"},
+			decodeHosts: []string{testDecodeHostIP, testDecodeHostIP2, testDecodeHostIP3},
 			dpSize:      16,
 			dpLocal:     8,
 			wantErr:     "--moriio-decode-hosts",
@@ -1096,7 +1096,7 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 		t.Run("dormant feature rejects write-mode", func(t *testing.T) {
 			opts := NewOptions()
 			opts.MoRIIOWriteMode = true
-			opts.MoRIIODecodePodIP = "10.0.1.1"
+			opts.MoRIIODecodePodIP = testDecodeHostIP
 			err := opts.Complete()
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "not yet enabled")
@@ -1110,7 +1110,7 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 		})
 		t.Run("dormant feature rejects remote-hosts", func(t *testing.T) {
 			opts := NewOptions()
-			opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+			opts.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
 			opts.MoRIIODPSize = 16
 			opts.MoRIIODPSizeLocal = 8
 			err := opts.Complete()
@@ -1137,7 +1137,7 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 	t.Run("write-mode with pod IP passes", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		require.NoError(t, opts.Complete())
 	})
 
@@ -1321,46 +1321,46 @@ func TestResolveHostsToIPs(t *testing.T) {
 	})
 
 	t.Run("raw IPv4 addresses are passed through", func(t *testing.T) {
-		hosts := []string{"10.0.0.1"}
+		hosts := []string{testPrefillHostIP1}
 		result, err := resolveHostsToIPs(hosts)
 		require.NoError(t, err)
-		require.Equal(t, []string{"10.0.0.1"}, result)
+		require.Equal(t, []string{testPrefillHostIP1}, result)
 	})
 
 	t.Run("raw IPv6 addresses are passed through", func(t *testing.T) {
-		hosts := []string{"::1"}
+		hosts := []string{testLoopbackIPv6}
 		result, err := resolveHostsToIPs(hosts)
 		require.NoError(t, err)
-		require.Equal(t, []string{"::1"}, result)
+		require.Equal(t, []string{testLoopbackIPv6}, result)
 	})
 
 	t.Run("localhost resolves to IP", func(t *testing.T) {
-		hosts := []string{"localhost"}
+		hosts := []string{testLocalHostname}
 		result, err := resolveHostsToIPs(hosts)
 		require.NoError(t, err)
 		require.Len(t, result, 1)
 		// localhost should resolve to 127.0.0.1 or ::1
-		require.True(t, result[0] == "127.0.0.1" || result[0] == "::1",
+		require.True(t, result[0] == testLoopbackIP || result[0] == testLoopbackIPv6,
 			"expected localhost to resolve to 127.0.0.1 or ::1, got %s", result[0])
 	})
 
 	t.Run("mixed IPs and hostnames both work", func(t *testing.T) {
-		hosts := []string{"10.0.0.1", "localhost"}
+		hosts := []string{testPrefillHostIP1, testLocalHostname}
 		result, err := resolveHostsToIPs(hosts)
 		require.NoError(t, err)
 		require.Len(t, result, 2)
-		require.Equal(t, "10.0.0.1", result[0])
+		require.Equal(t, testPrefillHostIP1, result[0])
 		// localhost resolves to 127.0.0.1 or ::1
-		require.True(t, result[1] == "127.0.0.1" || result[1] == "::1")
+		require.True(t, result[1] == testLoopbackIP || result[1] == testLoopbackIPv6)
 	})
 
 	t.Run("multiple DNS names resolve correctly", func(t *testing.T) {
-		hosts := []string{"localhost", "localhost"}
+		hosts := []string{testLocalHostname, testLocalHostname}
 		result, err := resolveHostsToIPs(hosts)
 		require.NoError(t, err)
 		require.Len(t, result, 2)
 		for _, h := range result {
-			require.True(t, h == "127.0.0.1" || h == "::1",
+			require.True(t, h == testLoopbackIP || h == testLoopbackIPv6,
 				"expected resolved IP, got %s", h)
 		}
 	})
@@ -1384,35 +1384,35 @@ func TestCompleteAutomaticDNSResolution(t *testing.T) {
 	t.Run("raw IP addresses are passed through", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 16
 		opts.MoRIIODPSizeLocal = 8
-		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
-		opts.MoRIIODecodeHosts = []string{"10.0.1.1", "10.0.1.2"}
+		opts.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
+		opts.MoRIIODecodeHosts = []string{testDecodeHostIP, testDecodeHostIP2}
 		require.NoError(t, opts.Complete())
 		// IPs should be passed through unchanged
-		require.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, opts.MoRIIORemoteHosts)
-		require.Equal(t, []string{"10.0.1.1", "10.0.1.2"}, opts.MoRIIODecodeHosts)
+		require.Equal(t, []string{testPrefillHostIP1, testPrefillHostIP2}, opts.MoRIIORemoteHosts)
+		require.Equal(t, []string{testDecodeHostIP, testDecodeHostIP2}, opts.MoRIIODecodeHosts)
 	})
 
 	t.Run("localhost automatically resolves to IP", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 8
 		opts.MoRIIODPSizeLocal = 8
-		opts.MoRIIORemoteHosts = []string{"localhost"}
-		opts.MoRIIODecodeHosts = []string{"localhost"}
+		opts.MoRIIORemoteHosts = []string{testLocalHostname}
+		opts.MoRIIODecodeHosts = []string{testLocalHostname}
 		require.NoError(t, opts.Complete())
 		// localhost should be automatically resolved to an IP
-		require.True(t, opts.MoRIIORemoteHosts[0] == "127.0.0.1" || opts.MoRIIORemoteHosts[0] == "::1")
-		require.True(t, opts.MoRIIODecodeHosts[0] == "127.0.0.1" || opts.MoRIIODecodeHosts[0] == "::1")
+		require.True(t, opts.MoRIIORemoteHosts[0] == testLoopbackIP || opts.MoRIIORemoteHosts[0] == testLoopbackIPv6)
+		require.True(t, opts.MoRIIODecodeHosts[0] == testLoopbackIP || opts.MoRIIODecodeHosts[0] == testLoopbackIPv6)
 	})
 
 	t.Run("unresolvable hostname errors", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 8
 		opts.MoRIIORemoteHosts = []string{"unresolvable-host-xyz.invalid"}
 		err := opts.Complete()
@@ -1423,21 +1423,21 @@ func TestCompleteAutomaticDNSResolution(t *testing.T) {
 	t.Run("local-pod-ip raw IP is passed through", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 8
 		opts.MoRIIODPSizeLocal = 8
 		require.NoError(t, opts.Complete())
-		require.Equal(t, "10.0.1.1", opts.MoRIIODecodePodIP)
+		require.Equal(t, testDecodeHostIP, opts.MoRIIODecodePodIP)
 	})
 
 	t.Run("local-pod-ip DNS name resolves to IP", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "localhost"
+		opts.MoRIIODecodePodIP = testLocalHostname
 		opts.MoRIIODPSize = 8
 		opts.MoRIIODPSizeLocal = 8
 		require.NoError(t, opts.Complete())
-		require.True(t, opts.MoRIIODecodePodIP == "127.0.0.1" || opts.MoRIIODecodePodIP == "::1")
+		require.True(t, opts.MoRIIODecodePodIP == testLoopbackIP || opts.MoRIIODecodePodIP == testLoopbackIPv6)
 	})
 
 	t.Run("local-pod-ip unresolvable hostname errors", func(t *testing.T) {
@@ -1463,7 +1463,7 @@ func TestWideEPScenarios(t *testing.T) {
 	t.Run("1P1D DP=8 intra-node (no remote hosts)", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.0.1"
+		opts.MoRIIODecodePodIP = testPrefillHostIP1
 		opts.MoRIIODPSize = 8
 		opts.MoRIIOTPSize = 1
 		// No remote hosts needed for single-pod 1P1D
@@ -1485,30 +1485,30 @@ func TestWideEPScenarios(t *testing.T) {
 	t.Run("2P2D DP=16 inter-node with IPs (static deployment)", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 16
 		opts.MoRIIOTPSize = 1
 		opts.MoRIIODPSizeLocal = 8
 		// Raw IPs work for static IP deployments
-		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
-		opts.MoRIIODecodeHosts = []string{"10.0.1.1", "10.0.1.2"}
+		opts.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
+		opts.MoRIIODecodeHosts = []string{testDecodeHostIP, testDecodeHostIP2}
 
 		require.NoError(t, opts.Complete())
 		// IPs should be passed through unchanged
-		require.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, opts.MoRIIORemoteHosts)
-		require.Equal(t, []string{"10.0.1.1", "10.0.1.2"}, opts.MoRIIODecodeHosts)
+		require.Equal(t, []string{testPrefillHostIP1, testPrefillHostIP2}, opts.MoRIIORemoteHosts)
+		require.Equal(t, []string{testDecodeHostIP, testDecodeHostIP2}, opts.MoRIIODecodeHosts)
 	})
 
 	t.Run("2P2D DP=16 inter-node with DNS names (LWS pattern)", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 16
 		opts.MoRIIOTPSize = 1
 		opts.MoRIIODPSizeLocal = 8
 		// Use localhost as a resolvable DNS name for testing
-		opts.MoRIIORemoteHosts = []string{"localhost", "localhost"}
-		opts.MoRIIODecodeHosts = []string{"localhost", "localhost"}
+		opts.MoRIIORemoteHosts = []string{testLocalHostname, testLocalHostname}
+		opts.MoRIIODecodeHosts = []string{testLocalHostname, testLocalHostname}
 
 		require.NoError(t, opts.Complete())
 		// DNS names should be resolved to IPs
@@ -1516,11 +1516,11 @@ func TestWideEPScenarios(t *testing.T) {
 		require.Len(t, opts.MoRIIODecodeHosts, 2)
 		// All entries should now be IPs (127.0.0.1 or ::1)
 		for _, h := range opts.MoRIIORemoteHosts {
-			require.True(t, h == "127.0.0.1" || h == "::1",
+			require.True(t, h == testLoopbackIP || h == testLoopbackIPv6,
 				"expected resolved IP, got %s", h)
 		}
 		for _, h := range opts.MoRIIODecodeHosts {
-			require.True(t, h == "127.0.0.1" || h == "::1",
+			require.True(t, h == testLoopbackIP || h == testLoopbackIPv6,
 				"expected resolved IP, got %s", h)
 		}
 	})
@@ -1529,10 +1529,10 @@ func TestWideEPScenarios(t *testing.T) {
 	t.Run("2P2D validation: dp-size must be divisible by dp-size-local", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 15 // Not divisible by 8
 		opts.MoRIIODPSizeLocal = 8
-		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+		opts.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
 
 		err := opts.Complete()
 		require.Error(t, err)
@@ -1542,11 +1542,11 @@ func TestWideEPScenarios(t *testing.T) {
 	t.Run("2P2D validation: host count must match pod count", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 16
 		opts.MoRIIODPSizeLocal = 8
 		// 3 hosts but dp-size/dp-size-local = 2 pods
-		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+		opts.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2, "10.0.0.3"}
 
 		err := opts.Complete()
 		require.Error(t, err)
@@ -1556,10 +1556,10 @@ func TestWideEPScenarios(t *testing.T) {
 	t.Run("2P2D validation: dp-size-local required for multi-host", func(t *testing.T) {
 		opts := NewOptions()
 		opts.MoRIIOWriteMode = true
-		opts.MoRIIODecodePodIP = "10.0.1.1"
+		opts.MoRIIODecodePodIP = testDecodeHostIP
 		opts.MoRIIODPSize = 16
 		opts.MoRIIODPSizeLocal = 0 // Missing!
-		opts.MoRIIORemoteHosts = []string{"10.0.0.1", "10.0.0.2"}
+		opts.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
 
 		err := opts.Complete()
 		require.Error(t, err)

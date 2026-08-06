@@ -18,13 +18,13 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -309,18 +309,29 @@ retryLoop:
 	// not independently re-derived here. This is the router-applies-the-
 	// connector-returned-rank model (PR #45043 review, njhill): the prefill
 	// connector returns the rank, the router pins the decode leg to it, so both
-	// legs agree without each hashing the request id. Fall back to the hash only
-	// if the prefill response omitted it (older vLLM without the returnable rank).
-	decodeDPRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
-	if pkv, ok := pKVTransferParams.(map[string]any); ok {
-		if rv, present := pkv[requestFieldRemoteDPRank]; present {
-			if ri, ok := toInt(rv); ok {
-				decodeDPRank = ri
+	// legs agree without each hashing the request id. The returned rank is
+	// validated to be in [0, dp_size); an omitted, non-numeric, or out-of-range
+	// value falls back to the deterministic hash. The header AND the decode
+	// body's remote_dp_rank are then pinned to the SAME validated value so they
+	// cannot target different ranks and hang the transfer.
+	// DP-rank propagation is a MoRI-IO WRITE-mode concern only. In standard
+	// NIXLv2 READ mode the decode body's remote_dp_rank / remote_dp_rank_override
+	// and the x-data-parallel-rank header are left untouched, matching the legacy
+	// wire shape.
+	if s.config.MoRIIOWriteMode {
+		decodeDPRank, usedReturned := resolveDecodeDPRank(pKVTransferParams, uuidStr, s.config.MoRIIODPSize)
+		if pkv, ok := pKVTransferParams.(map[string]any); ok {
+			if rv, present := pkv[requestFieldRemoteDPRank]; present && !usedReturned && s.config.MoRIIODPSize > 1 {
+				s.logger.V(1).Info("prefill returned invalid/out-of-range remote_dp_rank; using hash fallback",
+					"request_id", uuidStr, "returned", rv,
+					"dp_size", s.config.MoRIIODPSize, "rank", decodeDPRank)
 			}
+			pkv[requestFieldRemoteDPRank] = decodeDPRank
+			pkv[requestFieldRemoteDPRankOverride] = true
 		}
-	}
-	if s.config.MoRIIODPSize > 1 {
-		dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeDPRank))
+		if s.config.MoRIIODPSize > 1 {
+			dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeDPRank))
+		}
 	}
 
 	delete(completionRequest, requestFieldStream)
@@ -610,10 +621,16 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		return
 	}
 
-	// Build cloned requests under separate contexts so each carries its own
-	// span lineage and either side can be observed/cancelled independently
-	// without affecting the other.
-	pCtx, prefillSpan := tracer.Start(parentCtx, "llm_d.pd_proxy.prefill",
+	// Fire prefill and decode concurrently, but DEFER committing decode's
+	// response to the client until prefill's outcome is known (the commit
+	// point). Both legs share a cancelable context so a failed or hung prefill
+	// aborts decode's in-flight request / KV wait immediately instead of
+	// letting it hang, and decode's output is buffered so a failed prefill can
+	// never surface a bogus 200 to the client.
+	dispatchCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	pCtx, prefillSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -630,7 +647,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	preq.Body = io.NopCloser(bytes.NewReader(pbody))
 	preq.ContentLength = int64(len(pbody))
 
-	dCtx, decodeSpan := tracer.Start(parentCtx, "llm_d.pd_proxy.decode",
+	dCtx, decodeSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -650,54 +667,112 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	s.logger.V(5).Info("concurrent-dispatch prefill request body", "body", string(pbody))
 	s.logger.V(5).Info("concurrent-dispatch decode request body", "body", string(dbody))
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// Decode writes into a deferred writer that buffers everything until we
+	// commit() (prefill succeeded -> flush + stream on) or abort() (prefill
+	// failed -> discard); it never writes to the client directly.
+	dcw := newDeferredCommitWriter(w)
 
-	// Prefill goroutine: response body is discarded; we only observe the
-	// status code for telemetry / fallback decisions.
-	var prefillStatus int
-	var prefillBody string
+	// Prefill goroutine: body is buffered so it can be returned to the client
+	// verbatim on failure. On ANY non-2xx status (transport errors surface as
+	// 502 from the reverse proxy) it cancels the shared context so decode's
+	// KV wait aborts immediately.
+	var prefillResp *bufferedResponseWriter
+	prefillDone := make(chan struct{})
 	prefillStartedAt := time.Now()
 	go func() {
-		defer wg.Done()
+		defer close(prefillDone)
 		defer prefillSpan.End()
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, preq)
-		prefillStatus = pw.statusCode
-		prefillBody = pw.buffer.String()
+		prefillResp = pw
 		prefillSpan.SetAttributes(
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(time.Since(prefillStartedAt).Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
+			cancel() // KV will never arrive -> abort decode instead of hanging
 			s.logger.Error(nil, "concurrent-dispatch prefill returned error status",
 				"status", pw.statusCode, "request_id", uuidStr, "body", pw.buffer.String())
 		}
 	}()
 
-	// Decode goroutine: streams directly to the client's ResponseWriter.
-	// dataParallelHandler may steal the request and dispatch to another
-	// data-parallel replica; preserve that semantics.
+	// Decode goroutine: buffers into dcw. dataParallelHandler may steal the
+	// request and dispatch to another data-parallel replica; preserve that
+	// semantics but still route through the deferred writer.
+	decodeDone := make(chan struct{})
 	decodeStartedAt := time.Now()
 	go func() {
-		defer wg.Done()
-		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(w, dreq)
+		defer close(decodeDone)
+		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq)
 		decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 		if !dataParallelUsed {
 			decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
-			s.decoderProxy.ServeHTTP(w, dreq)
+			s.decoderProxy.ServeHTTP(dcw, dreq)
 		}
 		decodeSpan.SetAttributes(attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(time.Since(decodeStartedAt).Milliseconds())))
 	}()
 
-	wg.Wait()
-
-	// A failed prefill usually also hangs decode; log it so the cause is visible.
-	if isHTTPError(prefillStatus) {
-		s.logger.Info("concurrent-dispatch: prefill failed -- decode may have streamed an error or hung",
-			"request_id", uuidStr, "p_status", prefillStatus, "p_body_snippet", truncate(prefillBody, 256))
+	// Commit point: wait for prefill's outcome, bounded by a KV-wait backstop
+	// so a hung/unreachable prefill cannot make decode wait for KV forever.
+	waitTimeout := s.config.MoRIIOParallelDecodeWaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = defaultMoRIIOParallelDecodeWaitTimeout
 	}
+	timer := time.NewTimer(waitTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-prefillDone:
+		if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
+			// Prefill succeeded: commit decode's buffered response and stream on.
+			if !dcw.commit() {
+				s.logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
+					"request_id", uuidStr)
+			}
+			break
+		}
+		// Prefill failed: abort decode and return the prefill error verbatim.
+		cancel()
+		dcw.abort()
+		status := http.StatusBadGateway
+		if prefillResp != nil {
+			status = prefillResp.statusCode
+			for key, values := range prefillResp.Header() {
+				for _, v := range values {
+					w.Header().Add(key, v)
+				}
+			}
+		}
+		bodySnippet := ""
+		if prefillResp != nil {
+			bodySnippet = truncate(prefillResp.buffer.String(), 256)
+		}
+		s.logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
+			"request_id", uuidStr, "p_status", status, "p_body_snippet", bodySnippet)
+		w.WriteHeader(status)
+		if prefillResp != nil {
+			if _, writeErr := w.Write(prefillResp.bodyBytes()); writeErr != nil {
+				s.logger.Error(writeErr, "failed to send prefill error to client (concurrent-dispatch)")
+			}
+		}
+	case <-timer.C:
+		// Prefill did not resolve within the backstop window: cancel both legs
+		// and fail rather than hang waiting for KV that may never arrive.
+		cancel()
+		dcw.abort()
+		s.logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
+			"request_id", uuidStr, "timeout", waitTimeout.String())
+		w.WriteHeader(http.StatusGatewayTimeout)
+		if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
+		}
+		<-prefillDone // let the cancelled prefill goroutine finish to avoid a leak
+	}
+
+	// Wait for decode to finish (streamed on success, or promptly aborted) so
+	// we never leak the decode goroutine or its response body.
+	<-decodeDone
 
 	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration

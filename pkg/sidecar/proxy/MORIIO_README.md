@@ -35,9 +35,34 @@ connector agree on a single DP rank without each side independently hashing:
 - **Parallel**: the sidecar pins the rank itself and sets `remote_dp_rank_override=true`;
   the connector honors that pin on both legs.
 
-**Which to use?** Serial is the safe default and gives the tightest correctness guarantee
-(decode is pinned to the rank prefill truly used). Parallel reduces end-to-end latency by
-overlapping the two legs, at the cost of pinning the rank before prefill confirms it.
+**Which to use?** Serial is the **shipped default and the SLA-safe path**: parallel
+dispatch is **OFF unless you explicitly pass `--moriio-parallel-dispatch`**, so with
+defaults the sidecar always takes the serial `handleNIXLV2` path. Serial gives the
+tightest correctness guarantee (decode is pinned to the rank prefill truly used).
+
+Parallel dispatch is an **opt-in latency optimization** that overlaps the two legs.
+Because prefill and decode are issued concurrently, it now includes explicit
+**prefill-failure handling** so it stays correct and never hangs:
+
+- **Shared cancelable context.** Both legs derive from one cancelable context. If
+  prefill returns any non-2xx status (or a transport error, which surfaces as `502`),
+  the sidecar cancels that context so decode's in-flight request / KV wait aborts
+  immediately instead of waiting for KV that will never arrive.
+- **Commit point (buffered decode response).** Decode is dispatched concurrently but
+  its HTTP status/headers/body are held until prefill's outcome is known. If prefill
+  **fails**, decode's output is discarded and the **prefill error/status** is returned
+  to the client (never a bogus `200`). If prefill **succeeds**, decode's response is
+  committed and streamed through with its own status, headers, and body/SSE preserved.
+- **Bounded KV-wait backstop.** As a last resort, `--moriio-parallel-decode-wait-timeout`
+  (default `30s`) bounds how long decode may wait on the prefill outcome; on expiry both
+  legs are cancelled and the request fails with `504` rather than hanging. Prefill in
+  parallel dispatch is capped to one token, so it normally resolves well within this
+  window.
+
+Trade-off: because the client commit is deferred to the commit point, decode's response
+is buffered until prefill is confirmed and then flushed/streamed. In practice prefill
+(one token) resolves quickly, so streaming resumes almost immediately after the commit
+point; the serial path retains fully incremental streaming from the first byte.
 
 ## Supported Topologies
 
@@ -51,7 +76,8 @@ overlapping the two legs, at the cost of pinning the rank before prefill confirm
 | Flag | Purpose |
 |------|---------|
 | `--moriio-write-mode` | Enable MoRI-IO WRITE-mode (serial dispatch by default) |
-| `--moriio-parallel-dispatch` | Concurrent prefill/decode dispatch (requires `--moriio-write-mode`) |
+| `--moriio-parallel-dispatch` | Concurrent prefill/decode dispatch; **OFF by default (serial is the SLA-safe path); opt-in only**. Requires `--moriio-write-mode` |
+| `--moriio-parallel-decode-wait-timeout` | Backstop for parallel dispatch: how long decode may wait on the prefill outcome/KV before being cancelled so the request fails (`504`) instead of hanging (default `30s`; only used with `--moriio-parallel-dispatch`) |
 | `--moriio-dp-size` | Data parallel world size |
 | `--moriio-dp-size-local` | Per-pod DP size for multi-pod (`pod_idx = dp_rank / dp_size_local`) |
 | `--moriio-remote-hosts` | Prefill-side pod hosts for fan-out (DNS names preferred) |

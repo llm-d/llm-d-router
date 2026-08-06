@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"encoding/binary"
+	"math"
 
 	"golang.org/x/crypto/blake2s"
 )
@@ -40,4 +41,37 @@ func pickDPRank(requestID string, dpSize int) int {
 	_, _ = h.Write([]byte(requestID))
 	sum := h.Sum(nil)
 	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(dpSize))
+}
+
+// resolveDecodeDPRank picks the DP rank for the decode leg in serial WRITE
+// dispatch. It prefers the rank the prefill leg returned in its
+// kv_transfer_params (remote_dp_rank), but only when that value is a valid
+// integer in [0, dpSize); otherwise it falls back to the deterministic hash of
+// the request id. The returned rank is therefore always in range, so the caller
+// can pin BOTH the x-data-parallel-rank header and the decode body's
+// remote_dp_rank to the same value and avoid the header/body targeting
+// different ranks (which would hang the KV transfer). The second return value
+// reports whether the prefill-returned rank was used (false = hash fallback,
+// including when it was omitted, non-numeric, or out of range).
+func resolveDecodeDPRank(prefillKV any, requestID string, dpSize int) (rank int, usedReturned bool) {
+	fallback := pickDPRank(requestID, dpSize)
+	if dpSize <= 1 {
+		// Single-DP: the rank is always 0 and the header is not set.
+		return fallback, false
+	}
+	pkv, ok := prefillKV.(map[string]any)
+	if !ok {
+		return fallback, false
+	}
+	rv, present := pkv[requestFieldRemoteDPRank]
+	if !present {
+		return fallback, false
+	}
+	if f, ok := rv.(float64); ok && f != math.Trunc(f) {
+		return fallback, false
+	}
+	if ri, ok := toInt(rv); ok && ri >= 0 && ri < dpSize {
+		return ri, true
+	}
+	return fallback, false
 }

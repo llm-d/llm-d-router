@@ -94,6 +94,13 @@ const (
 	defaultMooncakeBootstrapPort = 8998
 	defaultP2PConnectorPort      = 7777
 
+	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
+	// dispatch: it bounds how long the decode leg waits on the prefill outcome
+	// (and thus KV) before being cancelled, so a hung/failed prefill fails the
+	// request instead of hanging. Prefill in parallel dispatch is capped to one
+	// token, so it normally resolves well within this window.
+	defaultMoRIIOParallelDecodeWaitTimeout = 30 * time.Second
+
 	// TLS stages
 	prefillStage = "prefiller"
 	decodeStage  = "decoder"
@@ -220,15 +227,17 @@ func NewOptions() *Options {
 			Tracing:                 false,
 			// MoRI-IO defaults: off, preserving existing NIXLv2 behaviour.
 			// Port defaults match vLLM's MoRI-IO connector defaults.
-			MoRIIOWriteMode:            false,
-			MoRIIODecodeNotifyPort:     61005,
-			MoRIIODecodeHandshakePort:  6301,
-			MoRIIODecodePodIP:          os.Getenv("POD_IP"),
-			MoRIIOParallelDispatch:     false,
-			MoRIIOPrefillHandshakePort: 6301,
-			MoRIIOPrefillNotifyPort:    61005,
-			MoRIIOTPSize:               1,
-			MoRIIODPSize:               1,
+			MoRIIOWriteMode:           false,
+			MoRIIODecodeNotifyPort:    61005,
+			MoRIIODecodeHandshakePort: 6301,
+			MoRIIODecodePodIP:         os.Getenv("POD_IP"),
+			MoRIIOParallelDispatch:    false,
+
+			MoRIIOParallelDecodeWaitTimeout: defaultMoRIIOParallelDecodeWaitTimeout,
+			MoRIIOPrefillHandshakePort:      6301,
+			MoRIIOPrefillNotifyPort:         61005,
+			MoRIIOTPSize:                    1,
+			MoRIIODPSize:                    1,
 			// Wide-EP multi-pod: empty disables fan-out (single-pod fallback).
 			MoRIIORemoteHosts: nil,
 			MoRIIODPSizeLocal: 0,
@@ -292,7 +301,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	// Concurrent-dispatch flags: synthesise decode's kv_transfer_params from
 	// config so prefill and decode dispatch can overlap.
 	fs.BoolVar(&opts.MoRIIOParallelDispatch, "moriio-parallel-dispatch", opts.MoRIIOParallelDispatch,
-		"Fire prefill and decode concurrently. Requires --moriio-write-mode.")
+		"Fire prefill and decode concurrently. OFF by default (serial dispatch via handleNIXLV2 is the SLA-safe path); opt-in only. Requires --moriio-write-mode.")
+	fs.DurationVar(&opts.MoRIIOParallelDecodeWaitTimeout, "moriio-parallel-decode-wait-timeout", opts.MoRIIOParallelDecodeWaitTimeout,
+		"Backstop timeout for parallel dispatch: how long decode may wait on the prefill outcome/KV before being cancelled so the request fails instead of hanging. Only used with --moriio-parallel-dispatch.")
 	fs.IntVar(&opts.MoRIIOPrefillHandshakePort, "moriio-prefill-handshake-port", opts.MoRIIOPrefillHandshakePort,
 		"Prefill pod's base MoRI-IO handshake port, used to build the decode leg in parallel-dispatch mode.")
 	fs.IntVar(&opts.MoRIIOPrefillNotifyPort, "moriio-prefill-notify-port", opts.MoRIIOPrefillNotifyPort,
@@ -441,26 +452,27 @@ func (opts *Options) Complete() error {
 	// aligns with Kubernetes LeaderWorkerSet patterns where pod addresses are
 	// DNS names (e.g., "moriio-prefill-0-0.namespace.svc"); a literal IP is
 	// used as-is.
-	if resolved, resolveErr := resolveHostsToIPs(opts.MoRIIORemoteHosts); resolveErr != nil {
-		return fmt.Errorf("resolving --moriio-remote-hosts: %w", resolveErr)
-	} else {
-		opts.MoRIIORemoteHosts = resolved
+	resolvedRemote, remoteErr := resolveHostsToIPs(opts.MoRIIORemoteHosts)
+	if remoteErr != nil {
+		return fmt.Errorf("resolving --moriio-remote-hosts: %w", remoteErr)
 	}
-	if resolved, resolveErr := resolveHostsToIPs(opts.MoRIIODecodeHosts); resolveErr != nil {
-		return fmt.Errorf("resolving --moriio-decode-hosts: %w", resolveErr)
-	} else {
-		opts.MoRIIODecodeHosts = resolved
+	opts.MoRIIORemoteHosts = resolvedRemote
+
+	resolvedDecode, decodeErr := resolveHostsToIPs(opts.MoRIIODecodeHosts)
+	if decodeErr != nil {
+		return fmt.Errorf("resolving --moriio-decode-hosts: %w", decodeErr)
 	}
+	opts.MoRIIODecodeHosts = resolvedDecode
 
 	// Single-host counterpart: --moriio-local-pod-ip is decode's advertised
 	// remote_host on the prefill leg. Resolve it the same way so it can be an
 	// LWS DNS name (a literal IP passes through unchanged).
 	if opts.MoRIIODecodePodIP != "" {
-		if resolved, resolveErr := resolveHostsToIPs([]string{opts.MoRIIODecodePodIP}); resolveErr != nil {
-			return fmt.Errorf("resolving --moriio-local-pod-ip: %w", resolveErr)
-		} else {
-			opts.MoRIIODecodePodIP = resolved[0]
+		resolved, podIPErr := resolveHostsToIPs([]string{opts.MoRIIODecodePodIP})
+		if podIPErr != nil {
+			return fmt.Errorf("resolving --moriio-local-pod-ip: %w", podIPErr)
 		}
+		opts.MoRIIODecodePodIP = resolved[0]
 	}
 
 	return nil

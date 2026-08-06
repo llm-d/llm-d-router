@@ -264,6 +264,11 @@ type Config struct {
 	// synthesising decode's kv_transfer_params from config instead of reading
 	// them from the prefill response. Requires MoRIIOWriteMode.
 	MoRIIOParallelDispatch bool
+	// MoRIIOParallelDecodeWaitTimeout bounds how long the parallel WRITE
+	// dispatch waits for the prefill outcome before cancelling decode, so a
+	// hung or failed prefill cannot make decode wait for KV that never
+	// arrives. Zero falls back to defaultMoRIIOParallelDecodeWaitTimeout.
+	MoRIIOParallelDecodeWaitTimeout time.Duration
 	// MoRIIOPrefillHandshakePort is the prefill pod's base MoRI-IO handshake port.
 	MoRIIOPrefillHandshakePort int
 	// MoRIIOPrefillNotifyPort is the prefill pod's base MoRI-IO notify port.
@@ -376,8 +381,29 @@ type Server struct {
 func (s *Server) resolver() *hostResolver {
 	s.resolverOnce.Do(func() {
 		s.hostResolver = newHostResolver(s.logger, resolveTTLFromEnv())
+		s.seedResolver(s.hostResolver)
 	})
 	return s.hostResolver
+}
+
+// seedResolver primes the request-path resolver with the spec->IP mappings that
+// Complete() already resolved at startup, so the first request does not repeat
+// those lookups and a request-time DNS failure still serves the startup IP
+// instead of the raw hostname (which would hang the MoRI-IO handshake). Specs
+// and their resolved IPs are captured positionally in Complete(); a length
+// mismatch (e.g. a Config built directly in tests) skips seeding for that list.
+func (s *Server) seedResolver(r *hostResolver) {
+	seedPairs := func(specs, ips []string) {
+		if len(specs) != len(ips) {
+			return
+		}
+		for i := range specs {
+			r.seed(specs[i], ips[i])
+		}
+	}
+	seedPairs(s.config.MoRIIODecodeHostSpecs, s.config.MoRIIODecodeHosts)
+	seedPairs(s.config.MoRIIORemoteHostSpecs, s.config.MoRIIORemoteHosts)
+	r.seed(s.config.MoRIIODecodePodIPSpec, s.config.MoRIIODecodePodIP)
 }
 
 // currentDecodeHosts returns the decode-side peer IPs for the current request,
