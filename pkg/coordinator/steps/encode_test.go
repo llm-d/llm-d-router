@@ -145,6 +145,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 }
 
 func TestEncodeStep_ResponseHeadersConstrainRemainingFanOut(t *testing.T) {
+	const expectedRevision = "revision-b"
 	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestNumber := requestCount.Add(1)
@@ -152,12 +153,12 @@ func TestEncodeStep_ResponseHeadersConstrainRemainingFanOut(t *testing.T) {
 			if got := r.Header.Get("X-Disagg-Revision"); got != "" {
 				t.Errorf("first encode revision = %q, want empty", got)
 			}
-			w.Header().Set("X-Disagg-Revision", "revision-b")
+			w.Header().Set("X-Disagg-Revision", expectedRevision)
 		} else {
-			if got := r.Header.Get("X-Disagg-Revision"); got != "revision-b" {
-				t.Errorf("encode request %d revision = %q, want %q", requestNumber, got, "revision-b")
+			if got := r.Header.Get("X-Disagg-Revision"); got != expectedRevision {
+				t.Errorf("encode request %d revision = %q, want %q", requestNumber, got, expectedRevision)
 			}
-			w.Header().Set("X-Disagg-Revision", "revision-b")
+			w.Header().Set("X-Disagg-Revision", expectedRevision)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
 	}))
@@ -188,8 +189,8 @@ func TestEncodeStep_ResponseHeadersConstrainRemainingFanOut(t *testing.T) {
 	if err := p.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("encode failed: %v", err)
 	}
-	if got := reqCtx.ForwardedHeaders()["x-disagg-revision"]; got != "revision-b" {
-		t.Fatalf("forwarded revision = %q, want %q", got, "revision-b")
+	if got := reqCtx.ForwardedHeaders()["x-disagg-revision"]; got != expectedRevision {
+		t.Fatalf("forwarded revision = %q, want %q", got, expectedRevision)
 	}
 }
 
