@@ -54,7 +54,15 @@ func (s *StreamingServer) tryServeModelList(ctx context.Context, reqCtx *Request
 		return false, nil
 	}
 
-	body, err := json.Marshal(s.aggregateModels())
+	models, collected := s.aggregateModels()
+	if collected == 0 {
+		// No endpoint has reported its model list yet: either the pool is empty, or the pods are
+		// still being scraped after a cold start or scale-up (scraping is interval-based). Return
+		// 503 so the client retries, instead of a misleading empty 200.
+		return true, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no model data collected yet from any endpoint"}
+	}
+
+	body, err := json.Marshal(models)
 	if err != nil {
 		return true, errcommon.Error{Code: errcommon.Internal, Msg: "failed to marshal /v1/models response: " + err.Error()}
 	}
@@ -83,8 +91,10 @@ func (s *StreamingServer) tryServeModelList(ctx context.Context, reqCtx *Request
 }
 
 // aggregateModels collects the models from all endpoints in the datastore and returns one entry per
-// unique model ID, sorted alphabetically so the response is the same every time.
-func (s *StreamingServer) aggregateModels() extmodels.ModelResponse {
+// unique model ID, sorted alphabetically so the response is the same every time. The second return
+// value is how many endpoints have actually reported a model list (been scraped), letting the caller
+// tell "nothing collected yet" (empty pool or still warming up) from a genuinely empty result.
+func (s *StreamingServer) aggregateModels() (extmodels.ModelResponse, int) {
 	endpoints := s.datastore.PodList(func(fwkdl.Endpoint) bool { return true })
 	// The same model appears on many pods, but we keep only one copy of it below.
 	// Sort the pods first so we always keep the same pod's copy and the answer stays consistent.
@@ -94,12 +104,14 @@ func (s *StreamingServer) aggregateModels() extmodels.ModelResponse {
 
 	seen := make(map[string]struct{})
 	data := make([]attrmodels.ModelData, 0)
+	collected := 0 // endpoints that have reported their model list at least once (been scraped)
 
 	for _, ep := range endpoints {
 		c, ok := fwkdl.ReadAttribute[attrmodels.ModelDataCollection](ep.GetAttributes(), attrmodels.ModelsAttributeKey.String())
 		if !ok {
-			continue
+			continue // registered but not scraped yet; do not count it
 		}
+		collected++
 		for _, model := range c {
 			if _, dup := seen[model.ID]; dup {
 				continue
@@ -110,5 +122,5 @@ func (s *StreamingServer) aggregateModels() extmodels.ModelResponse {
 	}
 	// return the models in a fixed (alphabetical) order every time
 	slices.SortFunc(data, func(a, b attrmodels.ModelData) int { return strings.Compare(a.ID, b.ID) })
-	return extmodels.ModelResponse{Object: "list", Data: data}
+	return extmodels.ModelResponse{Object: "list", Data: data}, collected
 }

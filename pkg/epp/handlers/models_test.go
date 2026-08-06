@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -103,8 +104,11 @@ func TestAggregateModels(t *testing.T) {
 	}}
 	s := &StreamingServer{datastore: ds}
 
-	got := s.aggregateModels()
+	got, gotCollected := s.aggregateModels()
 
+	// Three endpoints are registered, but the third reported no model list, so only two count as
+	// scraped.
+	assert.Equal(t, 2, gotCollected)
 	assert.Equal(t, "list", got.Object)
 	// union across endpoints, deduplicated by ID, sorted for stable output.
 	assert.Equal(t, []string{"base", "finance", "legal"}, modelIDs(got.Data))
@@ -128,7 +132,7 @@ func TestAggregateModels_PreservesOpenAIFields(t *testing.T) {
 	}}
 	s := &StreamingServer{datastore: ds}
 
-	got := s.aggregateModels()
+	got, _ := s.aggregateModels()
 
 	require.Len(t, got.Data, 1)
 	assert.Equal(t, attrmodels.ModelData{
@@ -151,7 +155,7 @@ func TestAggregateModels_DeterministicDedupWinner(t *testing.T) {
 	}}
 	s := &StreamingServer{datastore: ds}
 
-	got := s.aggregateModels()
+	got, _ := s.aggregateModels()
 
 	require.Len(t, got.Data, 1)
 	assert.Equal(t, attrmodels.ModelData{ID: "shared", OwnedBy: "from-a", Created: 100}, got.Data[0])
@@ -162,8 +166,9 @@ func TestAggregateModels_NoEndpoints(t *testing.T) {
 
 	s := &StreamingServer{datastore: &mockModelsDatastore{}}
 
-	got := s.aggregateModels()
+	got, gotEndpoints := s.aggregateModels()
 
+	assert.Equal(t, 0, gotEndpoints)
 	assert.Equal(t, "list", got.Object)
 	assert.Empty(t, got.Data)
 }
@@ -224,6 +229,114 @@ func TestHandleModelsRequest(t *testing.T) {
 			assert.Equal(t, []string{"base"}, modelIDs(resp.Data))
 		})
 	}
+}
+
+func TestTryServeModelList_ResponseUsesOpenAIJSONKeys(t *testing.T) {
+	t.Parallel()
+
+	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
+		endpointWithModels(attrmodels.ModelData{
+			ID:      "base",
+			Object:  "model",
+			Created: 1699999999,
+			OwnedBy: "vllm",
+			Parent:  "root",
+		}),
+	}}
+	s := &StreamingServer{datastore: ds}
+	reqCtx := &RequestContext{Request: &Request{Headers: make(map[string]string)}}
+
+	handled, err := s.tryServeModelList(context.Background(), reqCtx, modelsHeaderRequest(http.MethodGet, "/v1/models"))
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.NotNil(t, reqCtx.localResp)
+
+	// Assert on the raw JSON keys rather than round-tripping through the same struct tags, so a tag
+	// typo (e.g. "ownedby") that still round-trips cleanly is caught. OpenAI compatibility is the point.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(reqCtx.localResp.GetImmediateResponse().Body, &raw))
+	assert.Equal(t, "list", raw["object"])
+
+	data, ok := raw["data"].([]any)
+	require.True(t, ok, "data must be a JSON array")
+	require.Len(t, data, 1)
+	model, ok := data[0].(map[string]any)
+	require.True(t, ok, "data entry must be a JSON object")
+
+	assert.Equal(t, "base", model["id"])
+	assert.Equal(t, "model", model["object"])
+	assert.EqualValues(t, 1699999999, model["created"])
+	assert.Equal(t, "vllm", model["owned_by"])
+	assert.Equal(t, "root", model["parent"])
+}
+
+func TestTryServeModelList_NotScrapedYetReturns503(t *testing.T) {
+	t.Parallel()
+
+	// Endpoints are registered but none have been scraped yet (cold start / scale-up window, since
+	// scraping is interval-based). With no model list collected from any endpoint, this must be a
+	// 503 so the client retries, not a misleading empty 200.
+	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
+		fwkdl.NewEndpoint(nil, nil), // ready endpoint with no ModelsAttributeKey collected yet
+		fwkdl.NewEndpoint(nil, nil), // another endpoint, also not scraped yet
+	}}
+	s := &StreamingServer{datastore: ds}
+	reqCtx := &RequestContext{Request: &Request{Headers: make(map[string]string)}}
+
+	handled, err := s.tryServeModelList(context.Background(), reqCtx, modelsHeaderRequest(http.MethodGet, "/v1/models"))
+
+	assert.True(t, handled)
+	require.Error(t, err)
+	var e errcommon.Error
+	require.ErrorAs(t, err, &e)
+	assert.Equal(t, errcommon.ServiceUnavailable, e.Code)
+	assert.Nil(t, reqCtx.localResp)
+	assert.NotEqual(t, RequestAnsweredLocal, reqCtx.RequestState)
+}
+
+func TestTryServeModelList_NoEndpointsReturns503(t *testing.T) {
+	t.Parallel()
+
+	s := &StreamingServer{datastore: &mockModelsDatastore{}}
+	reqCtx := &RequestContext{Request: &Request{Headers: make(map[string]string)}}
+
+	handled, err := s.tryServeModelList(context.Background(), reqCtx, modelsHeaderRequest(http.MethodGet, "/v1/models"))
+
+	assert.True(t, handled)
+	require.Error(t, err)
+	var e errcommon.Error
+	require.ErrorAs(t, err, &e)
+	assert.Equal(t, errcommon.ServiceUnavailable, e.Code)
+	// No local response is stored; the state machine sends the error via the standard error path.
+	assert.Nil(t, reqCtx.localResp)
+	assert.NotEqual(t, RequestAnsweredLocal, reqCtx.RequestState)
+}
+
+func TestHandleRequestHeaders_ModelsShortCircuit(t *testing.T) {
+	t.Parallel()
+
+	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
+		endpointWithModels(attrmodels.ModelData{ID: "base"}),
+	}}
+	// A director is wired so a reordering regression (the EndOfStream fallback running before the
+	// models short-circuit) routes to a random endpoint and fails these assertions cleanly, rather
+	// than nil-panicking on s.director.
+	s := &StreamingServer{datastore: ds, director: &mockDirectorRequest{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	// modelsHeaderRequest sets EndOfStream: a bodyless GET would otherwise hit the
+	// fallback-to-random-endpoint branch, so this guards that the short-circuit runs first.
+	err := s.HandleRequestHeaders(context.Background(), reqCtx, modelsHeaderRequest(http.MethodGet, "/v1/models"))
+	require.NoError(t, err)
+
+	assert.Equal(t, RequestAnsweredLocal, reqCtx.RequestState)
+	require.NotNil(t, reqCtx.localResp)
+	// Not routed: no target endpoint chosen and no routing header response built.
+	assert.Empty(t, reqCtx.TargetEndpoint)
+	assert.Nil(t, reqCtx.reqHeaderResp)
 }
 
 func TestUpdateStateAndSendIfNeeded_AnsweredLocally(t *testing.T) {
