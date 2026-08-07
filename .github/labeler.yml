@@ -1,0 +1,30 @@
+# Path based area/* labels. actions/labeler errors if a listed label name isn't
+# already a repository label (pull-requests: write cannot create one), so only
+# area/epp and area/dev are wired up here.
+#
+# docs/area_taxonomy.md defines area/scheduling, area/flowcontrol, area/kvcache,
+# area/coordinator, area/sidecar, area/datalayer, area/telemetry and area/docs.
+# Move their glob blocks here once those labels are created (#956). scheduling,
+# flowcontrol and datalayer also need a pkg/epp/framework/plugins/<x>/** glob
+# alongside pkg/epp/<x>/**. See docs/area_taxonomy.md for why.
+
+area/epp:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/epp/**
+          - cmd/epp/**
+          - test/integration/epp/**
+
+area/dev:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - hack/**
+          - scripts/**
+          - Makefile
+          - test/e2e/**
+          - test/framework/**
+          - test/utils/**
+          - test/scripts/**
+          - test/perf/**
+          - test/profiling/**
