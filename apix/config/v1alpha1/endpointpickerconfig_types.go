@@ -420,6 +420,12 @@ type FlowControlConfig struct {
 	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
 	// Flow Control. If omitted, "utilization-detector" is used by default.
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
+
+	// +optional
+	// AllowDynamicPriorityProvisioning controls whether the registry creates new priority bands
+	// dynamically when requested by the control plane during reconciliation.
+	// Defaults to true when omitted.
+	AllowDynamicPriorityProvisioning *bool `json:"allowDynamicPriorityProvisioning,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {

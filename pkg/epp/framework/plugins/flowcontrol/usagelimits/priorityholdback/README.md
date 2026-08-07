@@ -55,7 +55,7 @@ Use when hand-tuned, per-band ceiling values are required and the algorithmic do
 - Ceilings must be monotonically non-increasing when priorities are sorted highest-first.
 - `shape`, `minCeiling`, and `maxCeiling` must not be set when `domain` is `explicit`; they are rejected during configuration validation.
 
-**Limitation:** The `explicit` domain is intended for statically configured priority bands. If a priority without a configured ceiling reaches the policy (for example, due to dynamic priority band provisioning), the policy logs an error and falls back to a ceiling of `0.0` for that priority. If dynamic priority band provisioning is required, consider using the `rank` or `value` domains until explicit support is added.
+**Limitation:** The `explicit` domain is intended for statically configured priority bands. To ensure unknown priorities are not dynamically provisioned during control plane reconciliation, set `allowDynamicPriorityProvisioning: false` in `flowControl`. When disabled, only statically configured priority bands exist; requests for unknown priorities are rejected by the registry and logged. If a priority without a configured ceiling reaches the policy, it falls back to a ceiling of `0.0`. If dynamic priority band provisioning is required, consider using the `rank` or `value` domains.
 
 **Parameters:**
 
@@ -93,6 +93,7 @@ plugins:
         50: 0.70
         10: 0.30
 flowControl:
+  allowDynamicPriorityProvisioning: false
   usageLimitPolicyPluginRef: my-explicit-holdback
 ```
 

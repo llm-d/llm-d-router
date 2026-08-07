@@ -146,6 +146,10 @@ func buildRegistryConfig(
 		opts = append(opts, registry.WithPriorityBand(pb))
 	}
 
+	if apiConfig.AllowDynamicPriorityProvisioning != nil {
+		opts = append(opts, registry.WithAllowDynamicPriorityProvisioning(*apiConfig.AllowDynamicPriorityProvisioning))
+	}
+
 	return registry.NewConfig(defaults, opts...)
 }
 

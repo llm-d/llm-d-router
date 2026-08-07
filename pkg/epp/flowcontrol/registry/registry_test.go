@@ -1450,4 +1450,3 @@ func TestApplyDesiredPriorities_ExistingBand_WhenDisabled(t *testing.T) {
 
 	assert.True(t, exists, "Statically configured priority band must remain provisioned during reconciliation even when dynamic priority provisioning is disabled")
 }
-}
