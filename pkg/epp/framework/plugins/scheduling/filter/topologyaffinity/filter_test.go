@@ -125,6 +125,17 @@ func TestFilter_EndpointMissingAttributeIsDropped(t *testing.T) {
 	assert.Equal(t, "same-host", got[0].GetMetadata().ID.Name)
 }
 
+func TestFilter_MatchesPeerFromHeaderWhenNoAttribute(t *testing.T) {
+	sameHost := makeEndpoint(t, "same-host", &attrtopology.Topology{Hostname: "h1"})
+
+	f := newTestFilter(topoutil.LevelHost)
+	f.peerTopologyHeader = "x-peer-topology"
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-peer-topology": "host=h1"}}
+	got := f.Filter(context.Background(), req, []fwksched.Endpoint{sameHost})
+	require.Len(t, got, 1)
+	assert.Equal(t, "same-host", got[0].GetMetadata().ID.Name)
+}
+
 func TestFilter_Consumes(t *testing.T) {
 	f := newTestFilter(topoutil.LevelHost)
 
@@ -142,6 +153,15 @@ func TestFactory_Defaults(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, topoutil.LevelHost, f.minAffinity)
 	assert.Equal(t, FilterType, f.TypedName().Name)
+	assert.Empty(t, f.peerTopologyHeader)
+}
+
+func TestFactory_PeerTopologyHeader(t *testing.T) {
+	p, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"peerTopologyHeader": "x-peer-topology"}`)), nil)
+	require.NoError(t, err)
+	f, ok := p.(*Filter)
+	require.True(t, ok)
+	assert.Equal(t, "x-peer-topology", f.peerTopologyHeader)
 }
 
 func TestFactory_InvalidMinAffinity(t *testing.T) {

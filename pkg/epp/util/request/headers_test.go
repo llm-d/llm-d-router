@@ -47,6 +47,7 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.DestinationEndpointServedKey,
 		errcommon.RequestDroppedReasonHeaderKey,
 		"Content-Length",
+		"x-peer-topology",
 	}
 
 	for _, header := range systemHeaders {
