@@ -34,7 +34,8 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var internalForwardingHeaders = map[string]bool{
-	"epp-profile": true,
+	"epp-profile":     true,
+	"x-peer-topology": true,
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding
@@ -86,6 +87,13 @@ type RequestContext struct {
 	// decode step. Populated by PrefillStep from the prefill response; consumed
 	// by the KV connector when building the decode request.
 	KVTransferParams map[string]any
+	// PeerTopology carries the prefill endpoint's encoded topology from the
+	// prefill response to the decode request, for topology-affinity-filter
+	// and topology-affinity-scorer running in the decode EPP's profile.
+	// Populated by PrefillStep from the x-peer-topology response header;
+	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
+	// the prefill EPP's config has no topology-stamp-handler.
+	PeerTopology string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter

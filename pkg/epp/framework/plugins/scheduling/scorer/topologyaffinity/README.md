@@ -9,15 +9,22 @@ in an earlier scheduling phase.
 
 ## What it does
 
-Scoped to single-EPP disaggregated deployments, where one EPP process runs both the
-`decode` and `prefill` scheduling profiles for a request. Coordinator deployments, where
-prefill and decode are picked by separate EPPs, are not yet supported.
+Supports two deployment modes:
 
-For a disaggregated prefill/decode request, `disagg-profile-handler` selects the decode
-endpoint first, then runs the `prefill` profile to select a prefill endpoint. This plugin
-runs in the `prefill` profile and grades each candidate by the tightest topology level it
-shares with the decode pick (host, rack, zone, or region; same host implies same rack,
-zone, and region), using a fixed proximity curve:
+- **Single EPP**: one EPP process runs both the `decode` and `prefill` scheduling
+  profiles for a request. `disagg-profile-handler` selects the decode endpoint first,
+  then runs the `prefill` profile to select a prefill endpoint. This plugin runs in the
+  `prefill` profile and grades candidates against the decode pick, resolved from a
+  request attribute.
+- **Coordinator, separate P/D EPPs**: the prefill EPP is picked first, in a different
+  process. The prefill EPP's `topology-stamp-handler` plugin encodes its selected
+  endpoint's topology onto a response header; the coordinator forwards that header onto
+  the decode request. This plugin runs in the decode EPP's `decode` profile and resolves
+  the peer topology from that header via `peerTopologyHeader`.
+
+In both modes the plugin grades each candidate by the tightest topology level it shares
+with the peer (host, rack, zone, or region; same host implies same rack, zone, and
+region), using a fixed proximity curve:
 
 | Common level | Score | KV-transfer path        |
 |--------------|-------|--------------------------|
@@ -61,9 +68,12 @@ physical enclosure.
 
 ## Inputs consumed
 
-Reads the `Topology` attribute (`topology-extractor`) from the candidate endpoints and
-from the peer endpoint. The peer endpoint is resolved from the `peer-endpoint` request
-attribute, published by `disagg-profile-handler` before running the `prefill` profile.
+Reads the `Topology` attribute (`topology-extractor`) from the candidate endpoints.
+
+The peer topology is resolved first from the `peer-endpoint` request attribute (single
+EPP, published by `disagg-profile-handler` before running the `prefill` profile), falling
+back to the `peerTopologyHeader` request header (coordinator mode) when the attribute is
+absent.
 
 Declares `Topology` as an optional data dependency: a config with no `topology-extractor`
 logs a startup warning rather than an error, since every candidate scores 0 when the
@@ -74,8 +84,9 @@ attribute is absent.
 | Parameter               | Required | Default | Description                                                                  |
 |--------------------------|----------|---------|--------------------------------------------------------------------------------|
 | `topologyProducerName`   | no       | default producer | `topology-extractor` instance to read the `Topology` attribute from. |
+| `peerTopologyHeader`     | no       | unset   | Request header carrying the peer topology in coordinator deployments. Set to `x-peer-topology` when running in a decode EPP behind the coordinator; unused in single-EPP deployments. |
 
-**Configuration Example:**
+**Configuration Example, single EPP:**
 ```yaml
 plugins:
   - type: topology-extractor
@@ -85,6 +96,21 @@ schedulingProfiles:
   - name: prefill
     plugins:
       - pluginRef: prefill-topology-affinity
+        weight: 1
+```
+
+**Configuration Example, coordinator (decode EPP):**
+```yaml
+plugins:
+  - type: topology-extractor
+  - type: topology-affinity-scorer
+    name: decode-topology-affinity
+    parameters:
+      peerTopologyHeader: x-peer-topology
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: decode-topology-affinity
         weight: 1
 ```
 

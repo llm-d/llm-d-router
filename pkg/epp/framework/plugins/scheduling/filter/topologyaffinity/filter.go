@@ -39,6 +39,11 @@ type parameters struct {
 	// TopologyProducerName selects the topology-extractor instance to read
 	// endpoint topology from. Defaults to the extractor's default producer.
 	TopologyProducerName string `json:"topologyProducerName,omitempty"`
+	// PeerTopologyHeader names the request header carrying the peer's
+	// encoded topology in coordinator deployments, where the peer endpoint
+	// is not in-process. Unset by default: single-EPP deployments resolve
+	// the peer through the peer-endpoint request attribute instead.
+	PeerTopologyHeader string `json:"peerTopologyHeader,omitempty"`
 }
 
 var _ fwksched.Filter = &Filter{}
@@ -63,9 +68,10 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 		name = FilterType
 	}
 	return &Filter{
-		typedName:   fwkplugin.TypedName{Type: FilterType, Name: name},
-		minAffinity: minAffinity,
-		dataKey:     attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(params.TopologyProducerName),
+		typedName:          fwkplugin.TypedName{Type: FilterType, Name: name},
+		minAffinity:        minAffinity,
+		dataKey:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(params.TopologyProducerName),
+		peerTopologyHeader: params.PeerTopologyHeader,
 	}, nil
 }
 
@@ -79,9 +85,10 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 // topology affinity is a preference and must never make a request
 // unroutable.
 type Filter struct {
-	typedName   fwkplugin.TypedName
-	minAffinity topoutil.Level
-	dataKey     fwkplugin.DataKey
+	typedName          fwkplugin.TypedName
+	minAffinity        topoutil.Level
+	dataKey            fwkplugin.DataKey
+	peerTopologyHeader string
 }
 
 func (f *Filter) TypedName() fwkplugin.TypedName {
@@ -99,7 +106,7 @@ func (f *Filter) Consumes() fwkplugin.DataDependencies {
 }
 
 func (f *Filter) Filter(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
-	peer, ok := topoutil.PeerTopology(request, f.dataKey.String())
+	peer, ok := topoutil.PeerTopology(request, f.dataKey.String(), f.peerTopologyHeader)
 	if !ok {
 		return endpoints
 	}
