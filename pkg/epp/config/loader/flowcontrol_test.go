@@ -151,6 +151,24 @@ func TestBuildRegistryConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "ShouldSucceed_WithAllowDynamicPriorityProvisioningDisabled",
+			apiConfig: &configapi.FlowControlConfig{
+				AllowDynamicPriorityProvisioning: ptr.To(false),
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				assert.False(t, cfg.AllowDynamicPriorityProvisioning, "AllowDynamicPriorityProvisioning should be set to false")
+			},
+		},
+		{
+			name: "ShouldSucceed_WithAllowDynamicPriorityProvisioningEnabled",
+			apiConfig: &configapi.FlowControlConfig{
+				AllowDynamicPriorityProvisioning: ptr.To(true),
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				assert.True(t, cfg.AllowDynamicPriorityProvisioning, "AllowDynamicPriorityProvisioning should be set to true")
+			},
+		},
+		{
 			name:      "ShouldSucceed_WithNilConfig_AndApplySystemDefaults",
 			apiConfig: nil,
 			assertion: func(t *testing.T, cfg *registry.Config) {
