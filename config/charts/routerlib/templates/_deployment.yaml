@@ -101,6 +101,7 @@
               - --zap-encoder
               - "json"
               - --config-file
+              - "/config/{{ .Values.router.epp.pluginsConfigFile }}"
           {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict }}
           {{- if and (gt (.Values.router.epp.replicas | int) 1) (not $gkePB.enabled) }}
               - --ha-enable-leader-election
