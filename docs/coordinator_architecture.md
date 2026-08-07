@@ -728,7 +728,7 @@ only the request carrier differs.
 
 | `type` | Purpose | Key params |
 | :---- | :---- | :---- |
-| `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` and `GET /v1/models` on the listener. | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
+| `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` and `GET /v1/models` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
 | `replace-media-urls` | Download `image_url` references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and per-image hash/placeholder/kwargs. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
