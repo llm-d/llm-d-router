@@ -24,11 +24,25 @@ import (
 	"k8s.io/utils/ptr"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
+
+// mockFilterDetector implements both SaturationDetector and Filter, like the real utilization-detector.
+type mockFilterDetector struct{ mockPlugin }
+
+var (
+	_ fwksched.Filter = &mockFilterDetector{}
+)
+
+func (m *mockFilterDetector) Saturation(_ context.Context, _ []fwkdl.Endpoint) float64 { return 0 }
+func (m *mockFilterDetector) Filter(_ context.Context, _ *fwksched.InferenceRequest, eps []fwksched.Endpoint) []fwksched.Endpoint {
+	return eps
+}
 
 // metricsPlugins returns an allPlugins map with mock stubs for both default metrics plugins.
 // Providing them prevents ensureDataLayer from calling registerDefaultPlugin (which needs the
@@ -119,4 +133,81 @@ func TestEnsureDataLayer(t *testing.T) {
 		require.Empty(t, cfg.DataLayer.Sources)
 	})
 
+}
+
+func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
+	t.Run("detector implementing Filter is injected into profiles", func(t *testing.T) {
+		w := 2.0
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		detectorName := "my-detector"
+		detector := &mockFilterDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}}
+		handle.AddPlugin(detectorName, detector)
+
+		allPlugins := handle.GetAllPluginsWithNames()
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 2)
+		require.Equal(t, detectorName, cfg.SchedulingProfiles[0].Plugins[1].PluginRef)
+	})
+
+	t.Run("detector not implementing Filter is not injected", func(t *testing.T) {
+		w := 2.0
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		detectorName := "plain-detector"
+		detector := &mockSaturationDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}}
+		handle.AddPlugin(detectorName, detector)
+
+		allPlugins := handle.GetAllPluginsWithNames()
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 1, "non-filter detector should not be injected")
+	})
+
+	t.Run("detector already in profile is not duplicated", func(t *testing.T) {
+		detectorName := "my-detector"
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{Name: "default", Plugins: []configapi.SchedulingPlugin{
+					{PluginRef: detectorName},
+					{PluginRef: "picker"},
+				}},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		detector := &mockFilterDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}}
+		handle.AddPlugin(detectorName, detector)
+
+		allPlugins := handle.GetAllPluginsWithNames()
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 2, "already present, no duplicate")
+	})
 }
