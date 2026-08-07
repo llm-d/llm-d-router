@@ -1380,3 +1380,62 @@ func TestFlowRegistry_FlowErrorScoping(t *testing.T) {
 	assert.Equal(t, int32(concurrency), errorCount.Load(), "All requests should fail flow provisioning")
 	assert.Equal(t, int32(0), successCount.Load(), "No request should succeed if flow provisioning failed")
 }
+
+func TestApplyDesiredPriorities_ProvisionUnknownBand_WhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	h := newRegistryTestHarness(t, harnessOptions{}) // AllowDynamicPriorityProvisioning defaults to true
+	const unknownPrio = 999
+
+	h.fr.ApplyDesiredPriorities(map[int]struct{}{unknownPrio: {}})
+
+	h.fr.mu.RLock()
+	_, exists := h.fr.config.PriorityBands[unknownPrio]
+	h.fr.mu.RUnlock()
+
+	assert.True(t, exists, "Unknown priority band should be provisioned when dynamic priority provisioning is enabled")
+}
+
+func TestApplyDesiredPriorities_RejectUnknownBand_WhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	defaults := newTestPriorityBandPolicyDefaults()
+	cfg, err := NewConfig(defaults, WithAllowDynamicPriorityProvisioning(false))
+	require.NoError(t, err)
+
+	h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+	const unknownPrio = 999
+
+	h.fr.ApplyDesiredPriorities(map[int]struct{}{unknownPrio: {}})
+
+	h.fr.mu.RLock()
+	_, exists := h.fr.config.PriorityBands[unknownPrio]
+	h.fr.mu.RUnlock()
+
+	assert.False(t, exists, "Unknown priority band must not be provisioned when dynamic priority provisioning is disabled")
+}
+
+func TestApplyDesiredPriorities_ExistingBand_WhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	defaults := newTestPriorityBandPolicyDefaults()
+	const staticPrio = 50
+	band := mustBand(t, staticPrio)
+
+	cfg, err := NewConfig(defaults,
+		WithAllowDynamicPriorityProvisioning(false),
+		WithPriorityBand(band),
+	)
+	require.NoError(t, err)
+
+	h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+
+	// Reconcile with the existing static band
+	h.fr.ApplyDesiredPriorities(map[int]struct{}{staticPrio: {}})
+
+	h.fr.mu.RLock()
+	_, exists := h.fr.config.PriorityBands[staticPrio]
+	h.fr.mu.RUnlock()
+
+	assert.True(t, exists, "Statically configured priority band must remain provisioned during reconciliation even when dynamic priority provisioning is disabled")
+}
