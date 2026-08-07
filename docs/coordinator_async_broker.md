@@ -77,6 +77,8 @@ The AP protocol is unchanged. Dispatches carry no mode header, so they re-enter 
 
 ## Configuration
 
+To enable the step, add this block as the first entry under `steps:` in the coordinator's pipeline config, and point `redis_url` at the Redis your async processor uses.
+
 ```yaml
 - type: async-broker
   params:
