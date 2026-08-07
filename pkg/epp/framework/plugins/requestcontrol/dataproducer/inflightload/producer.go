@@ -37,6 +37,7 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
 )
 
 const (
@@ -395,6 +396,15 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
 
+	if request.Body != nil {
+		bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+		log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL estimate",
+			"requestID", request.RequestID,
+			"bucket", bucket.String(),
+			"maxOutputTokens", request.Body.MaxOutputTokens,
+		)
+	}
+
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 			continue
@@ -433,18 +443,16 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		var maxOutputTokens *int64
-		if request != nil && request.Body != nil {
-			maxOutputTokens = request.Body.MaxOutputTokens
-		}
 		// Output tokens are based on the full input, not the cached portion.
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
+		// EstimateOutputFromRequest reads the OSL bucket published as a request
+		// attribute, falling back to the ratio-based estimate for UNKNOWN requests.
+		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return tokens
 }
 
 func (p *InFlightLoadProducer) ResponseBody(
-	_ context.Context,
+	ctx context.Context,
 	request *fwksched.InferenceRequest,
 	resp *requestcontrol.Response,
 	_ *datalayer.EndpointMetadata,
@@ -500,6 +508,14 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
+		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
+			bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
+				"requestID", request.RequestID,
+				"estimatedBucket", bucket.String(),
+				"actualCompletionTokens", resp.Usage.CompletionTokens,
+			)
+		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
 		p.PluginState.Touch(request.RequestID)
