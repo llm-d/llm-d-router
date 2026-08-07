@@ -27,6 +27,7 @@ import (
 
 const (
 	RequestHeaderExtensionPoint     = "RequestHeader"
+	ScreenerExtensionPoint          = "Screener"
 	AdmissionExtensionPoint         = "Admission"
 	DataProducerExtensionPoint      = "DataProducer"
 	PreRequestExtensionPoint        = "PreRequest"
@@ -34,6 +35,14 @@ const (
 	ResponseStreamingExtensionPoint = "ResponseStreaming"
 	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
+
+// Screener performs preliminary filtering of located endpoints before data
+// production, admission, and scheduling profiles run. Every screener sees the
+// same input set, and the framework intersects their results.
+type Screener interface {
+	plugin.Plugin
+	Screen(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint
+}
 
 // PreRequest is called by the director after a getting result from scheduling layer and
 // before a request is sent to the selected model server.

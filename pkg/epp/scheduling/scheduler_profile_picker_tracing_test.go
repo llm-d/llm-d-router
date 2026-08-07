@@ -67,7 +67,7 @@ func newWeightedScores(names ...string) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(names))
 	for i, name := range names {
 		endpoint := fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}}, nil, nil)
+			&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, nil, nil)
 		scores[endpoint] = float64(i)
 	}
 	return scores

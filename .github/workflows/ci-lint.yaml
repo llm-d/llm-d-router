@@ -46,6 +46,7 @@ jobs:
               - go.mod
               - go.sum
               - .golangci.yml
+              - .golangci-security.yml
               - .typos.toml
               - scripts/**
               - hack/**
@@ -57,6 +58,10 @@ jobs:
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -103,3 +108,28 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
           govulncheck ./...
+
+      - name: Run make lint-security
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
+        run: make lint-security
+
+      # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
+      - name: Upload gosec SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
+      # On runs that skip the upload above the artifact is the only way to
+      # reach the findings.
+      - name: Upload gosec SARIF artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gosec-sarif
+          path: gosec.sarif
+          retention-days: 7
+          if-no-files-found: warn

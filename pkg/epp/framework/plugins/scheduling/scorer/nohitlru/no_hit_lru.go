@@ -175,7 +175,7 @@ func (s *NoHitLRU) isColdRequest(ctx context.Context, endpoints []scheduling.End
 		}
 		info, ok := attr.(*attrprefix.PrefixCacheMatchInfo)
 		if ok && info.MatchBlocks() > 0 {
-			logger.Info("Cache hit detected on endpoint", "endpoint", ep.GetMetadata().NamespacedName)
+			logger.Info("Cache hit detected on endpoint", "endpoint", ep.GetMetadata().ID)
 			return false
 		}
 	}
@@ -210,7 +210,7 @@ func (s *NoHitLRU) getLRUPositions() map[string]int {
 // (usedPods) and those that have never received cold requests (neverUsedPods).
 func (s *NoHitLRU) partitionPodsByUsage(endpoints []scheduling.Endpoint, lruPosition map[string]int) (usedEndpoints, neverUsedEndpoints []scheduling.Endpoint) {
 	for _, endpoint := range endpoints {
-		endpointName := endpoint.GetMetadata().NamespacedName.String()
+		endpointName := endpoint.GetMetadata().ID.String()
 		if _, exists := lruPosition[endpointName]; exists {
 			usedEndpoints = append(usedEndpoints, endpoint)
 		} else {
@@ -242,7 +242,7 @@ func (s *NoHitLRU) scoreUsedPods(scoredEndpoints map[scheduling.Endpoint]float64
 		return
 	}
 	for _, endpoint := range usedPods {
-		endpointName := endpoint.GetMetadata().NamespacedName.String()
+		endpointName := endpoint.GetMetadata().ID.String()
 		lruPos := lruPosition[endpointName]
 		// LRU keys are oldest to newest so rank 0 = oldest
 		// The never used endpoint count is added to the rank so that
@@ -339,7 +339,7 @@ func (s *NoHitLRU) moveTargetPodToFront(ctx context.Context, request *scheduling
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 
 	targetPod := targetProfile.TargetEndpoints[0]
-	endpointName := targetPod.GetMetadata().NamespacedName.String()
+	endpointName := targetPod.GetMetadata().ID.String()
 
 	// Move the endpoint to the front of the LRU.
 	var present struct{} // dummy value

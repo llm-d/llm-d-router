@@ -25,6 +25,16 @@ type Plugin interface {
 	TypedName() TypedName
 }
 
+// ReadinessChecker is an optional interface for plugins whose asynchronous
+// initialization must complete before the EPP can safely receive traffic.
+type ReadinessChecker interface {
+	Plugin
+	// CheckReady returns nil when the plugin is ready. It must be fast and
+	// non-blocking, safe for concurrent calls, and report cached state rather
+	// than perform external I/O.
+	CheckReady() error
+}
+
 // DataDependencies holds the data keys a plugin consumes, split by whether they
 // are required (framework errors if no producer exists) or optional (framework
 // logs a warning but continues if no producer exists).

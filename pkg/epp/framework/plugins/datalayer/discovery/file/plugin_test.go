@@ -58,7 +58,7 @@ func (r *recordingNotifier) upsertedNames() []string {
 	defer r.mu.Unlock()
 	names := make([]string, len(r.upserted))
 	for i, m := range r.upserted {
-		names[i] = m.NamespacedName.String()
+		names[i] = m.ID.String()
 	}
 	return names
 }
@@ -75,10 +75,11 @@ func writeTemp(t *testing.T, content string) string {
 
 func newFD(path string, watch bool) *FileDiscovery {
 	return &FileDiscovery{
-		path:      path,
-		watchFile: watch,
-		endpoints: make(map[types.NamespacedName]struct{}),
-		ready:     make(chan struct{}),
+		path:            path,
+		watchFile:       watch,
+		validateAddress: validateIPv4Address,
+		endpoints:       make(map[types.NamespacedName]struct{}),
+		ready:           make(chan struct{}),
 	}
 }
 
@@ -164,7 +165,7 @@ endpoints:
 	cancel()
 
 	require.NoError(t, newFD(path, false).Start(ctx, notifier))
-	assert.Equal(t, "default", notifier.upserted[0].NamespacedName.Namespace)
+	assert.Equal(t, "default", notifier.upserted[0].ID.Namespace)
 }
 
 func TestStart_MetricsHostIsAddressPort(t *testing.T) {
@@ -283,7 +284,7 @@ endpoints:
 		notifier.mu.Lock()
 		defer notifier.mu.Unlock()
 		for _, m := range notifier.upserted {
-			if m.NamespacedName.Name == "ep3" {
+			if m.ID.Name == "ep3" {
 				return true
 			}
 		}
@@ -337,7 +338,7 @@ func TestDumpStateCaps(t *testing.T) {
 
 func TestDumpStateConcurrentWithLoad(t *testing.T) {
 	path := writeTemp(t, "endpoints:\n- name: ep1\n  address: 10.0.0.1\n  port: \"8000\"\n")
-	f := &FileDiscovery{path: path, endpoints: map[types.NamespacedName]struct{}{}}
+	f := &FileDiscovery{path: path, validateAddress: validateIPv4Address, endpoints: map[types.NamespacedName]struct{}{}}
 	notifier := &recordingNotifier{}
 
 	var wg sync.WaitGroup

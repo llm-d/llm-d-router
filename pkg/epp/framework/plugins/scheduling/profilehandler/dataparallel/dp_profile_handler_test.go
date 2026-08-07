@@ -23,10 +23,10 @@ const DefaultTestPodPort = "8000"
 func createEndpoint(nsn k8stypes.NamespacedName, ipaddr, port string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: nsn,
-			Address:        ipaddr,
-			Port:           port,
-			Labels:         labels,
+			ID:      nsn,
+			Address: ipaddr,
+			Port:    port,
+			Labels:  labels,
 		},
 		nil,
 		fwkdl.NewAttributes(),

@@ -130,7 +130,7 @@ func makeBenchmarkEndpoints(n int) []fwksched.Endpoint {
 		}
 		endpoints[i] = fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: fmt.Sprintf("pod%d", i)},
+				ID: k8stypes.NamespacedName{Name: fmt.Sprintf("pod%d", i)},
 			},
 			&fwkdl.Metrics{
 				WaitingQueueSize:    i % 8,              // 0..7

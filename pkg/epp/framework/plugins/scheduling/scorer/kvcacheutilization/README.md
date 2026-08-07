@@ -45,3 +45,7 @@ schedulingProfiles:
       - pluginRef: kv-cache-util
         weight: 1
 ```
+
+## Multi-cluster support
+
+`multicluster-kv-cache-utilization-scorer` is the cluster-scoped variant. The stock per-pod KV field is empty on a cluster-endpoint, so it scores on the `llm-d.ai/multicluster-kv-cache-utilization` attribute. The `multicluster-metrics-data-source` scrapes the peer cluster and the `multicluster-metrics-extractor` writes that attribute from the pool's aggregate KV metric. Configure both in `dataLayer`, otherwise this scorer sees no pool metric and returns no score. See the [wiring example](../../../README.md#example).

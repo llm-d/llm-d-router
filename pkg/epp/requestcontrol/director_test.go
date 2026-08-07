@@ -337,29 +337,67 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoints: []fwksched.Endpoint{
 					&fwksched.ScoredEndpoint{
 						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-							Address:        "192.168.1.100",
-							Port:           "8000",
-							MetricsHost:    "192.168.1.100:8000",
-							NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+							Address:     "192.168.1.100",
+							Port:        "8000",
+							MetricsHost: "192.168.1.100:8000",
+							ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
 						}, nil, nil),
 					},
 					&fwksched.ScoredEndpoint{
 						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-							Address:        "192.168.2.100",
-							Port:           "8000",
-							MetricsHost:    "192.168.2.100:8000",
-							NamespacedName: types.NamespacedName{Name: "pod2", Namespace: "default"},
+							Address:     "192.168.2.100",
+							Port:        "8000",
+							MetricsHost: "192.168.2.100:8000",
+							ID:          types.NamespacedName{Name: "pod2", Namespace: "default"},
 						}, nil, nil),
 					},
 					&fwksched.ScoredEndpoint{
 						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-							Address:        "192.168.4.100",
-							Port:           "8000",
-							MetricsHost:    "192.168.4.100:8000",
-							NamespacedName: types.NamespacedName{Name: "pod4", Namespace: "default"},
+							Address:     "192.168.4.100",
+							Port:        "8000",
+							MetricsHost: "192.168.4.100:8000",
+							ID:          types.NamespacedName{Name: "pod4", Namespace: "default"},
 						}, nil, nil),
 					},
 				},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
+	scoredEndpoint1 := &fwksched.ScoredEndpoint{
+		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			Address:     "192.168.1.100",
+			Port:        "8000",
+			MetricsHost: "192.168.1.100:8000",
+			ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
+		}, nil, nil),
+		Score: 0.91,
+	}
+	scoredEndpoint2 := &fwksched.ScoredEndpoint{
+		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			Address:     "192.168.2.100",
+			Port:        "8000",
+			MetricsHost: "192.168.2.100:8000",
+			ID:          types.NamespacedName{Name: "pod2", Namespace: "default"},
+		}, nil, nil),
+		Score: 0.74,
+	}
+	// Scored but not selected by the picker; its score is still surfaced.
+	scoredEndpoint3 := &fwksched.ScoredEndpoint{
+		Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			Address:     "192.168.3.100",
+			Port:        "8000",
+			MetricsHost: "192.168.3.100:8000",
+			ID:          types.NamespacedName{Name: "pod3", Namespace: "default"},
+		}, nil, nil),
+		Score: 0.12,
+	}
+	scoredScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints:  []fwksched.Endpoint{scoredEndpoint1, scoredEndpoint2},
+				ScoredCandidates: []fwksched.ScoredEndpoint{*scoredEndpoint1, *scoredEndpoint2, *scoredEndpoint3},
 			},
 		},
 		PrimaryProfileName: "testProfile",
@@ -378,6 +416,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		targetModelName         string                   // Expected model name after target model resolution
 		admitRequestDenialError error                    // Expected denial error from admission plugin
 		dataProducerPlugin      *mockDataProducerPlugin
+		screener                *mockScreener
 		preRequestPlugin        *mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
@@ -400,16 +439,45 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "successful request with scored endpoints",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = scoredScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000",
+				TargetEndpointScores: map[string]float64{
+					"192.168.1.100:8000": 0.91,
+					"192.168.2.100:8000": 0.74,
+					"192.168.3.100:8000": 0.12,
+				},
 			},
 			inferenceObjectiveName: objectiveName,
 		},
@@ -496,10 +564,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -532,10 +600,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    model,
 				TargetModelName: modelRewritten,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -564,10 +632,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantReqCtx: &handlers.RequestContext{
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -601,10 +669,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantReqCtx: &handlers.RequestContext{
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -638,10 +706,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantReqCtx: &handlers.RequestContext{
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -709,10 +777,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -732,10 +800,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    objectiveNameResolve,
 				TargetModelName: "resolved-target-model-A",
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -755,10 +823,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    "food-review-1",
 				TargetModelName: "food-review-1",
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -799,10 +867,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantReqCtx: &handlers.RequestContext{
 				TargetModelName: genericRewriteTarget,
 				TargetPod: &fwkdl.EndpointMetadata{
-					NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
-					Address:        "192.168.1.100",
-					Port:           "8000",
-					MetricsHost:    "192.168.1.100:8000",
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
@@ -824,6 +892,20 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"messages": []any{},
 			},
 			wantErrCode: errcommon.BadRequest,
+		},
+		{
+			name: "screener eliminates all candidates",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			initialTargetModelName:  model,
+			inferenceObjectiveName:  objectiveName,
+			screener: &mockScreener{name: "eliminate-all", screen: func([]fwksched.Endpoint) []fwksched.Endpoint {
+				return nil
+			}},
+			wantErrCode: errcommon.ServiceUnavailable,
 		},
 		{
 			name: "scheduler returns error",
@@ -901,6 +983,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if test.dataProducerPlugin != nil {
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
+				if test.screener != nil {
+					config = config.WithScreeners(test.screener)
+				}
 				if test.preRequestPlugin != nil {
 					config = config.WithPreRequestPlugins(test.preRequestPlugin)
 				}
@@ -974,6 +1059,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 						t.Errorf("reqCtx.TargetPod mismatch (-want +got):\n%s", diff)
 					}
 					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
+					assert.Equal(t, test.wantReqCtx.TargetEndpointScores, returnedReqCtx.TargetEndpointScores, "reqCtx.TargetEndpointScores mismatch")
 				}
 
 				if test.wantFairnessID != "" {
@@ -1371,7 +1457,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 			Headers: map[string]string{"X-Test-Response-Header": "TestValue"},
 		},
 
-		TargetPod: &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
+		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
 	director.HandleResponseHeader(ctx, reqCtx)
@@ -1391,8 +1477,8 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 // session-affinity scorer and filter, registered as response-received plugins,
 // set the session token header when the director runs the response-header hook.
 func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
-	targetPod := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}}
-	wantToken := base64.StdEncoding.EncodeToString([]byte(targetPod.NamespacedName.String()))
+	targetPod := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}}
+	wantToken := base64.StdEncoding.EncodeToString([]byte(targetPod.ID.String()))
 
 	tests := []struct {
 		name       string
@@ -1468,7 +1554,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		Response: &handlers.Response{
 			Headers: map[string]string{"X-Test-Streaming-Header": "StreamValue"},
 		},
-		TargetPod: &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
+		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
 	director.HandleResponseBody(ctx, reqCtx, false)
@@ -1674,18 +1760,18 @@ func (p *testResponseReceived) ResponseHeader(_ context.Context, _ *fwksched.Inf
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.lastRespOnResponse = response
-	p.lastTargetPodOnResponse = targetPod.NamespacedName.String()
+	p.lastTargetPodOnResponse = targetPod.ID.String()
 }
 
 func (p *testResponseStreaming) ResponseBody(_ context.Context, _ *fwksched.InferenceRequest, response *fwkrc.Response, targetPod *fwkdl.EndpointMetadata) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.respsOnStreaming = append(p.respsOnStreaming, response)
-	p.targetPodsOnStreaming = append(p.targetPodsOnStreaming, targetPod.NamespacedName.String())
+	p.targetPodsOnStreaming = append(p.targetPodsOnStreaming, targetPod.ID.String())
 
 	// Maintain legacy fields for compatibility
 	p.lastRespOnStreaming = response
-	p.lastTargetPodOnStreaming = targetPod.NamespacedName.String()
+	p.lastTargetPodOnStreaming = targetPod.ID.String()
 }
 
 func TestResponseBodyQueue_CloseWaitsForBlockedEnqueue(t *testing.T) {
@@ -1807,13 +1893,13 @@ func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
 			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
 		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
 			nil, attrs,
 		)
 	}
 	endpointBare := func() fwksched.Endpoint {
 		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
 			nil, fwkdl.NewAttributes(),
 		)
 	}
@@ -1821,7 +1907,7 @@ func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 		attrs := fwkdl.NewAttributes()
 		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
 		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "p"}},
+			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
 			nil, attrs,
 		)
 	}
@@ -1915,10 +2001,10 @@ func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
 			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"decode": {TargetEndpoints: []fwksched.Endpoint{
 					fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-						Address:        "192.168.1.100",
-						Port:           "8000",
-						MetricsHost:    "192.168.1.100:8000",
-						NamespacedName: types.NamespacedName{Name: "pod1", Namespace: "default"},
+						Address:     "192.168.1.100",
+						Port:        "8000",
+						MetricsHost: "192.168.1.100:8000",
+						ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
 					}, nil, attrs),
 				}},
 			},

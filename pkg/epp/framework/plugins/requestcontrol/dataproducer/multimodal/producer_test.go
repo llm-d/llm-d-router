@@ -200,7 +200,7 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 
 	err := producer.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
-		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: podB}, nil),
+		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podB}, nil),
 	})
 
 	require.NoError(t, err)
@@ -254,7 +254,7 @@ func newTestProducer(t *testing.T, params *Parameters, podList func() []k8stypes
 
 func newEndpoint(name k8stypes.NamespacedName) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: name},
+		&fwkdl.EndpointMetadata{ID: name},
 		&fwkdl.Metrics{},
 		nil,
 	)

@@ -40,3 +40,7 @@ parameters:
   insecureSkipVerify: true
   interval: "1s"
 ```
+
+## Multi-cluster support
+
+`multicluster-metrics-data-source` is the cluster-scoped variant. It scrapes a peer cluster's metrics like the pod source, and a distinct type lets a config pair it with `multicluster-metrics-extractor` independently of the pod pipeline. Because it crosses a cluster trust boundary it verifies the peer certificate by default, unlike the pod source. Set a `caCertPath` for a private cluster CA, or `insecureSkipVerify` to opt out. The response payload is size-capped. See the [wiring example](../../../README.md#example).

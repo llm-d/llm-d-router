@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/prometheus/common/expfmt"
@@ -43,6 +44,12 @@ type metricsDatasourceParams struct {
 	Scheme string `json:"scheme"`
 	// Path defines the URL path used in metrics retrieval (e.g., "/metrics").
 	Path string `json:"path"`
+	// Port, when set, overrides the endpoint's inference port for metrics retrieval.
+	// Use when the model server exposes metrics on a port other than the InferencePool target port.
+	// The override applies to every endpoint of the source. Do not set it on pools with
+	// multiple target ports (data-parallel ranks): each rank must be scraped on its own
+	// port, and a single override would point all ranks at the same one.
+	Port *int `json:"port,omitempty"`
 	// InsecureSkipVerify defines whether model server certificate should be verified or not.
 	InsecureSkipVerify bool `json:"insecureSkipVerify"`
 	// CACertPath is an optional PEM CA bundle to verify the scrape target cert.
@@ -75,9 +82,18 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		}
 	}
 
+	if cfg.Port != nil && (*cfg.Port < 1 || *cfg.Port > 65535) {
+		return nil, fmt.Errorf("invalid port %d: must be between 1 and 65535", *cfg.Port)
+	}
+
 	intervalOpt, err := http.ParseIntervalOption(cfg.Interval)
 	if err != nil {
 		return nil, err
+	}
+
+	opts := []http.Option{intervalOpt}
+	if cfg.Port != nil {
+		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
@@ -87,7 +103,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MetricsDataSourceType, name, parseMetrics, intervalOpt)
+		MetricsDataSourceType, name, parseMetrics, opts...)
 }
 
 func defaultDataSourceConfigParams() *metricsDatasourceParams {

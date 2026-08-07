@@ -304,8 +304,8 @@ func (m *mockEndpointCandidates) callCount() int {
 
 func makeMockEndpoint(name, ip string) fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Namespace: "default", Name: name},
-		Address:        ip,
+		ID:      types.NamespacedName{Namespace: "default", Name: name},
+		Address: ip,
 	}, nil)
 }
 

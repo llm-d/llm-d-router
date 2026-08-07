@@ -46,7 +46,7 @@ var _ = Describe("Data Parallel support", func() {
 			fakeDecodePort := tmpPort - 1
 
 			DeferCleanup(os.Setenv, "POD_IP", os.Getenv("POD_IP"))
-			err = os.Setenv("POD_IP", "127.0.0.1")
+			err = os.Setenv("POD_IP", testLoopbackIP)
 			Expect(err).ToNot(HaveOccurred())
 
 			decodeURL, err := url.Parse("http://localhost:" + strconv.Itoa(fakeDecodePort))

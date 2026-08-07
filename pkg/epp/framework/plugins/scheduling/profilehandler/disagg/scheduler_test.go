@@ -48,26 +48,26 @@ func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 func TestPDSchedule(t *testing.T) {
 	endpoint1 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "endpoint1"},
-			Address:        "1.2.3.4",
-			Labels:         map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+			ID:      k8stypes.NamespacedName{Name: "endpoint1"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
 		},
 		&fwkdl.Metrics{WaitingQueueSize: 0},
 		fwkdl.NewAttributes(),
 	)
 	endpoint2 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "endpoint2"},
-			Address:        "5.6.7.8",
-			Labels:         map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+			ID:      k8stypes.NamespacedName{Name: "endpoint2"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
 		},
 		&fwkdl.Metrics{WaitingQueueSize: 0},
 		fwkdl.NewAttributes(),
 	)
 	noRoleEndpoint1 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "noRoleEndpoint1"},
-			Address:        "1.1.1.1",
+			ID:      k8stypes.NamespacedName{Name: "noRoleEndpoint1"},
+			Address: "1.1.1.1",
 		},
 		&fwkdl.Metrics{WaitingQueueSize: 2},
 		fwkdl.NewAttributes(),
@@ -260,7 +260,8 @@ func TestPDSchedule(t *testing.T) {
 				t.Errorf("Unexpected error, got %v, want %v", err, test.err)
 			}
 
-			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score")); diff != "" {
+			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 			if test.wantRes2 != nil { // Checking the prefix match in the decode pod.
@@ -274,7 +275,8 @@ func TestPDSchedule(t *testing.T) {
 					t.Errorf("Unexpected error in schedule call, got %v, want %v", err, test.err)
 				}
 
-				if diff := cmp.Diff(test.wantRes2, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score")); diff != "" {
+				if diff := cmp.Diff(test.wantRes2, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
+					cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 					t.Errorf("Unexpected output in subsequent schedule call (-want +got): %v", diff)
 				}
 			}

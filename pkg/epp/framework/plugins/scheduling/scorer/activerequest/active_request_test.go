@@ -27,7 +27,7 @@ type stubEndpoint struct {
 
 func newStubEndpoint(name string, queueSize int) *stubEndpoint {
 	return &stubEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
 		metrics: &datalayer.Metrics{
 			WaitingQueueSize: queueSize,
 		},
@@ -40,7 +40,7 @@ func (f *stubEndpoint) UpdateMetadata(*datalayer.EndpointMetadata) {}
 func (f *stubEndpoint) GetMetrics() *datalayer.Metrics             { return f.metrics }
 func (f *stubEndpoint) UpdateMetrics(*datalayer.Metrics)           {}
 func (f *stubEndpoint) GetAttributes() datalayer.AttributeMap      { return f.attr }
-func (f *stubEndpoint) String() string                             { return f.metadata.NamespacedName.String() }
+func (f *stubEndpoint) String() string                             { return f.metadata.ID.String() }
 func (f *stubEndpoint) Put(key string, val datalayer.Cloneable)    { f.attr.Put(key, val) }
 func (f *stubEndpoint) Get(key string) (datalayer.Cloneable, bool) {
 	return f.attr.Get(key)

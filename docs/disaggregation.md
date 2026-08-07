@@ -275,12 +275,13 @@ plugins:
         - key: "role"
           operator: In
           values: ["decode"]
-  - type: prefix-cache-scorer
+  - type: approx-prefix-cache-producer
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
+  - type: prefix-cache-scorer
   - type: max-score-picker
   - type: prefix-based-pd-decider
     parameters:
@@ -338,12 +339,13 @@ plugins:
         - key: "role"
           operator: In
           values: ["decode"]
-  - type: prefix-cache-scorer
+  - type: approx-prefix-cache-producer
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
+  - type: prefix-cache-scorer
   - type: max-score-picker
   - type: always-disagg-multimodal-decider
   - type: prefix-based-pd-decider
