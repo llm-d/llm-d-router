@@ -403,6 +403,44 @@ func TestDirector_HandleRequest(t *testing.T) {
 		PrimaryProfileName: "testProfile",
 	}
 
+	vllmScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address:     "192.168.1.100",
+							Port:        "8000",
+							MetricsHost: "192.168.1.100:8000",
+							ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
+							Labels:      map[string]string{"llm-d.ai/engine-type": "vllm"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
+	legacyVLLMScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address:     "192.168.1.100",
+							Port:        "8000",
+							MetricsHost: "192.168.1.100:8000",
+							ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
+							Labels:      map[string]string{"inference.networking.k8s.io/engine-type": "vllm"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
 	tests := []struct {
 		name                    string
 		reqBodyMap              map[string]any
@@ -447,8 +485,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(2),
 			},
 			inferenceObjectiveName: objectiveName,
 		},
@@ -572,9 +611,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":   model,
-				"prompt":  "original prompt",
-				"new_key": "new_value",
+				"model":    model,
+				"prompt":   "original prompt",
+				"new_key":  "new_value",
+				"priority": float64(2),
 			},
 			inferenceObjectiveName: objectiveName,
 			preRequestPlugin: &mockPreRequestPlugin{
@@ -608,8 +648,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":  modelRewritten,
-				"prompt": "some prompt",
+				"model":    modelRewritten,
+				"prompt":   "some prompt",
+				"priority": float64(0),
 			},
 			inferenceObjectiveName: model,
 			rewrites:               []*v1alpha2.InferenceModelRewrite{rewrite},
@@ -647,6 +688,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 						"content": "critical prompt",
 					},
 				},
+				"priority": float64(0),
 			},
 			targetModelName: model,
 		},
@@ -684,6 +726,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 						"content": "critical prompt",
 					},
 				},
+				"priority": float64(0),
 			},
 			targetModelName:    model,
 			dataProducerPlugin: newMockDataProducerPlugin("test-plugin"),
@@ -721,6 +764,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 						"content": "critical prompt",
 					},
 				},
+				"priority": float64(0),
 			},
 			targetModelName:         model,
 			admitRequestDenialError: nil,
@@ -808,8 +852,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":  "resolved-target-model-A",
-				"prompt": "prompt for target resolution",
+				"model":    "resolved-target-model-A",
+				"prompt":   "prompt for target resolution",
+				"priority": float64(1),
 			},
 			inferenceObjectiveName: objectiveNameResolve,
 		},
@@ -831,8 +876,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":  "food-review-1",
-				"prompt": "test prompt",
+				"model":    "food-review-1",
+				"prompt":   "test prompt",
+				"priority": float64(0),
 			},
 			reqBodyMap: map[string]any{
 				"model":  "food-review-1",
@@ -875,10 +921,47 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":  genericRewriteTarget,
-				"prompt": "p",
+				"model":    genericRewriteTarget,
+				"prompt":   "p",
+				"priority": float64(0),
 			},
 			rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
+		},
+		{
+			name: "vllm backend negates priority via engine-type label",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = vllmScheduleResults
+			},
+			initialTargetModelName: model,
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(-2),
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "vllm backend negates priority via legacy engine-type label",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = legacyVLLMScheduleResults
+			},
+			initialTargetModelName: model,
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(-2),
+			},
+			inferenceObjectiveName: objectiveName,
 		},
 		{
 			name:        "prompt or messages not found, expect err",
