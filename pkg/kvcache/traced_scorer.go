@@ -47,10 +47,13 @@ func (t *tracedScorer) Score(
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 ) (map[string]float64, error) {
 	tracer := tracing.Tracer("llm-d-router/pkg/kvcache")
-	_, span := tracer.Start(ctx, "llm_d.kv_cache.scorer.compute",
+	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.scorer.compute",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
+
+	// Correlate logs emitted by the wrapped scorer with this span.
+	ctx = tracing.LoggerWithSpanContext(ctx, span)
 
 	span.SetAttributes(
 		attribute.String("llm_d.kv_cache.scorer.algorithm", string(t.next.Strategy())),
