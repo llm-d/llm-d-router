@@ -28,44 +28,20 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
-	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 )
 
-// mockModelsDatastore is a minimal Datastore returning a fixed endpoint set. The embedded
-// Datastore satisfies the interface; only PodList, the method the models path uses, is implemented.
+// mockModelsDatastore is a minimal Datastore whose AggregateModels returns a fixed result.
+// The embedded Datastore satisfies the rest of the interface; only AggregateModels is implemented.
 type mockModelsDatastore struct {
 	Datastore
-	endpoints []fwkdl.Endpoint
+	body      json.RawMessage
+	collected int
 }
 
-func (m *mockModelsDatastore) PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint {
-	out := make([]fwkdl.Endpoint, 0, len(m.endpoints))
-	for _, ep := range m.endpoints {
-		if predicate(ep) {
-			out = append(out, ep)
-		}
-	}
-	return out
-}
-
-// endpointWithModels builds a ready endpoint carrying the given models as its collected attribute.
-func endpointWithModels(models ...attrmodels.ModelData) fwkdl.Endpoint {
-	ep := fwkdl.NewEndpoint(nil, nil)
-	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey.String(), attrmodels.ModelDataCollection(models))
-	return ep
-}
-
-// endpointWithIDAndModels is endpointWithModels with an explicit endpoint identity, used to assert
-// the identity-ordered dedup winner when the same model ID is reported by multiple endpoints.
-func endpointWithIDAndModels(id string, models ...attrmodels.ModelData) fwkdl.Endpoint {
-	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: id}}, nil)
-	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey.String(), attrmodels.ModelDataCollection(models))
-	return ep
+func (m *mockModelsDatastore) AggregateModels() (json.RawMessage, int) {
+	return m.body, m.collected
 }
 
 func modelsHeaderRequest(method, path string) *extProcPb.ProcessingRequest_RequestHeaders {
@@ -78,99 +54,6 @@ func modelsHeaderRequest(method, path string) *extProcPb.ProcessingRequest_Reque
 			}},
 		},
 	}
-}
-
-func modelIDs(data []attrmodels.ModelData) []string {
-	ids := make([]string, 0, len(data))
-	for _, m := range data {
-		ids = append(ids, m.ID)
-	}
-	return ids
-}
-
-func TestAggregateModels(t *testing.T) {
-	t.Parallel()
-
-	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-		endpointWithModels(
-			attrmodels.ModelData{ID: "base"},
-			attrmodels.ModelData{ID: "legal", Parent: "base"},
-		),
-		endpointWithModels(
-			attrmodels.ModelData{ID: "base"},
-			attrmodels.ModelData{ID: "finance", Parent: "base"},
-		),
-		endpointWithModels(),
-	}}
-	s := &StreamingServer{datastore: ds}
-
-	got, gotCollected := s.aggregateModels()
-
-	// Three endpoints are registered, but the third reported no model list, so only two count as
-	// scraped.
-	assert.Equal(t, 2, gotCollected)
-	assert.Equal(t, "list", got.Object)
-	// union across endpoints, deduplicated by ID, sorted for stable output.
-	assert.Equal(t, []string{"base", "finance", "legal"}, modelIDs(got.Data))
-	for _, m := range got.Data {
-		if m.ID == "legal" || m.ID == "finance" {
-			assert.Equal(t, "base", m.Parent, "adapter %q should carry its parent", m.ID)
-		}
-	}
-}
-
-func TestAggregateModels_PreservesOpenAIFields(t *testing.T) {
-	t.Parallel()
-
-	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-		endpointWithModels(attrmodels.ModelData{
-			ID:      "base",
-			Object:  "model",
-			Created: 1699999999,
-			OwnedBy: "vllm",
-		}),
-	}}
-	s := &StreamingServer{datastore: ds}
-
-	got, _ := s.aggregateModels()
-
-	require.Len(t, got.Data, 1)
-	assert.Equal(t, attrmodels.ModelData{
-		ID:      "base",
-		Object:  "model",
-		Created: 1699999999,
-		OwnedBy: "vllm",
-	}, got.Data[0])
-}
-
-func TestAggregateModels_DeterministicDedupWinner(t *testing.T) {
-	t.Parallel()
-
-	// The same model ID is reported by two endpoints with differing metadata. PodList order is
-	// unstable, so aggregateModels sorts by endpoint identity and keeps the lower-ID endpoint's
-	// entry; the higher-ID endpoint is listed first here to prove ordering, not slice position, wins.
-	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-		endpointWithIDAndModels("ep-b", attrmodels.ModelData{ID: "shared", OwnedBy: "from-b", Created: 200}),
-		endpointWithIDAndModels("ep-a", attrmodels.ModelData{ID: "shared", OwnedBy: "from-a", Created: 100}),
-	}}
-	s := &StreamingServer{datastore: ds}
-
-	got, _ := s.aggregateModels()
-
-	require.Len(t, got.Data, 1)
-	assert.Equal(t, attrmodels.ModelData{ID: "shared", OwnedBy: "from-a", Created: 100}, got.Data[0])
-}
-
-func TestAggregateModels_NoEndpoints(t *testing.T) {
-	t.Parallel()
-
-	s := &StreamingServer{datastore: &mockModelsDatastore{}}
-
-	got, gotEndpoints := s.aggregateModels()
-
-	assert.Equal(t, 0, gotEndpoints)
-	assert.Equal(t, "list", got.Object)
-	assert.Empty(t, got.Data)
 }
 
 func TestHandleModelsRequest(t *testing.T) {
@@ -194,9 +77,10 @@ func TestHandleModelsRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-				endpointWithModels(attrmodels.ModelData{ID: "base"}),
-			}}
+			ds := &mockModelsDatastore{
+				body:      json.RawMessage(`{"object":"list","data":[{"id":"base"}]}`),
+				collected: 1,
+			}
 			s := &StreamingServer{datastore: ds}
 			reqCtx := &RequestContext{Request: &Request{Headers: make(map[string]string)}}
 
@@ -223,26 +107,22 @@ func TestHandleModelsRequest(t *testing.T) {
 			}
 			assert.Equal(t, "application/json", gotHeaders["content-type"])
 
-			var resp extmodels.ModelResponse
-			require.NoError(t, json.Unmarshal(ir.Body, &resp))
-			assert.Equal(t, "list", resp.Object)
-			assert.Equal(t, []string{"base"}, modelIDs(resp.Data))
+			// Body is passed through unchanged from the datastore.
+			assert.Equal(t, []byte(ds.body), ir.Body)
 		})
 	}
 }
 
-func TestTryServeModelList_ResponseUsesOpenAIJSONKeys(t *testing.T) {
+func TestTryServeModelList_ResponsePassesThroughDatalayerBody(t *testing.T) {
 	t.Parallel()
 
-	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-		endpointWithModels(attrmodels.ModelData{
-			ID:      "base",
-			Object:  "model",
-			Created: 1699999999,
-			OwnedBy: "vllm",
-			Parent:  "root",
-		}),
-	}}
+	// Verify that the handler places the raw bytes from AggregateModels verbatim into the Envoy
+	// response, including the OpenAI-compatible JSON keys.
+	const rawJSON = `{"object":"list","data":[{"id":"base","object":"model","created":1699999999,"owned_by":"vllm","parent":"root"}]}`
+	ds := &mockModelsDatastore{
+		body:      json.RawMessage(rawJSON),
+		collected: 1,
+	}
 	s := &StreamingServer{datastore: ds}
 	reqCtx := &RequestContext{Request: &Request{Headers: make(map[string]string)}}
 
@@ -251,23 +131,7 @@ func TestTryServeModelList_ResponseUsesOpenAIJSONKeys(t *testing.T) {
 	require.True(t, handled)
 	require.NotNil(t, reqCtx.localResp)
 
-	// Assert on the raw JSON keys rather than round-tripping through the same struct tags, so a tag
-	// typo (e.g. "ownedby") that still round-trips cleanly is caught. OpenAI compatibility is the point.
-	var raw map[string]any
-	require.NoError(t, json.Unmarshal(reqCtx.localResp.GetImmediateResponse().Body, &raw))
-	assert.Equal(t, "list", raw["object"])
-
-	data, ok := raw["data"].([]any)
-	require.True(t, ok, "data must be a JSON array")
-	require.Len(t, data, 1)
-	model, ok := data[0].(map[string]any)
-	require.True(t, ok, "data entry must be a JSON object")
-
-	assert.Equal(t, "base", model["id"])
-	assert.Equal(t, "model", model["object"])
-	assert.EqualValues(t, 1699999999, model["created"])
-	assert.Equal(t, "vllm", model["owned_by"])
-	assert.Equal(t, "root", model["parent"])
+	assert.Equal(t, []byte(rawJSON), reqCtx.localResp.GetImmediateResponse().Body)
 }
 
 func TestTryServeModelList_NotScrapedYetReturns503(t *testing.T) {
@@ -276,10 +140,7 @@ func TestTryServeModelList_NotScrapedYetReturns503(t *testing.T) {
 	// Endpoints are registered but none have been scraped yet (cold start / scale-up window, since
 	// scraping is interval-based). With no model list collected from any endpoint, this must be a
 	// 503 so the client retries, not a misleading empty 200.
-	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-		fwkdl.NewEndpoint(nil, nil), // ready endpoint with no ModelsAttributeKey collected yet
-		fwkdl.NewEndpoint(nil, nil), // another endpoint, also not scraped yet
-	}}
+	ds := &mockModelsDatastore{collected: 0}
 	s := &StreamingServer{datastore: ds}
 	reqCtx := &RequestContext{Request: &Request{Headers: make(map[string]string)}}
 
@@ -315,9 +176,10 @@ func TestTryServeModelList_NoEndpointsReturns503(t *testing.T) {
 func TestHandleRequestHeaders_ModelsShortCircuit(t *testing.T) {
 	t.Parallel()
 
-	ds := &mockModelsDatastore{endpoints: []fwkdl.Endpoint{
-		endpointWithModels(attrmodels.ModelData{ID: "base"}),
-	}}
+	ds := &mockModelsDatastore{
+		body:      json.RawMessage(`{"object":"list","data":[{"id":"base"}]}`),
+		collected: 1,
+	}
 	// A director is wired so a reordering regression (the EndOfStream fallback running before the
 	// models short-circuit) routes to a random endpoint and fails these assertions cleanly, rather
 	// than nil-panicking on s.director.

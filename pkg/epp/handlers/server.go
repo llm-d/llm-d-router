@@ -19,6 +19,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -97,7 +98,10 @@ type Director interface {
 
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
-	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
+	// AggregateModels returns the combined, deduplicated, alphabetically sorted model list across
+	// all endpoints as a pre-serialized JSON body, and the count of endpoints that have reported
+	// their model list. A count of zero means no endpoint has been scraped yet.
+	AggregateModels() (json.RawMessage, int)
 }
 
 // Server implements the Envoy external processing server.
@@ -600,6 +604,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		if reqCtx.RequestState == RequestAnsweredLocal {
 			// Request fully answered locally (e.g. GET /v1/models); close the gRPC stream without routing.
+			recordRequestProcessing()
 			return nil
 		}
 	}
