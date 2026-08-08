@@ -49,10 +49,12 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	logger = logger.WithName("trace")
 	loggerWrap := &errorHandler{logger: logger}
 
+	// resource.New reports malformed OTEL_RESOURCE_ATTRIBUTES entries alongside a
+	// resource holding everything it could parse. Tracing degrades to that resource
+	// rather than stopping process startup.
 	res, err := newResource(ctx, defaultServiceName)
 	if err != nil {
-		loggerWrap.Handle(fmt.Errorf("%s: %v", "build trace resource failed", err))
-		return nil, err
+		loggerWrap.Handle(fmt.Errorf("%s: %v", "build trace resource degraded", err))
 	}
 
 	traceExporter, err := initTraceExporter(ctx, logger)
@@ -123,7 +125,9 @@ func newResource(ctx context.Context, defaultServiceName string) (*resource.Reso
 // Transport security, authentication headers and timeouts for the otlp exporter
 // come from the standard OTEL_EXPORTER_OTLP_* environment variables. Passing any
 // of them as an explicit option here would override the operator's setting, since
-// the exporter applies explicit options after the environment.
+// the exporter applies explicit options after the environment. The one exception
+// is the loopback fallback in localCollectorOptions, which applies only when the
+// environment sets none of them.
 func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanExporter, error) {
 	var traceExporter sdktrace.SpanExporter
 	traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
@@ -138,13 +142,44 @@ func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanEx
 
 	logger.Info("init OTel trace exporter", "type", exporterType)
 	if exporterType == "otlp" {
-		traceExporter, err = otlptracegrpc.New(ctx)
+		traceExporter, err = otlptracegrpc.New(ctx, localCollectorOptions()...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create otlp-grcp exporter: %w", err)
 		}
 	}
 
 	return traceExporter, nil
+}
+
+// otlpTransportEnv are the variables that select where spans are sent and how the
+// connection is secured.
+var otlpTransportEnv = []string{
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_INSECURE",
+	"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+	"OTEL_EXPORTER_OTLP_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+}
+
+// localCollectorOptions targets a plaintext collector on the loopback address when
+// the environment configures no transport. The SDK's own default reaches the same
+// host and port but negotiates TLS, which a local collector does not serve.
+//
+// The options are dropped as soon as any of the transport variables is set, so an
+// operator's endpoint and its scheme still decide where spans go and how the
+// connection is secured.
+func localCollectorOptions() []otlptracegrpc.Option {
+	for _, key := range otlpTransportEnv {
+		if _, ok := os.LookupEnv(key); ok {
+			return nil
+		}
+	}
+
+	return []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint("localhost:4317"),
+		otlptracegrpc.WithInsecure(),
+	}
 }
 
 const instrumentationName = "llm-d-router"

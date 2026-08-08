@@ -33,6 +33,19 @@ import (
 
 const testServiceName = "llm-d-test"
 
+// clearEnv unsets keys for the duration of the test. t.Setenv records the original
+// value so its cleanup restores it; the value it writes is discarded immediately.
+func clearEnv(t *testing.T, keys ...string) {
+	t.Helper()
+
+	for _, key := range keys {
+		if v, ok := os.LookupEnv(key); ok {
+			t.Setenv(key, v)
+			os.Unsetenv(key)
+		}
+	}
+}
+
 // attrValue returns the value of key in set, or "" when unset.
 func attrValue(set *attribute.Set, key attribute.Key) string {
 	v, ok := set.Value(key)
@@ -88,6 +101,7 @@ func TestNewResource(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t, "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES")
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -117,6 +131,47 @@ func TestNewResource(t *testing.T) {
 	}
 }
 
+// resource.New reports a malformed OTEL_RESOURCE_ATTRIBUTES entry alongside a
+// resource holding the entries it could parse. Tracing must keep that resource
+// instead of failing, since InitTracing failing stops process startup.
+func TestMalformedResourceAttributesDegradeRatherThanFail(t *testing.T) {
+	clearEnv(t, "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.pod.name=epp-0,malformed,k8s.node.name=node-1")
+
+	res, err := newResource(context.Background(), testServiceName)
+	if err == nil {
+		t.Fatal("newResource() error = nil, want the malformed entry reported")
+	}
+
+	set := res.Set()
+	for key, want := range map[attribute.Key]string{
+		"k8s.pod.name":  "epp-0",
+		"k8s.node.name": "node-1",
+		"service.name":  testServiceName,
+	} {
+		if got := attrValue(set, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
+	})
+
+	shutdown, err := InitTracing(context.Background(), testr.New(t), testServiceName)
+	if err != nil {
+		t.Fatalf("InitTracing() error = %v, want startup to continue with the degraded resource", err)
+	}
+	t.Cleanup(func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown() error = %v", err)
+		}
+	})
+}
+
 // InitTracing must configure the SDK without writing to the process environment.
 func TestInitTracingDoesNotMutateEnvironment(t *testing.T) {
 	watched := []string{
@@ -126,17 +181,13 @@ func TestInitTracingDoesNotMutateEnvironment(t *testing.T) {
 		"OTEL_TRACES_SAMPLER",
 		"OTEL_TRACES_SAMPLER_ARG",
 	}
-	for _, key := range watched {
-		if v, ok := os.LookupEnv(key); ok {
-			t.Setenv(key, v) // restored by t.Setenv cleanup if the test mutates it
-			os.Unsetenv(key)
-		}
-	}
+	clearEnv(t, watched...)
 
-	origTP, origHandler := otel.GetTracerProvider(), otel.GetErrorHandler()
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
 	t.Cleanup(func() {
 		otel.SetTracerProvider(origTP)
 		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
 	})
 
 	shutdown, err := InitTracing(context.Background(), testr.New(t), testServiceName)
