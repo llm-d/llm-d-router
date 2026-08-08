@@ -29,6 +29,7 @@ import (
 	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/toolcalling"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -82,6 +83,17 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			attribute.String("llm_d.pd_proxy.request_path", requestPath),
 			openAIAPIAttr(apiType),
 		)
+
+		if upstreamSnapshot := toolCallingSnapshotFromHTTPHeaders(r.Header); upstreamSnapshot != nil {
+			preserved := toolcalling.PreservedTrue
+			recordToolCallingPreservation(preserved)
+			span.AddEvent("tool_calling.parameters.observed",
+				trace.WithAttributes(toolcalling.SpanAttributes(upstreamSnapshot, "sidecar_inbound")...))
+			span.AddEvent("tool_calling.parameters.forwarded",
+				trace.WithAttributes(
+					append(toolcalling.SpanAttributes(upstreamSnapshot, "sidecar_outbound"),
+						attribute.String("preserved_from_upstream", preserved))...))
+		}
 
 		prefillHostPorts := r.Header.Values(routing.PrefillEndpointHeader)
 		r.Header.Del(routing.PrefillEndpointHeader)
@@ -219,4 +231,20 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}
+}
+
+func toolCallingSnapshotFromHTTPHeaders(h http.Header) *toolcalling.ToolCallingSnapshot {
+	flat := make(map[string]string, 5)
+	for _, key := range []string{
+		toolcalling.HeaderSnapshotHash,
+		toolcalling.HeaderToolPresent,
+		toolcalling.HeaderToolChoiceKind,
+		toolcalling.HeaderToolDefsCount,
+		toolcalling.HeaderParallelToolCalls,
+	} {
+		if v := h.Get(key); v != "" {
+			flat[key] = v
+		}
+	}
+	return toolcalling.FromHeaders(flat)
 }
