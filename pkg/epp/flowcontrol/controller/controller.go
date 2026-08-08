@@ -478,6 +478,13 @@ func (fc *FlowController) awaitFinalization(
 // request waits, so the processor enforces the regime-appropriate budget and finalizes the item. Deriving the deadline
 // from the longer of the two budgets keeps the context from pre-empting that decision; it still bounds a request that
 // never reaches a queue, and a caller deadline that fires sooner still wins.
+//
+// The backstop is padded past the sweep interval because the two mechanisms differ in resolution: the deadline is an
+// exact timer while the sweep polls. Left unpadded, the deadline and an empty-pool eviction come due at the same
+// instant whenever the no-endpoint budget is the longer one, which is the configuration the split exists to serve, and
+// the exact timer always wins. The regime would then never reach an outcome, since the context cannot tell the regimes
+// apart. Padding cedes the decision to the sweep and leaves the deadline covering only the case where the sweep never
+// runs at all.
 func (fc *FlowController) createRequestContext(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
@@ -489,8 +496,8 @@ func (fc *FlowController) createRequestContext(
 	}
 
 	// A zero budget in either regime disables eviction there, so no backstop can be derived.
-	backstop := max(saturationTTL, fc.config.NoEndpointRequestTTL)
 	if saturationTTL > 0 && fc.config.NoEndpointRequestTTL > 0 {
+		backstop := max(saturationTTL, fc.config.NoEndpointRequestTTL) + 2*fc.config.ExpiryCleanupInterval
 		reqCtx, cancel := context.WithDeadlineCause(ctx, enqueueTime.Add(backstop), types.ErrTTLExpired)
 		return reqCtx, cancel, enqueueTime, saturationTTL
 	}
