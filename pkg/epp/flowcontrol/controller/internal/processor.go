@@ -87,6 +87,11 @@ type Processor struct {
 	// it needs no synchronization.
 	poolEmpty bool
 
+	// ceilings is the reusable output buffer handed to the UsageLimitPolicy each dispatch cycle,
+	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
+	// synchronization.
+	ceilings []float64
+
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
@@ -381,7 +386,8 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
 
 	priorities := p.registry.AllOrderedPriorityLevels()
-	ceilings := p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities)
+	ceilings := p.ceilingsBuffer(len(priorities))
+	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
 
 	for i, priority := range priorities {
 		// --- Viability Check (Saturation/HoL Blocking) ---
@@ -421,6 +427,20 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		return true
 	}
 	return false
+}
+
+// ceilingsBuffer returns the reusable ceilings buffer sized to n, every element reset to 1.0 (no
+// gating). Pre-filling guarantees that an entry the policy does not write fails open rather than
+// carrying a stale value from the previous cycle.
+func (p *Processor) ceilingsBuffer(n int) []float64 {
+	if cap(p.ceilings) < n {
+		p.ceilings = make([]float64, n)
+	}
+	buf := p.ceilings[:n]
+	for i := range buf {
+		buf[i] = 1.0
+	}
+	return buf
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
