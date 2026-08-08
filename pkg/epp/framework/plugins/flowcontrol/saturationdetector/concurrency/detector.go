@@ -129,6 +129,10 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 // max(requestRatio, tokenRatio) and averaged across endpoints. Evaluating each
 // endpoint independently ensures an endpoint saturated on either dimension is
 // reflected in the pool signal.
+//
+// The inflight counts are read from the InFlightLoad attribute, which the
+// InFlightLoadProducer increments at dispatch and decrements on request
+// completion, so the signal already reflects completions with no scrape lag.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	if len(endpoints) == 0 {
 		return 1.0
