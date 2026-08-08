@@ -18,6 +18,7 @@ linters:
     - durationcheck
     - errcheck
     - fatcontext
+    - forbidigo
     - ginkgolinter
     - goconst
     - gocritic
@@ -53,7 +54,18 @@ linters:
           - goconst
           - dupword
           - prealloc
+      # The panic ban applies only to pkg/epp/flowcontrol (non-test files); see that package's doc.go.
+      - path-except: pkg/epp/flowcontrol/
+        linters:
+          - forbidigo
+      - path: _test\.go$
+        linters:
+          - forbidigo
   settings:
+    forbidigo:
+      forbid:
+        - pattern: ^panic$
+          msg: "pkg/epp/flowcontrol is panic-free by design (see its doc.go); validate at the boundary and return an error"
     importas:
       no-unaliased: false # unaliased imports are allowed; only enforce when an alias is used
       alias:

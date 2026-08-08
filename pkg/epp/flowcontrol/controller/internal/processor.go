@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -183,6 +184,9 @@ func (p *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
 // It uses a `select` statement to interleave accepting new requests with dispatching existing ones, balancing
 // responsiveness with throughput.
 func (p *Processor) Run(ctx context.Context) {
+	// Log any panic with processor context before the default handlers repanic; the process
+	// fail-stops rather than continuing on state a panicked goroutine may have left inconsistent.
+	defer utilruntime.HandleCrashWithLogger(p.logger)
 	p.logger.V(logutil.DEFAULT).Info("Processor run loop starting.")
 	defer p.logger.V(logutil.DEFAULT).Info("Processor run loop stopped.")
 
@@ -463,7 +467,11 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		return nil
 	}
 
-	removedItem := removedItemAcc.(*FlowItem)
+	removedItem, ok := removedItemAcc.(*FlowItem)
+	if !ok {
+		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
+		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
+	}
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
 	return nil
@@ -474,6 +482,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 func (p *Processor) runCleanupSweep(ctx context.Context) {
 	defer p.wg.Done()
 	logger := p.logger.WithName("runCleanupSweep")
+	defer utilruntime.HandleCrashWithLogger(logger)
 	logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine starting.")
 	defer logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine stopped.")
 
@@ -496,7 +505,8 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 func (p *Processor) sweepFinalizedItems() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
-			return itemAcc.(*FlowItem).FinalState() != nil
+			item, ok := itemAcc.(*FlowItem)
+			return ok && item.FinalState() != nil
 		}
 		removedItems := managedQ.Cleanup(predicate)
 		if len(removedItems) > 0 {
@@ -644,6 +654,7 @@ func (p *Processor) processAllQueuesConcurrently(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Go(func() {
+			defer utilruntime.HandleCrashWithLogger(logger)
 			for task := range tasks {
 				processFn(task.mq, task.logger)
 			}

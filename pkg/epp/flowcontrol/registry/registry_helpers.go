@@ -54,7 +54,7 @@ type priorityBand struct {
 
 // initPriorityBand constructs the runtime state for a single priority level and registers it within the registry.
 // This is used during registry initialization and by addPriorityBand (dynamic provisioning).
-// The caller MUST hold fr.mu (Write Lock) as this method modifies the orderedPriorityLevels slice.
+// The caller MUST hold fr.mu (Write Lock) as this method republishes the orderedPriorityLevels slice.
 func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 	policyState := bandConfig.FairnessPolicy.NewState(context.Background())
 	band := &priorityBand{
@@ -65,10 +65,13 @@ func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 	}
 	band.priorityBandAccessor = &priorityBandAccessor{registry: fr, band: band}
 	fr.priorityBands.Store(bandConfig.Priority, band)
-	fr.orderedPriorityLevels = append(fr.orderedPriorityLevels, bandConfig.Priority)
-	sort.Slice(fr.orderedPriorityLevels, func(i, j int) bool {
-		return fr.orderedPriorityLevels[i] > fr.orderedPriorityLevels[j]
-	})
+
+	// Copy-on-write: the published slice is shared with lock-free readers and must not be mutated.
+	current := *fr.orderedPriorityLevels.Load()
+	updated := make([]int, 0, len(current)+1)
+	updated = append(append(updated, current...), bandConfig.Priority)
+	sort.Slice(updated, func(i, j int) bool { return updated[i] > updated[j] })
+	fr.orderedPriorityLevels.Store(&updated)
 }
 
 // addPriorityBand dynamically provisions a new priority band.
@@ -128,15 +131,11 @@ func (fr *FlowRegistry) PriorityBandAccessor(priority int) (flowcontrol.Priority
 	return band.priorityBandAccessor, nil
 }
 
-// AllOrderedPriorityLevels returns a snapshot of all configured priority levels,
-// sorted in descending order. The returned slice is a copy, safe for the caller to iterate
-// without holding any lock.
+// AllOrderedPriorityLevels returns all configured priority levels, sorted in descending order.
+// The returned slice is the shared, immutable published snapshot: callers MUST treat it as
+// read-only. The read is a single atomic pointer load, with no lock and no allocation.
 func (fr *FlowRegistry) AllOrderedPriorityLevels() []int {
-	fr.mu.RLock()
-	defer fr.mu.RUnlock()
-	result := make([]int, len(fr.orderedPriorityLevels))
-	copy(result, fr.orderedPriorityLevels)
-	return result
+	return *fr.orderedPriorityLevels.Load()
 }
 
 //  --- Internal Administrative/Lifecycle Methods ---
