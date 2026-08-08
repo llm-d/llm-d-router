@@ -19,6 +19,7 @@ package pipeline
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,26 +38,61 @@ var internalForwardingHeaders = map[string]bool{
 	"epp-profile": true,
 }
 
+func isForwardableHeader(name string) bool {
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+}
+
 // ForwardedHeaders returns original request headers suitable for forwarding
 // to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
 // coordinator-owned routing headers.
 // Keys are normalized to lowercase so they do not collide by case with headers
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
+	rc.headersMu.RLock()
+	defer rc.headersMu.RUnlock()
+
 	out := make(map[string]string)
-	if rc.OriginalHeaders == nil {
-		return out
-	}
 	for key, vals := range rc.OriginalHeaders {
 		lower := strings.ToLower(key)
-		if hopByHopHeaders[lower] || internalForwardingHeaders[lower] || lower == "content-length" || lower == "host" || lower == "content-type" {
+		if !isForwardableHeader(lower) {
+			continue
+		}
+		if _, reserved := rc.forwardResponseHeaders[lower]; reserved {
 			continue
 		}
 		if len(vals) > 0 {
 			out[lower] = vals[0]
 		}
 	}
+	for key, value := range rc.downstreamHeaders {
+		if !isForwardableHeader(key) {
+			continue
+		}
+		out[key] = value
+	}
 	return out
+}
+
+// CaptureResponseHeaders records configured response headers for subsequent
+// pipeline steps. Unconfigured headers are ignored.
+func (rc *RequestContext) CaptureResponseHeaders(headers http.Header) {
+	rc.headersMu.Lock()
+	defer rc.headersMu.Unlock()
+
+	for name := range rc.forwardResponseHeaders {
+		if values := headers.Values(name); len(values) > 0 {
+			if rc.downstreamHeaders == nil {
+				rc.downstreamHeaders = make(map[string]string)
+			}
+			rc.downstreamHeaders[name] = values[0]
+		}
+	}
+}
+
+// ResponseHeaderForwardingEnabled reports whether the pipeline is configured
+// to relay response headers between steps.
+func (rc *RequestContext) ResponseHeaderForwardingEnabled() bool {
+	return len(rc.forwardResponseHeaders) > 0
 }
 
 // RequestContext carries all state for a single request through the pipeline.
@@ -85,7 +121,10 @@ type RequestContext struct {
 	// KVTransferParams carries the prefill pod's KV-cache transfer hints to the
 	// decode step. Populated by PrefillStep from the prefill response; consumed
 	// by the KV connector when building the decode request.
-	KVTransferParams map[string]any
+	KVTransferParams       map[string]any
+	headersMu              sync.RWMutex
+	forwardResponseHeaders map[string]struct{}
+	downstreamHeaders      map[string]string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
