@@ -308,16 +308,49 @@ func assetPlaceholderCount(dataLen int) int {
 	return 1
 }
 
-// packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
-// Reinterpreting them reproduces the input, so locality keys are unchanged.
+// utf8CharSize returns the byte length of a UTF-8 character given its first byte.
+// Invalid and continuation bytes fall back to 1.
+func utf8CharSize(firstByte byte) int {
+	switch {
+	case firstByte&0x80 == 0x00:
+		return 1
+	case firstByte&0xE0 == 0xC0:
+		return 2
+	case firstByte&0xF0 == 0xE0:
+		return 3
+	case firstByte&0xF8 == 0xF0:
+		return 4
+	default:
+		return 1 // invalid UTF-8 continuation byte, treat as single byte
+	}
+}
+
+// packBytes packs bytes into little-endian uint32 pseudo-tokens respecting
+// UTF-8 character boundaries. Unfilled trailing bytes are naturally zero-padded.
 func packBytes(raw []byte) []uint32 {
 	if len(raw) == 0 {
 		return nil
 	}
-	raw = align(raw)
-	out := make([]uint32, len(raw)/bytesPerToken)
-	for i := range out {
-		out[i] = binary.LittleEndian.Uint32(raw[i*bytesPerToken:])
+	out := make([]uint32, 0, (len(raw)+bytesPerToken-1)/bytesPerToken)
+	var slot [bytesPerToken]byte
+	pos := 0
+
+	for len(raw) > 0 {
+		size := utf8CharSize(raw[0])
+		if size > len(raw) {
+			size = 1 // truncated bytes or non-UTF-8 (e.g. MM placeholder hashes)
+		}
+		if pos+size > bytesPerToken {
+			out = append(out, binary.LittleEndian.Uint32(slot[:]))
+			slot = [bytesPerToken]byte{}
+			pos = 0
+		}
+		copy(slot[pos:], raw[:size])
+		pos += size
+		raw = raw[size:]
+	}
+	if pos > 0 {
+		out = append(out, binary.LittleEndian.Uint32(slot[:]))
 	}
 	return out
 }
