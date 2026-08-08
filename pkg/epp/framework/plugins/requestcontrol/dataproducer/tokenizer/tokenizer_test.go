@@ -50,8 +50,9 @@ func (m *mockTokenizer) RenderChat(_ context.Context, payload fwkrh.RequestPaylo
 
 func newTestPlugin(tok tokenizer) *Plugin {
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PluginType, Name: "test"},
-		backend:   renderBackend{tk: tok},
+		typedName:   plugin.TypedName{Type: PluginType, Name: "test"},
+		backend:     renderBackend{tk: tok},
+		backendName: backendVLLM,
 	}
 }
 

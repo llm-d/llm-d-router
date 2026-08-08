@@ -22,10 +22,14 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
@@ -145,6 +149,12 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 ) *Pool {
 	if cfg == nil {
 		cfg = DefaultConfig()
+	}
+
+	// Wrap the adapter with tracing instrumentation.
+	// When tracing is not configured, the tracer is a no-op implementation.
+	if adapter != nil {
+		adapter = NewTracedAdapter(adapter)
 	}
 
 	p := &Pool{
@@ -278,14 +288,35 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		return
 	}
 
-	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
+	// Parent to the receive span while keeping the worker's context for
+	// cancellation, so index operations below land in the message's trace.
+	if msg.SpanContext.IsValid() {
+		ctx = trace.ContextWithRemoteSpanContext(ctx, msg.SpanContext)
+	}
+
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "events_process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+	)
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("llm_d.kv_cache.events.topic", msg.Topic),
+		attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(msg.Payload)),
+	)
+
+	podID, modelName, batch, err := p.adapter.ParseMessage(ctx, msg)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		logger.Error(err, "Failed to parse message")
 		return
 	}
+
 	if msg.SourceEndpoint != "" {
 		podID = msg.SourceEndpoint
 	}
+	span.SetAttributes(
+		attribute.String("llm_d.kv_cache.events.pod_id", podID),
+		attribute.Int("llm_d.kv_cache.events.event_count", len(batch.Events)),
+	)
 
 	p.processEventBatch(ctx, &batch, podID, modelName)
 }

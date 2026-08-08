@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -68,7 +69,7 @@ func (s *SGLangAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 // and decodes the msgpack payload into an EventBatch.
 //
 //nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
-func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
+func (s *SGLangAdapter) ParseMessage(_ context.Context, msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
 	podID, modelName := parseTopic(msg.Topic)
 
 	var batch msgpackSGLangEventBatch

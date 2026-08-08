@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter //nolint:testpackage // Benchmarks access unexported functions
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -154,7 +155,7 @@ func BenchmarkParseMessage_Batch(b *testing.B) {
 			b.SetBytes(int64(len(batchPayload)))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _, _, err := adapter.ParseMessage(msg)
+				_, _, _, err := adapter.ParseMessage(context.Background(), msg)
 				if err != nil {
 					b.Fatal(err)
 				}
