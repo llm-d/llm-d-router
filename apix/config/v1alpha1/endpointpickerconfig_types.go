@@ -395,6 +395,9 @@ type FlowControlConfig struct {
 	// unavailability rather than as backpressure.
 	// The budget in force is re-evaluated while the request is queued, so a pool that scales from zero
 	// moves its queued requests onto DefaultRequestTTL, and each regime change starts a fresh budget.
+	// Total queue wait stays bounded by the longer of the two budgets, plus a short expiry-sweep margin;
+	// a regime change grants a fresh budget but does not extend that bound, so a request that changes
+	// regime near the bound may be evicted before the fresh budget elapses.
 	// If omitted, it defaults to 60s. An explicit "0s" disables eviction while the pool is empty:
 	// requests then wait until an endpoint appears, the client disconnects, or the controller shuts
 	// down.

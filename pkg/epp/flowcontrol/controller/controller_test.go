@@ -780,12 +780,15 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			}
 
 			const requestTTL = 50 * time.Millisecond
-			// Both budgets are set: the context backstop spans the longer of the two, so leaving the no-endpoint budget
-			// unbounded would leave this request bounded only by the mock processor, which never finalizes it.
+			// Both budgets are set so a backstop is derived at all, and it spans the longer of the two: leaving the
+			// no-endpoint budget unbounded would leave this request bounded only by the mock processor, which never
+			// finalizes it. The backstop's margin over that budget scales with the sweep interval, so a short interval
+			// keeps the deadline inside the test's window. No sweep runs behind a mock processor, so the context is
+			// still the only finalizer.
 			h := newUnitHarness(t.Context(), t, &Config{
 				DefaultRequestTTL:     requestTTL,
 				NoEndpointRequestTTL:  requestTTL,
-				ExpiryCleanupInterval: time.Minute,
+				ExpiryCleanupInterval: 10 * time.Millisecond,
 			}, nil, processor, withHarnessClock(clock.RealClock{}))
 
 			h.mockRegistry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(_ contracts.ActiveFlowConnection) error) error {
