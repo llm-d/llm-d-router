@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -68,6 +69,11 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		)
 		defer span.End()
 
+		// Request-scoped logger correlated with the active span. Call sites that
+		// still use s.logger do not pick this up; prefer log.FromContext when ctx
+		// is available.
+		logger := logging.WithTrace(ctx, s.logger)
+		ctx = log.IntoContext(ctx, logger)
 		ctx = context.WithValue(ctx, requestStartTimeKey, requestStart)
 		r = r.WithContext(ctx)
 
@@ -101,7 +107,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(prefillHostPort) == 0 {
-			s.logger.V(4).Info("skip disaggregated prefill", "api", apiType.String())
+			logger.V(4).Info("skip disaggregated prefill", "api", apiType.String())
 			span.SetAttributes(
 				attribute.Bool("llm_d.pd_proxy.disaggregation_used", false),
 				attribute.String("llm_d.pd_proxy.reason", "no_prefill_header"),
@@ -116,7 +122,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		if len(prefillHostPort) > 0 {
 			if !s.allowlistValidator.IsAllowed(prefillHostPort) {
-				s.logger.Error(nil, "SSRF protection: prefill target not in allowlist",
+				logger.Error(nil, "SSRF protection: prefill target not in allowlist",
 					"target", prefillHostPort,
 					"clientIP", r.RemoteAddr,
 					"userAgent", r.Header.Get("User-Agent"),
@@ -129,7 +135,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				http.Error(w, "Forbidden: prefill target not allowed by SSRF protection", http.StatusForbidden)
 				return
 			}
-			s.logger.V(4).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
+			logger.V(4).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
 		}
 
 		kvCacheSource := strings.TrimSpace(r.Header.Get(routing.KVCacheSourceHeader))
@@ -137,14 +143,14 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		if kvCacheSource != "" {
 			switch {
 			case !s.p2pPullAvailable():
-				s.logger.V(logging.DEBUG).Info("ignoring KV cache source header: connector does not support P2P pulls",
+				logger.V(logging.DEBUG).Info("ignoring KV cache source header: connector does not support P2P pulls",
 					"connector", s.config.KVConnector)
 				kvCacheSource = ""
 			case !isHostPort(kvCacheSource):
-				s.logger.Info("ignoring malformed KV cache source header", "value", kvCacheSource)
+				logger.Info("ignoring malformed KV cache source header", "value", kvCacheSource)
 				kvCacheSource = ""
 			case !s.allowlistValidator.IsAllowed(kvCacheSource):
-				s.logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
+				logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
 					"target", kvCacheSource, "clientIP", r.RemoteAddr)
 				kvCacheSource = ""
 			}
@@ -166,9 +172,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				encoderHost = strings.TrimSpace(encoderHost)
 				if s.allowlistValidator.IsAllowed(encoderHost) {
 					allowedEncoders = append(allowedEncoders, encoderHost)
-					s.logger.V(4).Info("SSRF protection: encoder target allowed", "target", encoderHost)
+					logger.V(4).Info("SSRF protection: encoder target allowed", "target", encoderHost)
 				} else {
-					s.logger.Info("SSRF protection: encoder target not in allowlist, removing from list",
+					logger.Info("SSRF protection: encoder target not in allowlist, removing from list",
 						"target", encoderHost,
 						"clientIP", r.RemoteAddr,
 						"userAgent", r.Header.Get("User-Agent"),
@@ -178,7 +184,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
-			s.logger.V(4).Info("encoder headers detected, using EC connector",
+			logger.V(4).Info("encoder headers detected, using EC connector",
 				"encoderCount", len(allowedEncoders),
 				"encoderCandidates", len(encoderHostPorts),
 				"hasPrefiller", len(prefillHostPort) > 0)
@@ -192,7 +198,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(encoderHostPorts) > 0 && len(allowedEncoders) == 0 {
-			s.logger.Info("SSRF protection: all encoder targets filtered out, falling back to P/D or decoder-only")
+			logger.Info("SSRF protection: all encoder targets filtered out, falling back to P/D or decoder-only")
 			span.SetAttributes(
 				attribute.Bool("llm_d.ec_proxy.encode_disaggregation_used", false),
 				attribute.Int("llm_d.ec_proxy.encoder_allowed", len(allowedEncoders)),
@@ -201,12 +207,12 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(prefillHostPort) > 0 {
-			s.logger.V(4).Info("using P/D protocol")
+			logger.V(4).Info("using P/D protocol")
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
 
-		s.logger.V(4).Info("no prefiller or encoder, using decoder only")
+		logger.V(4).Info("no prefiller or encoder, using decoder only")
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
