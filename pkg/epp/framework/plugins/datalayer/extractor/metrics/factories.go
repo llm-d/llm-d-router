@@ -60,6 +60,19 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels). Used by engines like Triton TRT-LLM.
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// TotalCacheTokensSpecs lists gauge specifications reporting KV cache capacity in tokens.
+		// The maximum across the specs present in a scrape is used, allowing tiered engines to
+		// list per-tier capacity gauges (e.g. SGLang hicache host pool and device pool). Absent
+		// metrics are skipped, since tier gauges only exist when the feature is enabled.
+		TotalCacheTokensSpecs []string `json:"totalCacheTokensSpecs,omitempty"`
+		// OffloadDetectionSpecs lists metric specifications whose presence indicates the engine
+		// offloads KV cache to another tier without reporting that tier's capacity
+		// (e.g. vLLM OffloadingConnector runtime metrics).
+		OffloadDetectionSpecs []string `json:"offloadDetectionSpecs,omitempty"`
+		// OffloadSizeLabelName optionally names a label on the CacheInfoSpec metric whose numeric
+		// value, when greater than zero, indicates KV cache offloading (e.g. vLLM's
+		// kv_offloading_size, in GiB).
+		OffloadSizeLabelName string `json:"offloadSizeLabelName,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
 	}
@@ -94,6 +107,22 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		// vLLM does not report offload-tier capacity in any metric; these series
+		// exist only when the OffloadingConnector is active (registered at startup
+		// with zero values, before any offload traffic), so their presence flags
+		// deployments where CacheNumBlocks (HBM only) undercounts the real cache.
+		// Family names carry the exposition-format counter suffix; total_bytes is
+		// the deprecated pre-v0.26 name kept for older engines. The
+		// kv_offloading_size label (GiB) is only set via --kv-offloading-size.
+		// vllm:external_prefix_cache_* is deliberately excluded: it is registered
+		// unconditionally, connector or not.
+		OffloadDetectionSpecs: []string{
+			"vllm:kv_offload_cpu_cache_usage_perc",
+			"vllm:kv_offload_load_bytes_total",
+			"vllm:kv_offload_store_bytes_total",
+			"vllm:kv_offload_total_bytes_total",
+		},
+		OffloadSizeLabelName: "kv_offloading_size",
 	},
 	{
 		Name:                    "sglang",
@@ -104,6 +133,21 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:           "sglang:cache_config_info",
 		CacheBlockSizeLabelName: "page_size",
 		CacheNumBlocksLabelName: "num_pages",
+		// Newer SGLang (verified on v0.5.16) does not export cache_config_info;
+		// it exposes page_size and num_pages as plain gauges instead. Direct
+		// gauge specs run after CacheInfo extraction, so whichever form the
+		// engine version provides wins.
+		CacheBlockSizeSpec: "sglang:page_size",
+		CacheNumBlocksSpec: "sglang:num_pages",
+		// With hicache enabled (default write_through policy) the host pool is
+		// an inclusive superset of the device pool, so total effective capacity
+		// is max(host, device), not their sum. hicache_host_total_tokens exists
+		// on SGLang v0.5.10+ when hierarchical cache is enabled; on older
+		// versions only the device gauge is present and capacity stays HBM-only.
+		TotalCacheTokensSpecs: []string{
+			"sglang:hicache_host_total_tokens",
+			"sglang:max_total_num_tokens",
+		},
 	},
 	{
 		Name:                "trtllm-serve",
@@ -221,6 +265,9 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
 			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
 			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
+			TotalCacheTokens:    engineConfig.TotalCacheTokensSpecs,
+			OffloadDetection:    engineConfig.OffloadDetectionSpecs,
+			OffloadSizeLabel:    engineConfig.OffloadSizeLabelName,
 			CustomMetrics:       customMetrics,
 		})
 		if err != nil {

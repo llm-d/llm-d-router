@@ -42,7 +42,22 @@ type Mapping struct {
 	// (e.g. Triton TRT-LLM).
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
-	CustomMetrics  []CustomMetric
+	// TotalCacheTokens lists gauges reporting KV cache capacity in tokens.
+	// The extractor takes the maximum across the specs present in a scrape,
+	// so tiered engines can list per-tier capacity gauges (e.g. SGLang's
+	// hicache host pool, which is an inclusive superset of the device pool).
+	// Specs whose metric is absent are skipped rather than treated as errors,
+	// since tier gauges only exist when the corresponding feature is enabled.
+	TotalCacheTokens []*Spec
+	// OffloadDetection lists metrics whose presence indicates that the engine
+	// offloads KV cache to another tier without reporting that tier's
+	// capacity (e.g. vLLM's OffloadingConnector runtime metrics).
+	OffloadDetection []*Spec
+	// OffloadSizeLabel optionally names a label on the CacheInfo metric whose
+	// numeric value, when greater than zero, likewise indicates KV cache
+	// offloading (e.g. vLLM's kv_offloading_size, in GiB).
+	OffloadSizeLabel string
+	CustomMetrics    []CustomMetric
 }
 
 // MappingConfig holds configuration used to build a Mapping.
@@ -56,6 +71,9 @@ type MappingConfig struct {
 	CacheNumBlocksLabel string
 	CacheBlockSize      string
 	CacheNumBlocks      string
+	TotalCacheTokens    []string
+	OffloadDetection    []string
+	OffloadSizeLabel    string
 	CustomMetrics       []CustomMetric
 }
 
@@ -75,7 +93,7 @@ func (m *Mapping) specs() []namedSpec {
 	if m.LoraRequestInfo != nil {
 		loraSpec = m.LoraRequestInfo.Spec
 	}
-	specs := make([]namedSpec, 0, 5+len(m.CustomMetrics))
+	specs := make([]namedSpec, 0, 5+len(m.TotalCacheTokens)+len(m.OffloadDetection)+len(m.CustomMetrics))
 	specs = append(specs,
 		namedSpec{"queue", m.TotalQueuedRequests, m.TotalQueuedRequests != nil},
 		namedSpec{"running", m.TotalRunningRequests, m.TotalRunningRequests != nil},
@@ -83,6 +101,12 @@ func (m *Mapping) specs() []namedSpec {
 		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
+	for _, spec := range m.TotalCacheTokens {
+		specs = append(specs, namedSpec{"totalCacheTokens", spec, spec != nil})
+	}
+	for _, spec := range m.OffloadDetection {
+		specs = append(specs, namedSpec{"offloadDetection", spec, spec != nil})
+	}
 	for _, custom := range m.CustomMetrics {
 		specs = append(specs, namedSpec{
 			name:    custom.AttributeKey,
@@ -161,6 +185,10 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	totalCacheTokensSpecs, specErrs := parseSpecList(cfg.TotalCacheTokens)
+	errs = append(errs, specErrs...)
+	offloadDetectionSpecs, specErrs := parseSpecList(cfg.OffloadDetection)
+	errs = append(errs, specErrs...)
 	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
 	errs = append(errs, customErrs...)
 
@@ -177,8 +205,28 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
 		CacheBlockSize:       cacheBlockSizeSpec,
 		CacheNumBlocks:       cacheNumBlocksSpec,
+		TotalCacheTokens:     totalCacheTokensSpecs,
+		OffloadDetection:     offloadDetectionSpecs,
+		OffloadSizeLabel:     cfg.OffloadSizeLabel,
 		CustomMetrics:        customMetrics,
 	}, nil
+}
+
+// parseSpecList parses a list of metric specification strings, dropping empties.
+func parseSpecList(specStrings []string) ([]*Spec, []error) {
+	specs := make([]*Spec, 0, len(specStrings))
+	var errs []error
+	for _, s := range specStrings {
+		spec, err := parseStringToSpec(s)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if spec != nil {
+			specs = append(specs, spec)
+		}
+	}
+	return specs, errs
 }
 
 func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
