@@ -264,8 +264,14 @@ func TestRegistry_PriorityBandAccessor(t *testing.T) {
 		t.Run("IterateQueues", func(t *testing.T) {
 			t.Parallel()
 
-			t.Run("ShouldVisitAllQueuesInBand", func(t *testing.T) {
+			t.Run("ShouldVisitAllActiveQueuesInBand", func(t *testing.T) {
 				t.Parallel()
+				h := newTestHarness(t) // Isolated harness: this subtest mutates queue contents.
+				accessor, err := h.registry.PriorityBandAccessor(highPriority)
+				require.NoError(t, err)
+				h.addItem(h.highPriorityKey1, 100)
+				h.addItem(h.highPriorityKey2, 100)
+
 				var iteratedKeys []flowcontrol.FlowKey
 				accessor.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
 					iteratedKeys = append(iteratedKeys, queue.FlowKey())
@@ -273,11 +279,56 @@ func TestRegistry_PriorityBandAccessor(t *testing.T) {
 				})
 				expectedKeys := []flowcontrol.FlowKey{h.highPriorityKey1, h.highPriorityKey2}
 				assert.ElementsMatch(t, expectedKeys, iteratedKeys,
-					"IterateQueues must visit every registered flow in the band exactly once")
+					"IterateQueues must visit every active (non-empty) flow in the band exactly once")
+			})
+
+			t.Run("ShouldSkipEmptyQueues", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t) // Isolated harness: this subtest mutates queue contents.
+				accessor, err := h.registry.PriorityBandAccessor(highPriority)
+				require.NoError(t, err)
+				h.addItem(h.highPriorityKey1, 100)
+
+				var iteratedKeys []flowcontrol.FlowKey
+				accessor.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
+					iteratedKeys = append(iteratedKeys, queue.FlowKey())
+					return true
+				})
+				assert.Equal(t, []flowcontrol.FlowKey{h.highPriorityKey1}, iteratedKeys,
+					"IterateQueues must visit only flows whose queues hold items; registered-but-empty flows are skipped")
+			})
+
+			t.Run("ShouldTrackEmptinessTransitions", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t) // Isolated harness: this subtest mutates queue contents.
+				accessor, err := h.registry.PriorityBandAccessor(highPriority)
+				require.NoError(t, err)
+
+				countVisited := func() int {
+					var n int
+					accessor.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
+						n++
+						return true
+					})
+					return n
+				}
+
+				item := h.addItem(h.highPriorityKey1, 100)
+				assert.Equal(t, 1, countVisited(), "A flow must become visible once its queue holds an item")
+				h.removeItem(h.highPriorityKey1, item)
+				assert.Equal(t, 0, countVisited(), "A flow must stop being visited once its queue drains")
+				h.addItem(h.highPriorityKey1, 100)
+				assert.Equal(t, 1, countVisited(), "A drained flow must become visible again on re-add")
 			})
 
 			t.Run("ShouldExitEarly_WhenCallbackReturnsFalse", func(t *testing.T) {
 				t.Parallel()
+				h := newTestHarness(t) // Isolated harness: this subtest mutates queue contents.
+				accessor, err := h.registry.PriorityBandAccessor(highPriority)
+				require.NoError(t, err)
+				h.addItem(h.highPriorityKey1, 100)
+				h.addItem(h.highPriorityKey2, 100)
+
 				var iterationCount int
 				accessor.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
 					iterationCount++
@@ -307,12 +358,16 @@ func TestRegistry_PriorityBandAccessor(t *testing.T) {
 					}
 				}()
 
-				// Goroutine B: The Modifier (constantly writing)
+				// Goroutine B: The Modifier (constantly writing). Item add/remove cycles exercise the
+				// active-queue index transitions racing against iteration; flow create/delete cycles
+				// exercise registry topology changes.
 				go func() {
 					defer wg.Done()
 					for i := range 100 {
 						key := flowcontrol.FlowKey{ID: fmt.Sprintf("new-flow-%d", i), Priority: highPriority}
 						h.synchronizeFlow(key)
+						item := h.addItem(key, 100)
+						h.removeItem(key, item)
 						h.registry.mu.Lock()
 						h.registry.deleteFlow(key)
 						h.registry.mu.Unlock()
@@ -346,6 +401,45 @@ func TestRegistry_PriorityBandAccessor(t *testing.T) {
 			assert.False(t, callbackExecuted, "IterateQueues must not execute the callback for an empty band")
 		})
 	})
+}
+
+// TestRegistry_IterateQueues_StaleDrainDoesNotHideReincarnatedQueue exercises the interleaving
+// where a cleanup-sweep worker drains a queue through a handle resolved before deleteFlow removed
+// that queue, after a successor queue was registered under the same flow ID and became active. The
+// stale drain's empty transition must not remove the successor's active-queue index entry: a
+// non-empty registered queue that IterateQueues skips is invisible to both dispatch and future
+// sweeps, so its requests would hang until flow GC.
+func TestRegistry_IterateQueues_StaleDrainDoesNotHideReincarnatedQueue(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t)
+	key := h.highPriorityKey1
+
+	// A sweep worker resolves a handle to a queue holding finalized-but-unswept items.
+	h.addItem(key, 100)
+	staleMQ, err := h.registry.ManagedQueue(key)
+	require.NoError(t, err, "Setup: resolving the pre-deletion queue handle must succeed")
+
+	// GC collects the idle flow (deleteFlow tolerates non-empty queues by design).
+	h.registry.mu.Lock()
+	h.registry.deleteFlow(key)
+	h.registry.mu.Unlock()
+
+	// The flow is re-registered under the same ID and receives a new request.
+	h.synchronizeFlow(key)
+	h.addItem(key, 100)
+
+	// The stale sweep drain must not delete the reincarnated queue's index entry.
+	staleMQ.Cleanup(func(flowcontrol.QueueItemAccessor) bool { return true })
+
+	accessor, err := h.registry.PriorityBandAccessor(highPriority)
+	require.NoError(t, err, "Setup: getting the band accessor must succeed")
+	var visited []string
+	accessor.IterateQueues(func(q flowcontrol.FlowQueueAccessor) bool {
+		visited = append(visited, q.FlowKey().ID)
+		return true
+	})
+	assert.Contains(t, visited, key.ID,
+		"a non-empty registered queue must remain visible to IterateQueues after a stale drain of its predecessor")
 }
 
 // --- Lifecycle and State Management Tests ---

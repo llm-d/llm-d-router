@@ -101,6 +101,55 @@ func TestPick_SingleNonEmptyQueue_StashesEnqueueTime(t *testing.T) {
 	assert.Equal(t, enqueue, stashed)
 }
 
+// TestPick_IdleProgramServiceDecaysWithoutVisits is the end-to-end regression for idle-service
+// freeze under the band accessor's skip-empty iteration: an idle program's queue is never visited,
+// so its decay must not depend on visits. After idling, its decayed service must let it outrank a
+// fresh low-service competitor.
+func TestPick_IdleProgramServiceDecaysWithoutVisits(t *testing.T) {
+	strategy, err := newStrategy(Config{
+		Strategy:           "las",
+		LASWeightService:   1.0,
+		LASWeightHeadWait:  0.0,
+		LASDecayFactor:     1.0,
+		LASHalfLifeSeconds: 1,
+	})
+	require.NoError(t, err)
+	las, ok := strategy.(*LASStrategy)
+	require.True(t, ok)
+	p := &ProgramAwarePlugin{strategy: strategy}
+	now := time.Now()
+
+	// "heavy" accrued lots of service, then idled 10 half-lives without any Pick visiting it;
+	// "light" completed a small request just now.
+	heavy := las.getOrCreateState("heavy")
+	heavy.attainedService = 1000
+	heavy.decayAnchor = now.Add(-10 * time.Second)
+	light := las.getOrCreateState("light")
+	light.attainedService = 10
+	light.decayAnchor = now
+
+	// Both become active; the band visits only these two non-empty queues.
+	queues := []*fwkfcmocks.MockFlowQueueAccessor{
+		{LenV: 1, FlowKeyV: flowcontrol.FlowKey{ID: "heavy"}, PeekV: &fwkfcmocks.MockQueueItemAccessor{EnqueueTimeV: now}},
+		{LenV: 1, FlowKeyV: flowcontrol.FlowKey{ID: "light"}, PeekV: &fwkfcmocks.MockQueueItemAccessor{EnqueueTimeV: now}},
+	}
+	band := &fwkfcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+			for _, q := range queues {
+				if !cb(q) {
+					return
+				}
+			}
+		},
+	}
+
+	got, err := p.Pick(context.Background(), band)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "heavy", got.FlowKey().ID,
+		"heavy's service must have decayed to ~1 while idle, below light's 10")
+}
+
 func TestPreRequest_RecordsDispatchAndWait(t *testing.T) {
 	enqueue := time.Now().Add(-50 * time.Millisecond)
 	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
