@@ -36,8 +36,8 @@ func NewTracedIndex(next Index) Index {
 }
 
 func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
-	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
-	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index.add",
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "index_add",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -59,8 +59,8 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 }
 
 func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
-	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
-	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index.evict",
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "index_evict",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -85,8 +85,8 @@ func (t *tracedIndex) Lookup(
 	requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {
-	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
-	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index",
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "index_lookup",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
