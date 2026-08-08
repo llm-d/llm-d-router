@@ -1,6 +1,13 @@
-# PrometheusRule CRD for prometheus-operator deployments.
-# Apply this manifest to get the same alerts without manually editing
-# prometheus.yaml rule_files.
+# Alerting rules for the EPP's KV-cache index, KV-event stream, and request path.
+#
+# This PrometheusRule is the single source for these alerts. For a Prometheus
+# that is not managed by prometheus-operator, extract the bare rule groups:
+#
+#   yq '.spec' deploy/components/monitoring/prometheus-rules.yaml > kvcache-alerts.rules.yml
+#
+# The kv_cache_* series exist only when the precise prefix cache runs with
+# indexerConfig.kvBlockIndexConfig.enableMetrics: true; the llm_d_epp_request_*
+# series are always emitted. Alerts on absent series simply never fire.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -13,6 +20,8 @@ spec:
   groups:
     - name: kvcache.rules
       rules:
+        # A cold index, a block size that disagrees with the model server, or a
+        # broken event stream all show up as lookups that stop matching.
         - alert: KVCacheLowIndexHitRatio
           expr: |
             (
@@ -35,7 +44,9 @@ spec:
         - alert: KVCacheHighLookupLatency
           expr: |
             histogram_quantile(0.99,
-              rate(llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket[5m])
+              sum by (le, instance) (
+                rate(llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket[5m])
+              )
             ) > 0.5
           for: 5m
           labels:
@@ -47,12 +58,14 @@ spec:
               500ms for 5 minutes. This adds scheduling overhead and may indicate
               an overloaded or under-provisioned index backend.
 
+        # The 1h baseline is offset by the alert window so a sustained spike does
+        # not raise the baseline it is compared against.
         - alert: KVCacheAbnormalEvictionSpike
           expr: |
             rate(llm_d_router_epp_kv_cache_index_evictions_total[5m])
             >
             5 * avg_over_time(
-              rate(llm_d_router_epp_kv_cache_index_evictions_total[5m])[1h:1m]
+              rate(llm_d_router_epp_kv_cache_index_evictions_total[5m])[1h:1m] offset 10m
             )
             and
             rate(llm_d_router_epp_kv_cache_index_evictions_total[5m]) > 0
@@ -99,10 +112,17 @@ spec:
 
     - name: epp.rules
       rules:
+        # Grouping keeps one alert per model and streaming mode. The raw series
+        # also carry fairness_id, which is bounded at 1000 distinct values and
+        # would otherwise multiply the alert count by that bound. Streaming stays
+        # in the grouping because TTFT equals total duration for non-streaming
+        # requests, so the two populations are not comparable.
         - alert: EPPHighTTFT
           expr: |
             histogram_quantile(0.99,
-              rate(llm_d_epp_request_ttft_seconds_bucket[5m])
+              sum by (le, model_name, streaming) (
+                rate(llm_d_epp_request_ttft_seconds_bucket[5m])
+              )
             ) > 5
           for: 5m
           labels:
@@ -111,18 +131,23 @@ spec:
             summary: "EPP P99 time-to-first-token exceeds 5s"
             description: >-
               The 99th percentile time-to-first-token has exceeded 5 seconds for
-              5 minutes. Model servers may be overloaded or the scheduling policy
-              may be suboptimal.
+              5 minutes on {{ $labels.model_name }} (streaming={{ $labels.streaming }}).
+              Model servers may be overloaded or the scheduling policy may be
+              suboptimal.
 
+        # Both sides are fully aggregated: request_error_total carries an
+        # error_code label that request_total does not, and requests rejected
+        # before the body is parsed increment only the error counter. Any
+        # grouping finer than sum() drops those series on the vector match.
         - alert: EPPHighRequestErrorRate
           expr: |
             (
-              rate(llm_d_epp_request_error_total[5m])
+              sum(rate(llm_d_epp_request_error_total[5m]))
               /
-              rate(llm_d_epp_request_total[5m])
+              sum(rate(llm_d_epp_request_total[5m]))
             ) > 0.05
             and
-            rate(llm_d_epp_request_total[5m]) > 0
+            sum(rate(llm_d_epp_request_total[5m])) > 0
           for: 5m
           labels:
             severity: critical

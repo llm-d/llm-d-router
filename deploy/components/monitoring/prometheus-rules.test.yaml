@@ -1,0 +1,322 @@
+# promtool unit tests for the alerts in prometheus-rules.yaml.
+#
+# Run via `make verify-alert-rules`, which extracts .spec from the
+# PrometheusRule into the rule file this suite references.
+#
+# Input series carry the label sets the EPP actually emits. Testing against
+# bare {} series hides vector-match failures: request_error_total carries an
+# error_code label that request_total does not, so a rule that divides the two
+# without aggregating yields an empty vector in production while passing a
+# label-free test.
+
+rule_files:
+  - alert-rules.generated.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- KVCacheLowIndexHitRatio ---
+  - interval: 1m
+    name: hit ratio of 10% fires
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_hits_total{instance="epp-0:9090"}'
+        values: '0+1x20'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_requests_total{instance="epp-0:9090"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KVCacheLowIndexHitRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: epp-0:9090
+            exp_annotations:
+              summary: "KV-cache index hit ratio below 30%"
+              description: >-
+                The KV-cache index hit ratio has been below 30% for 10 minutes
+                while lookups are still occurring. The index may be cold, mis-sized,
+                or experiencing hash collisions.
+
+  - interval: 1m
+    name: healthy 50% hit ratio stays quiet
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_hits_total{instance="epp-0:9090"}'
+        values: '0+5x20'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_requests_total{instance="epp-0:9090"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KVCacheLowIndexHitRatio
+        exp_alerts: []
+
+  - interval: 1m
+    name: idle index with zero lookups stays quiet
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_hits_total{instance="epp-0:9090"}'
+        values: '0x20'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_requests_total{instance="epp-0:9090"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KVCacheLowIndexHitRatio
+        exp_alerts: []
+
+  # --- KVCacheHighLookupLatency ---
+  # Buckets mirror prometheus.DefBuckets, which is what the collector registers.
+  - interval: 1m
+    name: all observations above 500ms fire
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.005"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.01"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.025"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.05"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.1"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.25"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.5"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="1"}'
+        values: '0+10x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="2.5"}'
+        values: '0+10x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="5"}'
+        values: '0+10x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="10"}'
+        values: '0+10x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="+Inf"}'
+        values: '0+10x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KVCacheHighLookupLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: epp-0:9090
+            exp_annotations:
+              summary: "KV-cache index P99 lookup latency exceeds 500ms"
+              description: >-
+                The 99th percentile KV-cache index lookup latency has exceeded
+                500ms for 5 minutes. This adds scheduling overhead and may indicate
+                an overloaded or under-provisioned index backend.
+
+  - interval: 1m
+    name: sub-millisecond lookups stay quiet
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.005"}'
+        values: '0+10x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="0.01"}'
+        values: '0+10x10'
+      - series: 'llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket{instance="epp-0:9090",le="+Inf"}'
+        values: '0+10x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KVCacheHighLookupLatency
+        exp_alerts: []
+
+  # --- KVCacheAbnormalEvictionSpike ---
+  # Steady 1/s for an hour to establish the baseline, then a jump to 20/s.
+  - interval: 1m
+    name: eviction rate jumping 20x over baseline fires
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_evictions_total{instance="epp-0:9090"}'
+        values: '0+60x60 3600+1200x20'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: KVCacheAbnormalEvictionSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: epp-0:9090
+            exp_annotations:
+              summary: "KV-cache eviction rate spiked to 5x baseline"
+              description: >-
+                The KV-cache block eviction rate has exceeded 5 times its 1-hour
+                moving average for 10 minutes. This may indicate memory pressure or
+                a sudden workload shift invalidating cached blocks.
+
+  - interval: 1m
+    name: steady eviction rate stays quiet
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_index_evictions_total{instance="epp-0:9090"}'
+        values: '0+60x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: KVCacheAbnormalEvictionSpike
+        exp_alerts: []
+
+  # --- KVCacheSubscriberReconnecting ---
+  - interval: 1m
+    name: sustained reconnections fire per pod
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_events_subscriber_reconnections_total{instance="epp-0:9090",pod_identifier="pod-a"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KVCacheSubscriberReconnecting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: epp-0:9090
+              pod_identifier: pod-a
+            exp_annotations:
+              summary: "KV-cache event subscriber is reconnecting"
+              description: >-
+                A ZMQ event subscriber has been reconnecting at a sustained rate
+                for 10 minutes. The index may be stale because events are being
+                dropped. Check network connectivity to the model-server pod.
+
+  # --- KVCacheEventPoolSaturated ---
+  - interval: 1m
+    name: queue at 90% of capacity fires
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_events_pool_queue_depth{instance="epp-0:9090"}'
+        values: '90x10'
+      - series: 'llm_d_router_epp_kv_cache_events_pool_capacity{instance="epp-0:9090"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KVCacheEventPoolSaturated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: epp-0:9090
+            exp_annotations:
+              summary: "KV-cache event pool queue depth exceeds 80% of capacity"
+              description: >-
+                The event processing pool queue is more than 80% full for
+                5 minutes. The EPP may not be keeping up with the KV-cache event
+                stream. Consider increasing the worker shard count.
+
+  - interval: 1m
+    name: drained queue stays quiet
+    input_series:
+      - series: 'llm_d_router_epp_kv_cache_events_pool_queue_depth{instance="epp-0:9090"}'
+        values: '0x10'
+      - series: 'llm_d_router_epp_kv_cache_events_pool_capacity{instance="epp-0:9090"}'
+        values: '4x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KVCacheEventPoolSaturated
+        exp_alerts: []
+
+  # --- EPPHighTTFT ---
+  # Two models sharing a bucket set, so the grouping is exercised rather than
+  # assumed: only the slow one may alert.
+  - interval: 1m
+    name: slow model alerts without dragging in the fast one
+    input_series:
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="default-flow",instance="epp-0:9090",le="1",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="default-flow",instance="epp-0:9090",le="6",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="default-flow",instance="epp-0:9090",le="+Inf",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="default-flow",instance="epp-0:9090",le="1",model_name="fast",priority="0",streaming="true",target_model_name="fast"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="default-flow",instance="epp-0:9090",le="6",model_name="fast",priority="0",streaming="true",target_model_name="fast"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="default-flow",instance="epp-0:9090",le="+Inf",model_name="fast",priority="0",streaming="true",target_model_name="fast"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EPPHighTTFT
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              model_name: slow
+              streaming: "true"
+            exp_annotations:
+              summary: "EPP P99 time-to-first-token exceeds 5s"
+              description: >-
+                The 99th percentile time-to-first-token has exceeded 5 seconds for
+                5 minutes on slow (streaming=true). Model servers may be overloaded
+                or the scheduling policy may be suboptimal.
+
+  # fairness_id is bounded at 1000 distinct values. Two of them on one model
+  # must still collapse into a single alert.
+  - interval: 1m
+    name: many fairness_id values collapse to one alert
+    input_series:
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="flow-a",instance="epp-0:9090",le="6",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="flow-a",instance="epp-0:9090",le="+Inf",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="flow-b",instance="epp-0:9090",le="6",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0+10x20'
+      - series: 'llm_d_epp_request_ttft_seconds_bucket{fairness_id="flow-b",instance="epp-0:9090",le="+Inf",model_name="slow",priority="0",streaming="true",target_model_name="slow"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EPPHighTTFT
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              model_name: slow
+              streaming: "true"
+            exp_annotations:
+              summary: "EPP P99 time-to-first-token exceeds 5s"
+              description: >-
+                The 99th percentile time-to-first-token has exceeded 5 seconds for
+                5 minutes on slow (streaming=true). Model servers may be overloaded
+                or the scheduling policy may be suboptimal.
+
+  # --- EPPHighRequestErrorRate ---
+  # error_code is present on the error counter and absent from request_total.
+  # This is the shape that made the unaggregated rule silently match nothing.
+  - interval: 1m
+    name: 50% error rate fires despite mismatched label sets
+    input_series:
+      - series: 'llm_d_epp_request_error_total{error_code="BadRequest",fairness_id="default-flow",instance="epp-0:9090",model_name="",priority="0",target_model_name=""}'
+        values: '0+50x20'
+      - series: 'llm_d_epp_request_total{fairness_id="default-flow",instance="epp-0:9090",model_name="tinyllama",priority="0",target_model_name="tinyllama"}'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EPPHighRequestErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "EPP request error rate exceeds 5%"
+              description: >-
+                More than 5% of EPP requests are erroring for 5 minutes.
+                Investigate the error_code label breakdown and model-server health.
+
+  - interval: 1m
+    name: 1% error rate stays quiet
+    input_series:
+      - series: 'llm_d_epp_request_error_total{error_code="BadRequest",fairness_id="default-flow",instance="epp-0:9090",model_name="",priority="0",target_model_name=""}'
+        values: '0+1x20'
+      - series: 'llm_d_epp_request_total{fairness_id="default-flow",instance="epp-0:9090",model_name="tinyllama",priority="0",target_model_name="tinyllama"}'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EPPHighRequestErrorRate
+        exp_alerts: []
+
+  # Errors spread over several error_code values must still sum into the ratio.
+  - interval: 1m
+    name: errors across multiple error_code values sum into the ratio
+    input_series:
+      - series: 'llm_d_epp_request_error_total{error_code="BadRequest",fairness_id="default-flow",instance="epp-0:9090",model_name="",priority="0",target_model_name=""}'
+        values: '0+3x20'
+      - series: 'llm_d_epp_request_error_total{error_code="Internal",fairness_id="default-flow",instance="epp-0:9090",model_name="tinyllama",priority="0",target_model_name="tinyllama"}'
+        values: '0+4x20'
+      - series: 'llm_d_epp_request_total{fairness_id="default-flow",instance="epp-0:9090",model_name="tinyllama",priority="0",target_model_name="tinyllama"}'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EPPHighRequestErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "EPP request error rate exceeds 5%"
+              description: >-
+                More than 5% of EPP requests are erroring for 5 minutes.
+                Investigate the error_code label breakdown and model-server health.

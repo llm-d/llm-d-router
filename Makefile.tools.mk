@@ -7,6 +7,7 @@ check-all-tools: check-container-tool check-kubectl check-kustomize check-envsub
 HELM_VERSION ?= v3.17.1
 KUBECTL_VALIDATE_VERSION ?= v0.0.4
 YQ_VERSION ?= v4.45.1
+PROMTOOL_VERSION ?= 3.1.0
 
 $(LOCALBIN):
 	[ -d $@ ] || mkdir -p $@
@@ -37,6 +38,22 @@ $(KUBECTL_VALIDATE): | $(LOCALBIN)
 yq: $(YQ) ## Download yq locally if necessary.
 $(YQ): | $(LOCALBIN)
 	$(call go-install-tool,$(YQ),github.com/mikefarah/yq/v4,$(YQ_VERSION))
+
+# The Prometheus module carries replace directives, so `go install` refuses the
+# command packages; the release archive is the supported way to get promtool.
+.PHONY: promtool
+promtool: $(PROMTOOL) ## Download promtool locally if necessary.
+$(PROMTOOL): | $(LOCALBIN)
+	@set -e; \
+	os=$$(go env GOOS); arch=$$(go env GOARCH); \
+	dist="prometheus-$(PROMTOOL_VERSION).$${os}-$${arch}"; \
+	echo "Downloading $${dist}"; \
+	tmp=$$(mktemp -d); \
+	curl -fsSL -o "$${tmp}/prom.tar.gz" \
+	  "https://github.com/prometheus/prometheus/releases/download/v$(PROMTOOL_VERSION)/$${dist}.tar.gz"; \
+	tar -xzf "$${tmp}/prom.tar.gz" -C "$${tmp}"; \
+	mv "$${tmp}/$${dist}/promtool" $(PROMTOOL); \
+	rm -rf "$${tmp}"
 
 .PHONY: check-container-tool
 check-container-tool:

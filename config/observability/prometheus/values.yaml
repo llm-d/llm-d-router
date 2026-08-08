@@ -3,15 +3,6 @@ serviceAccounts:
     create: false
     name: inference-gateway-sa-metrics-reader
 
-serverFiles:
-  alerting_rules.yml:
-    groups: []
-  rules:
-    groups: []
-
-rule_files:
-  - /etc/prometheus/rules/kvcache-alerts.rules.yml
-
 extraScrapeConfigs: |
   - job_name: 'inference-extension-epp'
     authorization:

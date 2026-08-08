@@ -4,6 +4,7 @@ LOCALBIN ?= $(shell pwd)/bin
 HELM ?= $(LOCALBIN)/helm
 KUBECTL_VALIDATE ?= $(LOCALBIN)/kubectl-validate
 YQ ?= $(LOCALBIN)/yq
+PROMTOOL ?= $(LOCALBIN)/promtool
 
 # Tool checks (container runtime, kubectl, etc.) are defined in Makefile.tools.mk.
 include Makefile.tools.mk
@@ -342,6 +343,10 @@ post-deploy-test: ## Run post deployment tests
 .PHONY: verify-manifests
 verify-manifests: kubectl-validate ## Validate deployment manifests.
 	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
+.PHONY: verify-alert-rules
+verify-alert-rules: promtool yq ## Check and unit-test the Prometheus alerting rules.
+	PROMTOOL="$(PROMTOOL)" YQ="$(YQ)" hack/verify-alert-rules.sh
 
 ##@ Helm
 

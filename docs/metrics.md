@@ -385,27 +385,24 @@ out-of-the-box alerts; operators can tune thresholds or disable individual rules
 
 ### Loading the rules
 
-**Plain Prometheus (rule_files):** Copy or mount `kvcache-alerts.rules.yml` and reference it from
-your `prometheus.yaml`:
-
-```yaml
-rule_files:
-  - /etc/prometheus/rules/kvcache-alerts.rules.yml
-```
-
-**Prometheus Operator:** Apply the `PrometheusRule` CRD:
+**Prometheus Operator:** apply the `PrometheusRule`, or use the monitoring component, which already
+includes it alongside the EPP `ServiceMonitor`:
 
 ```bash
 kubectl apply -f deploy/components/monitoring/prometheus-rules.yaml
 ```
 
-**Kustomize:** The monitoring component already includes the `PrometheusRule` resource.
+**Plain Prometheus:** unwrap the rule groups from the same manifest and point `rule_files` at the
+result:
+
+```bash
+yq '.spec' deploy/components/monitoring/prometheus-rules.yaml > kvcache-alerts.rules.yml
+```
 
 ### Validating rules locally
 
 ```bash
-promtool check rules deploy/components/monitoring/kvcache-alerts.rules.yml
-promtool test rules deploy/components/monitoring/kvcache-alerts.test.yaml
+make verify-alert-rules
 ```
 
 ### Alert catalog
@@ -424,5 +421,11 @@ promtool test rules deploy/components/monitoring/kvcache-alerts.test.yaml
 
 | Alert | Severity | Condition |
 |---|---|---|
-| `EPPHighTTFT` | warning | P99 time-to-first-token > 5s for 5m. |
-| `EPPHighRequestErrorRate` | critical | Error rate > 5% for 5m. |
+| `EPPHighTTFT` | warning | P99 time-to-first-token > 5s for 5m, per model and streaming mode. |
+| `EPPHighRequestErrorRate` | critical | Error rate > 5% for 5m, summed across the deployment. |
+
+`EPPHighRequestErrorRate` compares fully aggregated sums rather than per-model ratios.
+`request_error_total` carries an `error_code` label that `request_total` does not, and a request
+rejected before its body is parsed increments only the error counter, so the two series sets do not
+align label-for-label. Its ratio is therefore a fleet-wide signal: it can exceed the true share of
+failed requests when errors arrive before routing.
