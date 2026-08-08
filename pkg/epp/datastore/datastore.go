@@ -575,6 +575,9 @@ func aggregateModels(endpoints []fwkdl.Endpoint) (json.RawMessage, int) {
 	// models in a fixed (alphabetical) order every time
 	slices.SortFunc(data, func(a, b attrmodels.ModelData) int { return strings.Compare(a.ID, b.ID) })
 
-	body, _ := json.Marshal(extmodels.ModelResponse{Object: "list", Data: data})
+	body, err := json.Marshal(extmodels.ModelResponse{Object: "list", Data: data})
+	if err != nil {
+		return nil, 0
+	}
 	return body, collected
 }
