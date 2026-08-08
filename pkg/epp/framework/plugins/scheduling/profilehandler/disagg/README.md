@@ -176,20 +176,21 @@ Decides per-request whether P/D disaggregation should run, based on prompt lengt
 
 Compares the uncached portion of the request prompt against a configurable threshold, triggering P/D disaggregation only when the uncached suffix is long enough to justify the overhead. A separate minimum prompt-length gate can skip short prompts before the prefix cache is even consulted.
 
-1. Read the prompt token count as `len(request.Body.TokenizedPrompt.TokenIDs)`.
-2. If `promptTokens` is set and the prompt is shorter than it, return false.
-3. Read `PrefixCacheMatchInfo` from the decode endpoint attributes.
-4. Compute uncached suffix length.
-5. Return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
+1. If `nonCachedTokens` is `0`, return false (the decider is disabled).
+2. Read the prompt token count as `request.Body.TokenizedPrompt.TokenCount()`.
+3. If `promptTokens` is set and the prompt is shorter than it, return false.
+4. Read `PrefixCacheMatchInfo` from the decode endpoint attributes.
+5. Compute uncached suffix length.
+6. Return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
 
 #### How It Works
 
-The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. `promptTokens` gates on this count directly: prompts shorter than it never disaggregate, regardless of cache state. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
+The prompt token count is `request.Body.TokenizedPrompt.TokenCount()`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. `promptTokens` gates on this count directly: prompts shorter than it never disaggregate, regardless of cache state. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
 
 #### Inputs consumed
 
 - `PrefixCacheMatchInfo` — endpoint attribute from `approx-prefix-cache-producer`, read from the decode endpoint.
-- `request.Body.TokenizedPrompt.TokenIDs` — token IDs from a `token-producer` plugin; their count is the prompt token count.
+- `request.Body.TokenizedPrompt` — token data from a `token-producer` plugin; `TokenCount()` is the prompt token count.
 
 #### Configuration
 
