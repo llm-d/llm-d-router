@@ -72,6 +72,7 @@ type Processor struct {
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
 	clock                clock.WithTicker
+	noEndpointRequestTTL time.Duration
 	cleanupSweepInterval time.Duration
 	logger               logr.Logger
 
@@ -83,9 +84,15 @@ type Processor struct {
 
 	// poolEmpty caches whether the candidate pool had zero endpoints as of the most recent dispatchCycle. enqueue reads
 	// it to distinguish a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero)
-	// from one caused by backpressure against a contended but non-empty pool. Only accessed from the Run goroutine, so
-	// it needs no synchronization.
-	poolEmpty bool
+	// from one caused by backpressure against a contended but non-empty pool, and the cleanup sweep reads it to pick the
+	// queue-wait budget in force. Written by the Run goroutine and read by the sweep goroutine, hence atomic.
+	poolEmpty atomic.Bool
+
+	// regimeSinceNanos is the wall-clock time (UnixNano) at which poolEmpty last changed value, or zero if it has never
+	// changed. The cleanup sweep charges queue wait from this point rather than from enqueue time, so that a request
+	// that outlasted one regime is not shed the instant the other begins. Written by the Run goroutine and read by the
+	// sweep goroutine, hence atomic.
+	regimeSinceNanos atomic.Int64
 
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
@@ -108,6 +115,7 @@ func NewProcessor(
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
 	clock clock.WithTicker,
+	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
@@ -120,6 +128,7 @@ func NewProcessor(
 		endpointCandidates:   endpointCandidates,
 		usageLimitPolicy:     usageLimitPolicy,
 		clock:                clock,
+		noEndpointRequestTTL: noEndpointRequestTTL,
 		cleanupSweepInterval: cleanupSweepInterval,
 		logger:               logger,
 		lifecycleCtx:         ctx,
@@ -296,7 +305,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 	if ok, stats := p.hasCapacity(key.Priority, req.ByteSize()); !ok {
 		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
-		if p.poolEmpty {
+		if p.poolEmpty.Load() {
 			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
 				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
 				"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
@@ -374,7 +383,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
-	p.poolEmpty = len(pool) == 0
+	if empty := len(pool) == 0; p.poolEmpty.Swap(empty) != empty {
+		p.regimeSinceNanos.Store(p.clock.Now().UnixNano())
+	}
 	saturation := p.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
@@ -491,12 +502,37 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 	}
 }
 
-// sweepFinalizedItems performs a single scan of all queues, removing finalized items in batch and releasing their
-// memory.
+// sweepFinalizedItems performs a single scan of all queues, evicting items that have exhausted the queue-wait budget in
+// force and removing finalized items in batch, releasing their memory.
+//
+// Expiry is evaluated here rather than at admission because the budget depends on the unavailability regime, which the
+// request outlives: a pool that scales from zero moves its queued requests from the no-endpoint budget onto the
+// saturation budget. The regime is sampled once per sweep so that every queue decides against the same view.
 func (p *Processor) sweepFinalizedItems() {
+	now := p.clock.Now()
+	poolEmpty := p.poolEmpty.Load()
+	var regimeSince time.Time
+	if nanos := p.regimeSinceNanos.Load(); nanos > 0 {
+		regimeSince = time.Unix(0, nanos)
+	}
+
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
-			return itemAcc.(*FlowItem).FinalState() != nil
+			item := itemAcc.(*FlowItem)
+			if item.FinalState() != nil {
+				return true
+			}
+			outcome, expired := isExpired(item, now, regimeSince, poolEmpty, p.noEndpointRequestTTL)
+			if !expired {
+				return false
+			}
+			// Finalizing here rather than in a separate pass keeps expiry to a single scan. Finalization is
+			// idempotent, and an item finalized but not removed is the same zombie state the sweep already
+			// tolerates, so a queue that declines the removal costs nothing beyond a later sweep.
+			item.FinalizeWithOutcome(outcome, expiryError(outcome))
+			logger.V(logutil.TRACE).Info("Evicted item, queue-wait budget exhausted.",
+				"requestID", item.OriginalRequest().ID(), "outcome", outcome, "poolEmpty", poolEmpty)
+			return true
 		}
 		removedItems := managedQ.Cleanup(predicate)
 		if len(removedItems) > 0 {
@@ -510,6 +546,42 @@ func (p *Processor) sweepFinalizedItems() {
 		}
 	}
 	p.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
+}
+
+// isExpired reports whether item has exhausted the queue-wait budget in force, and the outcome that eviction would
+// carry. A zero budget disables eviction in that regime.
+//
+// Elapsed time is charged from the later of enqueue and the most recent regime change. Charging from enqueue alone
+// would shed a request the moment it becomes dispatchable: an endpoint appearing after the saturation budget has
+// nominally elapsed would find that budget already spent, even though the request has only now become servable. Each
+// regime change therefore starts its budget fresh.
+func isExpired(
+	item *FlowItem,
+	now, regimeSince time.Time,
+	poolEmpty bool,
+	noEndpointRequestTTL time.Duration,
+) (types.QueueOutcome, bool) {
+	budget, outcome := item.EffectiveTTL(), types.QueueOutcomeEvictedTTL
+	if poolEmpty {
+		budget, outcome = noEndpointRequestTTL, types.QueueOutcomeEvictedNoEndpoints
+	}
+	if budget <= 0 {
+		return outcome, false
+	}
+
+	chargeFrom := item.EnqueueTime()
+	if regimeSince.After(chargeFrom) {
+		chargeFrom = regimeSince
+	}
+	return outcome, !now.Before(chargeFrom.Add(budget))
+}
+
+// expiryError builds the error accompanying an expiry eviction, wrapping the sentinels that callers match on.
+func expiryError(outcome types.QueueOutcome) error {
+	if outcome == types.QueueOutcomeEvictedNoEndpoints {
+		return fmt.Errorf("%w: %w: %w", types.ErrEvicted, types.ErrTTLExpired, types.ErrNoEndpoints)
+	}
+	return fmt.Errorf("%w: %w", types.ErrEvicted, types.ErrTTLExpired)
 }
 
 // shutdown handles the graceful termination of the processor, ensuring all pending items (in channel and queues) are
