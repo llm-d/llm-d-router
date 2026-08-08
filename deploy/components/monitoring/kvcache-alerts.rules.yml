@@ -1,0 +1,143 @@
+# Prometheus alerting rules for llm-d-router KV-cache and EPP health signals.
+#
+# These rules target the current metric names (llm_d_router_epp_kv_cache_* and
+# llm_d_epp_*). They are opt-in: load this file via rule_files in your
+# Prometheus config or apply the companion PrometheusRule CRD.
+#
+# Metric availability depends on the EPP configuration:
+#   - kv_cache_* metrics require enableMetrics: true in the indexerConfig.
+#   - TTFT/request metrics are always emitted by the EPP.
+
+groups:
+  - name: kvcache.rules
+    rules:
+      # Hit ratio below 30% while lookups are happening indicates the index is
+      # not useful (cold cache, wrong block size, or hash collisions).
+      - alert: KVCacheLowIndexHitRatio
+        expr: |
+          (
+            rate(llm_d_router_epp_kv_cache_index_lookup_hits_total[5m])
+            /
+            rate(llm_d_router_epp_kv_cache_index_lookup_requests_total[5m])
+          ) < 0.3
+          and
+          rate(llm_d_router_epp_kv_cache_index_lookup_requests_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV-cache index hit ratio below 30%"
+          description: >-
+            The KV-cache index hit ratio has been below 30% for 10 minutes
+            while lookups are still occurring. The index may be cold, mis-sized,
+            or experiencing hash collisions.
+
+      # P99 lookup latency exceeding 500ms degrades scheduling decisions.
+      - alert: KVCacheHighLookupLatency
+        expr: |
+          histogram_quantile(0.99,
+            rate(llm_d_router_epp_kv_cache_index_lookup_latency_seconds_bucket[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV-cache index P99 lookup latency exceeds 500ms"
+          description: >-
+            The 99th percentile KV-cache index lookup latency has exceeded
+            500ms for 5 minutes. This adds scheduling overhead and may indicate
+            an overloaded or under-provisioned index backend.
+
+      # Eviction rate spiking to 5x its 1h baseline suggests unexpected
+      # pressure on the block index (memory pressure, sudden workload shift).
+      - alert: KVCacheAbnormalEvictionSpike
+        expr: |
+          rate(llm_d_router_epp_kv_cache_index_evictions_total[5m])
+          >
+          5 * avg_over_time(
+            rate(llm_d_router_epp_kv_cache_index_evictions_total[5m])[1h:1m]
+          )
+          and
+          rate(llm_d_router_epp_kv_cache_index_evictions_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV-cache eviction rate spiked to 5x baseline"
+          description: >-
+            The KV-cache block eviction rate has exceeded 5 times its 1-hour
+            moving average for 10 minutes. This may indicate memory pressure or
+            a sudden workload shift invalidating cached blocks.
+
+      # ZMQ subscriber reconnections signal connectivity problems between the
+      # EPP and model-server event publishers.
+      - alert: KVCacheSubscriberReconnecting
+        expr: |
+          rate(llm_d_router_epp_kv_cache_events_subscriber_reconnections_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV-cache event subscriber is reconnecting"
+          description: >-
+            A ZMQ event subscriber has been reconnecting at a sustained rate
+            for 10 minutes. The index may be stale because events are being
+            dropped. Check network connectivity to the model-server pod.
+
+      # Event processing pool queue growing unbounded signals the EPP cannot
+      # keep up with the event stream.
+      - alert: KVCacheEventPoolSaturated
+        expr: |
+          llm_d_router_epp_kv_cache_events_pool_queue_depth
+          /
+          llm_d_router_epp_kv_cache_events_pool_capacity
+          > 0.8
+          and
+          llm_d_router_epp_kv_cache_events_pool_capacity > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV-cache event pool queue depth exceeds 80% of capacity"
+          description: >-
+            The event processing pool queue is more than 80% full for
+            5 minutes. The EPP may not be keeping up with the KV-cache event
+            stream. Consider increasing the worker shard count.
+
+  - name: epp.rules
+    rules:
+      # High time-to-first-token indicates model servers are overloaded or
+      # scheduling is suboptimal.
+      - alert: EPPHighTTFT
+        expr: |
+          histogram_quantile(0.99,
+            rate(llm_d_epp_request_ttft_seconds_bucket[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "EPP P99 time-to-first-token exceeds 5s"
+          description: >-
+            The 99th percentile time-to-first-token has exceeded 5 seconds for
+            5 minutes. Model servers may be overloaded or the scheduling policy
+            may be suboptimal.
+
+      # High request error rate signals a systemic problem in request handling.
+      - alert: EPPHighRequestErrorRate
+        expr: |
+          (
+            rate(llm_d_epp_request_error_total[5m])
+            /
+            rate(llm_d_epp_request_total[5m])
+          ) > 0.05
+          and
+          rate(llm_d_epp_request_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EPP request error rate exceeds 5%"
+          description: >-
+            More than 5% of EPP requests are erroring for 5 minutes.
+            Investigate the error_code label breakdown and model-server health.

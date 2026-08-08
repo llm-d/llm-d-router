@@ -377,3 +377,52 @@ Broader observability work tracked separately (not part of this document):
 - Deprecate/remove legacy metrics: [#1070](https://github.com/llm-d/llm-d-router/issues/1070), [#962](https://github.com/llm-d/llm-d-router/issues/962)
 - EPP operations guide: [#1291](https://github.com/llm-d/llm-d-router/issues/1291)
 - E2E metrics stability: [#1192](https://github.com/llm-d/llm-d-router/issues/1192)
+
+## Alerting rules
+
+Default Prometheus alerting rules ship in `deploy/components/monitoring/`. They provide sensible
+out-of-the-box alerts; operators can tune thresholds or disable individual rules as needed.
+
+### Loading the rules
+
+**Plain Prometheus (rule_files):** Copy or mount `kvcache-alerts.rules.yml` and reference it from
+your `prometheus.yaml`:
+
+```yaml
+rule_files:
+  - /etc/prometheus/rules/kvcache-alerts.rules.yml
+```
+
+**Prometheus Operator:** Apply the `PrometheusRule` CRD:
+
+```bash
+kubectl apply -f deploy/components/monitoring/prometheus-rules.yaml
+```
+
+**Kustomize:** The monitoring component already includes the `PrometheusRule` resource.
+
+### Validating rules locally
+
+```bash
+promtool check rules deploy/components/monitoring/kvcache-alerts.rules.yml
+promtool test rules deploy/components/monitoring/kvcache-alerts.test.yaml
+```
+
+### Alert catalog
+
+#### KV-cache index (requires `enableMetrics: true`)
+
+| Alert | Severity | Condition |
+|---|---|---|
+| `KVCacheLowIndexHitRatio` | warning | Hit ratio < 30% for 10m while lookups occur. |
+| `KVCacheHighLookupLatency` | warning | P99 lookup latency > 500ms for 5m. |
+| `KVCacheAbnormalEvictionSpike` | warning | Eviction rate > 5x its 1h baseline for 10m. |
+| `KVCacheSubscriberReconnecting` | warning | ZMQ subscriber reconnecting for 10m. |
+| `KVCacheEventPoolSaturated` | warning | Event pool queue > 80% capacity for 5m. |
+
+#### EPP request health
+
+| Alert | Severity | Condition |
+|---|---|---|
+| `EPPHighTTFT` | warning | P99 time-to-first-token > 5s for 5m. |
+| `EPPHighRequestErrorRate` | critical | Error rate > 5% for 5m. |
