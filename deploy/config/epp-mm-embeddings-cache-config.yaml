@@ -26,10 +26,15 @@ plugins:
       prefixMatchInfoProducerName: precise-prefix-cache-producer
   - type: queue-scorer
   - type: max-score-picker
+  - type: models-data-source
+  - type: models-data-extractor
   - type: single-profile-handler
   - type: decode-filter
 dataLayer:
   sources:
+    - pluginRef: models-data-source
+      extractors:
+        - pluginRef: models-data-extractor
     - pluginRef: metrics-data-source
       extractors:
         - pluginRef: core-metrics-extractor

@@ -12,12 +12,19 @@
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: models-data-source
+- type: models-data-extractor
 - type: probabilistic-admitter
 - type: random-picker  # feel free to plug in other scorers/pickers here
 - type: utilization-detector
   parameters:
     queueDepthThreshold: 999999999
     kvCacheUtilThreshold: 1.0
+dataLayer:
+  sources:
+  - pluginRef: models-data-source
+    extractors:
+    - pluginRef: models-data-extractor
 flowControl:
   saturationDetector:
     pluginRef: utilization-detector

@@ -2,6 +2,8 @@
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+- type: models-data-source
+- type: models-data-extractor
 - type: approx-prefix-cache-producer
   parameters:
     maxPrefixTokensToMatch: 16384
@@ -18,6 +20,11 @@ plugins:
 - type: prefix-based-pd-decider
   parameters:
     nonCachedTokens: 16
+dataLayer:
+  sources:
+  - pluginRef: models-data-source
+    extractors:
+    - pluginRef: models-data-extractor
 schedulingProfiles:
 - name: prefill
   plugins:
