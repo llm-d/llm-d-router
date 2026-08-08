@@ -18,6 +18,7 @@ package loader
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -147,6 +148,24 @@ func TestBuildRegistryConfig(t *testing.T) {
 					"OrderingPolicy should be correctly translated")
 				assert.Equal(t, roundrobin.RoundRobinFairnessPolicyType, band.FairnessPolicy.TypedName().Name,
 					"FairnessPolicy should be correctly translated")
+			},
+		},
+		{
+			name: "ShouldSucceed_WithAllowDynamicPriorityProvisioningDisabled",
+			apiConfig: &configapi.FlowControlConfig{
+				AllowDynamicPriorityProvisioning: ptr.To(false),
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				assert.False(t, cfg.AllowDynamicPriorityProvisioning, "AllowDynamicPriorityProvisioning should be set to false")
+			},
+		},
+		{
+			name: "ShouldSucceed_WithAllowDynamicPriorityProvisioningEnabled",
+			apiConfig: &configapi.FlowControlConfig{
+				AllowDynamicPriorityProvisioning: ptr.To(true),
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				assert.True(t, cfg.AllowDynamicPriorityProvisioning, "AllowDynamicPriorityProvisioning should be set to true")
 			},
 		},
 		{
@@ -617,3 +636,59 @@ func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, pr
 }
 
 var _ fwkfc.UsageLimitPolicy = (*constantPointEightPolicy)(nil)
+
+type mockValidatorPolicy struct {
+	fwkfc.UsageLimitPolicy
+	err        error
+	called     bool
+	calledWith fwkfc.ConfigInfo
+}
+
+func (m *mockValidatorPolicy) ValidateConfig(info fwkfc.ConfigInfo) error {
+	m.called = true
+	m.calledWith = info
+	return m.err
+}
+
+func TestBuildFlowControlConfig_ConfigValidator(t *testing.T) {
+	t.Parallel()
+
+	const policyName = "mock-validator"
+
+	t.Run("Success - ConfigValidator returns no error", func(t *testing.T) {
+		t.Parallel()
+		handle := newFlowControlTestHandle(t)
+		mockPolicy := &mockValidatorPolicy{}
+		handle.AddPlugin(policyName, mockPolicy)
+
+		apiConfig := &configapi.FlowControlConfig{
+			UsageLimitPolicyPluginRef: policyName,
+			PriorityBands: []configapi.PriorityBandConfig{
+				{Priority: 100},
+			},
+		}
+
+		cfg, err := buildFlowControlConfig(apiConfig, handle)
+		require.NoError(t, err)
+		assert.NotNil(t, cfg)
+		assert.True(t, mockPolicy.called)
+		assert.ElementsMatch(t, []int{0, 100}, mockPolicy.calledWith.StaticPriorities)
+	})
+
+	t.Run("Error - ConfigValidator error is propagated", func(t *testing.T) {
+		t.Parallel()
+		handle := newFlowControlTestHandle(t)
+		mockPolicy := &mockValidatorPolicy{
+			err: errors.New("custom validation error"),
+		}
+		handle.AddPlugin(policyName, mockPolicy)
+
+		apiConfig := &configapi.FlowControlConfig{
+			UsageLimitPolicyPluginRef: policyName,
+		}
+
+		_, err := buildFlowControlConfig(apiConfig, handle)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "usage limit policy config validation failed: custom validation error")
+	})
+}

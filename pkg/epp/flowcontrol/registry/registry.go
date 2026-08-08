@@ -246,6 +246,10 @@ func (fr *FlowRegistry) ApplyDesiredPriorities(desired map[int]struct{}) {
 
 	for priority := range desiredCopy {
 		if _, ok := fr.config.PriorityBands[priority]; !ok {
+			if !fr.config.AllowDynamicPriorityProvisioning {
+				fr.logger.Error(nil, "refusing to provision priority band because dynamic priority provisioning is disabled; add the band to the static configuration or enable dynamic provisioning", "priority", priority)
+				continue
+			}
 			fr.provisionPriorityBandLocked(priority)
 		}
 	}
