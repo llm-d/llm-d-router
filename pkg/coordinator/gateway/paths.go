@@ -23,9 +23,10 @@ const (
 	PathCompletions     = "/v1/completions"
 	DefaultGeneratePath = "/inference/v1/generate"
 
-	EPPProfileHeader  = "EPP-Profile"
-	ContentTypeHeader = "Content-Type"
-	ContentTypeJSON   = "application/json"
+	EPPProfileHeader   = "EPP-Profile"
+	PeerTopologyHeader = "x-peer-topology"
+	ContentTypeHeader  = "Content-Type"
+	ContentTypeJSON    = "application/json"
 
 	PhaseEncode  = "encode"
 	PhasePrefill = "prefill"

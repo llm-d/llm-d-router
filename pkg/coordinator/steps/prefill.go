@@ -116,6 +116,8 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		return upstreamError(PrefillStepName, resp.StatusCode, respBody)
 	}
 
+	reqCtx.PeerTopology = resp.Header.Get(gateway.PeerTopologyHeader)
+
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
 		return fmt.Errorf("prefill: decode response: %w", err)
