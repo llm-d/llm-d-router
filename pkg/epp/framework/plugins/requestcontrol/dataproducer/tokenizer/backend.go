@@ -141,9 +141,9 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 // Multi-string prompts are passed as an array so the renderer sees the full
 // prompt shape.
 func completionsPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	if body.Payload != nil {
-		if _, ok := body.Payload.AsMap(); ok {
-			return body.Payload
+	if body.Payload() != nil {
+		if _, ok := body.Payload().AsMap(); ok {
+			return body.Payload()
 		}
 	}
 	prompt := body.Completions.Prompt
@@ -157,9 +157,9 @@ func completionsPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 // to an OpenAI-shaped PayloadMap constructed from the typed struct when the body
 // carries a non-map payload (gRPC, warmup).
 func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	if body.Payload != nil {
-		if _, ok := body.Payload.AsMap(); ok {
-			return body.Payload
+	if body.Payload() != nil {
+		if _, ok := body.Payload().AsMap(); ok {
+			return body.Payload()
 		}
 	}
 	rcr := ChatCompletionsToRenderChatRequest(body.ChatCompletions)
@@ -172,7 +172,7 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 // messagesPayload returns the payload for an Anthropic Messages request. The raw
 // body uses the Anthropic Messages schema (top-level system, source-based image
 // blocks), which vLLM /render does not accept, so the payload is always rebuilt
-// from the typed struct into the /render chat schema regardless of body.Payload.
+// from the typed struct into the /render chat schema regardless of body.Payload().
 func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 	data, _ := json.Marshal(buildChatRenderRequest("", MessagesToRenderChatRequest(body.Messages)))
 	var pm fwkrh.PayloadMap

@@ -450,6 +450,7 @@ func TestRewriteModelName(t *testing.T) {
 		targetModel   string
 		incomingModel string
 		want          string
+		wantMutated   bool
 	}{
 		{
 			name:          "non-streaming response with model rewrite",
@@ -457,6 +458,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"id":"cmpl-123","model":"gpt-4-proxy","choices":[]}`,
+			wantMutated:   true,
 		},
 		{
 			name:          "streaming SSE chunk with model rewrite",
@@ -464,6 +466,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `data: {"id":"cmpl-123","model":"gpt-4-proxy","choices":[]}` + "\n\n",
+			wantMutated:   true,
 		},
 		{
 			name:          "no rewrite when names are the same",
@@ -471,6 +474,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "same-model",
 			incomingModel: "same-model",
 			want:          `{"model":"same-model"}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "no rewrite when target is empty",
@@ -478,6 +482,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"model":"some-model"}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "no rewrite when incoming is empty",
@@ -485,6 +490,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "some-model",
 			incomingModel: "",
 			want:          `{"model":"some-model"}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "model field with space after colon",
@@ -492,6 +498,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"model": "gpt-4-proxy"}`,
+			wantMutated:   true,
 		},
 		{
 			name:          "body without model field is unchanged",
@@ -499,6 +506,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"id":"cmpl-123","choices":[]}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "DONE marker is not affected",
@@ -506,13 +514,15 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          "data: [DONE]\n",
+			wantMutated:   false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rewriteModelName([]byte(tc.body), tc.targetModel, tc.incomingModel)
+			got, mutated := rewriteModelName([]byte(tc.body), tc.targetModel, tc.incomingModel)
 			assert.Equal(t, tc.want, string(got))
+			assert.Equal(t, tc.wantMutated, mutated)
 		})
 	}
 }

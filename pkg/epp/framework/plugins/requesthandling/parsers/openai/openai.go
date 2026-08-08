@@ -123,7 +123,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if err != nil {
 		return nil, err
 	}
-	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+	extractedBody.SetPayload(fwkrh.PayloadMap(bodyMap))
 	if model, ok := bodyMap["model"].(string); ok {
 		extractedBody.Model = model
 	}

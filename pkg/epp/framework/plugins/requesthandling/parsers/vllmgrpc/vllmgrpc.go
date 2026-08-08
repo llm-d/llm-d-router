@@ -121,10 +121,10 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 
 	default:
 		logger.V(logutil.TRACE).Info("unsupported gRPC path, skipping", "path", headers[parsers.MethodPathKey])
+		unsupportedBody := &fwkrh.InferenceRequestBody{}
+		unsupportedBody.SetPayload(fwkrh.RawPayload(body))
 		return &fwkrh.ParseResult{
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
-			},
+			Body:                   unsupportedBody,
 			SkipResponseProcessing: true,
 		}, nil
 	}
@@ -208,8 +208,8 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{Raw: pbReq.GetText()},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
 		}
+		body.SetPayload(fwkrh.PayloadProto{Message: pbReq})
 	case *pb.GenerateRequest_Tokenized:
 		tokenized := pbReq.GetTokenized()
 		if tokenized == nil {
@@ -222,12 +222,12 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
 				PerPromptTokens:    [][]uint32{copiedTokenIDsInt},
 				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
 			},
 		}
+		body.SetPayload(fwkrh.PayloadProto{Message: pbReq})
 	default:
 		return nil, errors.New("not supported request inputType")
 	}
@@ -285,8 +285,8 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 					TokenIDs: tokenIDs,
 				},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
 		}
+		body.SetPayload(fwkrh.PayloadProto{Message: pbReq})
 	} else {
 		return nil, errors.New("missing tokenized input in EmbedRequest")
 	}

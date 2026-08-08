@@ -23,7 +23,16 @@ import (
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
+
+// WithPayload sets body's payload via SetPayload and returns body, so table-driven test
+// fixtures can populate the private payload field in a single expression:
+// WithPayload(&fwkrh.InferenceRequestBody{...}, fwkrh.PayloadMap{...}).
+func WithPayload(body *fwkrh.InferenceRequestBody, payload fwkrh.RequestPayload) *fwkrh.InferenceRequestBody {
+	body.SetPayload(payload)
+	return body
+}
 
 // DefaultTestPort is the standard port used for mock model servers in tests.
 const DefaultTestPort = 8000

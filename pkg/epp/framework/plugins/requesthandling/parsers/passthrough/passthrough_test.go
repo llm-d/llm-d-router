@@ -24,6 +24,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
 func TestPassthroughParser_ParseRequest(t *testing.T) {
@@ -37,20 +38,16 @@ func TestPassthroughParser_ParseRequest(t *testing.T) {
 		wantBody *fwkrh.InferenceRequestBody
 	}{
 		{
-			name:    "empty body",
-			body:    []byte{},
-			headers: map[string]string{},
-			wantBody: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload([]byte{}),
-			},
+			name:     "empty body",
+			body:     []byte{},
+			headers:  map[string]string{},
+			wantBody: testutil.WithPayload(&fwkrh.InferenceRequestBody{}, fwkrh.RawPayload([]byte{})),
 		},
 		{
-			name:    "non-empty body",
-			body:    []byte("hello world"),
-			headers: map[string]string{},
-			wantBody: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload([]byte("hello world")),
-			},
+			name:     "non-empty body",
+			body:     []byte("hello world"),
+			headers:  map[string]string{},
+			wantBody: testutil.WithPayload(&fwkrh.InferenceRequestBody{}, fwkrh.RawPayload([]byte("hello world"))),
 		},
 	}
 
@@ -63,7 +60,7 @@ func TestPassthroughParser_ParseRequest(t *testing.T) {
 			if got.SkipResponseProcessing != false {
 				t.Errorf("got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
-			if diff := cmp.Diff(tt.wantBody, got.Body); diff != "" {
+			if diff := cmp.Diff(tt.wantBody, got.Body, cmp.AllowUnexported(fwkrh.InferenceRequestBody{})); diff != "" {
 				t.Errorf("Unexpected body (-want +got):\n%s", diff)
 			}
 		})

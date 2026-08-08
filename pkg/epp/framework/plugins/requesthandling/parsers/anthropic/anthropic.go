@@ -87,8 +87,10 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	// The count_tokens endpoint returns only a token count and gains nothing from
 	// structured parsing or response interception; forward the body unchanged.
 	if strings.HasSuffix(path, "/"+countTokensAPI) {
+		countTokensBody := &fwkrh.InferenceRequestBody{}
+		countTokensBody.SetPayload(fwkrh.RawPayload(body))
 		return &fwkrh.ParseResult{
-			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
+			Body:                   countTokensBody,
 			SkipResponseProcessing: true,
 		}, nil
 	}
@@ -112,9 +114,9 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 
 	result := &fwkrh.InferenceRequestBody{
 		Messages:        &messagesReq,
-		Payload:         fwkrh.PayloadMap(bodyMap),
 		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
+	result.SetPayload(fwkrh.PayloadMap(bodyMap))
 	if model, ok := bodyMap["model"].(string); ok {
 		result.Model = model
 	}

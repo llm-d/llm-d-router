@@ -121,10 +121,10 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 		return p.parseVertexRequest(ctx, body, headers, &aiplatformpb.RawPredictRequest{}, "RawPredictRequest", openAIResponsesPath)
 
 	default:
+		reqBody := &fwkrh.InferenceRequestBody{}
+		reqBody.SetPayload(fwkrh.RawPayload(body))
 		return &fwkrh.ParseResult{
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
-			},
+			Body:                   reqBody,
 			SkipResponseProcessing: true,
 		}, nil
 	}
@@ -182,7 +182,24 @@ func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, he
 		return nil, fmt.Errorf("parsing %s: %w", typeName, err)
 	}
 
-	inferenceRequestBody := parseResult.Body
-	inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
+	// Build a fresh body rather than reusing parseResult.Body: the OpenAI sub-parser already
+	// called SetPayload once on that body, so a second call here would mark it mutated even
+	// though this is still the initial parse of a freshly-received Vertex AI request.
+	parsed := parseResult.Body
+	inferenceRequestBody := &fwkrh.InferenceRequestBody{
+		Completions:     parsed.Completions,
+		ChatCompletions: parsed.ChatCompletions,
+		Messages:        parsed.Messages,
+		Responses:       parsed.Responses,
+		Conversations:   parsed.Conversations,
+		Embeddings:      parsed.Embeddings,
+		Generate:        parsed.Generate,
+		Images:          parsed.Images,
+		TokenizedPrompt: parsed.TokenizedPrompt,
+		Stream:          parsed.Stream,
+		MaxOutputTokens: parsed.MaxOutputTokens,
+		Model:           parsed.Model,
+	}
+	inferenceRequestBody.SetPayload(fwkrh.PayloadProto{Message: req})
 	return &fwkrh.ParseResult{Body: inferenceRequestBody, SkipResponseProcessing: parseResult.SkipResponseProcessing}, nil
 }

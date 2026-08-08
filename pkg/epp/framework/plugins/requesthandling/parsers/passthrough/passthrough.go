@@ -71,10 +71,10 @@ func (p *PassthroughParser) WithName(name string) *PassthroughParser {
 
 // ParseRequest converts the request to RawPayload.
 func (p *PassthroughParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	reqBody := &fwkrh.InferenceRequestBody{}
+	reqBody.SetPayload(fwkrh.RawPayload(body))
 	return &fwkrh.ParseResult{
-		Body: &fwkrh.InferenceRequestBody{
-			Payload: fwkrh.RawPayload(body),
-		},
+		Body:                   reqBody,
 		SkipResponseProcessing: false,
 	}, nil
 }

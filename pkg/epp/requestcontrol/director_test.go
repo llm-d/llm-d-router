@@ -420,6 +420,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		preRequestPlugin        *mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
@@ -450,6 +451,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"model":  model,
 				"prompt": "critical prompt",
 			},
+			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -580,8 +582,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 			preRequestPlugin: &mockPreRequestPlugin{
 				name: "test-pre-request-plugin",
 				modifyFn: func(request *fwksched.InferenceRequest) {
-					if payloadMap, ok := request.Body.Payload.(fwkrh.PayloadMap); ok {
+					if payloadMap, ok := request.Body.Payload().(fwkrh.PayloadMap); ok {
 						payloadMap["new_key"] = "new_value"
+						request.Body.SetPayload(payloadMap)
 					}
 				},
 			},
@@ -840,6 +843,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			inferenceObjectiveName:  "food-review-1",
+			wantRawBodyUnchanged:    true,
 		},
 		{
 			name: "request rejected by admission controller",
@@ -1019,6 +1023,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Error parsing the reqBodyMap, err is %v", err)
 				}
+				originalRawBody := append([]byte(nil), reqCtx.Request.RawBody...)
 
 				// Add appropriate path header based on request body content for path-based API detection
 				if _, hasPrompt := test.reqBodyMap["prompt"]; hasPrompt {
@@ -1076,6 +1081,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
 					}
+				}
+				if test.wantRawBodyUnchanged {
+					assert.Equal(t, originalRawBody, returnedReqCtx.Request.RawBody,
+						"reqCtx.Request.RawBody should be byte-identical to the input when no rewrite applies")
 				}
 				assert.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 			})

@@ -128,8 +128,8 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 
 	body := &fwkrh.InferenceRequestBody{
 		Generate: &generate,
-		Payload:  fwkrh.PayloadMap(bodyMap),
 	}
+	body.SetPayload(fwkrh.PayloadMap(bodyMap))
 	if model, ok := bodyMap["model"].(string); ok {
 		body.Model = model
 	}

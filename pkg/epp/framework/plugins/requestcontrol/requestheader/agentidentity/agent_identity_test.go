@@ -25,6 +25,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
 
 // newDefaultPlugin builds a Plugin with no parameters — the built-in defaults.
@@ -103,7 +104,7 @@ func TestRequestHeader(t *testing.T) {
 		{
 			name:          "previous_response_id in body is ignored",
 			headers:       map[string]string{},
-			body:          &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap{"previous_response_id": "resp-456"}},
+			body:          testutil.WithPayload(&fwkrh.InferenceRequestBody{}, fwkrh.PayloadMap{"previous_response_id": "resp-456"}),
 			wantAttrFound: false,
 		},
 		{
