@@ -75,7 +75,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if s.config.MoRIIOParallelDispatch && s.config.MoRIIOWriteMode {
 		// MoRI-IO requires transfer_id to carry the "tx" prefix for message routing.
 		transferID := "tx" + uuidStr
-		s.runNIXLProtocolV2WriteParallel(w, r, original, completionRequest, uuidStr, transferID, prefillPodHostPort, kvCacheSource)
+		s.runNIXLProtocolV2WriteParallel(w, r, original, completionRequest, uuidStr, transferID, prefillPodHostPort, kvCacheSource, apiType)
 		return
 	}
 
@@ -468,6 +468,7 @@ retryLoop:
 func (s *Server) runNIXLProtocolV2WriteParallel(
 	w http.ResponseWriter, r *http.Request, original []byte,
 	completionRequest map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
+	apiType APIType,
 ) {
 	s.logger.V(4).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
@@ -480,10 +481,21 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// body; they are restored when building the decode body.
 	streamValue, streamOk := completionRequest[requestFieldStream]
 	streamOptionsValue, streamOptionsOk := completionRequest[requestFieldStreamOptions]
-	maxTokensValue, maxTokensOk := completionRequest[requestFieldMaxTokens]
-	maxCompletionTokensValue, maxCompletionTokensOk := completionRequest[requestFieldMaxCompletionTokens]
-	maxOutputTokensValue, maxOutputTokensOk := completionRequest[requestFieldMaxOutputTokens]
-	minTokensValue, minTokensOk := completionRequest[requestFieldMinTokens]
+
+	type savedField struct {
+		field   string
+		val     any
+		present bool
+	}
+	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
+	savedTokenValues := make([]savedField, len(tokenLimitFields))
+	for i, field := range tokenLimitFields {
+		if v, ok := completionRequest[field]; ok {
+			savedTokenValues[i] = savedField{field: field, val: v, present: true}
+		} else {
+			savedTokenValues[i] = savedField{field: field}
+		}
+	}
 
 	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).
 	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
@@ -526,10 +538,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	completionRequest[requestFieldStream] = false
 	delete(completionRequest, requestFieldStreamOptions)
-	completionRequest[requestFieldMaxTokens] = 1
-	completionRequest[requestFieldMaxCompletionTokens] = 1
-	completionRequest[requestFieldMaxOutputTokens] = 1
-	completionRequest[requestFieldMinTokens] = 1
+	for _, field := range tokenLimitFields {
+		completionRequest[field] = 1
+	}
 
 	pbody, err := json.Marshal(completionRequest)
 	if err != nil {
@@ -548,21 +559,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	if streamOptionsOk {
 		completionRequest[requestFieldStreamOptions] = streamOptionsValue
 	}
-	delete(completionRequest, requestFieldMaxTokens)
-	if maxTokensOk {
-		completionRequest[requestFieldMaxTokens] = maxTokensValue
-	}
-	delete(completionRequest, requestFieldMaxCompletionTokens)
-	if maxCompletionTokensOk {
-		completionRequest[requestFieldMaxCompletionTokens] = maxCompletionTokensValue
-	}
-	delete(completionRequest, requestFieldMaxOutputTokens)
-	if maxOutputTokensOk {
-		completionRequest[requestFieldMaxOutputTokens] = maxOutputTokensValue
-	}
-	delete(completionRequest, requestFieldMinTokens)
-	if minTokensOk {
-		completionRequest[requestFieldMinTokens] = minTokensValue
+	for _, sv := range savedTokenValues {
+		delete(completionRequest, sv.field)
+		if sv.present {
+			completionRequest[sv.field] = sv.val
+		}
 	}
 
 	// Synthesise decode-leg kv_transfer_params that the serial path would
