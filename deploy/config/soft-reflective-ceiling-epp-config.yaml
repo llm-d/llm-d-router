@@ -9,6 +9,8 @@ kind: EndpointPickerConfig
 featureGates:
 - flowControl
 plugins:
+- type: models-data-source
+- type: models-data-extractor
 - type: queue-scorer
 - type: kv-cache-utilization-scorer
 - type: prefix-cache-scorer
@@ -22,5 +24,10 @@ schedulingProfiles:
     weight: 2.0
   - pluginRef: prefix-cache-scorer
     weight: 3.0
+dataLayer:
+  sources:
+  - pluginRef: models-data-source
+    extractors:
+    - pluginRef: models-data-extractor
 flowControl:
   usageLimitPolicyPluginRef: soft-reflective-ceiling-policy

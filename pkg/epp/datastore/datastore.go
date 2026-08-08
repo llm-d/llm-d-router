@@ -18,6 +18,7 @@ package datastore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -38,6 +39,8 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
+	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
@@ -89,6 +92,8 @@ type Datastore interface {
 	// the name of the InferenceModelRewrite object.
 	ModelRewriteGet(modelName string) (*v1alpha2.InferenceModelRewriteRule, string)
 	ModelRewriteGetAll() []*v1alpha2.InferenceModelRewrite
+
+	AggregateModels() (json.RawMessage, int)
 
 	// PodList lists pods matching the given predicate.
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
@@ -533,4 +538,46 @@ func selectorEqual(a, b labels.Selector) bool {
 		return false
 	}
 	return a.String() == b.String()
+}
+
+func (ds *datastore) AggregateModels() (json.RawMessage, int) {
+	return aggregateModels(ds.PodList(AllPodsPredicate))
+}
+
+// aggregateModels collects the models from all endpoints and returns one entry per unique model ID,
+// sorted alphabetically so the response is the same every time. The second return value is how many
+// endpoints have actually reported a model list, letting the caller distinguish "nothing collected
+// yet" from a genuinely empty result.
+func aggregateModels(endpoints []fwkdl.Endpoint) (json.RawMessage, int) {
+	// Sort pods first so we always keep the same pod's copy of a duplicated model ID.
+	slices.SortFunc(endpoints, func(a, b fwkdl.Endpoint) int {
+		return strings.Compare(a.GetMetadata().ID.String(), b.GetMetadata().ID.String())
+	})
+
+	seen := make(map[string]struct{})
+	data := make([]attrmodels.ModelData, 0)
+	collected := 0 // endpoints that have reported their model list at least once (been scraped)
+
+	for _, ep := range endpoints {
+		c, ok := fwkdl.ReadAttribute[attrmodels.ModelDataCollection](ep.GetAttributes(), attrmodels.ModelsAttributeKey.String())
+		if !ok {
+			continue // registered but not scraped yet; do not count it
+		}
+		collected++
+		for _, model := range c {
+			if _, dup := seen[model.ID]; dup {
+				continue
+			}
+			seen[model.ID] = struct{}{}
+			data = append(data, model)
+		}
+	}
+	// models in a fixed (alphabetical) order every time
+	slices.SortFunc(data, func(a, b attrmodels.ModelData) int { return strings.Compare(a.ID, b.ID) })
+
+	body, err := json.Marshal(extmodels.ModelResponse{Object: "list", Data: data})
+	if err != nil {
+		return nil, 0
+	}
+	return body, collected
 }

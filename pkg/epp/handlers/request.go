@@ -38,6 +38,13 @@ import (
 func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *RequestContext, req *extProcPb.ProcessingRequest_RequestHeaders) error {
 	reqCtx.RequestReceivedTimestamp = time.Now()
 
+	// GET /v1/models is answered from the aggregated datalayer model list. It must not fall through
+	// to backend routing, which would answer from a single pod and miss models loaded elsewhere
+	// (e.g. LoRA adapters).
+	if handled, err := s.tryServeModelList(ctx, reqCtx, req); handled {
+		return err
+	}
+
 	// an EoS in the request headers means this request has no body or trailers.
 	if req.RequestHeaders.EndOfStream {
 		// We will route this request to a random endpoint as this is assumed to just be a GET
