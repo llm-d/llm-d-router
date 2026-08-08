@@ -25,6 +25,7 @@ import (
 func NewConfig() *Config {
 	return &Config{
 		requestHeaderPlugins:     []fwkrc.RequestHeaderProcessor{},
+		screeners:                []fwkrc.Screener{},
 		admissionPlugins:         []fwkrc.Admitter{},
 		dataProducerPlugins:      []fwkrc.DataProducer{},
 		preRequestPlugins:        []fwkrc.PreRequest{},
@@ -36,6 +37,7 @@ func NewConfig() *Config {
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
 	requestHeaderPlugins     []fwkrc.RequestHeaderProcessor
+	screeners                []fwkrc.Screener
 	admissionPlugins         []fwkrc.Admitter
 	dataProducerPlugins      []fwkrc.DataProducer
 	preRequestPlugins        []fwkrc.PreRequest
@@ -46,6 +48,13 @@ type Config struct {
 // WithRequestHeaderPlugins sets the given plugins as the RequestHeaderProcessor plugins.
 func (c *Config) WithRequestHeaderPlugins(plugins ...fwkrc.RequestHeaderProcessor) *Config {
 	c.requestHeaderPlugins = plugins
+	return c
+}
+
+// WithScreeners sets the screeners that narrow candidates before request data
+// production and scheduling.
+func (c *Config) WithScreeners(screeners ...fwkrc.Screener) *Config {
+	c.screeners = screeners
 	return c
 }
 
@@ -89,6 +98,9 @@ func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	for _, plugin := range pluginObjects {
 		if requestHeaderProcessor, ok := plugin.(fwkrc.RequestHeaderProcessor); ok {
 			c.requestHeaderPlugins = append(c.requestHeaderPlugins, requestHeaderProcessor)
+		}
+		if screener, ok := plugin.(fwkrc.Screener); ok {
+			c.screeners = append(c.screeners, screener)
 		}
 		if preRequestPlugin, ok := plugin.(fwkrc.PreRequest); ok {
 			c.preRequestPlugins = append(c.preRequestPlugins, preRequestPlugin)

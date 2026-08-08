@@ -154,7 +154,7 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	if err := instantiatePlugins(rawConfig.Plugins, handle); err != nil {
+	if err := instantiatePlugins(rawConfig.Plugins, handle, logger); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
 	}
 
@@ -172,17 +172,17 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("scheduler config build failed: %w", err)
 	}
 
-	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load feature gates: %w", err)
-	}
-
 	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle)
 	if err != nil {
 		return nil, fmt.Errorf("data layer config build failed: %w", err)
 	}
 	if len(dataConfig.Sources) == 0 {
 		logger.Info("No data sources configured; metrics collection is disabled")
+	}
+
+	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load feature gates: %w", err)
 	}
 
 	var flowControlConfig *flowcontrol.Config
@@ -192,6 +192,8 @@ func InstantiateAndConfigure(
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
+	} else if flowControlSettingsConfigured(rawConfig.FlowControl) {
+		logger.Info("WARNING: the flowControl config section is set but the flowControl feature gate is disabled; its settings (other than saturationDetector) are ignored")
 	}
 
 	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle, logger)
@@ -217,6 +219,19 @@ func InstantiateAndConfigure(
 	}, nil
 }
 
+// flowControlSettingsConfigured reports whether the flowControl config section carries settings
+// beyond the saturation detector. The saturation detector is honored by the legacy admission path
+// even when the flowControl feature gate is disabled, so it alone does not indicate ignored
+// configuration.
+func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
+	if fc == nil {
+		return false
+	}
+	return fc.MaxBytes != nil || fc.MaxRequests != nil || fc.DefaultRequestTTL != nil ||
+		fc.DefaultPriorityBand != nil || fc.DefaultNegativePriorityBand != nil ||
+		len(fc.PriorityBands) > 0 || fc.UsageLimitPolicyPluginRef != ""
+}
+
 func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error) {
 	cfg := &configapi.EndpointPickerConfig{}
 	codecs := serializer.NewCodecFactory(scheme, serializer.EnableStrict)
@@ -226,13 +241,18 @@ func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error
 	return cfg, nil
 }
 
-func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) error {
+func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle, logger logr.Logger) error {
 	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
 	if err != nil {
 		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
 	}
 
 	for _, spec := range orderedPlugins {
+
+		if meta, ok := fwkplugin.RegistryMetadata[spec.Type]; ok && meta.Deprecated {
+			logger.Info("DEPRECATION warning: plugin is deprecated", "plugin", spec.Name, "type", spec.Type)
+		}
+
 		factory := fwkplugin.Registry[spec.Type]
 		plugin, err := factory(spec.Name, fwkplugin.StrictDecoder(spec.Parameters), handle)
 		if err != nil {
@@ -430,6 +450,17 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 
 	if rawDataConfig == nil { // metrics data collection not enabled and no additional configuration
 		return &cfg, nil
+	}
+
+	if ref := rawDataConfig.CrossReplicaSyncerPluginRef; ref != "" {
+		syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+		}
+		cfg.Syncer = syncer
+	}
+	if iv := rawDataConfig.CrossReplicaSyncInterval; iv != nil {
+		cfg.SyncInterval = iv.Duration
 	}
 
 	for _, source := range rawDataConfig.Sources {

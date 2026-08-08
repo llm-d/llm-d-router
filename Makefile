@@ -119,12 +119,14 @@ BUILDER_SOCK_FLAGS = $(DOCKER_GROUP_PARAM) \
 	-e CONTAINER_RUNTIME=docker
 endif
 
+E2E_NUM_PROCS ?= 5
+
 # Env vars forwarded into the e2e test container.
 # Add new image vars here so they are automatically passed through.
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_LABEL_FILTER LOAD_VLLM_RENDER_IMAGE HF_TOKEN
+               E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -159,8 +161,13 @@ LDFLAGS ?= -s -w
 BASE_IMAGE ?=
 
 # test packages
-epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | tr '\n' ' ')
+epp_TEST_PACKAGES = $$(go list ./... | grep -v /test/ | grep -v ./pkg/sidecar/ | grep -v ./pkg/coordinator/ | grep -v ./cmd/coordinator | tr '\n' ' ')
 sidecar_TEST_PACKAGES = ./pkg/sidecar/...
+# framework is intentionally absent from the worktree coverage-compare baseline
+# block (epp+sidecar only); CI's baseline cache unions all coverage/*.out, so
+# framework enters the CI baseline once this is on main. The PR run reports
+# coverage/framework.out as a new component.
+framework_TEST_PACKAGES = ./test/framework/...
 
 # Internal variables for generic targets
 epp_IMAGE = $(EPP_IMAGE)
@@ -253,11 +260,20 @@ lint: image-build-builder ## Run lint (use LINT_NEW_ONLY=true to only check new 
 	@printf "\033[33;1m==== Running linting ====\033[0m\n"
 	$(BUILDER_RUN) 'GOFLAGS=-buildvcs=false golangci-lint run $(LINT_ARGS) && typos'
 
+# Reports findings without failing while the initial baseline is triaged.
+# Set to 1 to block merges on new findings.
+SECURITY_LINT_EXIT_CODE ?= 0
+
+.PHONY: lint-security
+lint-security: image-build-builder ## Run security linters and write gosec.sarif
+	@printf "\033[33;1m==== Running security linting ====\033[0m\n"
+	$(BUILDER_RUN) 'GOFLAGS=-buildvcs=false golangci-lint run --config=./.golangci-security.yml --issues-exit-code=$(SECURITY_LINT_EXIT_CODE)'
+
 .PHONY: test
 test: test-unit test-e2e ## Run all tests (unit and e2e)
 
 .PHONY: test-unit
-test-unit: test-unit-epp test-unit-sidecar ## Run unit tests
+test-unit: test-unit-epp test-unit-sidecar test-unit-framework ## Run unit tests
 
 .PHONY: test-unit-%
 test-unit-%: image-build-builder
@@ -313,6 +329,11 @@ bench-tokenizer: image-build-builder ## Run external tokenizer + scorer benchmar
 	@printf "Run 'EXTERNAL_TOKENIZER_ENABLED=true KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
+.PHONY: bench-smoke
+bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-benchtime=1x) to catch runtime rot
+	@printf "\033[33;1m==== Running Flow Control Benchmark Smoke ====\033[0m\n"
+	$(BUILDER_RUN) 'go test -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
+
 .PHONY: post-deploy-test
 post-deploy-test: ## Run post deployment tests
 	@echo "Success!"
@@ -366,7 +387,7 @@ COVERAGE_LABEL     ?= main
 BASE_REF           ?= main
 
 .PHONY: test-coverage
-test-coverage: test-unit-epp test-unit-sidecar ## Run all unit tests with coverage (alias for test-unit)
+test-coverage: test-unit ## Run all unit tests with coverage (alias for test-unit)
 
 .PHONY: test-coverage-integration
 test-coverage-integration: test-integration ## Run integration tests with coverage (alias for test-integration)

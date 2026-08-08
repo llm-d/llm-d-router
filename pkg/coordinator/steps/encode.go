@@ -90,6 +90,15 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger := log.FromContext(ctx).WithName(EncodeStepName)
 
+	// On the generate path the prefill worker runs the vision encoder inline from
+	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
+	// avoids shipping the oversized preprocessed pixel tensor a second time
+	// (see https://github.com/vllm-project/vllm/issues/46722).
+	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
+		return nil
+	}
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
 
@@ -119,7 +128,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 			headers := reqCtx.ForwardedHeaders()
 			headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-			headers[gateway.EPPPhaseHeader] = gateway.PhaseEncode
+			headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
 
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
@@ -169,6 +178,10 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	placeholderTokenID := 0
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
+		// Only the upper bound is checked here; offset >= 0 is guaranteed for all
+		// paths, either by extractMultimodalEntries (generate) or by the trusted
+		// render-service response (chat/completions). A negative offset would
+		// index out of range.
 		if entry.Placeholder.Offset < len(fullTokenIDs) {
 			placeholderTokenID = fullTokenIDs[entry.Placeholder.Offset]
 		}
@@ -201,20 +214,21 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 				},
 			},
-			"max_tokens": 1,
 		}
+		capSingleTokenOutput(body, format)
 		return body
 	default:
-		return map[string]any{
+		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": tokenIDs,
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				"kwargs_data":     map[string][]string{ModalityImage: {entry.KwargsData}},
+				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
 			},
-			"sampling_params": map[string]any{"max_tokens": 1},
 		}
+		capSingleTokenOutput(body, format)
+		return body
 	}
 }
 

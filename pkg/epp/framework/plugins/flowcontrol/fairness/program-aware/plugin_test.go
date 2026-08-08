@@ -107,7 +107,7 @@ func TestPreRequest_RecordsDispatchAndWait(t *testing.T) {
 	req.PutAttribute(enqueueTimeAttributeKey, enqueue)
 
 	p := &ProgramAwarePlugin{}
-	p.PreRequest(context.Background(), req, nil)
+	_ = p.PreRequest(context.Background(), req, nil)
 
 	m := p.getOrCreateMetrics("alpha")
 	assert.Equal(t, int64(1), m.DispatchedCount())
@@ -119,7 +119,7 @@ func TestPreRequest_RecordsDispatchAndWait(t *testing.T) {
 func TestPreRequest_NoEnqueueAttribute_StillDispatches(t *testing.T) {
 	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
 	p := &ProgramAwarePlugin{}
-	p.PreRequest(context.Background(), req, nil)
+	_ = p.PreRequest(context.Background(), req, nil)
 
 	m := p.getOrCreateMetrics("alpha")
 	assert.Equal(t, int64(1), m.DispatchedCount())
@@ -130,7 +130,7 @@ func TestPreRequest_NoEnqueueAttribute_StillDispatches(t *testing.T) {
 func TestPreRequest_NoFairnessID_FallsBackToDefault(t *testing.T) {
 	req := &fwksched.InferenceRequest{}
 	p := &ProgramAwarePlugin{}
-	p.PreRequest(context.Background(), req, nil)
+	_ = p.PreRequest(context.Background(), req, nil)
 
 	got, ok := p.programMetrics.Load(metadata.DefaultFairnessID)
 	require.True(t, ok, "default fairness ID entry should be created")

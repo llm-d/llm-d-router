@@ -50,9 +50,9 @@ func sendRawCompletion() (int, error) {
 
 // podGone returns true when the named pod no longer appears in the pod list
 // and at least minRemaining pods exist.
-func podGone(podName string, minRemaining int) func() bool {
+func podGone(podName string, nsName string, minRemaining int) func() bool {
 	return func() bool {
-		_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+		_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 		for _, pod := range currentDecode {
 			if pod == podName {
 				return false
@@ -63,9 +63,9 @@ func podGone(podName string, minRemaining int) func() bool {
 }
 
 // eppPodReady returns true when a new EPP pod (not oldPodName) is Running and Ready.
-func eppPodReady(oldPodName string) func() bool {
+func eppPodReady(oldPodName string, nsName string) func() bool {
 	return func() bool {
-		pods := getPods(map[string]string{"app": "e2e-epp"})
+		pods := getPods(map[string]string{"app": "e2e-epp"}, nsName)
 		for _, p := range pods {
 			if p.Name == oldPodName {
 				continue
@@ -96,20 +96,17 @@ func completionRoutedToNamespace(nsName string) error {
 	return nil
 }
 
-var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disruptiveTestLabel), func() {
-	ginkgo.When("A decode pod is killed mid-request", func() {
+var _ = ginkgo.Describe("Disruption tests", func() {
+	ginkgo.When("A decode pod is killed mid-request", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
 
+			infPoolObjects := createInferencePool(1)
+
 			modelServers := createModelServersDecode(2)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
-
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
@@ -123,7 +120,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			deletePodByName(targetPod, 0)
 
 			ginkgo.By("Waiting for killed pod to be replaced")
-			gomega.Eventually(podGone(targetPod, 1), podRemovalTimeout, 1*time.Second).Should(gomega.BeTrue())
+			gomega.Eventually(podGone(targetPod, nsName, 1), podRemovalTimeout, 1*time.Second).Should(gomega.BeTrue())
 
 			ginkgo.By("Verifying new requests eventually route to a pod other than the killed one")
 			gomega.Eventually(func() error {
@@ -142,29 +139,31 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for replacement pod to become ready")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
 			ginkgo.By("Verifying requests succeed consistently after recovery")
 			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
+
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("A decode pod is killed while a streaming request is in-flight", func() {
+	ginkgo.When("A decode pod is killed while a streaming request is in-flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should not hang and should recover routing", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
 
+			infPoolObjects := createInferencePool(1)
+
 			modelServers := createModelServersDecode(2)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
-			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
@@ -194,29 +193,31 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for replacement pod")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
 			ginkgo.By("Verifying requests succeed consistently after recovery")
 			gomega.Eventually(completionRoutedToNamespace, eppRecoveryTimeout, 1*time.Second).WithArguments(nsName).
 				MustPassRepeatedly(3).Should(gomega.Succeed())
+
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("All pods are gone", func() {
+	ginkgo.When("All pods are gone", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should return 503 to the client", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
 
+			infPoolObjects := createInferencePool(1)
+
 			modelServers := createModelServersDecode(1)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
-			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+			_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
 			ginkgo.By("Verifying requests succeed before disruption")
@@ -228,7 +229,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, podRemovalTimeout, 1*time.Second).Should(gomega.Equal(0))
 
@@ -249,27 +250,29 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
 				return nsHdr
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Equal(nsName))
+
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
-	ginkgo.When("The EPP is killed while requests are in flight", func() {
+	ginkgo.When("The EPP is killed while requests are in flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and resume routing after restart", func() {
-			infPoolObjects = createInferencePool(1, true)
-
 			nsName := getNamespace()
 
+			infPoolObjects := createInferencePool(1)
+
 			modelServers := createModelServersDecode(1)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			ginkgo.By("Verifying requests succeed before EPP disruption")
 			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
 			gomega.Expect(nsHdr).Should(gomega.Equal(getNamespace()))
 
 			ginkgo.By("Finding EPP pod")
-			eppPods := getPods(map[string]string{"app": "e2e-epp"})
+			eppPods := getPods(map[string]string{"app": "e2e-epp"}, nsName)
 			gomega.Expect(eppPods).Should(gomega.HaveLen(1))
 			eppPodName := eppPods[0].Name
 
@@ -287,7 +290,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				"requests should fail while EPP is down")
 
 			ginkgo.By("Waiting for EPP to recover")
-			gomega.Eventually(eppPodReady(eppPodName), readyTimeout, 2*time.Second).Should(gomega.BeTrue())
+			gomega.Eventually(eppPodReady(eppPodName, nsName), readyTimeout, 2*time.Second).Should(gomega.BeTrue())
 
 			ginkgo.By("Verifying requests succeed after EPP recovery")
 			gomega.Eventually(func() error {
@@ -300,19 +303,22 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 				}
 				return nil
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Succeed())
-		})
-	})
 
-	ginkgo.When("Traffic is flowing during scale-to-zero and back", func() {
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
+		})
+	}))
+
+	ginkgo.When("Traffic is flowing during scale-to-zero and back", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should return 503s when empty and recover when scaled back", func() {
-			infPoolObjects = createInferencePool(1, true)
 			nsName := getNamespace()
 
+			infPoolObjects := createInferencePool(1)
+
 			modelServers := createModelServersDecode(1)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, modelServers, nsName)
 
 			epp := createEndPointPicker(simpleConfig)
-			ginkgo.DeferCleanup(testutils.DeleteObjects, testConfig, epp, nsName)
 
 			ginkgo.By("Verifying requests succeed before disruption")
 			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
@@ -332,7 +338,7 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
-				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector)
+				_, currentDecode := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, podRemovalTimeout, 1*time.Second).Should(gomega.Equal(0))
 
@@ -352,8 +358,12 @@ var _ = ginkgo.Describe("Disruption tests", ginkgo.Ordered, ginkgo.Label(disrupt
 			<-done
 
 			ginkgo.By(fmt.Sprintf("Traffic results: %d successes, %d failures", tc.successes(), tc.failures()))
+
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
-	})
+	}))
 
 })
 

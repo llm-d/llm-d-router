@@ -38,8 +38,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		if r.URL.Path != "/inference/v1/generate" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -125,20 +125,6 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("expected kwargs_data.image=[dGVuc29yLWE=,dGVuc29yLWI=], got %v", imageKwargs)
 	}
 
-	// Verify ec_transfer_params is a flat map keyed by mm_hash
-	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
-	if !ok {
-		t.Fatal("expected ec_transfer_params in prefill request")
-	}
-	if len(ecParams) != 2 {
-		t.Fatalf("expected 2 ec_transfer_params entries, got %d: %v", len(ecParams), ecParams)
-	}
-	for _, want := range []string{"hash-a", "hash-b"} {
-		if _, ok := ecParams[want]; !ok {
-			t.Errorf("missing hash %q in ec_transfer_params: %v", want, ecParams)
-		}
-	}
-
 	// Verify sampling_params with extra_args workaround
 	samplingParams, ok := prefillBody["sampling_params"].(map[string]any)
 	if !ok {
@@ -146,6 +132,9 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	}
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
+	}
+	if _, ok := samplingParams["min_tokens"]; ok {
+		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
 	extraArgs, ok := samplingParams["extra_args"].(map[string]any)
 	if !ok {
@@ -159,9 +148,27 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("expected kv_transfer_params.do_remote_decode=true, got %v", kvParams["do_remote_decode"])
 	}
 
-	// Verify no top-level kv_transfer_params in generate format
+	// Verify ec_transfer_params is a flat map keyed by mm_hash, nested in
+	// extra_args alongside kv_transfer_params (the engine reads it only there).
+	ecParams, ok := extraArgs["ec_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected ec_transfer_params in sampling_params.extra_args")
+	}
+	if len(ecParams) != 2 {
+		t.Fatalf("expected 2 ec_transfer_params entries, got %d: %v", len(ecParams), ecParams)
+	}
+	for _, want := range []string{"hash-a", "hash-b"} {
+		if _, ok := ecParams[want]; !ok {
+			t.Errorf("missing hash %q in ec_transfer_params: %v", want, ecParams)
+		}
+	}
+
+	// Verify no top-level kv_transfer_params or ec_transfer_params in generate format
 	if _, ok := prefillBody["kv_transfer_params"]; ok {
 		t.Fatal("generate format should not have top-level kv_transfer_params")
+	}
+	if _, ok := prefillBody["ec_transfer_params"]; ok {
+		t.Fatal("generate format should not have top-level ec_transfer_params")
 	}
 
 	// Verify response populated KVTransferParams
@@ -177,8 +184,8 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 		if r.URL.Path != gateway.PathCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -217,6 +224,14 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	}
 	if prefillBody["request_id"] != "req-compl" {
 		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
+	}
+	// Prefill leg caps output to a single token: max_tokens is pinned to 1 and
+	// min_tokens is stripped (it defaults to 0, keeping min_tokens <= max_tokens).
+	if prefillBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected max_tokens=1, got %v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["min_tokens"]; ok {
+		t.Fatalf("expected min_tokens to be stripped, got %v", prefillBody["min_tokens"])
 	}
 	// Completions format has top-level kv_transfer_params
 	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
@@ -271,8 +286,8 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		if r.URL.Path != gateway.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -374,8 +389,8 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 		if r.URL.Path != gateway.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Phase: prefill, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
+			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -415,6 +430,104 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	}
 	if _, ok := prefillBody["stream_options"]; ok {
 		t.Fatalf("expected stream_options to be stripped from prefill request, got %v", prefillBody["stream_options"])
+	}
+}
+
+// TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
+// regression test: buildPrefillBody used to clone the client's body and only
+// overwrite max_tokens, so a client-supplied max_completion_tokens survived
+// at its original, uncapped value alongside the newly-capped max_tokens=1.
+func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-4"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-max-completion-tokens",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		Body: map[string]any{
+			"model":                 "test-model",
+			"max_completion_tokens": 100,
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected prefill request max_tokens=1, got %v", prefillBody["max_tokens"])
+	}
+	if prefillBody["max_completion_tokens"] != float64(1) {
+		t.Fatalf("expected prefill request max_completion_tokens capped to 1, got %v", prefillBody["max_completion_tokens"])
+	}
+}
+
+// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens is a regression
+// test for the one coordinator path where a client-supplied min_tokens survives
+// into the capped body: chat-completions clones reqCtx.Body, so a client
+// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the leg.
+// The generate and completions legs build fresh bodies that never carry it.
+func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-5"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-min-tokens",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "test-model",
+		Body: map[string]any{
+			"model":      "test-model",
+			"min_tokens": 50,
+			"max_tokens": 200,
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hello"},
+			},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected prefill request max_tokens=1, got %v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["min_tokens"]; ok {
+		t.Fatalf("expected client min_tokens to be stripped, got %v", prefillBody["min_tokens"])
 	}
 }
 
@@ -479,6 +592,14 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 			}
 			if _, ok := parsed["ec_transfer_params"]; ok {
 				t.Errorf("ec-shared-storage must not set ec_transfer_params; body=%s", raw)
+			}
+			// Generate format nests transfer params in sampling_params.extra_args.
+			if sp, ok := parsed["sampling_params"].(map[string]any); ok {
+				if ea, ok := sp["extra_args"].(map[string]any); ok {
+					if _, ok := ea["ec_transfer_params"]; ok {
+						t.Errorf("ec-shared-storage must not set ec_transfer_params in extra_args; body=%s", raw)
+					}
+				}
 			}
 		})
 	}

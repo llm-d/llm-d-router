@@ -84,10 +84,10 @@ func TestLogger(t *testing.T) {
 
 	logOutput := b.read()
 	assert.Contains(t, logOutput, "Refreshing Prometheus Metrics	{\"ReadyPods\": 2}")
-	assert.Contains(t, logOutput, "Current Pods and metrics gathered	{\"Fresh metrics\": \"[Metadata: {NamespacedName:default/pod1 PodName: Address:1.2.3.4:5678")
+	assert.Contains(t, logOutput, "Current Pods and metrics gathered	{\"Fresh metrics\": \"[Metadata: {ID:default/pod1 Name: Address:1.2.3.4:5678")
 	assert.Contains(t, logOutput, "Metrics: {ActiveModels:map[modelA:1] WaitingModels:map[modelB:2] MaxActiveModels:5")
 	assert.Contains(t, logOutput, "RunningRequestsSize:3 WaitingQueueSize:7 KVCacheUsagePercent:42.5 KvCacheMaxTokenCapacity:2048")
-	assert.Contains(t, logOutput, "Metadata: {NamespacedName:default/pod2 PodName: Address:1.2.3.4:5679")
+	assert.Contains(t, logOutput, "Metadata: {ID:default/pod2 Name: Address:1.2.3.4:5679")
 	assert.Contains(t, logOutput, "\"Stale metrics\": \"[]\"")
 }
 
@@ -221,14 +221,14 @@ func (f *FakeOddMetricsDataStore) PodList(predicate func(fwkdl.Endpoint) bool) [
 }
 
 var pod1 = &fwkdl.EndpointMetadata{
-	NamespacedName: types.NamespacedName{
+	ID: types.NamespacedName{
 		Name:      "pod1",
 		Namespace: "default",
 	},
 	Address: "1.2.3.4:5678",
 }
 var pod2 = &fwkdl.EndpointMetadata{
-	NamespacedName: types.NamespacedName{
+	ID: types.NamespacedName{
 		Name:      "pod2",
 		Namespace: "default",
 	},

@@ -25,7 +25,7 @@ import (
 func TestRedactedHeaders_LowercasesAndFlattensHTTPHeader(t *testing.T) {
 	h := http.Header{
 		"X-Request-Id": {"abc-123"},
-		"Epp-Phase":    {"decode"},
+		"Epp-Profile":  {"decode"},
 	}
 
 	out := RedactedHeaders(h)
@@ -33,8 +33,8 @@ func TestRedactedHeaders_LowercasesAndFlattensHTTPHeader(t *testing.T) {
 	if got := out["x-request-id"]; got != "abc-123" {
 		t.Errorf("x-request-id = %q, want %q", got, "abc-123")
 	}
-	if got := out["epp-phase"]; got != "decode" {
-		t.Errorf("epp-phase = %q, want %q", got, "decode")
+	if got := out["epp-profile"]; got != "decode" {
+		t.Errorf("epp-profile = %q, want %q", got, "decode")
 	}
 	if _, ok := out["X-Request-Id"]; ok {
 		t.Errorf("canonical key must not be present; keys are lowercased")
@@ -60,14 +60,14 @@ func TestRedactedHeaders_AcceptsRequestHeaderField(t *testing.T) {
 func TestRedactedHeaders_LowercasesStringMap(t *testing.T) {
 	out := RedactedHeaders(map[string]string{
 		"x-request-id": "abc-123",
-		"EPP-Phase":    "encode",
+		"EPP-Profile":  "encode",
 	})
 
 	if got := out["x-request-id"]; got != "abc-123" {
 		t.Errorf("x-request-id = %q, want %q", got, "abc-123")
 	}
-	if got := out["epp-phase"]; got != "encode" {
-		t.Errorf("epp-phase = %q, want %q", got, "encode")
+	if got := out["epp-profile"]; got != "encode" {
+		t.Errorf("epp-profile = %q, want %q", got, "encode")
 	}
 }
 
@@ -108,14 +108,14 @@ func TestRedactedHeaders_TruncatesLongValue(t *testing.T) {
 	const phase = "decode"
 	out := RedactedHeaders(http.Header{
 		"X-Gateway-Peer-Metadata": {long},
-		"Epp-Phase":               {phase},
+		"Epp-Profile":             {phase},
 	})
 
 	want := long[:maxValueLen] + "...[truncated]"
 	if got := out["x-gateway-peer-metadata"]; got != want {
 		t.Errorf("long value not truncated:\n got %q\nwant %q", got, want)
 	}
-	if got := out["epp-phase"]; got != phase {
+	if got := out["epp-profile"]; got != phase {
 		t.Errorf("short value should be unchanged, got %q", got)
 	}
 }

@@ -355,7 +355,13 @@ func (fc *FlowController) tryDistribution(
 		fc.logger.Error(err,
 			"Invariant violation. Failed to get ManagedQueue for a leased flow.",
 			"flowKey", conn.FlowKey())
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, types.ErrRejected)
+		// An internal invariant violation, not a capacity condition: finalize as RejectedOther so it
+		// surfaces as an internal error rather than as saturation backpressure. The registry error is
+		// flattened with %v because this finalized error is returned through the connection closure in
+		// EnqueueAndWait: a %w-preserved ErrPriorityBandNotFound would be misread by
+		// withConnectionWithFallback as a lease-acquisition failure and silently retried at priority 0.
+		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
+			fmt.Errorf("%w: failed to get ManagedQueue for leased flow: %v", types.ErrRejected, err))
 		return item, err
 	}
 
@@ -378,8 +384,15 @@ func (fc *FlowController) tryDistribution(
 	return item, finalErr
 }
 
+func finalizeOnControllerShutdown(item *internal.FlowItem) (types.QueueOutcome, error) {
+	item.Finalize(types.ErrFlowControllerNotRunning)
+
+	finalState := item.FinalState()
+	return finalState.Outcome, finalState.Err
+}
+
 // awaitFinalization blocks until an item is finalized, either by the processor (synchronously) or by the controller
-// itself due to context expiry (asynchronously).
+// itself due to context expiry or shutdown (asynchronously).
 func (fc *FlowController) awaitFinalization(
 	reqCtx context.Context,
 	item *internal.FlowItem,
@@ -388,12 +401,19 @@ func (fc *FlowController) awaitFinalization(
 	case <-reqCtx.Done():
 		// Asynchronous Finalization (Controller-initiated):
 		// The request Context expired (Cancellation/TTL) while the item was being processed.
+		if fc.parentCtx.Err() != nil {
+			return finalizeOnControllerShutdown(item)
+		}
+
 		cause := context.Cause(reqCtx)
 		item.Finalize(cause)
 
 		// The processor will eventually discard this "zombie" item during its cleanup sweep.
 		finalState := item.FinalState()
 		return finalState.Outcome, finalState.Err
+
+	case <-fc.parentCtx.Done():
+		return finalizeOnControllerShutdown(item)
 
 	case finalState := <-item.Done():
 		// Synchronous Finalization (Processor-initiated):

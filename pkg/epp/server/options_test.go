@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"crypto/tls"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,6 +256,7 @@ func TestValidateDirectValues(t *testing.T) {
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
 	}
+
 }
 
 func TestDrainTimeoutFlag(t *testing.T) {
@@ -363,4 +365,130 @@ func TestCompleteMetricsCertFiles(t *testing.T) {
 	present.AddFlags(pflag.NewFlagSet("present", pflag.ContinueOnError))
 	present.MetricsCertDir = dir
 	require.NoError(t, present.Complete())
+}
+
+func TestTLSMinVersionFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantVersion uint16
+		wantErr     bool
+	}{
+		{
+			name:        "VersionTLS12",
+			args:        []string{"--tls-min-version", "VersionTLS12"},
+			wantVersion: tls.VersionTLS12,
+		},
+		{
+			name:        "VersionTLS13",
+			args:        []string{"--tls-min-version", "VersionTLS13"},
+			wantVersion: tls.VersionTLS13,
+		},
+		{
+			name:        "not set",
+			args:        []string{},
+			wantVersion: 0,
+		},
+		{
+			name:    "invalid version",
+			args:    []string{"--tls-min-version", "TLS1.2"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := append([]string{"--pool-name", testPoolName, "--config-file", testConfigFile}, tt.args...)
+			require.NoError(t, fs.Parse(argv))
+
+			err := opts.Complete()
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantVersion, opts.TLSMinVersionValue())
+		})
+	}
+}
+
+func TestTLSCipherSuitesFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantSuites []uint16
+		wantErr    bool
+	}{
+		{
+			name: "single cipher",
+			args: []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+			wantSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			},
+		},
+		{
+			name: "multiple ciphers",
+			args: []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			wantSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:       "not set",
+			args:       []string{},
+			wantSuites: nil,
+		},
+		{
+			name:    "unknown cipher",
+			args:    []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := append([]string{"--pool-name", testPoolName, "--config-file", testConfigFile}, tt.args...)
+			require.NoError(t, fs.Parse(argv))
+
+			err := opts.Complete()
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantSuites, opts.TLSCipherSuiteValues())
+		})
+	}
+}
+
+func TestParseTLSVersion(t *testing.T) {
+	for name, want := range tlsVersions {
+		got, err := parseTLSVersion(name)
+		require.NoError(t, err, name)
+		require.Equal(t, want, got, name)
+	}
+	_, err := parseTLSVersion("invalid")
+	require.Error(t, err)
+}
+
+func TestParseCipherSuites(t *testing.T) {
+	ids, err := parseCipherSuites([]string{
+		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []uint16{
+		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	}, ids)
+
+	_, err = parseCipherSuites([]string{"BOGUS"})
+	require.Error(t, err)
 }

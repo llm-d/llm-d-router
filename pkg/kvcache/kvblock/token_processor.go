@@ -24,7 +24,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-router/pkg/utils"
+	"github.com/llm-d/llm-d-router/pkg/common/collections"
 )
 
 // defaultBlockSize is the default number of tokens per block.
@@ -222,7 +222,7 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 
 	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures)
 
-	return utils.SliceMap(ph, func(hashVal uint64) BlockHash {
+	return collections.SliceMap(ph, func(hashVal uint64) BlockHash {
 		return BlockHash(hashVal)
 	}), nil
 }

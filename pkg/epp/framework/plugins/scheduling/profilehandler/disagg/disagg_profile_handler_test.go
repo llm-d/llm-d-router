@@ -36,7 +36,7 @@ const (
 
 func makeEndpoint(nsn k8stypes.NamespacedName, ip, port string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: nsn, Address: ip, Port: port, Labels: labels},
+		&fwkdl.EndpointMetadata{ID: nsn, Address: ip, Port: port, Labels: labels},
 		nil,
 		fwkdl.NewAttributes(),
 	)
@@ -1347,9 +1347,9 @@ func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
 	podPort := "8080"
 	ep := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
-			Address:        podAddr,
-			Port:           podPort,
+			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
+			Address: podAddr,
+			Port:    podPort,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -1366,8 +1366,8 @@ func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
 		},
 	}
 
-	profileHandler.PreRequest(ctx, request, result)
-	headersHandler.PreRequest(ctx, request, result)
+	_ = profileHandler.PreRequest(ctx, request, result)
+	_ = headersHandler.PreRequest(ctx, request, result)
 
 	expected := net.JoinHostPort(podAddr, podPort)
 	assert.Equal(t, expected, request.Headers[routing.PrefillEndpointHeader],
@@ -1390,8 +1390,58 @@ func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 		},
 	}
 
-	h.PreRequest(ctx, request, result)
+	_ = h.PreRequest(ctx, request, result)
 
 	want := net.JoinHostPort("10.0.0.1", "8000") + "," + net.JoinHostPort("10.0.0.2", "8000")
 	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
+}
+
+func TestHandler_Pick_PD_StampsPeerEndpointBeforePrefill(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	decodeResult := makeProfileRunResult("pod1")
+	profileResults := map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: decodeResult}
+	inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
+	injectPrefixCache(profileResults, 2, inputTokens) // few cached tokens → prefill needed
+
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
+	assert.NoError(t, err)
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", decider, nil)
+
+	got := h.Pick(ctx, req, profiles, profileResults)
+	assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got), "prefill must run")
+
+	peer, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
+	assert.True(t, ok, "peer endpoint attribute must be published before prefill runs")
+	assert.Equal(t, decodeResult.TargetEndpoints[0], peer)
+}
+
+func TestHandler_Pick_PD_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	profileResults := map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: makeProfileRunResult("pod1")}
+	inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
+	injectPrefixCache(profileResults, inputTokens, inputTokens) // fully cached → no prefill needed
+
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
+	assert.NoError(t, err)
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", decider, nil)
+
+	got := h.Pick(ctx, req, profiles, profileResults)
+	assert.Empty(t, got, "prefill must be skipped")
+
+	_, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
+	assert.False(t, ok, "peer endpoint attribute must not be published when prefill is skipped")
 }

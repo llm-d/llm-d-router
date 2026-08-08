@@ -38,7 +38,7 @@ import (
 var serverLog = ctrl.Log.WithName("server")
 
 var (
-	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, gateway.EPPPhaseHeader, "Prefer"}
+	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, gateway.EPPProfileHeader, "Prefer"}
 	loggedResponseHeaders = []string{"Content-Type", reqcommon.RequestIDHeaderKey}
 )
 
@@ -111,6 +111,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
 
 	r.Post(gateway.PathChatCompletions, s.handleInference)
 	r.Post(gateway.PathCompletions, s.handleInference)
+	r.Post(gateway.DefaultGeneratePath, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 

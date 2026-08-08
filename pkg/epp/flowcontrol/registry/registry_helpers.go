@@ -159,8 +159,7 @@ func (fr *FlowRegistry) synchronizeFlow(
 		return
 	}
 
-	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.",
-		"flowKey", key, "queueType", q.Name())
+	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.", "flowKey", key)
 
 	mq := newManagedQueue(q, policy, key, fr.logger, fr.propagateStatsDelta)
 	band.queues[key.ID] = mq

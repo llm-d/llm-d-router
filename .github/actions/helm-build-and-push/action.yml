@@ -12,7 +12,7 @@ inputs:
     required: false
     default: ''
   epp_image_repository:
-    description: 'EPP image repository name (e.g. llm-d-router-endpoint-picker or llm-d-router-endpoint-picker-dev)'
+    description: 'EPP image repository name (e.g. llm-d-router-endpoint-picker)'
     required: false
     default: 'llm-d-router-endpoint-picker'
 runs:

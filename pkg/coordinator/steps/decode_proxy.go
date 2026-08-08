@@ -69,13 +69,21 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 		proxyReq.Header.Set(k, v)
 	}
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
-	proxyReq.Header.Set(gateway.EPPPhaseHeader, gateway.PhaseDecode)
+	proxyReq.Header.Set(gateway.EPPProfileHeader, gateway.PhaseDecode)
 	for k, v := range extraHeaders {
 		proxyReq.Header.Set(k, v)
 	}
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info("request body", "method", "POST", "path", reqCtx.OriginalPath, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
+	}
+
+	// The decode leg is proxied straight to the gateway and never passes through
+	// gateway.Client.Request, which is what logs full request bodies at TRACE for
+	// the prefill and encode legs. Log the redacted body here so the decode leg's
+	// fields (min_tokens, max_tokens, ...) are observable at the same verbosity.
+	if v := logger.V(logutil.TRACE); v.Enabled() {
+		v.Info("request body", "method", "POST", "path", reqCtx.OriginalPath, "headers", httplog.RedactedHeaders(proxyReq.Header), "body", gateway.RedactBody(bodyBytes))
 	}
 
 	return proxyReq, nil

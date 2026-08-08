@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
@@ -87,7 +88,7 @@ func (p *HeadersHandler) WithName(name string) *HeadersHandler {
 }
 
 // PreRequest wires prefill and encode SchedulerProfile results into headers to indicate disaggregation workers.
-func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	tracer := tracing.Tracer(schedplugins.TracerScope)
 	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -100,7 +101,7 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.disagg.reason", "request_is_nil"),
 		)
-		return
+		return nil
 	}
 	if schedulingResult == nil {
 		span.SetAttributes(
@@ -108,13 +109,14 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.disagg.reason", "scheduling_result_is_nil"),
 		)
-		return
+		return nil
 	}
 
 	if request.TargetModel != "" {
 		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
 	}
 	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header
 	delete(request.Headers, routing.PrefillEndpointHeader) // clear header, if already set
@@ -149,7 +151,7 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_result"),
 		)
-		return // encode profile failed to run or we chose not to run it, no-op in this case
+		return nil // encode profile failed to run or we chose not to run it, no-op in this case
 	}
 
 	// Collect all target endpoints as comma-separated host:port pairs
@@ -164,7 +166,7 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_target_endpoints"),
 		)
-		return // no target endpoints, no-op in this case
+		return nil // no target endpoints, no-op in this case
 	}
 
 	request.Headers[routing.EncoderEndpointsHeader] = strings.Join(encodeHostPorts, ",")
@@ -172,4 +174,5 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 		attribute.Bool("llm_d.epp.encode.disaggregation_used", true),
 		attribute.String("llm_d.epp.encode.endpoints", strings.Join(encodeHostPorts, ",")),
 	)
+	return nil
 }

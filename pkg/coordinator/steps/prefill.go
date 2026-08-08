@@ -99,7 +99,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 
 	headers := reqCtx.ForwardedHeaders()
 	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPPhaseHeader] = gateway.PhasePrefill
+	headers[gateway.EPPProfileHeader] = gateway.PhasePrefill
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
@@ -137,8 +137,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	switch format {
 	case gateway.FormatChatCompletions:
 		body := maps.Clone(reqCtx.Body)
-		body["stream"] = false
-		delete(body, "stream_options")
+		capSingleTokenOutput(body, format)
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}
@@ -150,10 +149,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			tokens["features"] = tokensFeatures
 		}
 		body["tokens"] = tokens
-		body["max_tokens"] = 1
-		body["kv_transfer_params"] = kvParams
+		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
-			body["ec_transfer_params"] = ecParams
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 
@@ -163,40 +161,40 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			prompt = reqCtx.TokenIDs
 		}
 		body := map[string]any{
-			"request_id":         reqCtx.RequestID,
-			"model":              reqCtx.Model,
-			"prompt":             prompt,
-			"max_tokens":         1,
-			"kv_transfer_params": kvParams,
+			"request_id":                    reqCtx.RequestID,
+			"model":                         reqCtx.Model,
+			"prompt":                        prompt,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
+		capSingleTokenOutput(body, format)
 		if features != nil {
 			body["features"] = features
 		}
 		if len(ecParams) > 0 {
-			body["ec_transfer_params"] = ecParams
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 
-	default:
+	case gateway.FormatGenerate:
+		// The /inference/v1/generate engine reads transfer params only from
+		// sampling_params.extra_args; top-level fields are ignored on input.
+		sampling := map[string]any{reqcommon.FieldMaxTokens: 1}
+		setGenerateTransferParams(sampling, kvParams, ecParams)
 		body := map[string]any{
-			"request_id": reqCtx.RequestID,
-			"token_ids":  reqCtx.TokenIDs,
-			"model":      reqCtx.Model,
-			"sampling_params": map[string]any{
-				"max_tokens": 1,
-				"extra_args": map[string]any{
-					"kv_transfer_params": kvParams,
-				},
-			},
+			"request_id":                  reqCtx.RequestID,
+			"token_ids":                   reqCtx.TokenIDs,
+			"model":                       reqCtx.Model,
+			reqcommon.FieldSamplingParams: sampling,
 		}
+		capSingleTokenOutput(body, format)
 		if features != nil {
 			body["features"] = features
 		}
-		if len(ecParams) > 0 {
-			body["ec_transfer_params"] = ecParams
-		}
 		return body, nil
 	}
+	// resolveFormat only ever yields the three formats above; a new value
+	// reaching here is a programming error, not a client fault.
+	return nil, fmt.Errorf("prefill: unsupported request format %v", format)
 }
 
 type prefillResponse struct {

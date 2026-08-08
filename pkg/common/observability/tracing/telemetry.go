@@ -108,6 +108,11 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 // support exporter type
 // - console: export spans in console for development use case
 // - otlp: export spans through gRPC to an opentelemetry collector
+//
+// Transport security, authentication headers and timeouts for the otlp exporter
+// come from the standard OTEL_EXPORTER_OTLP_* environment variables. Passing any
+// of them as an explicit option here would override the operator's setting, since
+// the exporter applies explicit options after the environment.
 func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanExporter, error) {
 	var traceExporter sdktrace.SpanExporter
 	traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
@@ -122,7 +127,7 @@ func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanEx
 
 	logger.Info("init OTel trace exporter", "type", exporterType)
 	if exporterType == "otlp" {
-		traceExporter, err = otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+		traceExporter, err = otlptracegrpc.New(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create otlp-grcp exporter: %w", err)
 		}

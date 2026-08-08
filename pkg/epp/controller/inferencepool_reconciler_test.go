@@ -204,7 +204,7 @@ func diffStore(store datastore.Datastore, params diffStoreParams) string {
 	}
 	gotEndpoints := []string{}
 	for _, em := range store.PodList(datastore.AllPodsPredicate) {
-		gotEndpoints = append(gotEndpoints, em.GetMetadata().NamespacedName.Name)
+		gotEndpoints = append(gotEndpoints, em.GetMetadata().ID.Name)
 	}
 	if diff := cmp.Diff(params.wantEndpoints, gotEndpoints, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 		return "endpoints:" + diff

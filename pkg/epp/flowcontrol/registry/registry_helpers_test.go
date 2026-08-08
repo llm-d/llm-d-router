@@ -28,7 +28,7 @@ import (
 	testclock "k8s.io/utils/clock/testing"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
-	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/framework/plugins/queue"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/queue"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
@@ -89,9 +89,7 @@ func newTestHarness(t *testing.T) *testHarness {
 func (h *testHarness) synchronizeFlow(key flowcontrol.FlowKey) {
 	h.t.Helper()
 	policy := h.registry.config.PriorityBands[key.Priority].OrderingPolicy
-	q, err := queue.NewQueueFromName(defaultQueue, policy)
-	assert.NoError(h.t, err, "Helper synchronizeFlow: failed to create real queue for synchronization")
-	h.registry.synchronizeFlow(key, policy, q)
+	h.registry.synchronizeFlow(key, policy, queue.New(policy))
 }
 
 // addItem adds an item to a specific flow's queue.

@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -34,11 +35,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
 	// UtilizationDetectorType is the unique identifier for this plugin.
 	UtilizationDetectorType = "utilization-detector"
+
+	// staleWarnInterval bounds how often the detector logs about endpoints with missing or stale
+	// metrics. Saturation is evaluated every dispatch cycle (~1ms), so the condition must be logged
+	// on a time budget, never per evaluation.
+	staleWarnInterval = 30 * time.Second
 )
 
 // UtilizationDetectorFactory instantiates the detector plugin using the provided JSON parameters.
@@ -69,6 +76,11 @@ var (
 type Detector struct {
 	config    Config
 	typedName fwkplugin.TypedName
+	logger    logr.Logger
+
+	// lastStaleWarnNanos is the wall-clock time (UnixNano) of the most recent stale-metrics log,
+	// accessed atomically because Saturation may be called concurrently.
+	lastStaleWarnNanos atomic.Int64
 }
 
 // NewDetector creates a new instance of the Utilization Detector.
@@ -95,6 +107,7 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 	return &Detector{
 		config:    cfg,
 		typedName: typedName,
+		logger:    pluginLogger,
 	}
 }
 
@@ -114,26 +127,59 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
 func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
 	if len(candidates) == 0 {
+		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
+		// reading from a previous evaluation misattributing an empty-pool stall to a metrics
+		// collection failure.
+		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, 0)
 		return 1.0
 	}
 
 	var totalScore float64
+	staleCount := 0
 	for _, e := range candidates {
-		metrics := e.GetMetrics()
+		podMetrics := e.GetMetrics()
 
-		if metrics == nil || time.Since(metrics.UpdateTime) > d.config.MetricsStalenessThreshold {
+		if podMetrics == nil || time.Since(podMetrics.UpdateTime) > d.config.MetricsStalenessThreshold {
+			// Fail closed: an endpoint whose metrics are missing or stale scores as fully saturated. A
+			// fleet-wide metrics collection failure therefore halts dispatch entirely rather than
+			// admitting blind; the gauge and the rate-limited log below exist so operators can tell that
+			// stall apart from genuine overload (which typically scores above 1.0).
 			totalScore += 1.0
+			staleCount++
 			continue
 		}
 
-		qRatio := float64(metrics.WaitingQueueSize) / float64(d.config.QueueDepthThreshold)
-		kvRatio := metrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
+		qRatio := float64(podMetrics.WaitingQueueSize) / float64(d.config.QueueDepthThreshold)
+		kvRatio := podMetrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
 
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.
 		totalScore += max(qRatio, kvRatio)
 	}
 
+	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, staleCount)
+	if staleCount > 0 {
+		d.maybeLogStaleEndpoints(staleCount, len(candidates))
+	}
+
 	return totalScore / float64(len(candidates))
+}
+
+// maybeLogStaleEndpoints logs the stale-metrics condition at most once per staleWarnInterval.
+func (d *Detector) maybeLogStaleEndpoints(staleCount, total int) {
+	now := time.Now().UnixNano()
+	last := d.lastStaleWarnNanos.Load()
+	if now-last < int64(staleWarnInterval) {
+		return
+	}
+	if !d.lastStaleWarnNanos.CompareAndSwap(last, now) {
+		return // Another goroutine logged concurrently.
+	}
+	d.logger.V(logutil.DEFAULT).Info(
+		"Endpoints with missing or stale metrics are scored as fully saturated (fail-closed); "+
+			"if dispatch is stalled, check model-server metrics collection (scrape path, port, TLS, auth)",
+		"staleEndpoints", staleCount,
+		"totalEndpoints", total,
+		"metricsStalenessThreshold", d.config.MetricsStalenessThreshold.String())
 }
 
 // Filter blocks traffic to specific pods that are physically saturated or exceeding their safety limits.
@@ -151,12 +197,12 @@ func (d *Detector) Filter(
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
 	for _, endpoint := range endpoints {
-		metrics := endpoint.GetMetrics()
-		if metrics == nil || time.Since(metrics.UpdateTime) > d.config.MetricsStalenessThreshold {
+		podMetrics := endpoint.GetMetrics()
+		if podMetrics == nil || time.Since(podMetrics.UpdateTime) > d.config.MetricsStalenessThreshold {
 			continue
 		}
 
-		if float64(metrics.WaitingQueueSize) < qLimit && metrics.KVCacheUsagePercent < kvLimit {
+		if float64(podMetrics.WaitingQueueSize) < qLimit && podMetrics.KVCacheUsagePercent < kvLimit {
 			filtered = append(filtered, endpoint)
 		}
 	}

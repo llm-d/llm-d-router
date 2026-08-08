@@ -35,9 +35,10 @@ type Client interface {
 // Addressable supports getting an IP address and a namespaced name.
 type Addressable interface {
 	GetIPAddress() string
+	GetNodeAddress() string
 	GetPort() string
 	GetMetricsHost() string
-	GetNamespacedName() types.NamespacedName
+	GetID() types.NamespacedName
 }
 
 const (
@@ -76,14 +77,14 @@ func (cl *client) Get(ctx context.Context, target *url.URL, ep Addressable,
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch data from %s: %w", ep.GetNamespacedName(), err)
+		return nil, fmt.Errorf("failed to fetch data from %s: %w", ep.GetID(), err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code from %s: %v", ep.GetNamespacedName(), resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code from %s: %v", ep.GetID(), resp.StatusCode)
 	}
 
 	return parser(resp.Body)

@@ -31,84 +31,128 @@ import (
 const (
 	// SessionAffinityType is the type of the SessionAffinity scorer.
 	SessionAffinityType = "session-affinity-scorer"
+
+	// StrategyEncodedEndpointHeader echoes the picked pod back to the client,
+	// which resends it on subsequent requests.
+	StrategyEncodedEndpointHeader = "encoded_endpoint_header"
+
+	// StrategySessionID maps an opaque client-supplied session identifier,
+	// sourced from a header or request attribute, to a pod.
+	StrategySessionID = "session_id"
 )
 
-// parameters configures the SessionAffinity scorer.
 type parameters struct {
-	// HeaderName overrides the default x-session-token header used to read and
-	// write the session token. When empty the default is used.
-	HeaderName string `json:"headerName"`
-	// ProfileName is the name of the profile this instance is associated with (optional).
-	// When empty, the plugin defaults to the primary (decode) pod.
-	// Used in ResponseHeader to look up the correct target pod from SchedulingResult.
+	// Strategy is StrategyEncodedEndpointHeader (the default) or
+	// StrategySessionID. Only the config matching Strategy is used.
+	Strategy                    string                                  `json:"strategy"`
+	EncodedEndpointHeaderConfig sessionutil.EncodedEndpointHeaderConfig `json:"encodedEndpointHeaderConfig"`
+	SessionIDConfig             sessionutil.SessionIDConfig             `json:"sessionIdConfig"`
+	// ProfileName selects which pod of the SchedulingResult this instance pins.
+	// When empty, the primary (decode) pod is used.
 	ProfileName string `json:"profileName"`
 }
 
-// compile-time type assertion
+func defaultParameters() parameters {
+	return parameters{Strategy: StrategyEncodedEndpointHeader}
+}
+
+// applyDefaults fills the selected strategy's config with its defaults. Run
+// after decode, before validate.
+func (p *parameters) applyDefaults() {
+	switch p.Strategy {
+	case StrategyEncodedEndpointHeader:
+		p.EncodedEndpointHeaderConfig.ApplyDefaults()
+	case StrategySessionID:
+		p.SessionIDConfig.ApplyDefaults()
+	}
+}
+
+// validate dispatches to the selected strategy's config validator.
+func (p *parameters) validate() error {
+	switch p.Strategy {
+	case StrategyEncodedEndpointHeader:
+		return nil
+	case StrategySessionID:
+		return p.SessionIDConfig.Validate()
+	default:
+		return fmt.Errorf("strategy must be %q or %q, got %q", StrategyEncodedEndpointHeader, StrategySessionID, p.Strategy)
+	}
+}
+
 var _ scheduling.Scorer = &SessionAffinity{}
 var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
+var _ requestcontrol.PreRequest = &SessionAffinity{}
 
-// Factory defines the factory function for SessionAffinity scorer.
-func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	params := parameters{}
+func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	params := defaultParameters()
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", SessionAffinityType, err)
 		}
 	}
+	params.applyDefaults()
+	if err := params.validate(); err != nil {
+		return nil, fmt.Errorf("invalid parameters of the '%s' scorer - %w", SessionAffinityType, err)
+	}
 
-	return NewSessionAffinity(name, params.HeaderName, params.ProfileName), nil
+	return &SessionAffinity{
+		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
+		strategy:  newStrategy(params, handle),
+	}, nil
 }
 
-// NewSessionAffinity returns a scorer. When sessionHeader is empty the default
-// x-session-token header is used.
+// NewSessionAffinity returns a scorer using the encoded_endpoint_header algorithm.
+// When sessionHeader is empty the default x-session-token header is used.
 func NewSessionAffinity(name, sessionHeader, profileName string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName:     plugin.TypedName{Type: SessionAffinityType, Name: name},
-		sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
-		profileName:   profileName,
+		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
+		strategy: &encodedEndpointHeaderStrategy{
+			sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
+			profileName:   profileName,
+		},
 	}
 }
 
-// SessionAffinity is a routing scorer that routes subsequent
-// requests in a session to the same pod as the first request in the
-// session was sent to, by giving that pod the specified weight and assigning
-// zero score to the rest of the targets
-type SessionAffinity struct {
-	typedName plugin.TypedName
-	// sessionHeader is the request/response header carrying the session token.
-	sessionHeader string
-	// profileName is the name of the profile this instance is associated with.
-	profileName string
+// strategy is the algorithm-specific behavior for session affinity: how a
+// session's preferred pod is scored, how a fresh pick is recorded, and what
+// (if anything) is written back to the client.
+type strategy interface {
+	score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64
+	preRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult)
+	responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata)
 }
 
-// TypedName returns the typed name of the plugin.
+func newStrategy(params parameters, handle plugin.Handle) strategy {
+	if params.Strategy == StrategySessionID {
+		return newSessionIDHeaderStrategy(params, handle)
+	}
+	return newEncodedEndpointHeaderStrategy(params)
+}
+
+// SessionAffinity is a routing scorer that routes a session's requests to the
+// same pod, per whichever algorithm strategy implements.
+type SessionAffinity struct {
+	typedName plugin.TypedName
+	strategy  strategy
+}
+
 func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
 }
 
-// Category returns the preference the scorer applies when scoring candidate endpoints.
 func (s *SessionAffinity) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
 }
 
-// Score assign a high score to the pod used in previous requests and zero to others
 func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
-	scoredEndpoints := make(map[scheduling.Endpoint]float64)
-	podName := sessionutil.DecodePodName(ctx, request.Headers[s.sessionHeader])
-
-	for _, endpoint := range endpoints {
-		scoredEndpoints[endpoint] = 0.0 // initial value
-		if endpoint.GetMetadata().NamespacedName.String() == podName {
-			scoredEndpoints[endpoint] = 1.0
-		}
-	}
-
-	return scoredEndpoints
+	return s.strategy.score(ctx, request, endpoints)
 }
 
-// ResponseHeader sets the session header on the response sent to the client.
+func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
+	s.strategy.preRequest(ctx, request, schedulingResult)
+	return nil
+}
+
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
-	podToWrite := sessionutil.ResolvePodToWrite(request, s.profileName, targetPod)
-	sessionutil.WriteResponseHeader(ctx, SessionAffinityType, s.sessionHeader, response, podToWrite)
+	s.strategy.responseHeader(ctx, request, response, targetPod)
 }

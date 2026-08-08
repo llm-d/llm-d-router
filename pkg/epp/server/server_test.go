@@ -24,9 +24,11 @@ import (
 	"strconv"
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	pb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -48,6 +50,15 @@ const (
 	poolPort   = int32(5678)
 	namespace  = "ns1"
 )
+
+func testMetadataContext(t *testing.T, phase string) *corev3.Metadata {
+	t.Helper()
+	value, err := structpb.NewStruct(map[string]any{"phase": phase})
+	require.NoError(t, err)
+	return &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"test": value},
+	}
+}
 
 func TestServer(t *testing.T) {
 	tests := []struct {
@@ -152,6 +163,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 		Request: &pb.ProcessingRequest_RequestHeaders{
 			RequestHeaders: headers,
 		},
+		MetadataContext: testMetadataContext(t, "headers"),
 	}
 	err := process.Send(request)
 	if err != nil {
@@ -170,6 +182,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 				EndOfStream: true,
 			},
 		},
+		MetadataContext: testMetadataContext(t, "body"),
 	}
 	err = process.Send(request)
 	if err != nil {
@@ -218,6 +231,9 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 			t.Errorf("Incorrect value for header %s, want %s got %s", expectedKey, expectedValue, got)
 		}
 	}
+	require.Equal(t, map[string]any{
+		"test": map[string]any{"phase": "body"},
+	}, director.requestMetadata)
 
 	// Send response headers
 	if streamingResponse {
@@ -346,12 +362,14 @@ func recvResponseTrailers(stream pb.ExternalProcessor_ProcessClient) error {
 
 type testDirector struct {
 	requestHeaders                   map[string]string
+	requestMetadata                  map[string]any
 	handleResponseBodyEndStreamCount int
 	lastInferenceRequestBody         *fwkrh.InferenceRequestBody
 }
 
 func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
+	ts.requestMetadata = reqCtx.Request.Metadata
 	ts.lastInferenceRequestBody = inferenceRequestBody
 
 	bodyMap := make(map[string]any)

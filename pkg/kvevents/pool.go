@@ -20,6 +20,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -77,6 +78,18 @@ type PodDiscoveryConfig struct {
 	// The reconciler will connect to tcp://<PodIP>:<SocketPort>
 	// Default: 5557
 	SocketPort int `json:"socketPort"`
+	// ReplaySocketPort is the port where vLLM pods expose their ZMQ ROUTER
+	// socket for replay requests. Disabled when not set (0 or negative).
+	ReplaySocketPort int `json:"replaySocketPort,omitempty"`
+}
+
+// EffectiveReplayPort returns the replay socket port.
+// Returns -1 (disabled) when not explicitly configured.
+func (c *PodDiscoveryConfig) EffectiveReplayPort() int {
+	if c.ReplaySocketPort <= 0 {
+		return -1
+	}
+	return c.ReplaySocketPort
 }
 
 // DefaultPodReconcilerConfig returns a default configuration for the pod reconciler.
@@ -114,11 +127,19 @@ type Pool struct {
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
 	wg    sync.WaitGroup
+	// queueDepth mirrors the number of tasks queued across all shards. It is
+	// tracked incrementally rather than by summing queue.Len() so that the
+	// depth gauge stays O(1) on the enqueue/dequeue hot path.
+	queueDepth atomic.Int64
 }
 
 // NewPool creates a Pool with a sharded worker setup.
 // Subscribers are managed by SubscriberManager which is controlled by the pod
 // reconciler.
+//
+// Side effect: it registers the kvcache metrics with the controller-runtime
+// registry so that the kvevents metrics are scraped wherever a pool runs.
+// Registration is idempotent (guarded by a sync.Once).
 func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProcessor,
 	adapter EngineAdapter,
 ) *Pool {
@@ -140,7 +161,15 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		p.queues[i] = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[*RawMessage]())
 	}
 
+	metrics.Register()
+
 	return p
+}
+
+// addQueueDepth adjusts the tracked queue depth by delta and publishes the new
+// total to the depth gauge.
+func (p *Pool) addQueueDepth(delta int64) {
+	metrics.PoolQueueDepth.Set(float64(p.queueDepth.Add(delta)))
 }
 
 // GroupCatalog returns the KV cache group metadata learned from events.
@@ -153,6 +182,8 @@ func (p *Pool) GroupCatalog() *kvblock.GroupCatalog {
 func (p *Pool) Start(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	logger.Info("Starting sharded event processing pool", "workers", p.concurrency)
+
+	metrics.PoolCapacity.Set(float64(p.concurrency))
 
 	p.wg.Add(p.concurrency)
 	for i := 0; i < p.concurrency; i++ {
@@ -171,14 +202,23 @@ func (p *Pool) Shutdown(ctx context.Context) {
 	}
 
 	p.wg.Wait()
+
+	// Tasks still queued at shutdown are dropped with the queues, so reset the
+	// depth rather than leaving the gauge pinned at the undrained count.
+	p.queueDepth.Store(0)
+	metrics.PoolQueueDepth.Set(0)
+
 	logger.Info("event processing pool shut down.")
 }
 
 // AddTask is called by the subscriber to add a message to the processing queue.
 // It hashes the sharding key to select a queue, ensuring messages for the
-// same pod always go to the same worker (ordered queue).
+// same source endpoint always go to the same worker (ordered queue).
 func (p *Pool) AddTask(task *RawMessage) {
-	key := p.adapter.ShardingKey(task)
+	key := task.SourceEndpoint
+	if key == "" {
+		key = p.adapter.ShardingKey(task)
+	}
 	// Use an FNV-1a hash to deterministically select a queue.
 	h := fnv.New32a()
 	_, err := h.Write([]byte(key))
@@ -189,6 +229,12 @@ func (p *Pool) AddTask(task *RawMessage) {
 	//nolint:gosec // if concurrency overflows then the world is in trouble anyway
 	queueIndex := h.Sum32() % uint32(p.concurrency)
 	p.queues[queueIndex].Add(task)
+	p.addQueueDepth(1)
+}
+
+// resetForSource queues a pod reset on the same shard as its event stream.
+func (p *Pool) resetForSource(topic, sourceEndpoint string) {
+	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
 }
 
 // worker is the main processing loop for a single worker goroutine.
@@ -209,6 +255,7 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 			// Task succeeded, remove it from the queue.
 			queue.Forget(task)
 		}(task)
+		p.addQueueDepth(-1)
 
 		// Check if context was cancelled after processing a task.
 		select {
@@ -222,14 +269,34 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 // processRawMessage decodes the raw message payload using the adapter and processes the resulting event batch.
 func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	logger := log.FromContext(ctx)
+	if msg.reset {
+		podID := msg.SourceEndpoint
+		if podID == "" {
+			podID = p.adapter.ShardingKey(msg)
+		}
+		p.clearPod(ctx, podID)
+		return
+	}
 
 	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
 	if err != nil {
 		logger.Error(err, "Failed to parse message")
 		return
 	}
+	if msg.SourceEndpoint != "" {
+		podID = msg.SourceEndpoint
+	}
 
 	p.processEventBatch(ctx, &batch, podID, modelName)
+}
+
+func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
+	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
+	if err := p.index.Clear(ctx, podIdentifier); err != nil {
+		debugLogger.Error(err, "Failed to clear pod from index",
+			"podIdentifier", podIdentifier)
+	}
+	p.dedup.clear(podIdentifier)
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -522,13 +589,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"anyway (tier-scoped clear is not supported)",
 					"podIdentifier", podIdentifier, "deviceTier", ev.DeviceTier)
 			}
-			if err := p.index.Clear(ctx, podIdentifier); err != nil {
-				debugLogger.Error(err, "Failed to clear pod from index",
-					"podIdentifier", podIdentifier)
-			}
-			// Reset reference counts for this pod in lockstep with the index's
-			// pod-wide eager clear, so no stale references survive the reset.
-			p.dedup.clear(podIdentifier)
+			p.clearPod(ctx, podIdentifier)
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)

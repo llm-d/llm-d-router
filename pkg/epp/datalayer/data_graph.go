@@ -94,7 +94,7 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 		for key, consumerName := range missingKeys {
 			defaultProducerNameOrType, ok := defaultProducerRegistry[key]
 			if !ok {
-				return fmt.Errorf("no default producer found for missing data key: %v, which is consumed by: %v", key, consumerName)
+				return fmt.Errorf("%w %v, consumed by %v", ErrNoDefaultProducer, key, consumerName)
 			}
 			if handle.Plugin(defaultProducerNameOrType) != nil {
 				// Already created. This can happen when a producer produces multiple data keys.

@@ -37,8 +37,8 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount.Add(1)
 
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhaseEncode {
-			t.Errorf("expected EPP-Phase: encode, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
+			t.Errorf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -244,8 +244,8 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	var receivedBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(gateway.EPPPhaseHeader) != gateway.PhaseEncode {
-			t.Fatalf("expected EPP-Phase: encode, got %q", r.Header.Get(gateway.EPPPhaseHeader))
+		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
+			t.Fatalf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -351,6 +351,64 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
+// The encode chat sub-request is built fresh from the request context and does
+// not carry the client's sampling fields, so max_completion_tokens is not
+// propagated and is never injected: max_tokens=1 alone caps output.
+func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-b": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-max-completion-tokens",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":                 testModelName,
+			"max_completion_tokens": 100,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedBody["max_tokens"] != float64(1) {
+		t.Fatalf("expected encode sub-request max_tokens capped to 1, got %v", receivedBody["max_tokens"])
+	}
+	if _, ok := receivedBody["max_completion_tokens"]; ok {
+		t.Fatalf("expected encode sub-request to omit max_completion_tokens, got %v", receivedBody["max_completion_tokens"])
+	}
+}
+
 // TestEncodeStep_TextOnly verifies that Execute returns immediately without any
 // gateway calls when MultimodalEntries is empty (text-only request). ECTransferParams
 // must remain nil so the prefill step emits no ec_transfer_params field.
@@ -383,6 +441,45 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	}
 	if reqCtx.ECTransferParams != nil {
 		t.Fatalf("expected nil ECTransferParams for text-only request, got %v", reqCtx.ECTransferParams)
+	}
+}
+
+// TestEncodeStep_SkipsForGenerate verifies that Execute makes no gateway calls
+// and leaves ECTransferParams nil for a /inference/v1/generate request even when
+// multimodal entries are present: the prefill worker runs the vision encoder
+// inline, so the encode fan-out and EC handoff are skipped.
+func TestEncodeStep_SkipsForGenerate(t *testing.T) {
+	gatewayCallCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gatewayCallCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-generate",
+		Model:        "test-model",
+		OriginalPath: gateway.DefaultGeneratePath,
+		TokenIDs:     []int{1, 32000, 32000, 2},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gatewayCallCount != 0 {
+		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
+	}
+	if reqCtx.ECTransferParams != nil {
+		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
 	}
 }
 
@@ -479,5 +576,46 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 		if receivedTokenIDs[i] != float64(32000) {
 			t.Fatalf("expected placeholder=32000 at index %d, got %v", i, receivedTokenIDs[i])
 		}
+	}
+}
+
+// TestEncodeStep_GenerateFormat_CapsSingleToken verifies the generate-format
+// encoder sub-request caps output to a single token: sampling_params carries
+// max_tokens=1 and strips min_tokens (it defaults to 0, keeping min_tokens <=
+// max_tokens).
+func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
+	var samplingParams map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		samplingParams, _ = parsed["sampling_params"].(map[string]any)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"h1": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-gen-cap",
+		Model:     "test",
+		TokenIDs:  []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if samplingParams["max_tokens"] != float64(1) {
+		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
+	}
+	if _, ok := samplingParams["min_tokens"]; ok {
+		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
 }

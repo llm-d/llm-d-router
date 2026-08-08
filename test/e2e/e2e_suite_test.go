@@ -14,7 +14,7 @@ import (
 	"github.com/onsi/gomega/gexec"
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -57,18 +57,14 @@ const (
 	// renderManifest is the manifest for the standalone vLLM render deployment and service.
 	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
-	// CI shards scheduler e2e specs with label filters.
-	extendedTestLabel      = "Extended"
-	disruptiveTestLabel    = "Disruptive"
-	sharedStorageTestLabel = "SharedStorage"
-	metricsTestLabel       = "Metrics"
-	deprecatedPDTestLabel  = "DeprecatedPD"
-	disaggTestLabel        = "Disagg"
+	// defaultPort is the envoy gateway's NodePort.
+	defaultPort        = 30080
+	defaultMetricsPort = 32090
 )
 
 var (
-	basePort        = env.GetEnvInt("E2E_PORT", 30080, ginkgo.GinkgoLogr)
-	baseMetricsPort = env.GetEnvInt("E2E_METRICS_PORT", 32090, ginkgo.GinkgoLogr)
+	basePort        = env.GetEnvInt("E2E_PORT", defaultPort, ginkgo.GinkgoLogr)
+	baseMetricsPort = env.GetEnvInt("E2E_METRICS_PORT", defaultMetricsPort, ginkgo.GinkgoLogr)
 
 	testConfig *testutils.TestConfig
 
@@ -83,9 +79,14 @@ var (
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
 	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
-	numProcesses     = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
+
+	// numProcesses is the number of parallel processes that will be used by the tests.
+	// Theoretically this value could be gotten from the Ginkgo Suite Configuration.
+	// However, that needs to be done while the tests are running and has shown to not
+	// always allow the baseNsName field to be set correctly.
+	numProcesses = env.GetEnvInt("E2E_NUM_PROCS", 1, ginkgo.GinkgoLogr)
 	// baseNsName is the base of the namespace in which the K8S objects will be created
-	baseNsName = env.GetEnvString("NAMESPACE", getDefaultNsName(), ginkgo.GinkgoLogr)
+	baseNsName = env.GetEnvString("NAMESPACE", testutils.DefaultNsName(numProcesses, "e2e"), ginkgo.GinkgoLogr)
 
 	// k8sContext is the Kubernetes context to work with
 	k8sContext = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
@@ -93,16 +94,10 @@ var (
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
 	interval     = defaultInterval
 
-	crdObjects            []string
-	envoyObjects          []string
-	rbacObjects           []string
-	serviceAccountObjects []string
-	serviceObjects        []string
-	renderObjects         []string
-	infPoolObjects        []string
-	createdNameSpace      bool
+	crdObjects        []string
+	renderObjects     []string
+	createdRendererNS bool
 
-	portForwardSession    *gexec.Session
 	eppPortForwardSession *gexec.Session
 )
 
@@ -113,47 +108,23 @@ func TestEndToEnd(t *testing.T) {
 	)
 }
 
-var _ = ginkgo.BeforeSuite(func() {
-	suiteConfig, _ := ginkgo.GinkgoConfiguration()
-	if numProcesses != suiteConfig.ParallelTotal {
-		ginkgo.Fail(fmt.Sprintf("The value of the environment variable `E2E_NUM_PROCS` (%d) is not equal to the number of ginkgo processes being run (%d)",
-			numProcesses, suiteConfig.ParallelTotal))
-	}
+// There is only special setup to be done before process #1
+var _ = ginkgo.SynchronizedBeforeSuite(func() {
+	testutils.RequireParallelProcessesMatch(numProcesses)
 
 	if k8sContext == "" {
 		setupK8sCluster()
 	}
 	testConfig = testutils.NewTestConfig(k8sContext)
 	setupK8sClient()
-	setupNameSpace()
 	createCRDs()
-	nsName := getNamespace()
-	createEnvoy(nsName)
-	infraSubs := map[string]string{
-		"${EPP_NAME}": "e2e-epp",
-	}
-	rbacYamls := substituteMany(testutils.ReadYaml(rbacManifest), infraSubs)
-	rbacObjects = testutils.CreateObjsFromYaml(testConfig, rbacYamls, nsName)
-	saYamls := substituteMany(testutils.ReadYaml(serviceAccountManifest), infraSubs)
-	serviceAccountObjects = testutils.CreateObjsFromYaml(testConfig, saYamls, nsName)
-	serviceObjects = testutils.ApplyYAMLFile(testConfig, servicesManifest, nsName)
-	renderObjects = createRender(nsName)
-
-	// Prevent failure in tests due to InferencePool not existing before the test
-	infPoolObjects = createInferencePool(1, false)
-})
-
-var _ = ginkgo.AfterSuite(func() {
-	// Stop port-forwards when using an existing cluster context; they must be
-	// terminated before the process exits regardless of pass/fail status.
-	if k8sContext != "" {
-		if portForwardSession != nil {
-			portForwardSession.Terminate()
-		}
-		if eppPortForwardSession != nil {
-			eppPortForwardSession.Terminate()
-			eppPortForwardSession = nil
-		}
+	// If we are running tests in parallel, create the renderer in the "base namespace"
+	createdRendererNS = setupNameSpaceHelper(baseNsName)
+	renderObjects = createRender(baseNsName)
+}, func() {
+	if ginkgo.GinkgoParallelProcess() != 1 {
+		testConfig = testutils.NewTestConfig(k8sContext)
+		setupK8sClient()
 	}
 })
 
@@ -163,12 +134,8 @@ var _ = ginkgo.AfterSuite(func() {
 // ReportAfterEach only fires for individual specs and would miss setup/teardown failures.
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	if !report.SuiteSucceeded {
-		if numProcesses > 1 {
-			for idx := range numProcesses {
-				dumpPodsAndLogs(fmt.Sprintf("%s-%d", baseNsName, idx+1))
-			}
-		} else {
-			dumpPodsAndLogs(baseNsName)
+		for idx := range numProcesses {
+			testutils.DumpPodsAndLogs(testConfig, testutils.NamespaceForProcess(baseNsName, numProcesses, idx+1))
 		}
 	}
 
@@ -192,21 +159,12 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 		if shouldKeep {
 			ginkgo.By("Keeping created Kubernetes objects due to suite failure (E2E_KEEP_CLUSTER_ON_FAILURE=true)")
 		} else {
-			nsName := getNamespace()
 			ginkgo.By("Deleting created Kubernetes objects")
-			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
-			testutils.DeleteObjects(testConfig, renderObjects, nsName)
-			testutils.DeleteObjects(testConfig, serviceObjects, nsName)
-			testutils.DeleteObjects(testConfig, serviceAccountObjects, nsName)
-			testutils.DeleteObjects(testConfig, rbacObjects, nsName)
-			testutils.DeleteObjects(testConfig, envoyObjects, nsName)
-			testutils.DeleteObjects(testConfig, crdObjects, "")
-
-			if createdNameSpace {
-				ginkgo.By("Deleting namespace " + getNamespace())
-				err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, getNamespace(), metav1.DeleteOptions{})
-				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			testutils.DeleteObjects(testConfig, renderObjects, baseNsName)
+			if createdRendererNS {
+				deleteNameSpace(baseNsName)
 			}
+			testutils.DeleteObjects(testConfig, crdObjects, "")
 		}
 	}
 })
@@ -214,20 +172,11 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 // Create the Kubernetes cluster for the E2E tests and load the local images
 func setupK8sCluster() {
 	// extraPortMappings is substituted into `extraPortMappings: ${EXTRA_PORT_MAPPINGS}` in the Kind
-	// cluster configuration. Each item must use 2-space indentation to match that field's level in the
-	// YAML. If the field is ever reindented in Kind cluster configuration (kindClusterConfig), update
-	// the format string here too.
-	var extraPortMappingsBuilder strings.Builder
-	for idx := range numProcesses {
-		inc := idx * 100
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n  - containerPort: %d", 30080+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    hostPort: %d", basePort+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    protocol: TCP")
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n  - containerPort: %d", 32090+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    hostPort: %d", baseMetricsPort+inc)
-		fmt.Fprintf(&extraPortMappingsBuilder, "\n    protocol: TCP")
-	}
-	extraPortMappings := extraPortMappingsBuilder.String()
+	// cluster configuration below; keep its indentation in sync with testutils.BuildExtraPortMappings.
+	extraPortMappings := testutils.BuildExtraPortMappings(numProcesses,
+		[2]int{defaultPort, basePort},
+		[2]int{defaultMetricsPort, baseMetricsPort},
+	)
 
 	command := exec.Command("kind", "create", "cluster", "--name", kindClusterName, "--config", "-")
 	stdin, err := command.StdinPipe()
@@ -303,28 +252,44 @@ func setupK8sClient() {
 }
 
 // setupNameSpace sets up the specified namespace if it doesn't exist
-func setupNameSpace() {
-	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, getNamespace(), metav1.GetOptions{})
-	if err == nil {
-		return
-	}
-	gomega.Expect(errors.IsNotFound(err)).To(gomega.BeTrue())
+func setupNameSpace() bool {
+	return setupNameSpaceHelper(getNamespace())
+}
 
-	ginkgo.By("Creating namespace " + getNamespace())
+func setupNameSpaceHelper(nsName string) bool {
+	ginkgo.By("Setup namespace " + nsName)
+	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+	if err == nil {
+		return false
+	}
+	gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
+
+	ginkgo.By("Creating namespace " + nsName)
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getNamespace(),
+			Name: nsName,
 		},
 	}
 	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	createdNameSpace = true
 
-	ginkgo.By("Ensuring namespace exists: " + getNamespace())
+	ginkgo.By("Ensuring namespace exists: " + nsName)
 	testutils.EventuallyExists(testConfig, func() error {
 		return testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Name: getNamespace()}, &corev1.Namespace{})
+			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
 	})
+
+	return true
+}
+
+func deleteNameSpace(nsName string) {
+	ginkgo.By("Deleting namespace " + nsName)
+	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(func() bool {
+		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.
@@ -333,11 +298,16 @@ func createCRDs() {
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
 }
 
-func createEnvoy(nsName string) {
+func createEnvoy(nsName string) ([]string, *gexec.Session) {
+	infraSubs := map[string]string{
+		"${NAMESPACE}":       nsName,
+		"${ENVOY_NODE_PORT}": strconv.Itoa(getPort()),
+	}
 	manifests := testutils.ReadYaml(envoyManifest)
-	manifests = substituteMany(manifests, map[string]string{"${NAMESPACE}": nsName})
+	manifests = substituteMany(manifests, infraSubs)
 	ginkgo.By("Creating envoy proxy resources from manifest: " + envoyManifest)
-	envoyObjects = testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
+	envoyObjects := testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
+	var portForwardSession *gexec.Session
 
 	if k8sContext != "" {
 		envoyName := ""
@@ -355,16 +325,12 @@ func createEnvoy(nsName string) {
 		portForwardSession, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	}
+	return envoyObjects, portForwardSession
 }
 
-func createInferencePool(numTargetPorts int, toDelete bool) []string {
+func createInferencePool(numTargetPorts int) []string {
 	poolName := simModelName + "-inference-pool"
 	nsName := getNamespace()
-
-	if toDelete {
-		objName := []string{"inferencepool/" + poolName}
-		testutils.DeleteObjects(testConfig, objName, nsName)
-	}
 
 	infPoolYaml := testutils.ReadYaml(inferExtManifest)
 	// targetPorts is substituted into `targetPorts: ${TARGET_PORTS}` in inference-pools.yaml.
@@ -408,46 +374,21 @@ func startEPPMetricsPortForward() {
 	time.Sleep(3 * time.Second)
 }
 
-// getPort is used by the E2E tests to get the port of the envoy service for their setup.
-// When the tests are running in parallel, there will be up to N processes running. Each process
-// will have it's own envoy instance with its own nodePort. The nodePorts will be of the form
-// 30080, 30180, 30280, etc. In a more general sense they are of the form:
-// (the base port) + 100 * (the process number minus one). The goal is that the port for process
-// one, is the base port specified by the user.
+// getPort returns the envoy service's NodePort for this process. See testutils.ProcessPort.
 func getPort() int {
-	return basePort + 100*(ginkgo.GinkgoParallelProcess()-1)
+	return testutils.ProcessPort(basePort)
 }
 
-// getMetricsPort is used by the E2E tests to get the EPP's metrics port for their setup.
-// When the tests are running in parallel, there will be up to N processes running. Each process
-// will have it's own EPP instance with its own metrics nodePort. The nodePorts will be of the form
-// 32090, 32190, 32290, etc. In a more general sense they are of the form:
-// (the base metrics port) + 100 * (the process number minus one). The goal is that the metrics port
-// for process one, is the base metrics port specified by the user.
+// getMetricsPort returns the EPP's metrics NodePort for this process. See testutils.ProcessPort.
 func getMetricsPort() int {
-	return baseMetricsPort + 100*(ginkgo.GinkgoParallelProcess()-1)
+	return testutils.ProcessPort(baseMetricsPort)
 }
 
-// getNamespace returns the namespace being used by each and every test. When the tests run in
-// parallel, each test is assigned its own namespace to provide isolation between the tests.
-// If the tests are not being run in parallel, then the namespace used is simply the base namespace
-// setup by the NAMESPACE environment variable, defaulting to "default".
-// If the tests are running in parallel, the namespace names will be of the form baseName-N, where
-// baseName is the base namespace setup by the NAMESPACE environment variable, defaulting to "e2e"
-// and N is the process number.
+// getNamespace returns the namespace being used by the current process. Each
+// parallel process is assigned its own namespace to provide isolation between
+// the tests running in it. See testutils.Namespace.
 func getNamespace() string {
-	if numProcesses == 1 {
-		return baseNsName
-	}
-	return fmt.Sprintf("%s-%d", baseNsName, ginkgo.GinkgoParallelProcess())
-}
-
-// getDefaultNsName is used in setting the default base namespace.
-func getDefaultNsName() string {
-	if numProcesses == 1 {
-		return "default"
-	}
-	return "e2e"
+	return testutils.Namespace(baseNsName, numProcesses)
 }
 
 const kindClusterConfig = `

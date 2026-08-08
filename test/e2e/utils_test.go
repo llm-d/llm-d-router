@@ -1,8 +1,6 @@
 package e2e
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,10 +52,10 @@ func scaleDeployment(nsName string, objects []string, increment int) {
 }
 
 // getModelServerPods Returns the list of Prefill and Decode vLLM pods separately
-func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string) ([]string, []string) {
+func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string, nsName string) ([]string, []string) {
 	ginkgo.By("Getting Model server pods")
 
-	pods := getPods(podLabels)
+	pods := getPods(podLabels, nsName)
 
 	prefillValidator, err := apilabels.ValidatedSelectorFromSet(prefillLabels)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -92,10 +90,11 @@ func getModelServerPods(podLabels, prefillLabels, decodeLabels map[string]string
 	return prefillPods, decodePods
 }
 
-func getPods(labels map[string]string) []corev1.Pod {
+func getPods(labels map[string]string, nsName string) []corev1.Pod {
 	podList := corev1.PodList{}
 	selector := apilabels.SelectorFromSet(labels)
-	err := testConfig.K8sClient.List(testConfig.Context, &podList, &client.ListOptions{LabelSelector: selector})
+	err := testConfig.K8sClient.List(testConfig.Context, &podList,
+		&client.ListOptions{LabelSelector: selector, Namespace: nsName})
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 	pods := []corev1.Pod{}
@@ -109,8 +108,8 @@ func getPods(labels map[string]string) []corev1.Pod {
 }
 
 // getPodNames returns the names of all running pods matching the given label selector.
-func getPodNames(labels map[string]string) []string {
-	pods := getPods(labels)
+func getPodNames(labels map[string]string, nsName string) []string {
+	pods := getPods(labels, nsName)
 	names := make([]string, 0, len(pods))
 	for _, pod := range pods {
 		names = append(names, pod.Name)
@@ -406,135 +405,4 @@ func parseRequestCountFromMetrics(metricsOutput string) int {
 		}
 	}
 	return 0
-}
-
-// dumpPodsAndLogs dumps all pod statuses and their logs to the Ginkgo writer.
-// Call this before cleanup to insure the information is available when CI tests fail.
-func dumpPodsAndLogs(nsName string) {
-	if testConfig == nil || testConfig.KubeCli == nil {
-		ginkgo.GinkgoWriter.Println("Skipping pod dump: cluster not initialized")
-		return
-	}
-
-	ginkgo.GinkgoWriter.Printf("\n=== Dumping pod states and logs (namespace: %s) ===\n", nsName)
-
-	ctx, cancel := context.WithTimeout(testConfig.Context, 30*time.Second)
-	defer cancel()
-
-	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(ctx, v1.ListOptions{})
-	if err != nil {
-		ginkgo.GinkgoWriter.Printf("Failed to list pods: %v\n", err)
-		return
-	}
-
-	ginkgo.GinkgoWriter.Printf("Total pods found: %d\n\n", len(pods.Items))
-
-	// Print summary table (like kubectl get pods)
-	ginkgo.GinkgoWriter.Printf("%-55s %-8s %-22s %-8s %-6s\n", "NAME", "READY", "STATUS", "RESTARTS", "AGE")
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		ready, total := 0, len(pod.Spec.Containers)
-		restarts := int32(0)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Ready {
-				ready++
-			}
-			restarts += cs.RestartCount
-		}
-		status := string(pod.Status.Phase)
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				status = cs.State.Waiting.Reason
-				break
-			}
-		}
-		age := ""
-		if !pod.CreationTimestamp.IsZero() {
-			d := time.Since(pod.CreationTimestamp.Time).Round(time.Second)
-			age = d.String()
-		}
-		ginkgo.GinkgoWriter.Printf("%-55s %-8s %-22s %-8d %-6s\n",
-			pod.Name, fmt.Sprintf("%d/%d", ready, total), status, restarts, age)
-	}
-	ginkgo.GinkgoWriter.Println()
-
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		ginkgo.GinkgoWriter.Printf("--- Pod: %s | Phase: %s | Node: %s ---\n",
-			pod.Name, pod.Status.Phase, pod.Spec.NodeName)
-
-		for _, cs := range pod.Status.InitContainerStatuses {
-			printContainerStatus("init", cs)
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			printContainerStatus("container", cs)
-		}
-
-		restarted := map[string]bool{}
-		for _, cs := range pod.Status.InitContainerStatuses {
-			if cs.RestartCount > 0 {
-				restarted[cs.Name] = true
-			}
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.RestartCount > 0 {
-				restarted[cs.Name] = true
-			}
-		}
-
-		for _, c := range pod.Spec.InitContainers {
-			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
-			}
-			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
-		}
-		for _, c := range pod.Spec.Containers {
-			if restarted[c.Name] {
-				dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, true)
-			}
-			dumpContainerLogs(ctx, pod.Namespace, pod.Name, c.Name, false)
-		}
-	}
-	ginkgo.GinkgoWriter.Println("=== End of pod dump ===")
-}
-
-func printContainerStatus(kind string, cs corev1.ContainerStatus) {
-	status := fmt.Sprintf("  [%s] %s | ready=%v restarts=%d", kind, cs.Name, cs.Ready, cs.RestartCount)
-	if cs.State.Waiting != nil {
-		status += " | Waiting: " + cs.State.Waiting.Reason
-	}
-	if cs.State.Terminated != nil {
-		status += fmt.Sprintf(" | Terminated: %s (exit %d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
-	}
-	ginkgo.GinkgoWriter.Println(status)
-}
-
-func dumpContainerLogs(ctx context.Context, nsName, podName, containerName string, previous bool) {
-	tailLines := int64(100)
-	req := testConfig.KubeCli.CoreV1().Pods(nsName).GetLogs(podName, &corev1.PodLogOptions{
-		Container: containerName,
-		TailLines: &tailLines,
-		Previous:  previous,
-	})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to stream logs: %v\n", podName, containerName, err)
-		return
-	}
-	defer func() {
-		if err := stream.Close(); err != nil {
-			ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to close log stream: %v\n", podName, containerName, err)
-		}
-	}()
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, stream); err != nil {
-		ginkgo.GinkgoWriter.Printf("  [logs] %s/%s: failed to read logs: %v\n", podName, containerName, err)
-		return
-	}
-	label := "last 100 lines"
-	if previous {
-		label = "previous instance, last 100 lines"
-	}
-	ginkgo.GinkgoWriter.Printf("  [logs] %s/%s (%s):\n%s\n", podName, containerName, label, buf.String())
 }
