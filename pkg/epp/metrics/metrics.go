@@ -481,6 +481,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
@@ -552,6 +554,8 @@ func Reset() {
 	flowControlPoolSaturation.Reset()
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
+	llmdFlowControlCapacityUtilizationRequests.Reset()
+	llmdFlowControlCapacityUtilizationBytes.Reset()
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
@@ -928,6 +932,20 @@ func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
 // detector scored as fully saturated because their metrics were missing or stale.
 func RecordFlowControlStaleEndpoints(detector string, count int) {
 	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
+}
+
+// RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
+// (occupancy/configured capacity, 0.0-1.0) for a priority band, or the aggregate across all bands when priority is "".
+// Callers only invoke this for a bounded dimension, so an unbounded one yields no series rather than a misleading 0.
+func RecordFlowControlCapacityUtilizationRequests(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationRequests.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlCapacityUtilizationBytes sets the byte-size capacity utilization ratio (occupancy/configured
+// capacity, 0.0-1.0) for a priority band, or the aggregate across all bands when priority is "". Callers only invoke
+// this for a bounded dimension, so an unbounded one yields no series rather than a misleading 0.
+func RecordFlowControlCapacityUtilizationBytes(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationBytes.WithLabelValues(priority, inferencePool).Set(ratio)
 }
 
 // IncFlowControlRequestsTotal increments the total request counter for a given outcome.

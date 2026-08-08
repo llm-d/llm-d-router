@@ -280,6 +280,29 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
     problem (scrape path, port, TLS, auth) rather than genuine overload.
 
+#### `flow_control_capacity_utilization_requests`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Fraction of the configured request-count capacity currently occupied (0.0-1.0),
+    aggregated over every flow in a priority band. This is not a per-flow-queue metric: `priority`
+    identifies the band, and `priority=""` carries the aggregate across all bands (emitted only when
+    a global request-count capacity is configured). A dimension with no configured capacity is
+    omitted rather than reported as 0.
+*   **Usage:** Lets operators alert on "the band is at N% of its request limit" without joining
+    configured `maxRequests` values into the query. Sustained values near 1.0 precede
+    `flow_control_requests_total{outcome="RejectedCapacity"}` rising.
+
+#### `flow_control_capacity_utilization_bytes`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Byte-size counterpart of `flow_control_capacity_utilization_requests`: the
+    fraction of the configured byte-size capacity currently occupied (0.0-1.0), aggregated over every
+    flow in a priority band, with `priority=""` for the aggregate across all bands.
+*   **Usage:** Memory-pressure equivalent of the request-count ratio; a band can hit its `maxBytes`
+    ceiling long before its `maxRequests` one when payloads are large.
+
 #### `flow_control_requests_total`
 
 *   **Type:** Counter
