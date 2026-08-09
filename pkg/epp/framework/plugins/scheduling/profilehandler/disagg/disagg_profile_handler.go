@@ -38,7 +38,7 @@ const (
 
 // PeerEndpointAttributeKey is the request-attribute key under which this
 // handler publishes the endpoint selected in an earlier scheduling phase
-// (the decode pick, before running the prefill profile), for plugins in a
+// (the prefill pick, before running the decode profile), for plugins in a
 // later profile to compare against (e.g. topology affinity between a
 // disaggregated prefill and decode pick). The value is an Endpoint.
 const PeerEndpointAttributeKey = "peer-endpoint"
@@ -234,9 +234,9 @@ var (
 // Handler is the unified disaggregation profile handler.
 // It drives one or more of the following stages, each optional except decode:
 //
-//   - Encode  (E): schedules encoder pods for multimodal content
 //   - Prefill (P): schedules a prefill pod for KV-cache disaggregation
-//   - Decode  (D): schedules the decode pod (always runs first)
+//   - Encode  (E): schedules encoder pods for multimodal content
+//   - Decode  (D): schedules the decode pod (always runs last)
 //
 // All four handler types (D, P/D, E/PD, E/P/D) share this single implementation;
 // active stages are selected by setting encodeProfile / prefillProfile.
@@ -280,7 +280,7 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 }
 
 // Pick implements scheduling.ProfileHandler.
-// Stages run in order: decode → encode (optional) → prefill (optional).
+// Stages run in order: prefill (optional) → encode (optional) → decode.
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
@@ -301,7 +301,43 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
-	// ── Stage 1: Decode ────────────────────────────────────────────────────
+	// ── Stage 1: Prefill (optional) ────────────────────────────────────────
+	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
+		if _, executed := profileResults[h.prefillProfile]; !executed {
+			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, nil) {
+				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
+				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
+			}
+			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
+			profileResults[h.prefillProfile] = nil
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
+		}
+	}
+
+	if prefillRes := profileResults[h.prefillProfile]; prefillRes != nil && len(prefillRes.TargetEndpoints) > 0 {
+		// Publish the prefill pick so plugins in later profiles (e.g.
+		// topology affinity during decode) can compare candidates against it.
+		request.PutAttribute(PeerEndpointAttributeKey, prefillRes.TargetEndpoints[0])
+	}
+
+	// ── Stage 2: Encode (optional) ─────────────────────────────────────────
+	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
+		if _, executed := profileResults[h.encodeProfile]; !executed {
+			var peerEp scheduling.Endpoint
+			if prefillRes := profileResults[h.prefillProfile]; prefillRes != nil && len(prefillRes.TargetEndpoints) > 0 {
+				peerEp = prefillRes.TargetEndpoints[0]
+			}
+			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, peerEp) {
+				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
+				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
+			}
+			// Decider rejected encode - mark as evaluated so we don't re-run the decider.
+			profileResults[h.encodeProfile] = nil
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
+		}
+	}
+
+	// ── Stage 3: Decode ────────────────────────────────────────────────────
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		decodeProfile, ok := profiles[h.decodeProfile]
 		if !ok {
@@ -319,35 +355,6 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 			attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
 		)
 		return map[string]scheduling.SchedulerProfile{}
-	}
-
-	// ── Stage 2: Encode (optional) ─────────────────────────────────────────
-	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
-		if _, executed := profileResults[h.encodeProfile]; !executed {
-			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
-				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
-			}
-			// Decider rejected encode - mark as evaluated so we don't re-run the decider.
-			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
-		}
-	}
-
-	// ── Stage 3: Prefill (optional) ────────────────────────────────────────
-	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
-		if _, executed := profileResults[h.prefillProfile]; !executed {
-			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				// Publish the decode pick so plugins in the prefill profile (e.g.
-				// topology affinity) can compare candidates against it.
-				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
-				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
-			}
-			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
-			profileResults[h.prefillProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
-		}
 	}
 
 	// ── All stages done: record routing decision ───────────────────────────

@@ -30,9 +30,9 @@ Orchestrates up to three scheduling stages per request — decode (always), and 
 
 Runs each scheduling stage in sequence and assembles the final result from all stages that ran.
 
-1. Run the decode profile (always).
+1. If a prefill decider is configured and approves the request, run the prefill profile.
 2. If an encode decider is configured and approves the request, run the encode profile.
-3. If a prefill decider is configured and approves the request, run the prefill profile.
+3. Run the decode profile (always).
 4. Return the assembled scheduling result with decode as the primary profile.
 
 #### How It Works

@@ -241,8 +241,16 @@ func TestPDSchedule(t *testing.T) {
 			deciderPlugin, err := disagg.NewPrefixBasedPDDecider(disagg.PrefixBasedPDDeciderConfig{NonCachedTokens: 2})
 			assert.NoError(t, err)
 
-			profileHandle := disagg.NewDisaggProfileHandler(decode, prefill, "",
-				deciderPlugin, nil)
+			profileHandle, err := disagg.NewPdProfileHandler(
+				"test-handler",
+				disagg.PdProfileHandlerParameters{
+					DecodeProfile:     decode,
+					PrefillProfile:    prefill,
+					DeciderPluginName: disagg.PrefixBasedPDDeciderPluginType,
+				},
+				deciderPlugin,
+			)
+			assert.NoError(t, err)
 
 			schedulerConfig := scheduling.NewSchedulerConfig(profileHandle, map[string]fwksched.SchedulerProfile{
 				prefill: prefillSchedulerProfile,

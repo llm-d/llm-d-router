@@ -49,8 +49,8 @@ All topologies are driven by the unified `disagg-profile-handler` plugin, which 
 
 1. **User Request** – Sent via OpenAI API to the Envoy Proxy
 2. **EPP Scheduling Decision** – The `disagg-profile-handler` runs stages in order:
-   1. **Decode**: always runs first, selects a decode pod
-   2. **Prefill** (optional): the PD decider evaluates prompt length and prefix-cache hit; if disaggregation is warranted, a prefill pod is selected
+   1. **Prefill** (optional): the PD decider evaluates prompt length and prefix-cache hit; if disaggregation is warranted, a prefill pod is selected
+   2. **Decode**: always runs, selects a decode pod
 3. **Execution** – Request lands on Decode Worker:
    - If `x-prefiller-host-port` header doesn't exist → runs both stages locally
    - If `x-prefiller-host-port` header exists → sidecar sends prefill to the selected Prefill Worker, then runs decode locally
@@ -62,8 +62,8 @@ For multimodal requests (images, video, audio), the encode stage can be disaggre
 
 1. **User Request** – Multimodal request sent via OpenAI API
 2. **EPP Scheduling Decision** – The `disagg-profile-handler` runs stages in order:
-   1. **Decode**: selects a decode pod
-   2. **Encode** (optional): the encode decider checks for multimodal content; if present, an encode pod is selected
+   1. **Encode** (optional): the encode decider checks for multimodal content; if present, an encode pod is selected
+   2. **Decode**: selects a decode pod
 3. **Execution** – Request lands on Decode Worker:
    - If encode was scheduled → sidecar sends encoding work to the selected Encode Worker(s) via the `x-encoder-hosts-ports` header
    - Encode Worker processes multimodal content and returns encoding metadata (embedding references)
@@ -76,9 +76,9 @@ The full three-stage pipeline combines both encode and prefill disaggregation:
 
 1. **User Request** – Multimodal request sent via OpenAI API
 2. **EPP Scheduling Decision** – The `disagg-profile-handler` runs all three stages in order:
-   1. **Decode**: selects a decode pod
+   1. **Prefill** (optional): if the PD decider determines disaggregation is beneficial, a prefill pod is selected
    2. **Encode** (optional): if multimodal content is detected, an encode pod is selected
-   3. **Prefill** (optional): if the PD decider determines disaggregation is beneficial, a prefill pod is selected
+   3. **Decode**: selects a decode pod
 3. **Execution** – Request lands on Decode Worker:
    - If encode was scheduled → sidecar sends encoding work to the selected Encode Worker(s) via the `x-encoder-hosts-ports` header
    - Encode Worker processes multimodal content and returns encoding metadata (embedding references)

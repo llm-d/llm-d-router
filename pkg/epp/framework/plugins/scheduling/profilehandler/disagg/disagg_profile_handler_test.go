@@ -16,7 +16,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -120,18 +119,6 @@ func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.Inf
 	return req
 }
 
-// injectPrefixCache sets prefix-cache match info on the decode endpoint for decider evaluation.
-func injectPrefixCache(profileResults map[string]*scheduling.ProfileRunResult, cachedTokens, inputTokens int) {
-	res, ok := profileResults[defaultDecodeProfile]
-	if !ok || res == nil {
-		return
-	}
-	for _, ep := range res.TargetEndpoints {
-		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
-			attrprefix.NewPrefixCacheMatchInfo(cachedTokens, inputTokens, 1))
-	}
-}
-
 // handleWithDeciders creates a plugin handle pre-loaded with all decider types.
 func handleWithDeciders(ctx context.Context) plugin.Handle {
 	h := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
@@ -149,6 +136,16 @@ type mockEncodeDecider struct {
 func (m *mockEncodeDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
 
 func (m *mockEncodeDecider) disaggregate(_ context.Context, _ *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
+	return m.allow
+}
+
+type mockPDDecider struct {
+	allow bool
+}
+
+func (m *mockPDDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
+
+func (m *mockPDDecider) disaggregate(_ context.Context, _ *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
 	return m.allow
 }
 
@@ -382,46 +379,54 @@ func TestHandler_Pick_PD(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		nonCachedTokens int
-		cachedTokens    int
-		profileResults  map[string]*scheduling.ProfileRunResult
-		want            []string
+		name           string
+		allow          bool
+		profileResults map[string]*scheduling.ProfileRunResult
+		want           []string
 	}{
 		{
-			name:            "decode not run → run decode",
-			nonCachedTokens: 4,
-			profileResults:  map[string]*scheduling.ProfileRunResult{},
-			want:            []string{defaultDecodeProfile},
+			name:           "prefill not run, decider approves → run prefill",
+			allow:          true,
+			profileResults: map[string]*scheduling.ProfileRunResult{},
+			want:           []string{defaultPrefillProfile},
 		},
 		{
-			name:            "decode failed → done",
-			nonCachedTokens: 4,
-			profileResults:  map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: nil},
-			want:            []string{},
+			name:           "prefill not run, decider rejects → skip prefill, run decode",
+			allow:          false,
+			profileResults: map[string]*scheduling.ProfileRunResult{},
+			want:           []string{defaultDecodeProfile},
 		},
 		{
-			name:            "all profiles done → done",
-			nonCachedTokens: 4,
+			name:  "prefill done → run decode",
+			allow: true,
 			profileResults: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile:  makeProfileRunResult("pod1"),
-				defaultPrefillProfile: makeProfileRunResult("pod2"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:  "prefill failed (nil result) → run decode",
+			allow: true,
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: nil,
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:  "all profiles done → done",
+			allow: true,
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile:  makeProfileRunResult("pod2"),
 			},
 			want: []string{},
 		},
 		{
-			name:            "enough uncached tokens → run prefill",
-			nonCachedTokens: 4, cachedTokens: 2,
+			name:  "decode failed → done",
+			allow: true,
 			profileResults: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-			},
-			want: []string{defaultPrefillProfile},
-		},
-		{
-			name:            "short uncached suffix → skip prefill",
-			nonCachedTokens: 4, cachedTokens: 5,
-			profileResults: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile:  nil,
 			},
 			want: []string{},
 		},
@@ -429,14 +434,8 @@ func TestHandler_Pick_PD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedTokens})
-			assert.NoError(t, err)
-
 			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
-				decider, nil)
-
-			inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
-			injectPrefixCache(tt.profileResults, tt.cachedTokens, inputTokens)
+				&mockPDDecider{allow: tt.allow}, nil)
 
 			got := h.Pick(ctx, req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
@@ -444,88 +443,54 @@ func TestHandler_Pick_PD(t *testing.T) {
 	}
 }
 
-func TestHandler_Pick_PD_InputTokenError(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	// Request with neither Completions nor ChatCompletions → getUserInputLenInTokens fails.
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{},
-	}
-	profiles := map[string]scheduling.SchedulerProfile{
-		defaultDecodeProfile:  &mockProfile{},
-		defaultPrefillProfile: &mockProfile{},
-	}
-	results := map[string]*scheduling.ProfileRunResult{
-		defaultDecodeProfile: makeProfileRunResult("pod1"),
-	}
-
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 1})
-	assert.NoError(t, err)
-	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
-		decider, nil)
-
-	got := h.Pick(ctx, req, profiles, results)
-	assert.Empty(t, got, "should return empty map on input token estimation error")
-}
-
 func TestHandler_Pick_PD_Series(t *testing.T) {
 	ctx := context.Background()
-	short := completionsRequest("hello world, hello world!")
-	long := completionsRequest("hello world, hello world! and some additional padding text here")
+	req := completionsRequest("hello world, hello world!")
 
 	profiles := map[string]scheduling.SchedulerProfile{
 		defaultDecodeProfile:  &mockProfile{},
 		defaultPrefillProfile: &mockProfile{},
 	}
 	tests := []struct {
-		name            string
-		nonCachedTokens int
-		steps           []struct {
-			req          *scheduling.InferenceRequest
-			cachedTokens int
-			want         []string
+		name  string
+		allow bool
+		steps []struct {
+			results map[string]*scheduling.ProfileRunResult
+			want    []string
 		}
 	}{
 		{
-			name:            "same request twice: first disaggregates, second hits cache",
-			nonCachedTokens: 2,
+			name:  "decider approves: prefill runs first, then decode, then done",
+			allow: true,
 			steps: []struct {
-				req          *scheduling.InferenceRequest
-				cachedTokens int
-				want         []string
+				results map[string]*scheduling.ProfileRunResult
+				want    []string
 			}{
-				{short, 0, []string{defaultPrefillProfile}},
-				{short, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{}},
+				{map[string]*scheduling.ProfileRunResult{}, []string{defaultPrefillProfile}},
+				{map[string]*scheduling.ProfileRunResult{defaultPrefillProfile: makeProfileRunResult("pod1")}, []string{defaultDecodeProfile}},
+				{map[string]*scheduling.ProfileRunResult{defaultPrefillProfile: makeProfileRunResult("pod1"), defaultDecodeProfile: makeProfileRunResult("pod2")}, []string{}},
 			},
 		},
 		{
-			name:            "short then long: long triggers disaggregation",
-			nonCachedTokens: 2,
+			name:  "decider rejects: prefill skipped, decode runs first, then done",
+			allow: false,
 			steps: []struct {
-				req          *scheduling.InferenceRequest
-				cachedTokens int
-				want         []string
+				results map[string]*scheduling.ProfileRunResult
+				want    []string
 			}{
-				{short, 0, []string{defaultPrefillProfile}},
-				{long, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{defaultPrefillProfile}},
+				{map[string]*scheduling.ProfileRunResult{}, []string{defaultDecodeProfile}},
+				{map[string]*scheduling.ProfileRunResult{defaultPrefillProfile: nil, defaultDecodeProfile: makeProfileRunResult("pod2")}, []string{}},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedTokens})
-			assert.NoError(t, err)
 			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
-				decider, nil)
+				&mockPDDecider{allow: tt.allow}, nil)
 
 			for _, step := range tt.steps {
-				// Fresh results per step to avoid mutation leaking between iterations.
-				results := map[string]*scheduling.ProfileRunResult{
-					defaultDecodeProfile: makeProfileRunResult("pod1"),
-				}
-				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
-				injectPrefixCache(results, step.cachedTokens, inputTokens)
-				got := h.Pick(ctx, step.req, profiles, results)
+				got := h.Pick(ctx, req, profiles, step.results)
 				assert.ElementsMatch(t, step.want, profileNames(got))
 			}
 		})
@@ -611,24 +576,31 @@ func TestHandler_Pick_CustomProfiles(t *testing.T) {
 		customEncodeProfile:  &mockProfile{},
 	}
 
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 1})
-	assert.NoError(t, err)
-
 	h := NewDisaggProfileHandler(
 		customDecodeProfile, customPrefillProfile, customEncodeProfile,
-		decider, newAlwaysDisaggEncodeDecider(),
+		newAlwaysDisaggPDDecider(), newAlwaysDisaggEncodeDecider(),
 	)
 
-	// Stage 1: decode not run → run decode
+	// Stage 1: prefill not run → run prefill
 	got := h.Pick(ctx, chatRequest(true, false, false), profiles, map[string]*scheduling.ProfileRunResult{})
-	assert.ElementsMatch(t, []string{customDecodeProfile}, profileNames(got))
+	assert.ElementsMatch(t, []string{customPrefillProfile}, profileNames(got))
 
-	// Stage 2: decode done, multimodal → run encode
+	// Stage 2: prefill done, multimodal → run encode
 	results := map[string]*scheduling.ProfileRunResult{
-		customDecodeProfile: makeProfileRunResult("pod1"),
+		customPrefillProfile: makeProfileRunResult("pod1"),
 	}
 	got = h.Pick(ctx, chatRequest(true, false, false), profiles, results)
 	assert.ElementsMatch(t, []string{customEncodeProfile}, profileNames(got))
+
+	// Stage 3: encode done → run decode
+	results[customEncodeProfile] = makeProfileRunResult("pod2")
+	got = h.Pick(ctx, chatRequest(true, false, false), profiles, results)
+	assert.ElementsMatch(t, []string{customDecodeProfile}, profileNames(got))
+
+	// Stage 4: decode done → done
+	results[customDecodeProfile] = makeProfileRunResult("pod3")
+	got = h.Pick(ctx, chatRequest(true, false, false), profiles, results)
+	assert.Empty(t, got)
 }
 
 func TestHandler_ProcessResults_CustomProfiles(t *testing.T) {
@@ -669,64 +641,66 @@ func TestHandler_Pick_EPD(t *testing.T) {
 		want    []string
 	}{
 		{
-			name:    "decode not run → run decode",
+			name:    "encode not run, multimodal → run encode",
 			req:     chatRequest(true, false, false),
+			results: map[string]*scheduling.ProfileRunResult{},
+			want:    []string{defaultEncodeProfile},
+		},
+		{
+			name:    "no multimodal → skip encode, run decode",
+			req:     chatRequest(false, false, false),
 			results: map[string]*scheduling.ProfileRunResult{},
 			want:    []string{defaultDecodeProfile},
 		},
 		{
-			name:    "decode failed → done",
+			name:    "image → run encode",
 			req:     chatRequest(true, false, false),
-			results: map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: nil},
-			want:    []string{},
+			results: map[string]*scheduling.ProfileRunResult{},
+			want:    []string{defaultEncodeProfile},
 		},
 		{
-			name: "no multimodal → skip encode",
-			req:  chatRequest(false, false, false),
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-			},
-			want: []string{},
+			name:    "video → run encode",
+			req:     chatRequest(false, true, false),
+			results: map[string]*scheduling.ProfileRunResult{},
+			want:    []string{defaultEncodeProfile},
 		},
 		{
-			name: "image → run encode",
+			name:    "audio → run encode",
+			req:     chatRequest(false, false, true),
+			results: map[string]*scheduling.ProfileRunResult{},
+			want:    []string{defaultEncodeProfile},
+		},
+		{
+			name: "encode done → run decode",
 			req:  chatRequest(true, false, false),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile: makeProfileRunResult("pod1"),
 			},
-			want: []string{defaultEncodeProfile},
+			want: []string{defaultDecodeProfile},
 		},
 		{
-			name: "video → run encode",
-			req:  chatRequest(false, true, false),
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-			},
-			want: []string{defaultEncodeProfile},
-		},
-		{
-			name: "audio → run encode",
-			req:  chatRequest(false, false, true),
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-			},
-			want: []string{defaultEncodeProfile},
-		},
-		{
-			name: "encode failed → done",
+			name: "encode failed → fall through, run decode",
 			req:  chatRequest(true, false, false),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
 				defaultEncodeProfile: nil,
 			},
-			want: []string{},
+			want: []string{defaultDecodeProfile},
 		},
 		{
 			name: "all profiles done → done",
 			req:  chatRequest(true, false, false),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-				defaultEncodeProfile: makeProfileRunResult("pod2"),
+				defaultEncodeProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile: makeProfileRunResult("pod2"),
+			},
+			want: []string{},
+		},
+		{
+			name: "decode failed → done",
+			req:  chatRequest(true, false, false),
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultEncodeProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile: nil,
 			},
 			want: []string{},
 		},
@@ -748,9 +722,7 @@ func TestHandler_Pick_EPD_EncodeDecider(t *testing.T) {
 		defaultDecodeProfile: &mockProfile{},
 		defaultEncodeProfile: &mockProfile{},
 	}
-	results := map[string]*scheduling.ProfileRunResult{
-		defaultDecodeProfile: makeProfileRunResult("pod1"),
-	}
+	results := map[string]*scheduling.ProfileRunResult{}
 
 	tests := []struct {
 		name  string
@@ -758,7 +730,7 @@ func TestHandler_Pick_EPD_EncodeDecider(t *testing.T) {
 		want  []string
 	}{
 		{"decider approves → run encode", true, []string{defaultEncodeProfile}},
-		{"decider rejects → skip encode", false, nil},
+		{"decider rejects → skip encode, run decode", false, []string{defaultDecodeProfile}},
 	}
 
 	for _, tt := range tests {
@@ -860,82 +832,90 @@ func TestHandler_Pick_EPD_Full(t *testing.T) {
 	multimodalLong := withPrompt(chatRequest(true, false, false), testLongPrompt)
 
 	tests := []struct {
-		name            string
-		req             *scheduling.InferenceRequest
-		nonCachedTokens int
-		cachedTokens    int
-		results         map[string]*scheduling.ProfileRunResult
-		want            []string
+		name      string
+		req       *scheduling.InferenceRequest
+		pdDecider deciderPlugin
+		results   map[string]*scheduling.ProfileRunResult
+		want      []string
 	}{
 		{
-			name:            "decode not run → run decode",
-			req:             multimodalLong,
-			nonCachedTokens: 1,
-			results:         map[string]*scheduling.ProfileRunResult{},
-			want:            []string{defaultDecodeProfile},
+			name:      "prefill not run → run prefill",
+			req:       multimodalLong,
+			pdDecider: newAlwaysDisaggPDDecider(),
+			results:   map[string]*scheduling.ProfileRunResult{},
+			want:      []string{defaultPrefillProfile},
 		},
 		{
-			name:            "decode failed → done",
-			req:             multimodalLong,
-			nonCachedTokens: 1,
-			results:         map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: nil},
-			want:            []string{},
-		},
-		{
-			name:            "multimodal → run encode next",
-			req:             multimodalLong,
-			nonCachedTokens: 1,
+			name:      "prefill done, multimodal → run encode next",
+			req:       multimodalLong,
+			pdDecider: newAlwaysDisaggPDDecider(),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			},
 			want: []string{defaultEncodeProfile},
 		},
 		{
-			name:            "text-only, high uncached tokens → skip encode, run prefill",
-			req:             completionsRequest(testLongPrompt),
-			nonCachedTokens: 1, cachedTokens: 0,
+			name:      "prefill done, text-only → skip encode, run decode",
+			req:       completionsRequest(testLongPrompt),
+			pdDecider: newAlwaysDisaggPDDecider(),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			},
-			want: []string{defaultPrefillProfile},
+			want: []string{defaultDecodeProfile},
 		},
 		{
-			name:            "text-only, prefill not needed → done",
-			req:             completionsRequest(testLongPrompt),
-			nonCachedTokens: 100,
+			name:      "prefill rejected, multimodal → skip prefill, run encode",
+			req:       multimodalLong,
+			pdDecider: &mockPDDecider{allow: false},
+			results:   map[string]*scheduling.ProfileRunResult{},
+			want:      []string{defaultEncodeProfile},
+		},
+		{
+			name:      "prefill rejected, text-only → skip prefill, skip encode, run decode",
+			req:       completionsRequest(testLongPrompt),
+			pdDecider: &mockPDDecider{allow: false},
+			results:   map[string]*scheduling.ProfileRunResult{},
+			want:      []string{defaultDecodeProfile},
+		},
+		{
+			name:      "prefill done, encode failed → fall through, run decode",
+			req:       multimodalLong,
+			pdDecider: newAlwaysDisaggPDDecider(),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile:  nil,
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:      "prefill done, encode done → run decode",
+			req:       multimodalLong,
+			pdDecider: newAlwaysDisaggPDDecider(),
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile:  makeProfileRunResult("pod2"),
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:      "all three done → done",
+			req:       multimodalLong,
+			pdDecider: newAlwaysDisaggPDDecider(),
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile:  makeProfileRunResult("pod2"),
+				defaultDecodeProfile:  makeProfileRunResult("pod3"),
 			},
 			want: []string{},
 		},
 		{
-			name:            "encode failed → fall through, run prefill",
-			req:             multimodalLong,
-			nonCachedTokens: 1, cachedTokens: 0,
+			name:      "decode failed → done",
+			req:       multimodalLong,
+			pdDecider: newAlwaysDisaggPDDecider(),
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-				defaultEncodeProfile: nil,
-			},
-			want: []string{defaultPrefillProfile},
-		},
-		{
-			name:            "encode done → run prefill",
-			req:             multimodalLong,
-			nonCachedTokens: 1, cachedTokens: 0,
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-				defaultEncodeProfile: makeProfileRunResult("pod2"),
-			},
-			want: []string{defaultPrefillProfile},
-		},
-		{
-			name:            "all three done → done",
-			req:             multimodalLong,
-			nonCachedTokens: 1,
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile:  makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
 				defaultEncodeProfile:  makeProfileRunResult("pod2"),
-				defaultPrefillProfile: makeProfileRunResult("pod3"),
+				defaultDecodeProfile:  nil,
 			},
 			want: []string{},
 		},
@@ -943,22 +923,10 @@ func TestHandler_Pick_EPD_Full(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedTokens})
-			assert.NoError(t, err)
-
 			h := NewDisaggProfileHandler(
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
-				decider, newAlwaysDisaggEncodeDecider(),
+				tt.pdDecider, newAlwaysDisaggEncodeDecider(),
 			)
-
-			inputTokens := 0
-			if tt.req.Body.Completions != nil {
-				inputTokens = len(tt.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
-			} else if tt.req.Body.ChatCompletions != nil {
-				b, _ := json.Marshal(tt.req.Body.ChatCompletions.Messages)
-				inputTokens = len(b) / averageCharactersPerToken
-			}
-			injectPrefixCache(tt.results, tt.cachedTokens, inputTokens)
 
 			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
@@ -980,28 +948,22 @@ func TestHandler_Pick_EPD_Full_EncodeDecider(t *testing.T) {
 	tests := []struct {
 		name     string
 		allow    bool
-		wantNext []string // expected next profile from Pick (encode not yet run)
+		wantNext []string // expected next profile from Pick (prefill already run)
 	}{
 		{"decider approves → run encode next", true, []string{defaultEncodeProfile}},
-		{"decider rejects → skip encode, run prefill next", false, []string{defaultPrefillProfile}},
+		{"decider rejects → skip encode, run decode next", false, []string{defaultDecodeProfile}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 1})
-			assert.NoError(t, err)
-
 			h := NewDisaggProfileHandler(
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
-				decider, &mockEncodeDecider{allow: tt.allow},
+				newAlwaysDisaggPDDecider(), &mockEncodeDecider{allow: tt.allow},
 			)
 
 			results := map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			}
-
-			inputTokens := len(testLongPrompt) / averageCharactersPerToken
-			injectPrefixCache(results, 0, inputTokens)
 
 			got := h.Pick(ctx, multimodalLong, profiles, results)
 			assert.ElementsMatch(t, tt.wantNext, profileNames(got))
@@ -1104,16 +1066,16 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		description   string
 	}{
 		{
-			name:          "both deciders nil, decode not run → run decode",
+			name:          "both deciders nil, nothing run → skip prefill and encode, run decode",
 			pdDecider:     nil,
 			encodeDecider: nil,
 			req:           multimodalLong,
 			results:       map[string]*scheduling.ProfileRunResult{},
 			want:          []string{defaultDecodeProfile},
-			description:   "Should run decode first regardless of nil deciders",
+			description:   "With nil deciders, both prefill and encode should be skipped and decode should run",
 		},
 		{
-			name:          "both deciders nil, decode done → skip both encode and prefill",
+			name:          "both deciders nil, decode done → done",
 			pdDecider:     nil,
 			encodeDecider: nil,
 			req:           multimodalLong,
@@ -1121,52 +1083,47 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
 			},
 			want:        []string{},
-			description: "With nil deciders, both encode and prefill should be skipped",
+			description: "With nil deciders, when decode is done scheduling is complete",
 		},
 		{
-			name:          "pdDecider nil, encodeDecider present, multimodal → run encode",
+			name:          "pdDecider nil, encodeDecider present, nothing run, multimodal → skip prefill, run encode",
+			pdDecider:     nil,
+			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			req:           multimodalLong,
+			results:       map[string]*scheduling.ProfileRunResult{},
+			want:          []string{defaultEncodeProfile},
+			description:   "Nil pdDecider skips prefill and runs encode for multimodal",
+		},
+		{
+			name:          "pdDecider nil, encodeDecider present, encode done → run decode",
 			pdDecider:     nil,
 			encodeDecider: newAlwaysDisaggEncodeDecider(),
 			req:           multimodalLong,
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile: makeProfileRunResult("pod1"),
 			},
-			want:        []string{defaultEncodeProfile},
-			description: "Nil pdDecider should not affect encode stage",
+			want:        []string{defaultDecodeProfile},
+			description: "Encode done, runs decode",
 		},
 		{
-			name:          "pdDecider nil, encodeDecider present, encode done → skip prefill",
-			pdDecider:     nil,
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
-			req:           multimodalLong,
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-				defaultEncodeProfile: makeProfileRunResult("pod2"),
-			},
-			want:        []string{},
-			description: "Nil pdDecider should cause prefill to be skipped",
-		},
-		{
-			name:          "encodeDecider nil, pdDecider present, text-only → run prefill",
+			name:          "encodeDecider nil, pdDecider present, nothing run → run prefill",
 			pdDecider:     newAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			req:           completionsRequest(testLongPrompt),
-			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
-			},
-			want:        []string{defaultPrefillProfile},
-			description: "Nil encodeDecider should not affect prefill stage for text-only",
+			results:       map[string]*scheduling.ProfileRunResult{},
+			want:          []string{defaultPrefillProfile},
+			description:   "pdDecider present runs prefill",
 		},
 		{
-			name:          "encodeDecider nil, pdDecider present, multimodal → skip encode, run prefill",
+			name:          "encodeDecider nil, pdDecider present, prefill done → skip encode, run decode",
 			pdDecider:     newAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			req:           multimodalLong,
 			results: map[string]*scheduling.ProfileRunResult{
-				defaultDecodeProfile: makeProfileRunResult("pod1"),
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			},
-			want:        []string{defaultPrefillProfile},
-			description: "Nil encodeDecider should skip encode even for multimodal, then run prefill",
+			want:        []string{defaultDecodeProfile},
+			description: "Prefill done and encodeDecider nil, runs decode",
 		},
 	}
 
@@ -1176,12 +1133,6 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
 				tt.pdDecider, tt.encodeDecider,
 			)
-
-			// Inject prefix cache if needed for PD decider
-			if tt.req.Body.Completions != nil {
-				inputTokens := len(tt.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
-				injectPrefixCache(tt.results, 0, inputTokens)
-			}
 
 			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got), tt.description)
@@ -1396,7 +1347,7 @@ func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
 }
 
-func TestHandler_Pick_PD_StampsPeerEndpointBeforePrefill(t *testing.T) {
+func TestHandler_Pick_PD_StampsPeerEndpointBeforeDecode(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	req := completionsRequest(testLongPrompt)
 
@@ -1405,21 +1356,17 @@ func TestHandler_Pick_PD_StampsPeerEndpointBeforePrefill(t *testing.T) {
 		defaultPrefillProfile: &mockProfile{},
 	}
 
-	decodeResult := makeProfileRunResult("pod1")
-	profileResults := map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: decodeResult}
-	inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
-	injectPrefixCache(profileResults, 2, inputTokens) // few cached tokens → prefill needed
+	prefillResult := makeProfileRunResult("pod1")
+	profileResults := map[string]*scheduling.ProfileRunResult{defaultPrefillProfile: prefillResult}
 
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
-	assert.NoError(t, err)
-	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", decider, nil)
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", newAlwaysDisaggPDDecider(), nil)
 
 	got := h.Pick(ctx, req, profiles, profileResults)
-	assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got), "prefill must run")
+	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run")
 
 	peer, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
-	assert.True(t, ok, "peer endpoint attribute must be published before prefill runs")
-	assert.Equal(t, decodeResult.TargetEndpoints[0], peer)
+	assert.True(t, ok, "peer endpoint attribute must be published before decode runs")
+	assert.Equal(t, prefillResult.TargetEndpoints[0], peer)
 }
 
 func TestHandler_Pick_PD_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
@@ -1431,16 +1378,12 @@ func TestHandler_Pick_PD_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
 		defaultPrefillProfile: &mockProfile{},
 	}
 
-	profileResults := map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: makeProfileRunResult("pod1")}
-	inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
-	injectPrefixCache(profileResults, inputTokens, inputTokens) // fully cached → no prefill needed
+	profileResults := map[string]*scheduling.ProfileRunResult{defaultPrefillProfile: nil}
 
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
-	assert.NoError(t, err)
-	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", decider, nil)
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", &mockPDDecider{allow: false}, nil)
 
 	got := h.Pick(ctx, req, profiles, profileResults)
-	assert.Empty(t, got, "prefill must be skipped")
+	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run")
 
 	_, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
 	assert.False(t, ok, "peer endpoint attribute must not be published when prefill is skipped")
