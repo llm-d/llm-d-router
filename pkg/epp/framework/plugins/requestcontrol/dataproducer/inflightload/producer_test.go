@@ -207,7 +207,7 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	idB := fullEndpointName(podB)
 
 	// 1. Dispatch to PodA (Prefill) and PodB (Decode)
-	req := makeTokenRequest("multi-req", 4) // 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("multi-req", 4) // 4 input + 1000 UNKNOWN output = 1004 tokens
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -954,17 +954,17 @@ func TestInFlightLoadProducer_JanitorSkipsLiveRequest(t *testing.T) {
 	reqCtx, reqCancel := context.WithCancel(context.Background())
 	t.Cleanup(reqCancel)
 
-	req := makeTokenRequest("req-janitor", 4) // 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req-janitor", 4) // 4 input + 1000 UNKNOWN output = 1004 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(reqCtx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// Several janitor sweeps past the threshold, no chunks: counters must hold.
 	time.Sleep(150 * time.Millisecond)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID),
 		"janitor rolled back counters of a live request")
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// Ctx dies without EndOfStream (a genuinely leaked entry): the janitor
 	// reclaims it. This also proves the janitor is running in this test, so the
