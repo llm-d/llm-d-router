@@ -1,8 +1,8 @@
 # Metrics
 
 The `llm-d-router` Endpoint Picker (EPP) exposes Prometheus metrics to monitor its behavior and
-performance. These are in addition to the Inference Gateway metrics; for how to view metrics, see the
-Gateway API Inference Extension [metrics and observability guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics-and-observability.md).
+performance. These are in addition to the Inference Gateway metrics. For how to reach the EPP's
+metrics endpoint and what it serves, see [Scrape topology](#scrape-topology) below.
 
 ## Subsystems and naming
 
