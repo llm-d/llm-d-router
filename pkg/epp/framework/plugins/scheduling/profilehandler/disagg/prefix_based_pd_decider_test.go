@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -499,4 +500,253 @@ func TestWithName(t *testing.T) {
 
 	decider.WithName("renamed")
 	assert.Equal(t, "renamed", decider.TypedName().Name)
+}
+
+// withHeaders returns req with Headers set to the given map. Existing entries
+// are replaced.
+func withHeaders(req *scheduling.InferenceRequest, headers map[string]string) *scheduling.InferenceRequest {
+	req.Headers = headers
+	return req
+}
+
+// resultWithEndpoint builds a SchedulingResult with a single decode endpoint
+// under the "decode" primary profile. Passing nil produces a result whose
+// primary profile has a nil endpoint slot.
+func resultWithEndpoint(ep scheduling.Endpoint) *scheduling.SchedulingResult {
+	return &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{ep}},
+		},
+	}
+}
+
+func TestPreRequest_ConditionalDecodeGate(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	preferIfAvailable := map[string]string{"prefer": "if-available"}
+	returnMinimal := map[string]string{"prefer": "return=minimal"}
+
+	// endpointNoAttr is a decode endpoint whose attributes carry no
+	// PrefixCacheMatchInfo entry (simulates missing prefix-cache producer).
+	endpointNoAttr := makeTestEndpointBase()
+
+	// endpointWrongType puts a Cloneable of the wrong concrete type under the
+	// PrefixCacheMatchInfo key.
+	endpointWrongType := makeTestEndpointBase()
+	endpointWrongType.Put(attrprefix.PrefixCacheMatchInfoDataKey, &notPrefixCacheMatchInfo{})
+
+	tests := []struct {
+		name            string
+		nonCachedTokens int
+		promptTokens    int
+		headers         map[string]string
+		result          *scheduling.SchedulingResult
+		request         *scheduling.InferenceRequest
+		wantReject      bool
+	}{
+		{
+			name:            "no Prefer header forwards even without cache",
+			nonCachedTokens: 5,
+			headers:         nil,
+			result:          nil,
+			request:         makeRequestWithTokens(10),
+			wantReject:      false,
+		},
+		{
+			name:            "unrelated Prefer token forwards even without cache",
+			nonCachedTokens: 5,
+			headers:         returnMinimal,
+			result:          nil,
+			request:         makeRequestWithTokens(10),
+			wantReject:      false,
+		},
+		{
+			name:            "threshold zero disables the gate",
+			nonCachedTokens: 0,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(0)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      false,
+		},
+		{
+			name:            "nil scheduling result rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          nil,
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "unknown primary profile rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result: &scheduling.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*scheduling.ProfileRunResult{
+					"other": {TargetEndpoints: []scheduling.Endpoint{makeTestEndpoint(10)}},
+				},
+			},
+			request:    makeRequestWithTokens(10),
+			wantReject: true,
+		},
+		{
+			name:            "nil primary profile rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result: &scheduling.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults:     map[string]*scheduling.ProfileRunResult{"decode": nil},
+			},
+			request:    makeRequestWithTokens(10),
+			wantReject: true,
+		},
+		{
+			name:            "empty TargetEndpoints rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result: &scheduling.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults: map[string]*scheduling.ProfileRunResult{
+					"decode": {TargetEndpoints: nil},
+				},
+			},
+			request:    makeRequestWithTokens(10),
+			wantReject: true,
+		},
+		{
+			name:            "nil endpoint rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(nil),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "missing PrefixCacheMatchInfo attribute rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(endpointNoAttr),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "wrong-type attribute rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(endpointWrongType),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "non-cached suffix below threshold forwards",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(8)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      false,
+		},
+		{
+			name:            "non-cached suffix equals threshold rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(5)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "non-cached suffix above threshold rejects",
+			nonCachedTokens: 3,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(2)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "zero blocks matched rejects",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(0)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+		{
+			name:            "no TokenizedPrompt: zero-token prompt trivially covered",
+			nonCachedTokens: 5,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(0)),
+			request:         completionsRequestWithPrompt(fwkrh.Prompt{}),
+			wantReject:      false,
+		},
+		{
+			name:            "promptTokens does not shortcut the gate",
+			nonCachedTokens: 5,
+			promptTokens:    1000, // would gate P/D routing off; must not affect 412
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(0)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+				NonCachedTokens: tt.nonCachedTokens,
+				PromptTokens:    tt.promptTokens,
+			})
+			require.NoError(t, err)
+
+			req := withHeaders(tt.request, tt.headers)
+			err = decider.PreRequest(ctx, req, tt.result)
+			if !tt.wantReject {
+				assert.NoError(t, err)
+				return
+			}
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, errcommon.PreconditionFailed, e.Code)
+		})
+	}
+}
+
+// TestPreRequest_UsesUnweightedCachedBlockCount is the PreRequest twin of
+// TestDisaggregate_UsesUnweightedCachedBlockCount and pins the same #1047
+// invariant: a RAM-cached prefix (unweighted count 240, tier-weighted score
+// 192) must be seen as covering the prompt so the gate forwards it. If the
+// gate ever reverts to reading MatchBlocks() it would misroute to 412.
+func TestPreRequest_UsesUnweightedCachedBlockCount(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	const (
+		blockSize        = 16
+		inputTokens      = 4096
+		totalBlocks      = inputTokens / blockSize // 256
+		cachedBlocks     = 240                     // contiguous hit (3840 tokens)
+		ramWeightedScore = 192                     // int(240 * 0.8) as stored in matchBlocks
+		nonCachedTokens  = 512
+	)
+
+	newEndpoint := func(info *attrprefix.PrefixCacheMatchInfo) scheduling.Endpoint {
+		ep := makeTestEndpointBase()
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, info)
+		return ep
+	}
+	req := withHeaders(
+		withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens),
+		map[string]string{"prefer": "if-available"},
+	)
+
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: nonCachedTokens})
+	require.NoError(t, err)
+
+	fixed := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize).
+		WithCachedBlockCount(cachedBlocks))
+	assert.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(fixed)),
+		"RAM-cached prefix must forward when the unweighted cached-block count is used")
+
+	weightedOnly := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize))
+	err = decider.PreRequest(ctx, req, resultWithEndpoint(weightedOnly))
+	var e errcommon.Error
+	require.ErrorAs(t, err, &e, "the tier-weighted score alone undercounts cached blocks and misroutes")
+	assert.Equal(t, errcommon.PreconditionFailed, e.Code)
 }

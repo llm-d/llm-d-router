@@ -8,8 +8,11 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
@@ -42,8 +45,21 @@ func (p PrefixBasedPDDeciderConfig) validate() error {
 	return nil
 }
 
-// compile-time type assertion
-var _ deciderPlugin = &PrefixBasedPDDecider{}
+// compile-time type assertions
+var (
+	_ deciderPlugin    = &PrefixBasedPDDecider{}
+	_ fwkrc.PreRequest = &PrefixBasedPDDecider{}
+)
+
+// errCondDecodeCacheMiss is the fixed 412 returned by the conditional-decode
+// gate when a decoder cannot satisfy the request from its KV cache. Byte-for-
+// byte identical to the response previously emitted by the director's hard-
+// coded gate so coordinator behavior (see pkg/coordinator/steps/decode_proxy)
+// is unchanged.
+var errCondDecodeCacheMiss = errcommon.Error{
+	Code: errcommon.PreconditionFailed,
+	Msg:  "no decode worker has the requested KV cache",
+}
 
 // PrefixBasedPDDecider is a PD decider plugin which decision is based prefix aware
 type PrefixBasedPDDecider struct {
@@ -100,6 +116,76 @@ func (d *PrefixBasedPDDecider) TypedName() plugin.TypedName {
 func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	d.typedName.Name = name
 	return d
+}
+
+// PreRequest gates requests carrying the RFC 7240 "Prefer: if-available"
+// header used by the coordinator's speculative early-decode step. When the
+// non-cached suffix of the prompt on the chosen decode endpoint reaches
+// NonCachedTokens, the request is rejected with HTTP 412 so the coordinator
+// falls back to the full encode/prefill/decode pipeline. NonCachedTokens == 0
+// disables the gate. Requests without the header are a no-op.
+//
+// promptTokens is deliberately not honored here: it is a P/D routing shortcut
+// for short prompts, not a cache-adequacy predicate.
+//
+// Fails closed (412) when cache state cannot be read from the endpoint, since
+// a coordinator restart is cheaper than forwarding to a decoder that may not
+// hold the cache.
+func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
+	schedulingResult *scheduling.SchedulingResult) error {
+	if request == nil || !routing.IsConditionalDecode(request.Headers) {
+		return nil
+	}
+	if d.config.NonCachedTokens == 0 {
+		return nil
+	}
+	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
+
+	endpoint := primaryDecodeEndpoint(schedulingResult)
+	if endpoint == nil {
+		debugLogger.Info("conditional-decode: no primary decode endpoint, rejecting")
+		return errCondDecodeCacheMiss
+	}
+	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
+	if !ok || prefixInfoRaw == nil {
+		debugLogger.Info("conditional-decode: endpoint has no prefix-cache match info, rejecting")
+		return errCondDecodeCacheMiss
+	}
+	info, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok {
+		debugLogger.Info("conditional-decode: prefix-cache match info has unexpected type, rejecting",
+			"type", fmt.Sprintf("%T", prefixInfoRaw))
+		return errCondDecodeCacheMiss
+	}
+	inputTokens, err := getUserInputLenInTokens(request)
+	if err != nil {
+		debugLogger.Info("conditional-decode: failed to read input token count, rejecting", "error", err)
+		return errCondDecodeCacheMiss
+	}
+	hitPrefixTokens := info.CachedBlockCount() * info.BlockSizeTokens()
+	nonCachedTokens := inputTokens - hitPrefixTokens
+	if nonCachedTokens >= d.config.NonCachedTokens {
+		debugLogger.Info("conditional-decode: non-cached suffix at or above threshold, rejecting",
+			"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+		return errCondDecodeCacheMiss
+	}
+	debugLogger.Info("conditional-decode: non-cached suffix below threshold, forwarding",
+		"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+	return nil
+}
+
+// primaryDecodeEndpoint returns the first endpoint chosen by the primary
+// profile, or nil when the scheduling result is missing, malformed, or the
+// primary profile produced no endpoint.
+func primaryDecodeEndpoint(result *scheduling.SchedulingResult) scheduling.Endpoint {
+	if result == nil || result.PrimaryProfileName == "" || result.ProfileResults == nil {
+		return nil
+	}
+	primary := result.ProfileResults[result.PrimaryProfileName]
+	if primary == nil || len(primary.TargetEndpoints) == 0 {
+		return nil
+	}
+	return primary.TargetEndpoints[0]
 }
 
 func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {

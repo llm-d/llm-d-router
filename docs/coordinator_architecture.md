@@ -343,6 +343,11 @@ decode serve this directly" question. The step sends the decode request with the
 The 412 response may carry scheduling or cache-locality hints in headers or body; these
 are not yet consumed by the coordinator.
 
+The 412 is emitted on the router (EPP) side by the `prefix-based-pd-decider` plugin when
+declared in the deployment's plugin config; see [disaggregation.md](disaggregation.md) for
+the plugin's `nonCachedTokens` threshold. Deployments without the plugin never emit 412
+and always forward speculative decode requests.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must
