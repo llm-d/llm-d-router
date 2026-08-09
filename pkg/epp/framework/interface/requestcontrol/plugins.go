@@ -46,9 +46,21 @@ type Screener interface {
 
 // PreRequest is called by the director after a getting result from scheduling layer and
 // before a request is sent to the selected model server.
+// A non-nil error indicates the plugin could not complete its work; the director runs
+// every registered PreRequest plugin and aggregates their errors before failing the request.
+//
+// Return a github.com/llm-d/llm-d-router/pkg/common/error.Error so the director can map
+// the failure to the intended HTTP status; any other error type is reported to the client
+// as an Internal error.
+//
+// Every registered plugin runs even when a peer has already failed the request, so any
+// side effect published here outlives the failure. Plugins must ensure such state is
+// cleaned up by HandleResponseBody, which the director invokes on abort for every
+// request that picked a pod but never marked the response complete. Otherwise the
+// plugin must not have side effects at this extension point.
 type PreRequest interface {
 	plugin.Plugin
-	PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult)
+	PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error
 }
 
 // ResponseHeaderProcessor is called by the director after the response headers are successfully received

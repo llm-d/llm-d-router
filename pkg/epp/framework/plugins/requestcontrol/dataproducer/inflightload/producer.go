@@ -374,24 +374,24 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 	return nil
 }
 
-func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
+func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) error {
 	if result == nil || len(result.ProfileResults) == 0 {
-		return
+		return nil
 	}
 
 	if request == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: request is nil")
-		return
+		return nil
 	}
 
 	if request.RequestID == "" {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: missing RequestID")
-		return
+		return nil
 	}
 
 	if p.PluginState == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: PluginState is nil", "requestID", request.RequestID)
-		return
+		return nil
 	}
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
@@ -405,6 +405,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		)
 	}
 
+	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 			continue
@@ -436,7 +437,19 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
 			entry,
 		)
+		tracked = true
 	}
+
+	// ctx is the ext_proc stream context: it stays alive for the request's full
+	// lifetime and is canceled on stream end or client disconnect. Binding it
+	// keeps the janitor from reaping entries (and rolling back counters) for
+	// requests that are still in flight but have produced no response chunk,
+	// e.g. long prefill or a deep model-server queue.
+	// Bind only when an entry exists: an unbacked binding is never reclaimed.
+	if tracked {
+		p.PluginState.BindLiveness(ctx, request.RequestID)
+	}
+	return nil
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {

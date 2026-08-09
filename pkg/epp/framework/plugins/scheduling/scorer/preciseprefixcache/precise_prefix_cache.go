@@ -262,8 +262,8 @@ func (p *Plugin) Produce(ctx context.Context,
 
 func (p *Plugin) PreRequest(ctx context.Context,
 	req *scheduling.InferenceRequest, result *scheduling.SchedulingResult,
-) {
-	p.producer.PreRequest(ctx, req, result)
+) error {
+	return p.producer.PreRequest(ctx, req, result)
 }
 
 func (p *Plugin) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {

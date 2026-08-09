@@ -134,7 +134,7 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 		nil,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}, {Hash: "hash-c", Size: 1, Modality: img}})
 
-	producer.PreRequest(context.Background(), request, schedulingResult(endpointC))
+	_ = producer.PreRequest(context.Background(), request, schedulingResult(endpointC))
 	producer.wg.Wait()
 
 	cache := producer.cacheSnapshot()
@@ -151,7 +151,7 @@ func TestLRUEviction(t *testing.T) {
 	for _, hash := range []string{"hash-1", "hash-2", "hash-3"} {
 		request := requestWithHashes(hash, map[string]int{hash: 1})
 		require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
-		producer.PreRequest(context.Background(), request, schedulingResult(endpoint))
+		_ = producer.PreRequest(context.Background(), request, schedulingResult(endpoint))
 		producer.wg.Wait()
 	}
 

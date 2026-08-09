@@ -349,7 +349,7 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 				Body:      &requesthandling.InferenceRequestBody{TokenizedPrompt: &requesthandling.TokenizedPrompt{PerPromptTokens: [][]uint32{benchTokenIDs}}},
 			}
 			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
-			h.producer.PreRequest(ctx, infReq, schedResult)
+			_ = h.producer.PreRequest(ctx, infReq, schedResult)
 
 			// 3. Response lifecycle: release the in-flight load.
 			infReq.SchedulingResult = schedResult

@@ -328,7 +328,7 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 	t.Run("initial cold request seeds cache", func(_ *testing.T) {
 		coldReqA := &scheduling.InferenceRequest{RequestID: "cold-1"}
 		scorer.Score(ctx, coldReqA, endpoints)
-		scorer.PreRequest(ctx, coldReqA, requestToEndpoint(endpointA))
+		_ = scorer.PreRequest(ctx, coldReqA, requestToEndpoint(endpointA))
 		assertHighestScoredPod(endpointB, "after-endpointA-used")
 	})
 
@@ -354,7 +354,7 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 				t.Fatalf("expected neutral score for warm request, got %f", score)
 			}
 		}
-		scorer.PreRequest(ctx, warmReq, requestToEndpoint(endpointB))
+		_ = scorer.PreRequest(ctx, warmReq, requestToEndpoint(endpointB))
 		postWarmReq := &scheduling.InferenceRequest{RequestID: "cold-after-warm"}
 		postWarmScores := scorer.Score(ctx, postWarmReq, endpoints)
 		if postWarmScores[endpointB] <= postWarmScores[endpointA] {
@@ -365,14 +365,14 @@ func TestNoHitLRUPreferLeastRecentlyUsedAfterColdRequests(t *testing.T) {
 	t.Run("second cold request rotates to endpointB", func(_ *testing.T) {
 		coldReqB := &scheduling.InferenceRequest{RequestID: "cold-2"}
 		scorer.Score(ctx, coldReqB, endpoints)
-		scorer.PreRequest(ctx, coldReqB, requestToEndpoint(endpointB))
+		_ = scorer.PreRequest(ctx, coldReqB, requestToEndpoint(endpointB))
 		assertHighestScoredPod(endpointC, "after-endpointB-used")
 	})
 
 	t.Run("third cold request rotates back to endpointA", func(_ *testing.T) {
 		coldReqC := &scheduling.InferenceRequest{RequestID: "cold-3"}
 		scorer.Score(ctx, coldReqC, endpoints)
-		scorer.PreRequest(ctx, coldReqC, requestToEndpoint(endpointC))
+		_ = scorer.PreRequest(ctx, coldReqC, requestToEndpoint(endpointC))
 		assertHighestScoredPod(endpointA, "after-endpointC-used")
 	})
 }
@@ -440,7 +440,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 				},
 			},
 		}
-		scorer.PreRequest(ctx, req1, pdResult)
+		_ = scorer.PreRequest(ctx, req1, pdResult)
 
 		req2 := &scheduling.InferenceRequest{RequestID: "pd-request-2"}
 		prefillScores := scorer.Score(ctx, req2, prefillEndpoints)
@@ -468,7 +468,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 				},
 			},
 		}
-		scorer.PreRequest(ctx, req, result)
+		_ = scorer.PreRequest(ctx, req, result)
 
 		req2 := &scheduling.InferenceRequest{RequestID: "non-pd-request-2"}
 		scores := scorer.Score(ctx, req2, decodeEndpoints)
@@ -482,7 +482,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 		req := &scheduling.InferenceRequest{RequestID: "nil-result"}
 		scorer := nohitlru.NewNoHitLRU(ctx, nohitlru.NoHitLRUType, nil)
 		scorer.Score(ctx, req, decodeEndpoints)
-		scorer.PreRequest(ctx, req, nil)
+		_ = scorer.PreRequest(ctx, req, nil)
 	})
 
 	t.Run("empty profile results - graceful handling", func(_ *testing.T) {
@@ -494,7 +494,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 			PrimaryProfileName: "decode",
 			ProfileResults:     map[string]*scheduling.ProfileRunResult{},
 		}
-		scorer.PreRequest(ctx, req, result)
+		_ = scorer.PreRequest(ctx, req, result)
 	})
 }
 
@@ -511,7 +511,7 @@ type dumpedLRUState struct {
 func seedCold(ctx context.Context, scorer *nohitlru.NoHitLRU, target scheduling.Endpoint, id string) {
 	req := &scheduling.InferenceRequest{RequestID: id}
 	scorer.Score(ctx, req, []scheduling.Endpoint{target})
-	scorer.PreRequest(ctx, req, &scheduling.SchedulingResult{
+	_ = scorer.PreRequest(ctx, req, &scheduling.SchedulingResult{
 		PrimaryProfileName: "p",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
 			"p": {TargetEndpoints: []scheduling.Endpoint{target}},

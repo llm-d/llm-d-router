@@ -133,7 +133,7 @@ func TestPreRequest(t *testing.T) {
 		}
 
 		// 3. Call PreRequest
-		p.PreRequest(context.Background(), req1, res)
+		_ = p.PreRequest(context.Background(), req1, res)
 
 		// Wait for async update
 		p.wg.Wait()
@@ -180,7 +180,7 @@ func TestPreRequest(t *testing.T) {
 					},
 				},
 			}
-			p.PreRequest(context.Background(), req, res)
+			_ = p.PreRequest(context.Background(), req, res)
 			p.wg.Wait()
 
 			perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
@@ -258,7 +258,7 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{endpoint3}},
 		},
 	}
-	p.PreRequest(context.Background(), req1, schedulingResult)
+	_ = p.PreRequest(context.Background(), req1, schedulingResult)
 	p.wg.Wait()
 
 	// Second request shares the first token but diverges on the second.
@@ -318,7 +318,7 @@ func TestPrefixPluginPrefixGrowth(t *testing.T) {
 			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
 		},
 	}
-	p.PreRequest(context.Background(), req1, schedulingResult)
+	_ = p.PreRequest(context.Background(), req1, schedulingResult)
 	p.wg.Wait()
 
 	// Second request extends the first one's token prefix.
@@ -381,7 +381,7 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
 		},
 	}
-	p.PreRequest(context.Background(), req, schedulingResult)
+	_ = p.PreRequest(context.Background(), req, schedulingResult)
 	p.wg.Wait()
 
 	// Check indexer state - should be in tracked pods
@@ -712,7 +712,7 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 		},
 	}
 	_ = p.Produce(context.Background(), req1, endpoints)
-	p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
+	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"default": {TargetEndpoints: endpoints},
@@ -765,7 +765,7 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 		},
 	}
 	_ = p.Produce(context.Background(), req1, endpoints)
-	p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
+	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"default": {TargetEndpoints: endpoints},

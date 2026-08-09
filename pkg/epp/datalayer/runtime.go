@@ -35,6 +35,7 @@ import (
 var (
 	ErrSourceTypeCollision    = errors.New("source type registered across variants")
 	ErrDuplicateExtractorType = errors.New("duplicate extractor type configured for the same source")
+	ErrNoDefaultProducer      = errors.New("no default producer found for missing data key")
 )
 
 type sourceVariant string

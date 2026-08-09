@@ -304,12 +304,12 @@ func (s *NoHitLRU) Score(ctx context.Context, request *scheduling.InferenceReque
 
 // PreRequest is called before a request is sent to the target endpoint.
 // For cold requests, it updates the LRU cache to track which endpoints have been used recently.
-func (s *NoHitLRU) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (s *NoHitLRU) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 
 	if schedulingResult == nil || len(schedulingResult.ProfileResults) == 0 {
 		logger.Info("No scheduling result available")
-		return
+		return nil
 	}
 
 	// Read the cold request state we stored in Score
@@ -319,12 +319,12 @@ func (s *NoHitLRU) PreRequest(ctx context.Context, request *scheduling.Inference
 
 	if err != nil {
 		logger.Info("No cold request state found, treating as non-cold request", "error", err)
-		return
+		return nil
 	}
 
 	if !coldState.isCold {
 		logger.Info("Not a cold request, skipping LRU update")
-		return
+		return nil
 	}
 
 	if targetProfile, ok := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]; ok && targetProfile != nil && len(targetProfile.TargetEndpoints) != 0 {
@@ -333,6 +333,7 @@ func (s *NoHitLRU) PreRequest(ctx context.Context, request *scheduling.Inference
 	if targetProfile, ok := schedulingResult.ProfileResults[defaultPrefillProfile]; ok && targetProfile != nil && len(targetProfile.TargetEndpoints) != 0 {
 		s.moveTargetPodToFront(ctx, request, targetProfile, defaultPrefillProfile)
 	}
+	return nil
 }
 
 func (s *NoHitLRU) moveTargetPodToFront(ctx context.Context, request *scheduling.InferenceRequest, targetProfile *scheduling.ProfileRunResult, profileName string) {

@@ -21,6 +21,23 @@ provider:
         #   http:
         #     maxRequestsPerConnection: 256000
 
+  # GKE-specific configuration.
+  # This block is only used if name is "gke".
+  gke:
+    preferredBackends:
+      enabled: false
+      # Number of primary active pod instances pinned to the PREFERRED load balancing tier.
+      # Setting >1 scales concurrent active routing.
+      preferredReplicas: 1
+      # Number of standby pod instances pinned to the DEFAULT load balancing tier.
+      # Setting >1 scales warm standby failover capacity.
+      defaultReplicas: 1
+      # Benchmark capacity and threshold settings for PREFERRED load balancing tier.
+      # When incoming traffic exceeds capacityScalerPercent of maxRatePerEndpoint, excess traffic spills over to DEFAULT standby pods.
+      balancingMode: RATE
+      maxRatePerEndpoint: 100
+      capacityScalerPercent: 100
+
 # httpRoute section is used to deploy an HTTPRoute resource as part of the gateway chart.
 httpRoute:
   create: false # a flag to indicate whether to create the httproute as part of the chart or not.

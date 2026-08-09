@@ -152,8 +152,9 @@ func (s *SessionAffinity) Filter(ctx context.Context, request *scheduling.Infere
 }
 
 // PreRequest records the picked pod for the session.
-func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	s.strategy.preRequest(ctx, request, schedulingResult)
+	return nil
 }
 
 // ResponseHeader sets the session header on the response sent to the client.

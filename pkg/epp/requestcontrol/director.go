@@ -499,7 +499,23 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		reqCtx.TargetEndpointScores = scores
 	}
 
-	d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result)
+	if err := d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result); err != nil {
+		// Preserve a typed errcommon.Error from a single failing plugin so its
+		// status code (e.g. PreconditionFailed) reaches Envoy intact, even
+		// after the wrapping applied by runPreRequestPlugins (fmt.Errorf +
+		// errors.Join). Multiple failures collapse to Internal so all their
+		// messages reach the client via the joined error text; picking one
+		// typed code arbitrarily would drop the others. Untyped failures also
+		// collapse to Internal so response building does not fall through to
+		// Unknown in BuildErrResponse.
+		if u, ok := err.(interface{ Unwrap() []error }); ok && len(u.Unwrap()) == 1 {
+			var e errcommon.Error
+			if errors.As(err, &e) {
+				return reqCtx, e
+			}
+		}
+		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: err.Error()}
+	}
 
 	return reqCtx, nil
 }
@@ -604,16 +620,27 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return pod.GetMetadata()
 }
 
+// runPreRequestPlugins invokes every registered PreRequest plugin, wraps each non-nil
+// error with the plugin's typed name, and returns the joined result. Plugins are not
+// short-circuited: a failure in one does not skip the rest, so every plugin still runs
+// its side effects and the caller sees all failures.
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.InferenceRequest,
-	schedulingResult *fwksched.SchedulingResult) {
+	schedulingResult *fwksched.SchedulingResult) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	var errs []error
 	for _, plugin := range d.requestControlPlugins.preRequestPlugins {
 		loggerDebug.Info("Running PreRequest plugin", "plugin", plugin.TypedName())
 		before := time.Now()
-		plugin.PreRequest(ctx, request, schedulingResult)
+		err := plugin.PreRequest(ctx, request, schedulingResult)
 		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		if err != nil {
+			loggerDebug.Info("PreRequest plugin failed", "plugin", plugin.TypedName(), "error", err.Error())
+			errs = append(errs, fmt.Errorf("PreRequest %q failed: %w", plugin.TypedName().String(), err))
+			continue
+		}
 		loggerDebug.Info("Completed running PreRequest plugin successfully", "plugin", plugin.TypedName())
 	}
+	return errors.Join(errs...)
 }
 
 func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwksched.InferenceRequest) error {

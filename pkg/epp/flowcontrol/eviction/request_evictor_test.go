@@ -67,7 +67,7 @@ func TestRequestEvictor_PreRequest_CreatesEvictChannel(t *testing.T) {
 	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, &NoOpEvictor{})
 
 	ctx := context.Background()
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 
 	evictCh := re.EvictionRegistry().Get("req-1")
 	require.NotNil(t, evictCh, "EvictCh should be registered after PreRequest")
@@ -82,7 +82,7 @@ func TestRequestEvictor_ResponseBody_DeregistersEvictChannel(t *testing.T) {
 
 	ctx := context.Background()
 	request := makeInferenceRequest("req-1", -1)
-	re.PreRequest(ctx, request, makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, request, makeSchedulingResult()))
 	require.NotNil(t, re.EvictionRegistry().Get("req-1"))
 
 	re.ResponseBody(ctx, request, &requestcontrol.Response{EndOfStream: true}, nil)
@@ -97,7 +97,7 @@ func TestRequestEvictor_EvictN_ClosesEvictChannel(t *testing.T) {
 	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, evictor)
 
 	ctx := context.Background()
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 
 	evictCh := re.EvictionRegistry().Get("req-1")
 	require.NotNil(t, evictCh)
@@ -121,7 +121,7 @@ func TestRequestEvictor_EvictN_ReTracksOnFailure(t *testing.T) {
 	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, &failingEvictor{})
 
 	ctx := context.Background()
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 
 	evicted, err := re.EvictN(ctx, 1)
 	require.NoError(t, err)
@@ -140,7 +140,7 @@ func TestRequestEvictor_RaceBetweenEvictAndCompletion(t *testing.T) {
 	requests := make([]*scheduling.InferenceRequest, 10)
 	for i := range requests {
 		requests[i] = makeInferenceRequest("req-"+string(rune('a'+i)), -1)
-		re.PreRequest(ctx, requests[i], makeSchedulingResult())
+		require.NoError(t, re.PreRequest(ctx, requests[i], makeSchedulingResult()))
 	}
 
 	var wg sync.WaitGroup
@@ -176,7 +176,7 @@ func TestRequestEvictor_CtxCancellationTriggersCleanup(t *testing.T) {
 	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, evictor)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 
 	// Verify tracked.
 	assert.Equal(t, 1, re.queue.InFlightLen())
@@ -201,7 +201,7 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, evictor)
 
 	ctx := context.Background()
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 
 	// Evict to create a sync.Once entry in the evictor.
 	_, _ = re.EvictN(ctx, 1)
@@ -211,14 +211,14 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 	// We verify this indirectly: if Cleanup wasn't called, the sync.Once map would retain "req-1".
 	// Re-track and re-evict with a new channel — if the old sync.Once is still there,
 	// the new channel won't close (sync.Once already fired).
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 
 	// The ResponseBody from the first eviction fires via defer in real code.
 	// Simulate it here.
 	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
 
 	// Re-track and evict again.
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 	evictCh := re.EvictionRegistry().Get("req-1")
 	require.NotNil(t, evictCh)
 
@@ -240,7 +240,7 @@ func TestRequestEvictor_CleanupWorksWithNoOpEvictor(t *testing.T) {
 	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, &NoOpEvictor{})
 
 	ctx := context.Background()
-	re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult())
+	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
 	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
 
 	assert.Equal(t, 0, re.queue.InFlightLen())
