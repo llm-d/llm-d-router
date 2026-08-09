@@ -62,8 +62,13 @@ type algorithmParameters struct {
 }
 
 type parameters struct {
-	AttributeKey string              `json:"attributeKey"`
-	Algorithm    algorithmParameters `json:"algorithm"`
+	AttributeKey string `json:"attributeKey"`
+	// Producer names the plugin publishing the attribute. Empty selects the
+	// core metrics extractor, the only producer whose attribute names come
+	// from configuration; set it to read another producer's attribute, e.g.
+	// "dcgm-extractor".
+	Producer  string              `json:"producer"`
+	Algorithm algorithmParameters `json:"algorithm"`
 }
 
 // EndpointAttributeScorerFactory defines the factory function for EndpointAttributeScorer.
@@ -105,7 +110,7 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 
 	return &EndpointAttributeScorer{
 		typedName:     fwkplugin.TypedName{Type: EndpointAttributeScorerType, Name: name},
-		dataKey:       attrmetrics.ResolveScalarMetricAttribute(params.AttributeKey),
+		dataKey:       attrmetrics.ScalarMetricDataKey(params.AttributeKey).WithNonEmptyProducerName(params.Producer),
 		lowerIsBetter: params.Algorithm.Type == algorithmLinearLowerIsBetter,
 		fixedRange:    normalization.FixedRange,
 	}, nil

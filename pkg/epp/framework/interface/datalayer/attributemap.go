@@ -56,6 +56,7 @@ type AttributeMap interface {
 }
 
 // Attributes provides a goroutine-safe implementation of AttributeMap.
+// Put is the only writer, so every key in the map is a DataKey.
 type Attributes struct {
 	data sync.Map // key: DataKey, value: attribute value (opaque, Cloneable)
 }
@@ -97,9 +98,7 @@ func (a *Attributes) Get(key fwkplugin.DataKey) (Cloneable, bool) {
 func (a *Attributes) Keys() []fwkplugin.DataKey {
 	var keys []fwkplugin.DataKey
 	a.data.Range(func(key, _ any) bool {
-		if dk, ok := key.(fwkplugin.DataKey); ok {
-			keys = append(keys, dk)
-		}
+		keys = append(keys, key.(fwkplugin.DataKey))
 		return true
 	})
 	return keys
@@ -109,10 +108,8 @@ func (a *Attributes) Keys() []fwkplugin.DataKey {
 func (a *Attributes) Clone() AttributeMap {
 	clone := NewAttributes()
 	a.data.Range(func(key, value any) bool {
-		if dk, ok := key.(fwkplugin.DataKey); ok {
-			if v, ok := value.(Cloneable); ok {
-				clone.Put(dk, v)
-			}
+		if v, ok := value.(Cloneable); ok {
+			clone.Put(key.(fwkplugin.DataKey), v)
 		}
 		return true
 	})

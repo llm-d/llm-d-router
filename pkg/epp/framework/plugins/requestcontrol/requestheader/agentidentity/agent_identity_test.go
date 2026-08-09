@@ -257,7 +257,7 @@ func TestRequestHeader_CustomHeader(t *testing.T) {
 // resolve nothing.
 func TestAgentIdentityKeyMatchesDocumentedConfig(t *testing.T) {
 	const documented = "agent-identity"
-	if got := fwkplugin.ParseDataKey(documented, ""); got != AgentIdentityKey {
+	if got := fwkplugin.NewDataKey(documented, ""); got != AgentIdentityKey {
 		t.Errorf("config %q resolves to %s, want %s", documented, got, AgentIdentityKey)
 	}
 }

@@ -150,6 +150,9 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 
 	for _, filter := range p.filters {
 		logger.V(logutil.VERBOSE).Info("Running filter plugin", "plugin", filter.TypedName())
+		// The write violation is dropped: Filter has no error return, and Scope
+		// has already logged and rejected the write. Producers run under
+		// executePluginsAsDAG, which does fail the request on one.
 		scoped, _ := datascope.Scope(logger, filter, filteredEndpoints)
 		before := time.Now()
 		filteredEndpoints = datascope.Unscope(filter.Filter(ctx, request, scoped))
@@ -233,7 +236,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	// embeds the Scorer interface, which does not carry Produces/Consumes, so
 	// scoping the wrapper would hide every declaration the scorer makes.
 	logger := log.FromContext(ctx)
-	scoped, _ := datascope.Scope(logger, scorer.Scorer, endpoints)
+	scoped, _ := datascope.Scope(logger, scorer.Scorer, endpoints) // violation dropped: Score has no error return, see runFilterPlugins
 
 	if !tracingActive {
 		before := time.Now()

@@ -53,10 +53,9 @@ func (r *InferenceRequest) AttributeKeys() []fwkplugin.DataKey {
 	if r.attributes == nil {
 		return keys
 	}
+	// PutAttribute is the only writer, so every key is a DataKey.
 	r.attributes.Range(func(k, _ any) bool {
-		if dk, ok := k.(fwkplugin.DataKey); ok {
-			keys = append(keys, dk)
-		}
+		keys = append(keys, k.(fwkplugin.DataKey))
 		return true
 	})
 	return keys

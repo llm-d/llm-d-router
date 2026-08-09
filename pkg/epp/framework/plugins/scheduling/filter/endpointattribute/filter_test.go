@@ -274,12 +274,12 @@ func TestEndpointAttributeFilterFilter(t *testing.T) {
 	}
 }
 
-// TestFilterReadsAttributeOfNamedProducer covers the config form documented by
-// the DCGM extractor, where the attribute names a producer other than the core
-// metrics extractor. Resolving it to the wrong producer makes the filter miss
-// every endpoint and silently degrade to a no-op.
+// TestFilterReadsAttributeOfNamedProducer covers the config documented by the
+// DCGM extractor, where producer names a plugin other than the core metrics
+// extractor. Resolving to the wrong producer makes the filter miss every
+// endpoint and silently degrade to a no-op.
 func TestFilterReadsAttributeOfNamedProducer(t *testing.T) {
-	params := `{"attribute": "GPUUtilization/dcgm-extractor",
+	params := `{"attribute": "GPUUtilization", "producer": "dcgm-extractor",
 		"onMissing": "Fail",
 		"algorithm": {"type": "threshold",
 			"threshold": {"operator": "LessThan", "value": 0.8}}}`

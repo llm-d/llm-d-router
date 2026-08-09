@@ -21,7 +21,7 @@ Policies for the awkward cases:
 - **`onMissing`** — what happens to an endpoint that does not have the attribute: `Pass` keeps it (the default), `Fail` drops it.
 - **`fallbackOnEmpty`** — when every endpoint is filtered out and this is `true`, the original candidate list is returned unchanged, so the request can still be routed somewhere. Default `false`.
 
-The attribute is a numeric `ScalarMetricValue` endpoint attribute. A bare name is a custom metric of the core metrics extractor (see the [metrics extractor](../../../datalayer/extractor/metrics/README.md)); a name of the form `<attribute>/<producer>` addresses the attribute of a named producer, such as the [DCGM extractor](../../../datalayer/extractor/dcgm/README.md).
+The attribute is a numeric `ScalarMetricValue` endpoint attribute. With `producer` unset it is a custom metric of the core metrics extractor (see the [metrics extractor](../../../datalayer/extractor/metrics/README.md)); set `producer` to read the attribute of another plugin, such as the [DCGM extractor](../../../datalayer/extractor/dcgm/README.md).
 
 ## Inputs consumed
 
@@ -33,7 +33,8 @@ The plugin consumes:
 
 | Parameter                       | Required | Description                                                                              |
 |---------------------------------|----------|------------------------------------------------------------------------------------------|
-| `attribute`                     | yes      | Endpoint attribute to read. A bare name, e.g. `num_requests_running`, reads a custom metric of the core metrics extractor; a name carrying a producer, e.g. `GPUUtilization/dcgm-extractor`, reads that producer's attribute. |
+| `attribute`                     | yes      | Endpoint attribute to read, e.g. `num_requests_running`.                                  |
+| `producer`                      | no       | Plugin publishing the attribute. Defaults to the core metrics extractor; set to e.g. `dcgm-extractor` to read another producer's attribute. |
 | `onMissing`                     | no       | `Pass` (default) or `Fail` — keep or drop endpoints missing the attribute.                |
 | `fallbackOnEmpty`               | no       | When `true`, return the unfiltered candidates if every endpoint was dropped. Default `false`. |
 | `algorithm.type`                | yes      | Only `threshold` is currently supported.                                                  |

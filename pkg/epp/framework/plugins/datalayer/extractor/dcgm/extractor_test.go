@@ -27,6 +27,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
@@ -262,9 +263,8 @@ func TestProduces_DeclaresGPUUtilization(t *testing.T) {
 // endpoint-attribute-scorer expect in their YAML config. A mismatch means
 // the filter/scorer silently skip all endpoints (attribute not found).
 func TestAttributeKeyContract(t *testing.T) {
-	const expectedKey = "GPUUtilization/dcgm-extractor"
-	got := attrgpu.GPUUtilizationDataKey.String()
-	if got != expectedKey {
-		t.Errorf("GPUUtilizationDataKey.String() = %q, want %q (must match YAML attribute config)", got, expectedKey)
+	want := fwkplugin.NewDataKey("GPUUtilization", attrgpu.DCGMExtractorType)
+	if got := attrgpu.GPUUtilizationDataKey; got != want {
+		t.Errorf("GPUUtilizationDataKey = %s, want %s (must match the attribute/producer YAML config)", got, want)
 	}
 }

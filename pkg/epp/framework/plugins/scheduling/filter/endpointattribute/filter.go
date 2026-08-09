@@ -61,6 +61,11 @@ type algorithmParameters struct {
 
 type parameters struct {
 	Attribute string `json:"attribute"`
+	// Producer names the plugin publishing the attribute. Empty selects the
+	// core metrics extractor, the only producer whose attribute names come
+	// from configuration; set it to read another producer's attribute, e.g.
+	// "dcgm-extractor".
+	Producer string `json:"producer"`
 	// OnMissing decides what happens to endpoints that do not have the
 	// attribute: "Pass" keeps them (the default), "Fail" drops them.
 	OnMissing string `json:"onMissing"`
@@ -122,7 +127,7 @@ func NewEndpointAttributeFilter(name string, params parameters) (*EndpointAttrib
 
 	return &EndpointAttributeFilter{
 		typedName:       plugin.TypedName{Type: EndpointAttributeFilterType, Name: name},
-		dataKey:         attrmetrics.ResolveScalarMetricAttribute(params.Attribute),
+		dataKey:         attrmetrics.ScalarMetricDataKey(params.Attribute).WithNonEmptyProducerName(params.Producer),
 		passOnMissing:   params.OnMissing == onMissingPass,
 		fallbackOnEmpty: params.FallbackOnEmpty,
 		threshold:       *threshold,

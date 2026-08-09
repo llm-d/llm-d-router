@@ -37,7 +37,8 @@ The plugin consumes:
 
 | Parameter                                    | Required | Description                                                                    |
 |----------------------------------------------|----------|--------------------------------------------------------------------------------|
-| `attributeKey`                               | yes      | Endpoint attribute to read. A bare name, e.g. `custom.queue_depth`, reads a custom metric of the core metrics extractor; a name carrying a producer, e.g. `GPUUtilization/dcgm-extractor`, reads that producer's attribute. |
+| `attributeKey`                               | yes      | Endpoint attribute to read, e.g. `custom.queue_depth`.                          |
+| `producer`                                   | no       | Plugin publishing the attribute. Defaults to the core metrics extractor; set to e.g. `dcgm-extractor` to read another producer's attribute. |
 | `algorithm.type`                             | yes      | `linear_lower_is_better` or `linear_higher_is_better`.                          |
 | `algorithm.normalization`                    | no       | At most one strategy: `adaptiveRange` (the default) or `fixedRange`.            |
 | `algorithm.normalization.fixedRange.min/max` | no       | Bounds for `fixedRange` normalization; `min` must be less than `max`.           |

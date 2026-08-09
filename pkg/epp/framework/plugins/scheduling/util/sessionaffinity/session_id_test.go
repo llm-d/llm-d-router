@@ -398,7 +398,7 @@ type namedSessionID string
 
 func TestResolveSessionID(t *testing.T) {
 	const attr = "agent-identity"
-	attrKey := plugin.ParseDataKey(attr, "")
+	attrKey := plugin.NewDataKey(attr, "")
 
 	withHeader := func(name, value string) *scheduling.InferenceRequest {
 		return &scheduling.InferenceRequest{Headers: map[string]string{name: value}}

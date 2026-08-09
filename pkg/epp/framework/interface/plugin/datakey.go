@@ -16,10 +16,7 @@ limitations under the License.
 
 package plugin
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // DataKey uniquely identifies the data for data producer/consumer.
 type DataKey struct {
@@ -48,20 +45,4 @@ func (dk DataKey) WithNonEmptyProducerName(name string) DataKey {
 // String serializes the key to "DataType/ProducerName".
 func (dk DataKey) String() string {
 	return fmt.Sprintf("%s/%s", dk.dataType, dk.producerName)
-}
-
-// ParseDataKey inverts String. Configuration names a key as the serialized
-// form, so a plugin whose key comes from a config field can still resolve it
-// to the DataKey its producer publishes under.
-//
-// The split takes the last separator: a producer name is a plugin type, which
-// carries no separator, while a data type may be a qualified name such as
-// "llm-d.ai/multicluster-queue-size". A string with no separator has no
-// producer name and matches whatever defaultProducerName the caller supplies.
-func ParseDataKey(serialized, defaultProducerName string) DataKey {
-	idx := strings.LastIndex(serialized, "/")
-	if idx < 0 {
-		return NewDataKey(serialized, defaultProducerName)
-	}
-	return NewDataKey(serialized[:idx], serialized[idx+1:])
 }
