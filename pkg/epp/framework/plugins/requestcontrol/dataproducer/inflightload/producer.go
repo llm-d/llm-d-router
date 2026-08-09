@@ -443,9 +443,9 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		// Output tokens are based on the full input, not the cached portion.
-		// EstimateOutputFromRequest reads the OSL bucket published as a request
-		// attribute, falling back to the ratio-based estimate for UNKNOWN requests.
+		// Output tokens are independent of the prefix-cache discount that shapes
+		// adjustedInput. EstimateOutputFromRequest derives them from the OSL bucket
+		// published as a request attribute by the osl-bucket plugin.
 		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return tokens

@@ -75,8 +75,8 @@ plugins:
 ```
 
 The token estimator degrades gracefully when `osl-bucket` is absent: with no
-attribute set, every request reads as UNKNOWN and falls back to the existing
-`1.5 × ISL` estimate.
+attribute set, every request reads as UNKNOWN and uses the flat UNKNOWN output
+estimate (1,000 tokens).
 
 ## Limitations
 

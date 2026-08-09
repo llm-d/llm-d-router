@@ -34,8 +34,9 @@ type TokenEstimator interface {
 	// and the estimator's configured operator cap.
 	EstimateOutput(inputTokens int64, maxOutputTokens *int64) int64
 	// EstimateOutputFromRequest returns the estimated output token count from the
-	// OSL bucket published as a request attribute by the osl-bucket plugin,
-	// falling back to the ratio-based estimate for UNKNOWN or unclassified requests.
+	// OSL bucket published as a request attribute by the osl-bucket plugin
+	// (LONG/SHORT/UNKNOWN mapped to flat estimates), bounded by the
+	// client-requested cap.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 }
 
