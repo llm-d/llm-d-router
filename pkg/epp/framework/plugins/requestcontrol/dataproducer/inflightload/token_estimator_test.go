@@ -255,14 +255,19 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 		require.Equal(t, int64(50), e.EstimateOutputFromRequest(req))
 	})
 
-	t.Run("UNKNOWN bucket falls back to ratio-based estimate", func(t *testing.T) {
-		req := tokenizedRequest(100) // 100 input tokens, ratio 1.5 → 150 output
+	t.Run("UNKNOWN bucket → flat 1000", func(t *testing.T) {
+		req := tokenizedRequest(100)
 		req.PutAttribute(oslbucket.OSLBucketKey, oslbucket.OSLBucketUnknown)
-		require.Equal(t, int64(150), e.EstimateOutputFromRequest(req))
+		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
 
-	t.Run("missing attribute falls back to ratio-based estimate", func(t *testing.T) {
+	t.Run("missing attribute → flat 1000", func(t *testing.T) {
 		req := tokenizedRequest(100) // no osl-bucket attribute set
-		require.Equal(t, int64(150), e.EstimateOutputFromRequest(req))
+		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("UNKNOWN capped by max_output_tokens", func(t *testing.T) {
+		req := requestWithBucket(oslbucket.OSLBucketUnknown, ptr.To(int64(400)))
+		require.Equal(t, int64(400), e.EstimateOutputFromRequest(req))
 	})
 }

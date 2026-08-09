@@ -49,6 +49,13 @@ const (
 	// client's thinking_budget: the estimate exists to rank requests by load,
 	// where the LONG-vs-SHORT separation dominates, not to predict exact length.
 	longOutputEstimateTokens int64 = 4096
+	// unknownOutputEstimateTokens is the flat output-token estimate for an
+	// UNKNOWN request (no OSL signal). It sits at the midpoint of the UNKNOWN
+	// zone (500–1,999 tokens), preserving the ranking invariant
+	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
+	// TODO(osl): replace with a dynamic estimate (e.g. per-pool running average
+	// of observed CompletionTokens) in a follow-up PR.
+	unknownOutputEstimateTokens int64 = 1000
 	// shortOutputEstimateTokens is the flat output-token estimate for a SHORT
 	// (tool-call) request.
 	shortOutputEstimateTokens int64 = 100
@@ -129,10 +136,10 @@ func (e *SimpleTokenEstimator) EstimateOutput(inputTokens int64, maxOutputTokens
 
 // EstimateOutputFromRequest returns the estimated output token count from the OSL
 // bucket published by the osl-bucket plugin as a request attribute. LONG requests
-// (reasoning mode) use a flat 4096-token estimate and SHORT requests (tool-call)
-// use 100, each bounded by the client-requested cap. UNKNOWN — or a missing
-// attribute, e.g. when the osl-bucket plugin is not enabled — falls back to the
-// ratio-based EstimateOutput.
+// (reasoning mode) use a flat 4096-token estimate, SHORT requests (tool-call) use
+// 100, and UNKNOWN (or missing attribute) use 1000 — preserving the ranking
+// invariant SHORT < UNKNOWN < LONG. All values are bounded by the client-requested
+// cap.
 func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
@@ -159,12 +166,11 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 		return est
 
 	default:
-		// OSLBucketUnknown (or missing attribute): fall back to the ratio-based
-		// (1.5×ISL) estimate.
-		//
-		// TODO(osl): this fallback is known to be wrong and is only an interim
-		// default. Input and output length are near-independent in agentic
-		// workloads. A follow-up change will replace it with a better UNKNOWN estimate 
-		return e.EstimateOutput(e.EstimateInput(request), body.MaxOutputTokens)
+		// OSLBucketUnknown or missing attribute: use a flat estimate.
+		est := unknownOutputEstimateTokens
+		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
+			est = *body.MaxOutputTokens
+		}
+		return est
 	}
 }
