@@ -566,7 +566,7 @@ func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{RequestID: "req-comp-tiers"}
 	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
-	p.PreRequest(ctx, req, decodeOnly(computing))
+	_ = p.PreRequest(ctx, req, decodeOnly(computing))
 
 	// source 6 cpu blocks minus computing 5 (gpu, but local) = 1 block < delta.
 	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])

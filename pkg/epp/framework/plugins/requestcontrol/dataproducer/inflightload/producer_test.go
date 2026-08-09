@@ -956,7 +956,7 @@ func TestInFlightLoadProducer_JanitorSkipsLiveRequest(t *testing.T) {
 
 	req := makeTokenRequest("req-janitor", 4) // 4 input + 6 output = 10 tokens
 	res := makeSchedulingResult(endpointName)
-	producer.PreRequest(reqCtx, req, res)
+	_ = producer.PreRequest(reqCtx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
 
@@ -987,7 +987,7 @@ func TestInFlightLoadProducer_EndOfStreamAfterJanitorSkip(t *testing.T) {
 
 	req := makeTokenRequest("req-janitor-eos", 4)
 	res := makeSchedulingResult(endpointName)
-	producer.PreRequest(reqCtx, req, res)
+	_ = producer.PreRequest(reqCtx, req, res)
 
 	time.Sleep(150 * time.Millisecond)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID),
