@@ -87,17 +87,12 @@ type Processor struct {
 	// enqueueChan is the entry point for new requests.
 	enqueueChan chan *FlowItem
 
-	// poolEmpty caches whether the candidate pool had zero endpoints as of the most recent dispatchCycle. enqueue reads
-	// it to distinguish a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero)
-	// from one caused by backpressure against a contended but non-empty pool, and the cleanup sweep reads it to pick the
-	// queue-wait budget in force. Written by the Run goroutine and read by the sweep goroutine, hence atomic.
-	poolEmpty atomic.Bool
-
-	// regimeSinceNanos is the wall-clock time (UnixNano) at which poolEmpty last changed value, or zero if it has never
-	// changed. The cleanup sweep charges queue wait from this point rather than from enqueue time, so that a request
-	// that outlasted one regime is not shed the instant the other begins. Written by the Run goroutine and read by the
-	// sweep goroutine, hence atomic.
-	regimeSinceNanos atomic.Int64
+	// regime caches the unavailability regime observed by the most recent dispatchCycle. enqueue reads it to distinguish
+	// a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero) from one caused by
+	// backpressure against a contended but non-empty pool, and the cleanup sweep reads it to pick the queue-wait budget
+	// in force and the point to charge it from. Written only by the Run goroutine; a single pointer lets a reader load
+	// the emptiness and its timestamp as one consistent sample. Never nil.
+	regime atomic.Pointer[regimeSample]
 
 	// ceilings is the reusable output buffer handed to the UsageLimitPolicy each dispatch cycle,
 	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
@@ -113,6 +108,15 @@ type Processor struct {
 	// Written by both the main Run goroutine (enqueue, shutdown) and the runCleanupSweep goroutine (sweep),
 	// so each slot is an atomic to avoid a data race.
 	dropCounts [types.NumQueueOutcomes]atomic.Uint64
+}
+
+// regimeSample is one observation of the unavailability regime: whether the candidate pool was empty, and when that
+// answer last changed. The two travel together because a reader that mixed an emptiness from one observation with a
+// timestamp from another would charge queue wait against the wrong regime.
+type regimeSample struct {
+	empty bool
+	// since is the wall-clock time at which empty last changed value, or the zero time if it has never changed.
+	since time.Time
 }
 
 // NewProcessor creates a new Processor instance.
@@ -131,7 +135,7 @@ func NewProcessor(
 	logger logr.Logger,
 	reclamation *ReclamationController,
 ) *Processor {
-	return &Processor{
+	p := &Processor{
 		registry:             registry,
 		registryBackground:   registryBackground,
 		poolName:             poolName,
@@ -146,6 +150,10 @@ func NewProcessor(
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
 		reclamation:          reclamation,
 	}
+	// Seeded so readers never handle a nil sample. The pool reads as non-empty until the first dispatch cycle observes
+	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
+	p.regime.Store(&regimeSample{})
+	return p
 }
 
 // Submit attempts a non-blocking handoff of an item to the processor's internal enqueue channel.
@@ -320,7 +328,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 	if ok, stats := p.hasCapacity(key.Priority, req.ByteSize()); !ok {
 		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
-		if p.poolEmpty.Load() {
+		if p.regime.Load().empty {
 			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
 				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
 				"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
@@ -398,8 +406,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
-	if empty := len(pool) == 0; p.poolEmpty.Swap(empty) != empty {
-		p.regimeSinceNanos.Store(p.clock.Now().UnixNano())
+	// Run is the sole writer, so the load and the store cannot interleave with another write.
+	if empty := len(pool) == 0; empty != p.regime.Load().empty {
+		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
 	saturation := p.saturationDetector.Saturation(ctx, pool)
 
@@ -548,11 +557,7 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 // saturation budget. The regime is sampled once per sweep so that every queue decides against the same view.
 func (p *Processor) sweepFinalizedItems() {
 	now := p.clock.Now()
-	poolEmpty := p.poolEmpty.Load()
-	var regimeSince time.Time
-	if nanos := p.regimeSinceNanos.Load(); nanos > 0 {
-		regimeSince = time.Unix(0, nanos)
-	}
+	regime := p.regime.Load()
 
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
@@ -564,7 +569,7 @@ func (p *Processor) sweepFinalizedItems() {
 			if item.FinalState() != nil {
 				return true
 			}
-			outcome, expired := isExpired(item, now, regimeSince, poolEmpty, p.noEndpointRequestTTL)
+			outcome, expired := isExpired(item, now, regime, p.noEndpointRequestTTL)
 			if !expired {
 				return false
 			}
@@ -573,7 +578,7 @@ func (p *Processor) sweepFinalizedItems() {
 			// tolerates, so a queue that declines the removal costs nothing beyond a later sweep.
 			item.FinalizeWithOutcome(outcome, expiryError(outcome))
 			logger.V(logutil.TRACE).Info("Evicted item, queue-wait budget exhausted.",
-				"requestID", item.OriginalRequest().ID(), "outcome", outcome, "poolEmpty", poolEmpty)
+				"requestID", item.OriginalRequest().ID(), "outcome", outcome, "poolEmpty", regime.empty)
 			return true
 		}
 		removedItems := managedQ.Cleanup(predicate)
@@ -599,12 +604,12 @@ func (p *Processor) sweepFinalizedItems() {
 // regime change therefore starts its budget fresh.
 func isExpired(
 	item *FlowItem,
-	now, regimeSince time.Time,
-	poolEmpty bool,
+	now time.Time,
+	regime *regimeSample,
 	noEndpointRequestTTL time.Duration,
 ) (types.QueueOutcome, bool) {
 	budget, outcome := item.EffectiveTTL(), types.QueueOutcomeEvictedTTL
-	if poolEmpty {
+	if regime.empty {
 		budget, outcome = noEndpointRequestTTL, types.QueueOutcomeEvictedNoEndpoints
 	}
 	if budget <= 0 {
@@ -612,8 +617,8 @@ func isExpired(
 	}
 
 	chargeFrom := item.EnqueueTime()
-	if regimeSince.After(chargeFrom) {
-		chargeFrom = regimeSince
+	if regime.since.After(chargeFrom) {
+		chargeFrom = regime.since
 	}
 	return outcome, !now.Before(chargeFrom.Add(budget))
 }

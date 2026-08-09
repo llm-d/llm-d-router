@@ -625,7 +625,7 @@ func TestProcessor(t *testing.T) {
 						h.addQueue(testFlow)
 						// Pool scaled to zero: the queue acts as a scale-from-zero waiting room.
 						h.endpointCandidates.Candidates = nil
-						// Prime poolEmpty via a dispatch cycle, mirroring the Run loop's periodic dispatch.
+						// Prime the regime via a dispatch cycle, mirroring the Run loop's periodic dispatch.
 						h.processor.dispatchCycle(context.Background())
 						h.StatsFunc = func() contracts.AggregateStats {
 							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
@@ -1691,7 +1691,8 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 				}
 
 				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base)
-				outcome, expired := isExpired(item, base.Add(tc.elapsed), regimeSince, tc.poolEmpty, noEndpoint)
+				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
+				outcome, expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 
 				assert.Equal(t, tc.wantOutcome, outcome, "expiry should be attributed to the regime in force")
 				assert.Equal(t, tc.wantExpired, expired, "the budget in force decides whether the request is shed")
@@ -1704,7 +1705,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 		// --- ARRANGE ---
 		h := newTestHarness(t, testCleanupTick)
 		h.processor.noEndpointRequestTTL = noEndpointTTL
-		h.processor.poolEmpty.Store(true)
+		h.processor.regime.Store(&regimeSample{empty: true})
 
 		item := h.newTestItem("req-cold-start", testFlow, testShortTTL)
 		q := h.addQueue(testFlow)
@@ -1718,8 +1719,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 		assert.Equal(t, 1, q.Len(), "the item should still be queued")
 
 		// The pool comes up. The request only now became dispatchable, so it gets a fresh saturation budget.
-		h.processor.poolEmpty.Store(false)
-		h.processor.regimeSinceNanos.Store(h.clock.Now().UnixNano())
+		h.processor.regime.Store(&regimeSample{empty: false, since: h.clock.Now()})
 		h.processor.sweepFinalizedItems()
 		assert.Nil(t, item.FinalState(), "a request must not be shed the moment it becomes dispatchable")
 
@@ -1736,7 +1736,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 		// --- ARRANGE ---
 		h := newTestHarness(t, testCleanupTick)
 		h.processor.noEndpointRequestTTL = testShortTTL
-		h.processor.poolEmpty.Store(true)
+		h.processor.regime.Store(&regimeSample{empty: true})
 
 		// The saturation budget is long; only the no-endpoint budget can shed this request.
 		item := h.newTestItem("req-no-endpoints", testFlow, testTTL)
@@ -1770,21 +1770,21 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 		// --- ACT & ASSERT ---
 		// The harness pool is non-empty; the first cycle establishes the regime without recording a change.
 		h.processor.dispatchCycle(ctx)
-		assert.False(t, h.processor.poolEmpty.Load(), "the harness pool starts non-empty")
-		assert.Zero(t, h.processor.regimeSinceNanos.Load(), "settling on the initial regime is not a change")
+		assert.False(t, h.processor.regime.Load().empty, "the harness pool starts non-empty")
+		assert.Zero(t, h.processor.regime.Load().since, "settling on the initial regime is not a change")
 
 		// The pool scales to zero.
 		h.clock.Step(testShortTTL)
 		h.endpointCandidates.Candidates = nil
 		h.processor.dispatchCycle(ctx)
-		require.True(t, h.processor.poolEmpty.Load(), "the pool should now read as empty")
-		scaledDown := h.processor.regimeSinceNanos.Load()
-		assert.Equal(t, h.clock.Now().UnixNano(), scaledDown, "the regime change should be timestamped")
+		require.True(t, h.processor.regime.Load().empty, "the pool should now read as empty")
+		scaledDown := h.processor.regime.Load().since
+		assert.Equal(t, h.clock.Now(), scaledDown, "the regime change should be timestamped")
 
 		// A cycle that does not change the regime leaves the timestamp alone, so the budget keeps running.
 		h.clock.Step(testShortTTL)
 		h.processor.dispatchCycle(ctx)
-		assert.Equal(t, scaledDown, h.processor.regimeSinceNanos.Load(),
+		assert.Equal(t, scaledDown, h.processor.regime.Load().since,
 			"an unchanged regime must not restart the budget")
 	})
 }
