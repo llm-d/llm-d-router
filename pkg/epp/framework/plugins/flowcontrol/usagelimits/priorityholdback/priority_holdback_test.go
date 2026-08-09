@@ -598,7 +598,8 @@ func TestPolicyFactory_ExplicitDomain(t *testing.T) {
 func TestComputeLimitExplicit_TwoPriorities(t *testing.T) {
 	t.Parallel()
 	m := map[int]float64{100: 0.95, 10: 0.30}
-	ceilings := computeLimitExplicit(context.Background(), m, []int{100, 10})
+	ceilings := make([]float64, 2)
+	computeLimitExplicit(context.Background(), m, []int{100, 10}, ceilings)
 	require.Len(t, ceilings, 2)
 	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.30, ceilings[1], 1e-9)
@@ -607,7 +608,8 @@ func TestComputeLimitExplicit_TwoPriorities(t *testing.T) {
 func TestComputeLimitExplicit_ThreePriorities(t *testing.T) {
 	t.Parallel()
 	m := map[int]float64{100: 0.95, 50: 0.70, 10: 0.30}
-	ceilings := computeLimitExplicit(context.Background(), m, []int{100, 50, 10})
+	ceilings := make([]float64, 3)
+	computeLimitExplicit(context.Background(), m, []int{100, 50, 10}, ceilings)
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.70, ceilings[1], 1e-9)
@@ -617,7 +619,8 @@ func TestComputeLimitExplicit_ThreePriorities(t *testing.T) {
 func TestComputeLimitExplicit_SinglePriority(t *testing.T) {
 	t.Parallel()
 	m := map[int]float64{100: 0.80}
-	ceilings := computeLimitExplicit(context.Background(), m, []int{100})
+	ceilings := make([]float64, 1)
+	computeLimitExplicit(context.Background(), m, []int{100}, ceilings)
 	require.Len(t, ceilings, 1)
 	assert.InDelta(t, 0.80, ceilings[0], 1e-9)
 }
@@ -634,7 +637,7 @@ func TestComputeLimit_ExplicitDomain_SinglePriority(t *testing.T) {
 		ceilings: map[int]float64{100: 0.80},
 	})
 
-	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{100})
+	ceilings := computeLimits(t, policy, 0.5, []int{100})
 	require.Len(t, ceilings, 1)
 	assert.InDelta(t, 0.80, ceilings[0], 1e-9,
 		"explicit domain single priority should return the configured ceiling, not cMax")
@@ -647,7 +650,7 @@ func TestComputeLimit_ExplicitDomain_MultiplePriorities(t *testing.T) {
 		ceilings: map[int]float64{100: 0.95, 50: 0.70, 10: 0.30},
 	})
 
-	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{100, 50, 10})
+	ceilings := computeLimits(t, policy, 0.5, []int{100, 50, 10})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 0.95, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.70, ceilings[1], 1e-9)
@@ -661,9 +664,8 @@ func TestComputeLimit_ExplicitDomain_EmptyPriorities(t *testing.T) {
 		ceilings: map[int]float64{100: 0.95},
 	})
 
-	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{})
+	ceilings := computeLimits(t, policy, 0.5, []int{})
 	assert.Empty(t, ceilings)
-	assert.NotNil(t, ceilings, "should return empty slice, not nil")
 }
 
 func TestPriorityHoldbackPolicy_ValidateConfig(t *testing.T) {
