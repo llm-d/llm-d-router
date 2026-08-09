@@ -169,7 +169,7 @@ func (m *mockAdmissionPlugin) Admit(ctx context.Context, request *fwksched.Infer
 
 type mockRequestHeaderPlugin struct {
 	name           string
-	attributeKey   string
+	attributeKey   fwkplugin.DataKey
 	attributeValue string
 }
 

@@ -42,6 +42,16 @@ func ScalarMetricDataKey(attributeKey string) plugin.DataKey {
 	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
 }
 
+// ResolveScalarMetricAttribute resolves an attribute named in configuration to
+// the key it is published under. A name that carries a producer -- the
+// serialized form, e.g. "GPUUtilization/dcgm-extractor" -- addresses that
+// producer's scalar attribute; a bare name addresses a custom scalar metric of
+// the core metrics extractor, which is the only producer that takes its
+// attribute names from configuration.
+func ResolveScalarMetricAttribute(configured string) plugin.DataKey {
+	return plugin.ParseDataKey(configured, MetricsExtractorType)
+}
+
 func ReadScalarMetricValue(attrs fwkdl.AttributeMap, key plugin.DataKey) (ScalarMetricValue, bool) {
 	return fwkdl.ReadAttribute[ScalarMetricValue](attrs, key)
 }

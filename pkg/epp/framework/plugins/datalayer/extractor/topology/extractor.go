@@ -139,6 +139,14 @@ func (e *TopologyExtractor) TypedName() fwkplugin.TypedName {
 	return e.typedName
 }
 
+var _ fwkplugin.ProducerPlugin = &TopologyExtractor{}
+
+// Produces declares the Topology attribute both of this extractor's handlers
+// publish.
+func (e *TopologyExtractor) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{e.dk: attrtopology.Topology{}}
+}
+
 // RegisterDependencies wires this extractor to both an endpoint source and a Pod
 // notification source. Both sources are auto-created if absent from user config.
 func (e *TopologyExtractor) RegisterDependencies(r fwkdl.Registrar) error {

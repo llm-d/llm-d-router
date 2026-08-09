@@ -27,6 +27,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 )
 
@@ -271,4 +272,36 @@ func TestEndpointAttributeFilterFilter(t *testing.T) {
 			assert.Equal(t, want, got)
 		})
 	}
+}
+
+// TestFilterReadsAttributeOfNamedProducer covers the config form documented by
+// the DCGM extractor, where the attribute names a producer other than the core
+// metrics extractor. Resolving it to the wrong producer makes the filter miss
+// every endpoint and silently degrade to a no-op.
+func TestFilterReadsAttributeOfNamedProducer(t *testing.T) {
+	params := `{"attribute": "GPUUtilization/dcgm-extractor",
+		"onMissing": "Fail",
+		"algorithm": {"type": "threshold",
+			"threshold": {"operator": "LessThan", "value": 0.8}}}`
+
+	plug, err := EndpointAttributeFilterFactory("gpu", json.NewDecoder(strings.NewReader(params)), nil)
+	require.NoError(t, err)
+	filter := plug.(*EndpointAttributeFilter)
+
+	assert.Equal(t, attrgpu.GPUUtilizationDataKey, filter.dataKey,
+		"configured attribute must resolve to the key the DCGM extractor publishes")
+
+	attrs := fwkdl.NewAttributes()
+	attrs.Put(attrgpu.GPUUtilizationDataKey, attrmetrics.ScalarMetricValue(0.5))
+	busy := fwkdl.NewAttributes()
+	busy.Put(attrgpu.GPUUtilizationDataKey, attrmetrics.ScalarMetricValue(0.95))
+
+	endpoints := []scheduling.Endpoint{
+		scheduling.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, attrs),
+		scheduling.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, busy),
+	}
+
+	kept := filter.Filter(context.Background(), nil, endpoints)
+	require.Len(t, kept, 1, "only the idle GPU endpoint should survive")
+	assert.Equal(t, endpoints[0], kept[0])
 }

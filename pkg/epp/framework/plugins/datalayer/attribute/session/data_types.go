@@ -40,6 +40,6 @@ type SessionID string
 // future change of storage location or value type does not ripple through
 // every reader.
 func ReadSessionID(r *fwksched.InferenceRequest) (SessionID, bool) {
-	key := SessionIDDataKey.WithNonEmptyProducerName(sessionidconstants.SessionIDProducerType).String()
+	key := SessionIDDataKey.WithNonEmptyProducerName(sessionidconstants.SessionIDProducerType)
 	return fwksched.ReadRequestAttribute[SessionID](r, key)
 }

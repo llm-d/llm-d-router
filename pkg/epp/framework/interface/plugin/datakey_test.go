@@ -51,3 +51,47 @@ func TestDataKey_String(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDataKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		serialized string
+		defaultTo  string
+		expected   DataKey
+	}{
+		{
+			name:       "serialized form addresses the named producer",
+			serialized: "GPUUtilization/dcgm-extractor",
+			defaultTo:  "core-metrics-extractor",
+			expected:   NewDataKey("GPUUtilization", "dcgm-extractor"),
+		},
+		{
+			name:       "bare name falls back to the default producer",
+			serialized: "num_requests_running",
+			defaultTo:  "core-metrics-extractor",
+			expected:   NewDataKey("num_requests_running", "core-metrics-extractor"),
+		},
+		{
+			name:       "qualified data type keeps its separator",
+			serialized: "llm-d.ai/multicluster-queue-size/",
+			defaultTo:  "core-metrics-extractor",
+			expected:   NewDataKey("llm-d.ai/multicluster-queue-size", ""),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, ParseDataKey(tt.serialized, tt.defaultTo))
+		})
+	}
+}
+
+func TestParseDataKey_RoundTripsString(t *testing.T) {
+	for _, key := range []DataKey{
+		NewDataKey("GPUUtilization", "dcgm-extractor"),
+		NewDataKey("llm-d.ai/multicluster-queue-size", ""),
+		NewDataKey("PrefixCacheMatchInfo", "approximate-prefix-cache-producer"),
+	} {
+		assert.Equal(t, key, ParseDataKey(key.String(), "unused"), "key %s must survive a String/Parse round trip", key)
+	}
+}

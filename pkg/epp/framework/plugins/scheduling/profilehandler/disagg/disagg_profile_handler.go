@@ -66,7 +66,7 @@ func ParseStageOrder(s string) (StageOrder, error) {
 // (the decode pick in decode-first mode, or the prefill pick in prefill-first mode),
 // for plugins in a later profile to compare against (e.g. topology affinity).
 // The value is an Endpoint.
-const PeerEndpointAttributeKey = "peer-endpoint"
+var PeerEndpointAttributeKey = plugin.NewDataKey("peer-endpoint", DisaggProfileHandlerType)
 
 // ── Factory & constructor ────────────────────────────────────────────────────
 

@@ -193,10 +193,15 @@ func (s *SessionIDHeader) resolveSessionID(ctx context.Context, request *schedul
 	return ""
 }
 
-// attributeString reads a request attribute as a string. Producers store their
-// identifier under a named string type (e.g. session.SessionID), so a plain
-// string type assertion would miss them; any value of string kind is accepted.
-func attributeString(ctx context.Context, request *scheduling.InferenceRequest, key string) (string, bool) {
+// attributeString reads a request attribute as a string. The source names the
+// attribute in configuration, so the name is resolved to the key its producer
+// publishes under: "agent-identity" addresses a producer-agnostic key, while
+// "SessionIDDataKey/session-id-producer" addresses one producer's. Producers
+// store their identifier under a named string type (e.g. session.SessionID),
+// so a plain string type assertion would miss them; any value of string kind
+// is accepted.
+func attributeString(ctx context.Context, request *scheduling.InferenceRequest, configured string) (string, bool) {
+	key := plugin.ParseDataKey(configured, "")
 	v, ok := request.GetAttribute(key)
 	if !ok {
 		return "", false
@@ -204,7 +209,7 @@ func attributeString(ctx context.Context, request *scheduling.InferenceRequest, 
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.String {
 		log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - attribute is not a string, skipping source",
-			"attribute", key)
+			"attribute", key.String())
 		return "", false
 	}
 	return rv.String(), true

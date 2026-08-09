@@ -105,7 +105,7 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 
 	return &EndpointAttributeScorer{
 		typedName:     fwkplugin.TypedName{Type: EndpointAttributeScorerType, Name: name},
-		attributeKey:  params.AttributeKey,
+		dataKey:       attrmetrics.ResolveScalarMetricAttribute(params.AttributeKey),
 		lowerIsBetter: params.Algorithm.Type == algorithmLinearLowerIsBetter,
 		fixedRange:    normalization.FixedRange,
 	}, nil
@@ -117,7 +117,7 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 // range computed across the candidates.
 type EndpointAttributeScorer struct {
 	typedName     fwkplugin.TypedName
-	attributeKey  string
+	dataKey       fwkplugin.DataKey
 	lowerIsBetter bool
 	// fixedRange selects fixed-range normalization when set; adaptive-range
 	// normalization is used otherwise.
@@ -135,9 +135,11 @@ func (s *EndpointAttributeScorer) Category() fwksched.ScorerCategory {
 }
 
 // Consumes returns the list of data that is consumed by the plugin.
-func (s *EndpointAttributeScorer) Consumes() map[string]any {
-	return map[string]any{
-		s.attributeKey: attrmetrics.ScalarMetricValue(0),
+func (s *EndpointAttributeScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Optional: map[fwkplugin.DataKey]any{
+			s.dataKey: attrmetrics.ScalarMetricValue(0),
+		},
 	}
 }
 
@@ -155,7 +157,7 @@ func (s *EndpointAttributeScorer) Score(_ context.Context, _ *fwksched.Inference
 func (s *EndpointAttributeScorer) scoreFixedRange(endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, attrmetrics.ScalarMetricDataKey(s.attributeKey))
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.dataKey)
 		if !ok {
 			scores[endpoint] = 0.0
 			continue
@@ -180,7 +182,7 @@ func (s *EndpointAttributeScorer) scoreAdaptiveRange(endpoints []fwksched.Endpoi
 	maxValue := math.Inf(-1)
 
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, attrmetrics.ScalarMetricDataKey(s.attributeKey))
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.dataKey)
 		if !ok {
 			continue
 		}

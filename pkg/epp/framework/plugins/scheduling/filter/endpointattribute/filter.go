@@ -122,7 +122,7 @@ func NewEndpointAttributeFilter(name string, params parameters) (*EndpointAttrib
 
 	return &EndpointAttributeFilter{
 		typedName:       plugin.TypedName{Type: EndpointAttributeFilterType, Name: name},
-		attribute:       params.Attribute,
+		dataKey:         attrmetrics.ResolveScalarMetricAttribute(params.Attribute),
 		passOnMissing:   params.OnMissing == onMissingPass,
 		fallbackOnEmpty: params.FallbackOnEmpty,
 		threshold:       *threshold,
@@ -135,7 +135,7 @@ func NewEndpointAttributeFilter(name string, params parameters) (*EndpointAttrib
 // configured threshold are kept.
 type EndpointAttributeFilter struct {
 	typedName plugin.TypedName
-	attribute string
+	dataKey   plugin.DataKey
 	// passOnMissing keeps endpoints that do not have the attribute instead of
 	// dropping them.
 	passOnMissing bool
@@ -150,10 +150,14 @@ func (f *EndpointAttributeFilter) TypedName() plugin.TypedName {
 	return f.typedName
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (f *EndpointAttributeFilter) Consumes() map[string]any {
-	return map[string]any{
-		f.attribute: attrmetrics.ScalarMetricValue(0),
+// Consumes declares the configured attribute as optional: the producer is
+// selected in configuration, so a missing one is handled by the onMissing
+// policy rather than rejected at init time.
+func (f *EndpointAttributeFilter) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Optional: map[plugin.DataKey]any{
+			f.dataKey: attrmetrics.ScalarMetricValue(0),
+		},
 	}
 }
 
@@ -164,7 +168,7 @@ func (f *EndpointAttributeFilter) Consumes() map[string]any {
 func (f *EndpointAttributeFilter) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filtered := make([]scheduling.Endpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, attrmetrics.ScalarMetricDataKey(f.attribute))
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, f.dataKey)
 		if !ok {
 			if f.passOnMissing {
 				filtered = append(filtered, endpoint)

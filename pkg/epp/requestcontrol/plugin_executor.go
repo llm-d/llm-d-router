@@ -24,6 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/datascope"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -35,12 +36,15 @@ import (
 func executePluginsAsDAG(ctx context.Context, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx)
 	for _, plugin := range plugins {
-		scoped := scopeEndpoints(logger, plugin, endpoints)
+		scoped, violation := datascope.Scope(logger, plugin, endpoints)
 		before := time.Now()
 		err := plugin.Produce(ctx, request, scoped)
 		metrics.RecordPluginProcessingLatency(fwkrc.DataProducerExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		if err != nil {
 			return fmt.Errorf("DataProducer %q failed: %w", plugin.TypedName().String(), err)
+		}
+		if *violation != nil {
+			return fmt.Errorf("DataProducer %q failed: %w", plugin.TypedName().String(), *violation)
 		}
 	}
 	return nil
