@@ -118,7 +118,7 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	require.False(t, ok)
 
 	// 2. Produce with request -> should put UncachedRequestTokens
-	req := makeTokenRequest("req1", 4) // 4 input tokens -> 10 total (with output)
+	req := makeTokenRequest("req1", 4) // 4 input + 1000 output (UNKNOWN) = 1004 total
 	err = producer.Produce(context.Background(), req, endpoints)
 
 	require.NoError(t, err)
@@ -126,7 +126,7 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	val, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
 	require.True(t, ok)
 	uncached := val.(*attrconcurrency.UncachedRequestTokens)
-	require.Equal(t, int64(10), uncached.Tokens)
+	require.Equal(t, int64(1004), uncached.Tokens)
 
 	// Verify that InFlightLoad was NOT put/overwritten by Produce
 	_, ok = endpoint.Get(producer.dk.String())
@@ -181,12 +181,12 @@ func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest (Inc)
-	req := makeTokenRequest("req1", 4) // 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req1", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// 2. ResponseBody EndOfStream (Dec)
 	req.SchedulingResult = res
@@ -341,11 +341,11 @@ func TestInFlightLoadProducer_FlapDoesNotUnderflow(t *testing.T) {
 		},
 		{
 			name:                     "token counter, EndOfStream eviction",
-			addEstimatedOutputTokens: true, // 4 input + 6 estimated output = 10 tokens per request
+			addEstimatedOutputTokens: true, // 4 input + 1000 estimated output (UNKNOWN) = 1004 tokens per request
 			release:                  requestcontrol.Response{EndOfStream: true},
 			read:                     tokens,
 			inputA:                   4, inputB: 4,
-			liveAfterA: 10, liveAfterB: 10, liveAfterReleaseA: 10,
+			liveAfterA: 1004, liveAfterB: 1004, liveAfterReleaseA: 1004,
 		},
 		{
 			name:    "token counter, StartOfStream early release",
@@ -701,10 +701,10 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	endpointName := "prefix-cache-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// 8 input tokens. Output = 8 * 1.5 = 12.
+	// 8 input tokens. Output = 1000 (UNKNOWN flat).
 	// With block_size=4, total=2 blocks, matched=1 block (4 tokens cached):
 	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
-	//   total tokens = 4 + 12 = 16
+	//   total tokens = 4 + 1000 = 1004
 	endpoint := newStubSchedulingEndpoint(endpointName)
 	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 
@@ -718,8 +718,8 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 
 	producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(16), producer.tokenTracker.get(endpointID),
-		"only uncached input (4) plus output (12) should be tracked")
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID),
+		"only uncached input (4) plus output (1000) should be tracked")
 
 	// Release uses the exact stored value, returning to zero.
 	req.SchedulingResult = res
@@ -742,7 +742,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	idA := fullEndpointName(podA)
 	idB := fullEndpointName(podB)
 
-	// 8 input tokens, output 12.
+	// 8 input tokens, output 1000 (UNKNOWN flat).
 	epA := newStubSchedulingEndpoint(podA)
 	epA.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
 	epB := newStubSchedulingEndpoint(podB)
@@ -758,8 +758,8 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	}
 
 	producer.PreRequest(ctx, req, res)
-	require.Equal(t, int64(0+12), producer.tokenTracker.get(idA), "fully cached: only output tokens")
-	require.Equal(t, int64(8+12), producer.tokenTracker.get(idB), "uncached: input + output")
+	require.Equal(t, int64(0+1000), producer.tokenTracker.get(idA), "fully cached: only output tokens")
+	require.Equal(t, int64(8+1000), producer.tokenTracker.get(idB), "uncached: input + output")
 
 	// Drive the response lifecycle: StartOfStream releases prefill, EndOfStream releases decode.
 	req.SchedulingResult = res
@@ -783,8 +783,8 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	endpointName := "shared-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// 4 input tokens, 6 output, total 10 tokens per profile.
-	// Two profiles both targeting the same endpoint => 2 requests, 20 tokens.
+	// 4 input + 1000 output (UNKNOWN) = 1004 tokens per profile.
+	// Two profiles both targeting the same endpoint => 2 requests, 2008 tokens.
 	req := makeTokenRequest("req-shared", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
@@ -796,13 +796,13 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 
 	producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(2), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(20), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(2008), producer.tokenTracker.get(endpointID))
 
-	// StartOfStream releases the prefill profile only (1 request, 10 tokens).
+	// StartOfStream releases the prefill profile only (1 request, 1004 tokens).
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// EndOfStream releases the remaining (decode) profile.
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
@@ -860,12 +860,12 @@ func TestInFlightLoadProducer_Eviction(t *testing.T) {
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest: Adds load
-	req := makeTokenRequest("req-eviction", 4) // 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req-eviction", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// 2. Explicitly delete the request (simulates what the janitor or EOS cleanup does).
 	producer.PluginState.Delete(req.RequestID)
@@ -909,12 +909,12 @@ func TestInFlightLoadProducer_LateResponseAfterReap(t *testing.T) {
 	endpointName := "late-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-late", 4) // 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req-late", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
 
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// Simulate janitor reap
 	producer.PluginState.Delete(req.RequestID)
@@ -935,13 +935,13 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	endpointName := "race-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-race", 4) // 4 input + 6 output = 10 tokens
+	req := makeTokenRequest("req-race", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
 	res := makeSchedulingResult(endpointName)
 	producer.PreRequest(ctx, req, res)
-	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
 
 	// Fire releaseTokensEarly and an explicit Delete concurrently. Whichever
-	// wins the Swap does the -10; the other is a no-op. Net must be 0.
+	// wins the Swap does the -1004; the other is a no-op. Net must be 0.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
