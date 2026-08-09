@@ -86,6 +86,10 @@ attribute is absent.
 | `topologyProducerName`   | no       | default producer | `topology-extractor` instance to read the `Topology` attribute from. |
 | `peerTopologyHeader`     | no       | unset   | Request header carrying the peer topology in coordinator deployments. Set to `x-peer-topology` when running in a decode EPP behind the coordinator; unused in single-EPP deployments. |
 
+The plugin trusts `peerTopologyHeader` without re-verifying its source. Only set it on a
+profile reachable exclusively through the coordinator's forwarded header; a decode EPP
+reachable directly by a client would let that client spoof its own peer topology.
+
 **Configuration Example, single EPP:**
 ```yaml
 plugins:

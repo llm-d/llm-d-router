@@ -37,7 +37,9 @@ const PluginType = "topology-stamp-handler"
 
 // defaultHeaderName is the response header the encoded topology is written
 // to, and the header topology-affinity-filter/-scorer read the peer topology
-// from in coordinator deployments.
+// from in coordinator deployments. Must match gateway.PeerTopologyHeader in
+// pkg/coordinator/gateway and peerTopologyHeaderName in
+// pkg/epp/util/request/headers.go.
 const defaultHeaderName = "x-peer-topology"
 
 type parameters struct {

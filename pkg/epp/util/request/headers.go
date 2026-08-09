@@ -28,7 +28,10 @@ import (
 // peerTopologyHeaderName is the coordinator's cross-EPP header carrying the
 // prefill endpoint's topology to the decode EPP. A client-supplied value must
 // not reach the backend, since topology-affinity-filter and
-// topology-affinity-scorer trust it as the peer to compare against.
+// topology-affinity-scorer trust it as the peer to compare against. Must
+// match gateway.PeerTopologyHeader in pkg/coordinator/gateway and
+// defaultHeaderName in
+// pkg/epp/framework/plugins/requestcontrol/responsereceived/topologystamp.
 const peerTopologyHeaderName = "x-peer-topology"
 
 var (

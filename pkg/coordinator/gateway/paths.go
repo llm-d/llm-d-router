@@ -23,7 +23,10 @@ const (
 	PathCompletions     = "/v1/completions"
 	DefaultGeneratePath = "/inference/v1/generate"
 
-	EPPProfileHeader   = "EPP-Profile"
+	EPPProfileHeader = "EPP-Profile"
+	// PeerTopologyHeader must match the default headerName in
+	// pkg/epp/framework/plugins/requestcontrol/responsereceived/topologystamp
+	// and peerTopologyHeaderName in pkg/epp/util/request/headers.go.
 	PeerTopologyHeader = "x-peer-topology"
 	ContentTypeHeader  = "Content-Type"
 	ContentTypeJSON    = "application/json"
