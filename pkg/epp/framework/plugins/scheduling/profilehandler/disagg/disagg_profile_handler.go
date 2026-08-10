@@ -424,6 +424,15 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 ) map[string]scheduling.SchedulerProfile {
 	// If decode has already run, we are done.
 	if _, decodeExecuted := profileResults[h.decodeProfile]; decodeExecuted {
+		decodeRes := profileResults[h.decodeProfile]
+		if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
+			span.SetAttributes(
+				attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+				attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
+			)
+			return map[string]scheduling.SchedulerProfile{}
+		}
+
 		encodeUsed := profileResults[h.encodeProfile] != nil
 		prefillUsed := profileResults[h.prefillProfile] != nil
 
@@ -434,15 +443,11 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	}
 
 	// ── Stage 1: Prefill (optional) ────────────────────────────────────────
+	// In prefill-first mode, prefill runs whenever the prefill profile is configured.
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
-			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, nil) {
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
-				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
-			}
-			// Decider rejected prefill (or pdDecider is nil) - mark as evaluated so we don't re-run.
-			profileResults[h.prefillProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
+			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
+			return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 		}
 	}
 

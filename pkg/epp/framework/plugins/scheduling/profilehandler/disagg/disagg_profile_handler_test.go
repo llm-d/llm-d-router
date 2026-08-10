@@ -137,8 +137,8 @@ func handleWithDeciders(ctx context.Context) plugin.Handle {
 	h := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 	p1, _ := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
 	h.AddPlugin(PrefixBasedPDDeciderPluginType, p1)
-	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, newAlwaysDisaggPDDecider())
-	h.AddPlugin(AlwaysDisaggMulimodalPluginType, newAlwaysDisaggEncodeDecider())
+	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, NewAlwaysDisaggPDDecider())
+	h.AddPlugin(AlwaysDisaggMulimodalPluginType, NewAlwaysDisaggEncodeDecider())
 	return h
 }
 
@@ -616,7 +616,7 @@ func TestHandler_Pick_CustomProfiles(t *testing.T) {
 
 	h := NewDisaggProfileHandler(
 		customDecodeProfile, customPrefillProfile, customEncodeProfile,
-		decider, newAlwaysDisaggEncodeDecider(),
+		decider, NewAlwaysDisaggEncodeDecider(),
 	)
 
 	// Stage 1: decode not run → run decode
@@ -734,7 +734,7 @@ func TestHandler_Pick_EPD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, newAlwaysDisaggEncodeDecider())
+			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, NewAlwaysDisaggEncodeDecider())
 			got := h.Pick(ctx, tt.req, profiles, tt.results)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
@@ -833,7 +833,7 @@ func TestHandler_ProcessResults_EPD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, newAlwaysDisaggEncodeDecider())
+			h := NewDisaggProfileHandler(defaultDecodeProfile, "", defaultEncodeProfile, nil, NewAlwaysDisaggEncodeDecider())
 			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -948,7 +948,7 @@ func TestHandler_Pick_EPD_Full(t *testing.T) {
 
 			h := NewDisaggProfileHandler(
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
-				decider, newAlwaysDisaggEncodeDecider(),
+				decider, NewAlwaysDisaggEncodeDecider(),
 			)
 
 			inputTokens := 0
@@ -1067,7 +1067,7 @@ func TestHandler_ProcessResults_EPD_Full(t *testing.T) {
 			decider, _ := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{})
 			h := NewDisaggProfileHandler(
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
-				decider, newAlwaysDisaggEncodeDecider(),
+				decider, NewAlwaysDisaggEncodeDecider(),
 			)
 			res, err := h.ProcessResults(context.Background(), &scheduling.InferenceRequest{}, tt.results)
 			if tt.expectErr {
@@ -1126,7 +1126,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		{
 			name:          "pdDecider nil, encodeDecider present, multimodal → run encode",
 			pdDecider:     nil,
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			req:           multimodalLong,
 			results: map[string]*scheduling.ProfileRunResult{
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
@@ -1137,7 +1137,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		{
 			name:          "pdDecider nil, encodeDecider present, encode done → skip prefill",
 			pdDecider:     nil,
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			req:           multimodalLong,
 			results: map[string]*scheduling.ProfileRunResult{
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
@@ -1148,7 +1148,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		},
 		{
 			name:          "encodeDecider nil, pdDecider present, text-only → run prefill",
-			pdDecider:     newAlwaysDisaggPDDecider(),
+			pdDecider:     NewAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			req:           completionsRequest(testLongPrompt),
 			results: map[string]*scheduling.ProfileRunResult{
@@ -1159,7 +1159,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		},
 		{
 			name:          "encodeDecider nil, pdDecider present, multimodal → skip encode, run prefill",
-			pdDecider:     newAlwaysDisaggPDDecider(),
+			pdDecider:     NewAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			req:           multimodalLong,
 			results: map[string]*scheduling.ProfileRunResult{
@@ -1216,7 +1216,7 @@ func TestHandler_ProcessResults_NilDeciders(t *testing.T) {
 		{
 			name:          "pdDecider nil, encode ran successfully",
 			pdDecider:     nil,
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			results: map[string]*scheduling.ProfileRunResult{
 				defaultDecodeProfile: makeProfileRunResult("pod1"),
 				defaultEncodeProfile: makeProfileRunResult("pod2"),
@@ -1230,7 +1230,7 @@ func TestHandler_ProcessResults_NilDeciders(t *testing.T) {
 		},
 		{
 			name:          "encodeDecider nil, prefill ran successfully",
-			pdDecider:     newAlwaysDisaggPDDecider(),
+			pdDecider:     NewAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			results: map[string]*scheduling.ProfileRunResult{
 				defaultDecodeProfile:  makeProfileRunResult("pod1"),
@@ -1543,41 +1543,30 @@ func TestHandler_Pick_PrefillFirst_PD(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		pdDecider      deciderPlugin
 		profileResults map[string]*scheduling.ProfileRunResult
 		want           []string
 	}{
 		{
-			name:           "prefill not run, decider approves → run prefill",
-			pdDecider:      newAlwaysDisaggPDDecider(),
+			name:           "prefill not run → run prefill",
 			profileResults: map[string]*scheduling.ProfileRunResult{},
 			want:           []string{defaultPrefillProfile},
 		},
 		{
-			name:      "prefill done → run decode",
-			pdDecider: newAlwaysDisaggPDDecider(),
+			name: "prefill done → run decode",
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			},
 			want: []string{defaultDecodeProfile},
 		},
 		{
-			name:      "prefill failed (nil) → run decode",
-			pdDecider: newAlwaysDisaggPDDecider(),
+			name: "prefill failed (nil) → run decode",
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: nil,
 			},
 			want: []string{defaultDecodeProfile},
 		},
 		{
-			name:           "prefill decider nil → skip prefill, run decode",
-			pdDecider:      nil,
-			profileResults: map[string]*scheduling.ProfileRunResult{},
-			want:           []string{defaultDecodeProfile},
-		},
-		{
-			name:      "decode done → done",
-			pdDecider: newAlwaysDisaggPDDecider(),
+			name: "decode done → done",
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 				defaultDecodeProfile:  makeProfileRunResult("pod2"),
@@ -1585,11 +1574,18 @@ func TestHandler_Pick_PrefillFirst_PD(t *testing.T) {
 			want: []string{},
 		},
 		{
-			name:      "decode failed → done",
-			pdDecider: newAlwaysDisaggPDDecider(),
+			name: "decode failed (nil) → done",
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 				defaultDecodeProfile:  nil,
+			},
+			want: []string{},
+		},
+		{
+			name: "decode failed (0 endpoints) → done",
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile:  {TargetEndpoints: []scheduling.Endpoint{}},
 			},
 			want: []string{},
 		},
@@ -1597,7 +1593,7 @@ func TestHandler_Pick_PrefillFirst_PD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", tt.pdDecider, nil).
+			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
 				WithStageOrder(StageOrderPrefillFirst)
 			got := h.Pick(ctx, req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
@@ -1619,7 +1615,6 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 	tests := []struct {
 		name           string
 		req            *scheduling.InferenceRequest
-		pdDecider      deciderPlugin
 		encodeDecider  deciderPlugin
 		profileResults map[string]*scheduling.ProfileRunResult
 		want           []string
@@ -1627,16 +1622,14 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 		{
 			name:           "nothing run, multimodal → run prefill first",
 			req:            multimodalReq,
-			pdDecider:      newAlwaysDisaggPDDecider(),
-			encodeDecider:  newAlwaysDisaggEncodeDecider(),
+			encodeDecider:  NewAlwaysDisaggEncodeDecider(),
 			profileResults: map[string]*scheduling.ProfileRunResult{},
 			want:           []string{defaultPrefillProfile},
 		},
 		{
 			name:          "prefill done, multimodal → run encode next",
 			req:           multimodalReq,
-			pdDecider:     newAlwaysDisaggPDDecider(),
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			},
@@ -1645,8 +1638,7 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 		{
 			name:          "prefill done, text-only → skip encode, run decode",
 			req:           textReq,
-			pdDecider:     newAlwaysDisaggPDDecider(),
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 			},
@@ -1655,8 +1647,7 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 		{
 			name:          "prefill done, encode done → run decode",
 			req:           multimodalReq,
-			pdDecider:     newAlwaysDisaggPDDecider(),
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 				defaultEncodeProfile:  makeProfileRunResult("pod2"),
@@ -1666,8 +1657,7 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 		{
 			name:          "all three done → done",
 			req:           multimodalReq,
-			pdDecider:     newAlwaysDisaggPDDecider(),
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: makeProfileRunResult("pod1"),
 				defaultEncodeProfile:  makeProfileRunResult("pod2"),
@@ -1678,8 +1668,7 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 		{
 			name:          "prefill failed, multimodal → run encode next",
 			req:           multimodalReq,
-			pdDecider:     newAlwaysDisaggPDDecider(),
-			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			encodeDecider: NewAlwaysDisaggEncodeDecider(),
 			profileResults: map[string]*scheduling.ProfileRunResult{
 				defaultPrefillProfile: nil,
 			},
@@ -1691,7 +1680,7 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
-				tt.pdDecider, tt.encodeDecider,
+				nil, tt.encodeDecider,
 			).WithStageOrder(StageOrderPrefillFirst)
 			got := h.Pick(ctx, tt.req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
@@ -1713,7 +1702,7 @@ func TestHandler_Pick_PrefillFirst_StampsPeerEndpointBeforeDecode(t *testing.T) 
 		defaultPrefillProfile: prefillResult,
 	}
 
-	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", newAlwaysDisaggPDDecider(), nil).
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
 		WithStageOrder(StageOrderPrefillFirst)
 
 	got := h.Pick(ctx, req, profiles, profileResults)
@@ -1724,7 +1713,7 @@ func TestHandler_Pick_PrefillFirst_StampsPeerEndpointBeforeDecode(t *testing.T) 
 	assert.Equal(t, prefillResult.TargetEndpoints[0], peer)
 }
 
-func TestHandler_Pick_PrefillFirst_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
+func TestHandler_Pick_PrefillFirst_NoPeerEndpointWhenPrefillFailed(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	req := completionsRequest(testLongPrompt)
 
@@ -1733,15 +1722,17 @@ func TestHandler_Pick_PrefillFirst_NoPeerEndpointWhenPrefillSkipped(t *testing.T
 		defaultPrefillProfile: &mockProfile{},
 	}
 
-	// Prefill was skipped (nil result or not in results with nil decider)
+	// Prefill failed (nil result)
 	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
 		WithStageOrder(StageOrderPrefillFirst)
 
-	got := h.Pick(ctx, req, profiles, map[string]*scheduling.ProfileRunResult{})
+	got := h.Pick(ctx, req, profiles, map[string]*scheduling.ProfileRunResult{
+		defaultPrefillProfile: nil,
+	})
 	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run next")
 
 	_, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
-	assert.False(t, ok, "peer endpoint attribute must not be published when prefill is skipped")
+	assert.False(t, ok, "peer endpoint attribute must not be published when prefill failed")
 }
 
 func TestHandler_Pick_PrefillFirst_CustomProfiles(t *testing.T) {
@@ -1755,7 +1746,7 @@ func TestHandler_Pick_PrefillFirst_CustomProfiles(t *testing.T) {
 
 	h := NewDisaggProfileHandler(
 		customDecodeProfile, customPrefillProfile, customEncodeProfile,
-		newAlwaysDisaggPDDecider(), newAlwaysDisaggEncodeDecider(),
+		nil, NewAlwaysDisaggEncodeDecider(),
 	).WithStageOrder(StageOrderPrefillFirst)
 
 	req := chatRequest(true, false, false)
