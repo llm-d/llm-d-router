@@ -92,3 +92,45 @@ schedulingProfiles:
 
 The `topology-affinity-filter` plugin drops candidates below a minimum affinity instead
 of scoring them, and is the filtering counterpart of this scorer.
+
+## Multi-cluster support
+
+`multicluster-topology-scorer` is the cluster-scoped variant: over whole-cluster endpoints
+from `multicluster-file-discovery`, it scores each cluster by a static per-gateway `weights`
+map on one `Topology` field (default `region`; also `zone`, `rack`, `host`) instead of by peer
+proximity. Weights normalize by their max (top 1.0, ratios kept), so any non-negative scale
+works (`10`/`5` or `1`/`0.5`); at least one must be positive, negatives are rejected, and an
+unlisted value or missing `Topology` scores 0. Give it a profile weight above the load scorers
+so region dominates and queue/kv only break ties within a region; spill falls out of a
+capacity filter dropping the preferred region. It reads the base scorer's `Topology` attribute,
+so it needs `topology-extractor` (region label configured), not the metrics scrape pipeline.
+
+| Parameter               | Required | Default          | Description                                                                 |
+|-------------------------|----------|------------------|-----------------------------------------------------------------------------|
+| `weights`               | yes      |                  | Map of topology-field value to a relative weight (normalized by the max at load). A value absent from the map scores 0. |
+| `field`                 | no       | `region`         | Topology field the weights key on: `region`, `zone`, `rack`, or `host`.     |
+| `topologyProducerName`  | no       | default producer | `topology-extractor` instance to read the `Topology` attribute from.        |
+
+**Configuration Example (EAST gateway):**
+```yaml
+plugins:
+  - type: multicluster-file-discovery
+    name: discovery
+    parameters:
+      path: /etc/epp/clusters.yaml
+  - type: topology-extractor
+    parameters:
+      region: region
+  - type: multicluster-topology-scorer
+    name: geo
+    parameters:
+      field: region
+      weights:            # WEST gateway flips these to { west: 10, east: 5 }
+        east: 10
+        west: 5
+schedulingProfiles:
+  - name: clusters
+    plugins:
+      - pluginRef: geo
+        weight: 10
+```

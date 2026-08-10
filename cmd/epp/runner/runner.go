@@ -635,6 +635,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(kvcacheutilization.MultiClusterScorerType, fwkplugin.StabilityAlpha, kvcacheutilization.MultiClusterScorerFactory)
 	fwkplugin.Register(prefix.MultiClusterScorerType, fwkplugin.StabilityAlpha, prefix.MultiClusterScorerFactory)
 	fwkplugin.Register(reqdataprodprefix.MultiClusterPluginType, fwkplugin.StabilityAlpha, reqdataprodprefix.MultiClusterFactory)
+	fwkplugin.Register(topologyaffinityscorer.MultiClusterPluginType, fwkplugin.StabilityAlpha, topologyaffinityscorer.MultiClusterFactory)
 
 	// Flow Control plugins
 	// Beta
