@@ -51,11 +51,8 @@ var (
 	_ fwkrc.PreRequest = &PrefixBasedPDDecider{}
 )
 
-// errCondDecodeCacheMiss is the fixed 412 returned by the conditional-decode
-// gate when a decoder cannot satisfy the request from its KV cache. Byte-for-
-// byte identical to the response previously emitted by the director's hard-
-// coded gate so coordinator behavior (see pkg/coordinator/steps/decode_proxy)
-// is unchanged.
+// errCondDecodeCacheMiss is the 412 returned by the conditional-decode gate
+// when the chosen decoder cannot satisfy the request from its KV cache.
 var errCondDecodeCacheMiss = errcommon.Error{
 	Code: errcommon.PreconditionFailed,
 	Msg:  "no decode worker has the requested KV cache",
@@ -118,19 +115,12 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	return d
 }
 
-// PreRequest gates requests carrying the RFC 7240 "Prefer: if-available"
-// header used by the coordinator's speculative early-decode step. When the
-// non-cached suffix of the prompt on the chosen decode endpoint reaches
-// NonCachedTokens, the request is rejected with HTTP 412 so the coordinator
-// falls back to the full encode/prefill/decode pipeline. NonCachedTokens == 0
-// disables the gate. Requests without the header are a no-op.
-//
-// promptTokens is deliberately not honored here: it is a P/D routing shortcut
-// for short prompts, not a cache-adequacy predicate.
-//
-// Fails closed (412) when cache state cannot be read from the endpoint, since
-// a coordinator restart is cheaper than forwarding to a decoder that may not
-// hold the cache.
+// PreRequest gates requests carrying "Prefer: if-available". It rejects with
+// HTTP 412 when the non-cached suffix on the chosen decode endpoint reaches
+// NonCachedTokens, mirroring disaggregate()'s promptTokens/NonCachedTokens
+// shortcuts so both decisions honor the same knobs. NonCachedTokens == 0
+// disables the gate. Fails closed (412) when the endpoint's cache state
+// cannot be read.
 func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
 	schedulingResult *scheduling.SchedulingResult) error {
 	if request == nil || !routing.IsConditionalDecode(request.Headers) {
@@ -161,6 +151,11 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	if err != nil {
 		debugLogger.Info("conditional-decode: failed to read input token count, rejecting", "error", err)
 		return errCondDecodeCacheMiss
+	}
+	if d.config.PromptTokens > 0 && inputTokens < d.config.PromptTokens {
+		debugLogger.Info("conditional-decode: prompt below promptTokens threshold, forwarding",
+			"inputTokens", inputTokens, "promptTokens", d.config.PromptTokens)
+		return nil
 	}
 	hitPrefixTokens := info.CachedBlockCount() * info.BlockSizeTokens()
 	nonCachedTokens := inputTokens - hitPrefixTokens

@@ -417,16 +417,12 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 
 **Parameter:**
 
-- `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation, and the threshold for the conditional-decode 412 gate below
-  - If set to 0, disaggregation never occurs for any request and the 412 gate is disabled
-- `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
-  - If set to 0, the prompt-length gate is disabled
-  - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
-  - Applies to the disaggregation decision only; the conditional-decode 412 gate below is unaffected
+- `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation, and the threshold for the conditional-decode 412 gate. `0` disables both behaviors.
+- `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
 
 **Conditional-decode 412 gate**
 
-When a request carries the RFC 7240 `Prefer: if-available` header (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)), the plugin also acts as a request-time gate: if the non-cached suffix of the prompt on the chosen decode endpoint is at least `nonCachedTokens`, the request is rejected with HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. `nonCachedTokens: 0` disables the gate; the same non-cached-suffix threshold governs both the P/D routing decision and the 412 decision. Deployments that do not declare this plugin do not enforce the gate — conditional-decode requests are always forwarded. The gate reads unweighted cached-block state, so a RAM-cached prefix contributes its full token count.
+Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Deployments that do not declare this plugin do not enforce the gate — conditional-decode requests are always forwarded. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.

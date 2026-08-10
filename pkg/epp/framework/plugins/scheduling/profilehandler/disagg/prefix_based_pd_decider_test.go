@@ -679,9 +679,18 @@ func TestPreRequest_ConditionalDecodeGate(t *testing.T) {
 			wantReject:      false,
 		},
 		{
-			name:            "promptTokens does not shortcut the gate",
+			name:            "input below promptTokens forwards (short-prompt shortcut)",
 			nonCachedTokens: 5,
-			promptTokens:    1000, // would gate P/D routing off; must not affect 412
+			promptTokens:    100,
+			headers:         preferIfAvailable,
+			result:          resultWithEndpoint(makeTestEndpoint(0)),
+			request:         makeRequestWithTokens(10),
+			wantReject:      false,
+		},
+		{
+			name:            "input at or above promptTokens still rejects on cache miss",
+			nonCachedTokens: 5,
+			promptTokens:    10,
 			headers:         preferIfAvailable,
 			result:          resultWithEndpoint(makeTestEndpoint(0)),
 			request:         makeRequestWithTokens(10),
