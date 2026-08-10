@@ -28,17 +28,40 @@ import (
 )
 
 const (
-	// stalenessThreshold defines the threshold for considering data as stale.
+	// defaultStalenessThreshold defines the threshold for considering data as stale.
 	// if data of a request hasn't been read/write in the last "stalenessThreshold", it is considered as stale data
 	// and will be cleaned in the next cleanup cycle.
-	stalenessThreshold = time.Minute * 5
-	// cleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
-	cleanupInterval = time.Minute
+	defaultStalenessThreshold = time.Minute * 5
+	// defaultCleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
+	defaultCleanupInterval = time.Minute
 )
 
+// PluginStateOption configures a PluginState created by NewPluginState.
+type PluginStateOption func(*PluginState)
+
+// WithStalenessThreshold overrides the default staleness threshold.
+func WithStalenessThreshold(threshold time.Duration) PluginStateOption {
+	return func(s *PluginState) {
+		s.stalenessThreshold = threshold
+	}
+}
+
+// WithCleanupInterval overrides the default cleanup interval.
+func WithCleanupInterval(interval time.Duration) PluginStateOption {
+	return func(s *PluginState) {
+		s.cleanupInterval = interval
+	}
+}
+
 // NewPluginState initializes a new PluginState and returns its pointer.
-func NewPluginState(ctx context.Context) *PluginState {
-	pluginState := &PluginState{}
+func NewPluginState(ctx context.Context, opts ...PluginStateOption) *PluginState {
+	pluginState := &PluginState{
+		stalenessThreshold: defaultStalenessThreshold,
+		cleanupInterval:    defaultCleanupInterval,
+	}
+	for _, opt := range opts {
+		opt(pluginState)
+	}
 	go pluginState.cleanup(ctx)
 	return pluginState
 }
@@ -46,7 +69,8 @@ func NewPluginState(ctx context.Context) *PluginState {
 // PluginState is per-plugin scratch storage scoped to a single request. A plugin's
 // extension points (e.g. PreRequest, ResponseBody) can write, read, and alter entries
 // here to coordinate within that plugin. Entries are keyed by RequestID and reaped
-// after "stalenessThreshold" of inactivity.
+// after "stalenessThreshold" of inactivity, unless the request is bound to a live
+// ctx via BindLiveness.
 //
 // PluginState is not a cross-plugin handoff channel. Data shared between plugins must
 // flow through the Producer/Consumer DAG: write to Endpoint AttributeMap for
@@ -60,6 +84,11 @@ type PluginState struct {
 	storage sync.Map
 	// key: RequestID, value: time.Time
 	requestToLastAccessTime sync.Map
+	// key: RequestID, value: context.Context bound via BindLiveness
+	requestLiveness sync.Map
+
+	stalenessThreshold time.Duration
+	cleanupInterval    time.Duration
 }
 
 // Read retrieves data with the given "key" in the context of "requestID" from PluginState.
@@ -104,6 +133,7 @@ func (s *PluginState) Write(requestID string, key StateKey, val StateData) {
 // removed by a racing DeleteKey (or another Delete) on the same requestID.
 func (s *PluginState) Delete(requestID string) {
 	s.requestToLastAccessTime.Delete(requestID)
+	s.requestLiveness.Delete(requestID)
 	val, ok := s.storage.LoadAndDelete(requestID)
 	if !ok {
 		return
@@ -142,6 +172,21 @@ func (s *PluginState) Touch(requestID string) {
 	s.requestToLastAccessTime.Store(requestID, time.Now())
 }
 
+// BindLiveness marks the request as alive for as long as ctx is not done. The
+// janitor never reaps a bound request whose ctx is still alive; it refreshes
+// the request's last access time instead. Once ctx is done, the entries are
+// reaped on the normal staleness schedule. Delete removes the binding.
+//
+// The caller must have written state for requestID before binding: the janitor
+// reclaims bindings only for request IDs it can reach through the access-time
+// index, so a binding with no state behind it is never reclaimed.
+func (s *PluginState) BindLiveness(ctx context.Context, requestID string) {
+	if requestID == "" || ctx == nil {
+		return
+	}
+	s.requestLiveness.Store(requestID, ctx)
+}
+
 // LastAccessTime returns the last access time for the given requestID and a
 // boolean indicating if the requestID was found.
 func (s *PluginState) LastAccessTime(requestID string) (time.Time, bool) {
@@ -153,7 +198,7 @@ func (s *PluginState) LastAccessTime(requestID string) (time.Time, bool) {
 
 // cleanup periodically deletes data associated with the given requestID.
 func (s *PluginState) cleanup(ctx context.Context) {
-	ticker := time.NewTicker(cleanupInterval)
+	ticker := time.NewTicker(s.cleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -167,13 +212,19 @@ func (s *PluginState) cleanup(ctx context.Context) {
 }
 
 // cleanStaleRequests iterates through all requests and removes those that haven't been
-// accessed for longer than stalenessThreshold. This operation is safe to run concurrently
+// accessed for longer than stalenessThreshold, except requests whose bound liveness ctx
+// is still alive (see BindLiveness). This operation is safe to run concurrently
 // with other operations on the PluginState.
 func (s *PluginState) cleanStaleRequests() {
 	s.requestToLastAccessTime.Range(func(k, v any) bool {
 		requestID := k.(string)
 		lastAccessTime := v.(time.Time)
-		if time.Since(lastAccessTime) > stalenessThreshold {
+		if time.Since(lastAccessTime) > s.stalenessThreshold {
+			if bound, ok := s.requestLiveness.Load(requestID); ok && bound.(context.Context).Err() == nil {
+				log.Log.V(logutil.TRACE).Info("Holding stale request with a live bound context", "requestID", requestID, "lastAccessTime", lastAccessTime)
+				s.Touch(requestID)
+				return true
+			}
 			log.Log.V(logutil.DEBUG).Info("Cleaning up stale request from PluginState", "requestID", requestID, "lastAccessTime", lastAccessTime)
 			s.Delete(requestID) // cleanup stale requests (this is safe in sync.Map)
 		}

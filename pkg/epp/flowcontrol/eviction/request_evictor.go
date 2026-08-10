@@ -68,21 +68,21 @@ func (p *RequestEvictor) PreRequest(
 	ctx context.Context,
 	request *scheduling.InferenceRequest,
 	result *scheduling.SchedulingResult,
-) {
+) error {
 	if request == nil || result == nil || len(result.ProfileResults) == 0 {
-		return
+		return nil
 	}
 
 	profileResult := result.ProfileResults[result.PrimaryProfileName]
 	if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
-		return
+		return nil
 	}
 
 	targetEndpoint := profileResult.TargetEndpoints[0]
 	metadata := targetEndpoint.GetMetadata()
 	requestID := request.Headers[reqcommon.RequestIDHeaderKey]
 	if requestID == "" {
-		return
+		return nil
 	}
 
 	evictCh := make(chan struct{})
@@ -113,6 +113,7 @@ func (p *RequestEvictor) PreRequest(
 		"priority", item.Priority,
 		"evictable", p.queue.EvictableLen(),
 		"inFlight", p.queue.InFlightLen())
+	return nil
 }
 
 // ResponseBody is called for every response data chunk (streaming) or once (non-streaming).

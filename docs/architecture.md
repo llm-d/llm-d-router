@@ -26,7 +26,7 @@
 
 The design enables:
 
-- Support for **multiple base models** within a shared cluster (see [serving multiple inference pools](https://gateway-api-inference-extension.sigs.k8s.io/guides/serving-multiple-inference-pools-latest/))
+- Support for **multiple base models** within a shared cluster (see [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design))
 - Efficient routing based on **KV cache locality**, **session affinity**, **load**, and
 **model metadata**
 - Disaggregated **Prefill/Decode (P/D)** execution
@@ -59,6 +59,24 @@ The design enables:
 ### Routing Flow
 
 See the upstream [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/scheduling.md) doc for the canonical scheduling model.
+
+#### Request Control
+
+Request control runs once per request before any scheduling profiles:
+
+1. Request headers are processed and flow-control admission completes
+2. Endpoint candidates are located
+3. Global `Screener` plugins perform preliminary filtering of located endpoints
+   - Each screener receives an independent copy of the same endpoint set, and their returned subsets are intersected
+   - Most endpoint-selection plugins should implement a scheduling `Filter`, not a `Screener`
+   - Use a `Screener` only for mandatory constraints that must apply to every scheduling profile
+4. Data producers prepare per-request data using the filtered candidate set
+5. Admission plugins may reject the request
+6. The scheduler runs the configured scheduling profiles using the filtered candidate set
+
+#### Scheduling
+
+Each scheduling profile runs the following stages. Multiple profiles may run for one request, such as separate prefill and decode profiles.
 
 1. **Filtering**
    - Pods in an `InferencePool` go through a sequential chain of filters
@@ -154,11 +172,8 @@ kind: EndpointPickerConfig
 plugins:
 - type: precise-prefix-cache-producer
   parameters:
-    indexerConfig:
-      tokenProcessorConfig:
-        blockSize: 5
-      kvBlockIndexConfig:
-        maxPrefixBlocksToMatch: 256
+    tokenProcessorConfig:
+      blockSizeTokens: 5
 - type: prefix-cache-scorer
   parameters:
     prefixMatchInfoProducerName: precise-prefix-cache-producer
@@ -195,6 +210,8 @@ RequestHandler:
 - When no parsers are configured, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used.
 
 FlowControl:
+- The flow control admission layer itself is off by default; enable it with
+  `featureGates: ["flowControl"]`.
 - `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
 
@@ -223,6 +240,12 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
   endpoint or Kubernetes object change notifications
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+
+Polling sources share one Collector goroutine per endpoint. The base tick is
+`--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
+`interval` parameter (e.g. `"1s"`) that is rounded to the nearest multiple of the base tick;
+when omitted, the source runs on every base tick. The runtime converts each source's
+interval to base-tick multiples and schedules dispatches accordingly.
 
 See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc for the canonical model.
 

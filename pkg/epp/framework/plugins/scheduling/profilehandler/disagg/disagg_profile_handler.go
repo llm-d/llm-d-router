@@ -36,6 +36,13 @@ const (
 	defaultEncodeProfile  = "encode"
 )
 
+// PeerEndpointAttributeKey is the request-attribute key under which this
+// handler publishes the endpoint selected in an earlier scheduling phase
+// (the decode pick, before running the prefill profile), for plugins in a
+// later profile to compare against (e.g. topology affinity between a
+// disaggregated prefill and decode pick). The value is an Endpoint.
+const PeerEndpointAttributeKey = "peer-endpoint"
+
 // ── Factory & constructor ────────────────────────────────────────────────────
 
 type disaggProfilesParameters struct {
@@ -331,6 +338,9 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
+				// Publish the decode pick so plugins in the prefill profile (e.g.
+				// topology affinity) can compare candidates against it.
+				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
 				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
@@ -389,7 +399,7 @@ func (h *Handler) ProcessResults(
 
 // PreRequest wires prefill and encode SchedulerProfile results into headers
 // so the sidecar knows which pods to contact for disaggregated work.
-func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	tracer := tracing.Tracer(schedplugins.TracerScope)
 	_, span := tracer.Start(ctx, "prepare_disaggregation",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -402,7 +412,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.disagg.reason", "request_is_nil"),
 		)
-		return
+		return nil
 	}
 	if schedulingResult == nil {
 		span.SetAttributes(
@@ -410,7 +420,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.disagg.reason", "scheduling_result_is_nil"),
 		)
-		return
+		return nil
 	}
 
 	if request.TargetModel != "" {
@@ -452,7 +462,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_result"),
 		)
-		return
+		return nil
 	}
 
 	var encodeHostPorts []string
@@ -466,7 +476,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
 			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_target_endpoints"),
 		)
-		return
+		return nil
 	}
 
 	request.Headers[routing.EncoderEndpointsHeader] = strings.Join(encodeHostPorts, ",")
@@ -474,4 +484,5 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		attribute.Bool("llm_d.epp.encode.disaggregation_used", true),
 		attribute.String("llm_d.epp.encode.endpoints", strings.Join(encodeHostPorts, ",")),
 	)
+	return nil
 }

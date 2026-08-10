@@ -29,28 +29,56 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// roleSelector returns the pod selector for a single model-server role.
+func roleSelector(role string) map[string]string {
+	return map[string]string{"llm-d.ai/role": role}
+}
+
 // Model-server pod selectors keyed by the llm-d.ai/role label.
 var (
-	encodeSelector  = map[string]string{"llm-d.ai/role": "encode"}
-	prefillSelector = map[string]string{"llm-d.ai/role": "prefill"}
-	decodeSelector  = map[string]string{"llm-d.ai/role": "decode"}
+	encodeSelector  = roleSelector("encode")
+	prefillSelector = roleSelector("prefill")
+	decodeSelector  = roleSelector("decode")
 )
 
-// getPodNames returns the names of all non-terminating pods matching the labels.
-func getPodNames(labels map[string]string) []string {
+// listRolePods returns all non-terminating pods matching the labels.
+func listRolePods(labels map[string]string) []corev1.Pod {
 	podList := corev1.PodList{}
 	selector := apilabels.SelectorFromSet(labels)
 	err := testConfig.K8sClient.List(testConfig.Context, &podList,
 		&client.ListOptions{Namespace: getNamespace(), LabelSelector: selector})
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
-	names := make([]string, 0, len(podList.Items))
+	pods := make([]corev1.Pod, 0, len(podList.Items))
 	for _, pod := range podList.Items {
 		if pod.DeletionTimestamp == nil {
-			names = append(names, pod.Name)
+			pods = append(pods, pod)
 		}
 	}
+	return pods
+}
+
+// getPodNames returns the names of all non-terminating pods matching the labels.
+func getPodNames(labels map[string]string) []string {
+	pods := listRolePods(labels)
+	names := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		names = append(names, pod.Name)
+	}
 	return names
+}
+
+// podIPs returns the set of pod IPs of all non-terminating pods matching the
+// labels. Pods without an assigned IP are omitted.
+func podIPs(labels map[string]string) map[string]bool {
+	pods := listRolePods(labels)
+	ips := make(map[string]bool, len(pods))
+	for _, pod := range pods {
+		if pod.Status.PodIP != "" {
+			ips[pod.Status.PodIP] = true
+		}
+	}
+	return ips
 }
 
 // podsInDeploymentsReady waits until every Deployment named in objects reports

@@ -199,7 +199,7 @@ func TestDetector_Configuration(t *testing.T) {
 				newStubSchedulingEndpoint(reg, cleanEndpoint),
 			})
 			require.Len(t, kept, 1, "Filter should drop the overloaded endpoint")
-			require.Equal(t, cleanEndpoint, kept[0].GetMetadata().NamespacedName.Name)
+			require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
 		})
 	})
 }
@@ -675,7 +675,7 @@ func TestDetector_NilMetadataEndpoint(t *testing.T) {
 // --- Test Helpers & Mocks ---
 
 func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
-	endpointName := result.ProfileResults[result.PrimaryProfileName].TargetEndpoints[0].GetMetadata().NamespacedName.Name
+	endpointName := result.ProfileResults[result.PrimaryProfileName].TargetEndpoints[0].GetMetadata().ID.Name
 	id := fullEndpointName(endpointName)
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests++
@@ -689,7 +689,7 @@ func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.I
 	if metadata == nil || resp == nil || !resp.EndOfStream {
 		return
 	}
-	id := metadata.NamespacedName.String()
+	id := metadata.ID.String()
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests--
 		if req != nil {
@@ -765,7 +765,7 @@ func (e *liveEndpoint) Clone() datalayer.AttributeMap   { return e }
 func newFakeEndpoint(reg *localRegistry, name string) datalayer.Endpoint {
 	id := fullEndpointName(name)
 	return &liveEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "default"}},
 		reg:      reg,
 		id:       id,
 	}
@@ -781,7 +781,7 @@ type liveSchedulingEndpoint struct {
 
 func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingEndpoint {
 	return &liveSchedulingEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "default"}},
 		reg:      reg,
 		id:       fullEndpointName(name),
 	}

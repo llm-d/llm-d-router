@@ -22,7 +22,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 type tracedIndex struct {
@@ -36,7 +36,7 @@ func NewTracedIndex(next Index) Index {
 }
 
 func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
-	tracer := telemetry.Tracer("llm-d-kv-cache/pkg/kvcache/kvblock")
+	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
 	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index.add",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
@@ -59,7 +59,7 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 }
 
 func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
-	tracer := telemetry.Tracer("llm-d-kv-cache/pkg/kvcache/kvblock")
+	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
 	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index.evict",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
@@ -85,7 +85,7 @@ func (t *tracedIndex) Lookup(
 	requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {
-	tracer := telemetry.Tracer("llm-d-kv-cache/pkg/kvcache/kvblock")
+	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
 	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)

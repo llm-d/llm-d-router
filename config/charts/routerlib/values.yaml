@@ -91,6 +91,12 @@ tokenizer:
   port: 8000
   command: []
   args: []
+  # Extra args appended to the vllm-render container after the default or overridden args.
+  extraArgs: []
+  # Pod-level init containers rendered when the tokenizer is enabled.
+  initContainers: []
+  # Pod-level volumes rendered alongside model-cache when the tokenizer is enabled.
+  volumes: []
   env:
     - name: HF_TOKEN
       valueFrom:

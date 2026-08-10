@@ -350,7 +350,7 @@ func setupFullPathBenchmark(ctx context.Context, b *testing.B, name string, numP
 	realDetector := detectorPlugin.(flowcontrol.SaturationDetector)
 
 	epMeta := &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "default"},
+		ID: k8stypes.NamespacedName{Name: "pod-1", Namespace: "default"},
 	}
 	ep := fwkdl.NewEndpoint(epMeta, fwkdl.NewMetrics())
 	if err := producer.Extract(ctx, fwkdl.EndpointEvent{

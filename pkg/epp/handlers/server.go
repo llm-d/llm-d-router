@@ -82,6 +82,12 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetEmitEndpointScores controls whether the per-endpoint scheduler scores are emitted in the
+// request-path dynamic metadata under metadata.DestinationEndpointScoresKey. Off by default.
+func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
+	s.emitEndpointScores = enabled
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -102,6 +108,9 @@ type StreamingServer struct {
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
+	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
+	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
+	emitEndpointScores bool
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -110,8 +119,12 @@ type StreamingServer struct {
 // Refactor this monolithic struct. Fields related to the Envoy ext-proc protocol should be decoupled from the internal
 // request lifecycle state.
 type RequestContext struct {
-	TargetPod                  *fwkdl.EndpointMetadata
-	TargetEndpoint             string
+	TargetPod      *fwkdl.EndpointMetadata
+	TargetEndpoint string
+	// TargetEndpointScores maps endpoint address to the scheduler's score for it, covering
+	// every endpoint the primary profile scored rather than only those in TargetEndpoint.
+	// Nil when the primary profile ran no scorers.
+	TargetEndpointScores       map[string]float64
 	IncomingModelName          string
 	TargetModelName            string
 	ObjectiveKey               string
@@ -406,8 +419,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", recvErr)
 		}
 
-		reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
-
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
 			requestID := envoy.ExtractHeaderValue(v, reqcommon.RequestIDHeaderKey)
@@ -439,6 +450,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// Message is buffered, we can read and decode.
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
+				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 				reqCtx.Request.RawBody = make([]byte, buf.Len())
 				copy(reqCtx.Request.RawBody, buf.Bytes())
 
@@ -494,6 +506,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
+			// Overwrites the request-phase value on purpose. Response-received plugins
+			// read this through Response.ReqMetadata to learn which endpoint actually
+			// served the request, and Envoy only reports that at the response phase.
+			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				value := string(header.RawValue)

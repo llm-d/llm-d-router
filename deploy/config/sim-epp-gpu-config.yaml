@@ -7,6 +7,7 @@ plugins:
   name: dcgm-source
   parameters:
     port: 9400
+    interval: "1s"
 - type: dcgm-extractor
   name: dcgm-extractor
 - type: endpoint-attribute-filter

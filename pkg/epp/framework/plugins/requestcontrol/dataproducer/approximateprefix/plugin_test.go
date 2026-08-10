@@ -69,8 +69,8 @@ func TestProduce(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, p.PluginState())
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
-	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}
 
 	// First request to populate cache.
@@ -112,7 +112,7 @@ func TestPreRequest(t *testing.T) {
 		}
 		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 		req1 := &fwksched.InferenceRequest{
 			RequestID:   uuid.NewString(),
 			TargetModel: "test-model1",
@@ -133,7 +133,7 @@ func TestPreRequest(t *testing.T) {
 		}
 
 		// 3. Call PreRequest
-		p.PreRequest(context.Background(), req1, res)
+		_ = p.PreRequest(context.Background(), req1, res)
 
 		// Wait for async update
 		p.wg.Wait()
@@ -143,7 +143,7 @@ func TestPreRequest(t *testing.T) {
 		for _, promptHashes := range perPromptHashes {
 			for _, hash := range promptHashes {
 				pods := p.indexer().Get(hash)
-				assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().NamespacedName))
+				assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().ID))
 			}
 		}
 	})
@@ -157,7 +157,7 @@ func TestPreRequest(t *testing.T) {
 		}
 		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 
 		// Three requests with distinct token IDs generate distinct hashes.
 		// BlockSizeTokens is 1, so each single-token request yields one block.
@@ -180,7 +180,7 @@ func TestPreRequest(t *testing.T) {
 					},
 				},
 			}
-			p.PreRequest(context.Background(), req, res)
+			_ = p.PreRequest(context.Background(), req, res)
 			p.wg.Wait()
 
 			perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
@@ -235,9 +235,9 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 	}
 	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
-	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
-	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2, endpoint3}
 
 	// First request: tokens [1, 2].
@@ -258,7 +258,7 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{endpoint3}},
 		},
 	}
-	p.PreRequest(context.Background(), req1, schedulingResult)
+	_ = p.PreRequest(context.Background(), req1, schedulingResult)
 	p.wg.Wait()
 
 	// Second request shares the first token but diverges on the second.
@@ -297,7 +297,7 @@ func TestPrefixPluginPrefixGrowth(t *testing.T) {
 	}
 	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	endpoints := []fwksched.Endpoint{endpoint1}
 
 	// First request with an initial token prefix.
@@ -318,7 +318,7 @@ func TestPrefixPluginPrefixGrowth(t *testing.T) {
 			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
 		},
 	}
-	p.PreRequest(context.Background(), req1, schedulingResult)
+	_ = p.PreRequest(context.Background(), req1, schedulingResult)
 	p.wg.Wait()
 
 	// Second request extends the first one's token prefix.
@@ -341,7 +341,7 @@ func TestPrefixPluginPrefixGrowth(t *testing.T) {
 
 func TestPrefixPluginAutoTune(t *testing.T) {
 	podName := "pod-autotune"
-	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: podName}},
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: podName}},
 		&fwkdl.Metrics{
 			// Pod reports a block size above minBlockSizeTokens so the autotune
 			// path passes the metric through unclamped. (Metric values below the
@@ -381,11 +381,11 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
 		},
 	}
-	p.PreRequest(context.Background(), req, schedulingResult)
+	_ = p.PreRequest(context.Background(), req, schedulingResult)
 	p.wg.Wait()
 
 	// Check indexer state - should be in tracked pods
-	assert.Contains(t, p.indexer().Pods(), ServerID(endpoint.GetMetadata().NamespacedName))
+	assert.Contains(t, p.indexer().Pods(), ServerID(endpoint.GetMetadata().ID))
 }
 
 func TestMaxPrefixTokensToMatch(t *testing.T) {
@@ -401,7 +401,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 
@@ -459,7 +459,7 @@ func TestMaxPrefixBothCapsZeroMatchesEverything(t *testing.T) {
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 
@@ -489,7 +489,7 @@ func TestGetBlockSize_AutotuneClampsBelowMinimum(t *testing.T) {
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 		&fwkdl.Metrics{CacheBlockSize: 16}, // model server uses small blocks
 		fwkdl.NewAttributes(),
 	)
@@ -507,7 +507,7 @@ func TestGetBlockSize_AutotuneAboveMinimumPassesThrough(t *testing.T) {
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 		&fwkdl.Metrics{CacheBlockSize: 128},
 		fwkdl.NewAttributes(),
 	)
@@ -577,7 +577,7 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 				tokenIDs[i] = uint32(i)
 			}
 			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod1"},
+				ID: k8stypes.NamespacedName{Name: "pod1"},
 			}, nil, fwkdl.NewAttributes())
 			endpoints := []fwksched.Endpoint{endpoint}
 			req := &fwksched.InferenceRequest{
@@ -654,7 +654,7 @@ func TestProduce_MultiPrompt(t *testing.T) {
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{endpoint}
@@ -696,7 +696,7 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{endpoint}
@@ -712,7 +712,7 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 		},
 	}
 	_ = p.Produce(context.Background(), req1, endpoints)
-	p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
+	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"default": {TargetEndpoints: endpoints},
@@ -749,7 +749,7 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{endpoint}
@@ -765,7 +765,7 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 		},
 	}
 	_ = p.Produce(context.Background(), req1, endpoints)
-	p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
+	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"default": {TargetEndpoints: endpoints},
@@ -803,7 +803,7 @@ func TestPrefixPluginTokenizedRequest(t *testing.T) {
 	assert.NoError(t, err)
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{endpoint}
@@ -841,7 +841,7 @@ func TestPrefixPluginMatchesSameTokens(t *testing.T) {
 	p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
 
 	endpoint := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{endpoint}

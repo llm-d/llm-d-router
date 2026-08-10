@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-d
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: routing-sidecar
+        $patch: delete
+      containers:
+      - name: vllm
+        # This strategic-merge patch runs after the simulator component, so it
+        # replaces the whole args list; the simulator args are inlined here rather
+        # than left to the component (whose op: add insertions would be clobbered).
+        args:
+        - "--mode=${VLLM_SIM_MODE}"
+        - "--enable-kvcache=${KV_CACHE_ENABLED}"
+        - "--kv-cache-size=1024"
+        - "--block-size=16"
+        - "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
+        # The routing-sidecar this patch deletes owns port 8000 in the base and
+        # proxies to vLLM on 8200. With it gone, vLLM binds 8000 directly so the
+        # pod keeps serving on 8000, the port the InferencePool and the probes below target.
+        - "--port=8000"
+        - "--model=${MODEL_NAME}"
+        - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
+        - "${VLLM_EXTRA_ARGS_D}"
+        # $patch: replace overwrites the entire ports list; adding a port to the
+        # vllm-decode base will not appear here unless this patch is updated.
+        ports:
+        - $patch: replace
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            port: 8000
+        readinessProbe:
+          httpGet:
+            port: 8000
+        livenessProbe:
+          httpGet:
+            port: 8000
+        env:
+        - name: PORT
+          value: "8000"

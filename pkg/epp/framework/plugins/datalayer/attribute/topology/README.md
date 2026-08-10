@@ -24,3 +24,12 @@ The following plugins produce this attribute:
 
 - **`topology-extractor`** (Data Layer): Sets the `Topology` attribute using
   `spec.hostname` from the Pod object, or the value of a configured endpoint label.
+
+## Consumers
+
+The following plugins consume this attribute:
+
+- **`topology-affinity-filter`** (Scheduling): Keeps candidate endpoints whose
+  `Topology` is co-located with a peer endpoint at a configured minimum affinity.
+- **`topology-affinity-scorer`** (Scheduling): Scores candidate endpoints by
+  `Topology` proximity to a peer endpoint.

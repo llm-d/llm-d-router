@@ -1,0 +1,21 @@
+version: "2"
+
+# Security linters only. Kept separate from .golangci.yml so the SARIF report
+# contains gosec findings alone and uploads to the code scanning "gosec"
+# category without style findings mixed in.
+
+run:
+  timeout: 5m
+  allow-parallel-runners: true
+
+linters:
+  default: none
+  enable:
+    - gosec
+
+output:
+  formats:
+    text:
+      path: stdout
+    sarif:
+      path: gosec.sarif

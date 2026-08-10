@@ -46,10 +46,10 @@ func TestBulkPredictWithMetrics(t *testing.T) {
 	}
 	pods := []*fwkdl.EndpointMetadata{
 		{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+			ID: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 		{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod2"},
+			ID: types.NamespacedName{Namespace: "default", Name: "pod2"},
 		},
 	}
 	inputTokenLengths := []int{1, 1}
@@ -84,8 +84,8 @@ func TestBulkPredictWithMetrics_PropagatesInFlightOverrides(t *testing.T) {
 		{KVCacheUsagePercent: 0.6, RunningRequestsSize: 2},
 	}
 	pods := []*fwkdl.EndpointMetadata{
-		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
-		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod2"}},
+		{ID: types.NamespacedName{Namespace: "default", Name: "pod1"}},
+		{ID: types.NamespacedName{Namespace: "default", Name: "pod2"}},
 	}
 	inputTokenLengths := []int{1, 1}
 	generatedTokenCounts := []int{1, 1}
@@ -121,8 +121,8 @@ func TestBulkPredictWithMetrics_PropagatesEncoderSizes(t *testing.T) {
 		{KVCacheUsagePercent: 0.6},
 	}
 	pods := []*fwkdl.EndpointMetadata{
-		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
-		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod2"}},
+		{ID: types.NamespacedName{Namespace: "default", Name: "pod1"}},
+		{ID: types.NamespacedName{Namespace: "default", Name: "pod2"}},
 	}
 	inputTokenLengths := []int{1, 1}
 	generatedTokenCounts := []int{1, 1}
@@ -154,7 +154,7 @@ func TestBulkPredictWithMetrics_ClampsMatchedWithoutInputSizes(t *testing.T) {
 
 	metricsStates := []*fwkdl.Metrics{{KVCacheUsagePercent: 0.5}}
 	pods := []*fwkdl.EndpointMetadata{
-		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
+		{ID: types.NamespacedName{Namespace: "default", Name: "pod1"}},
 	}
 
 	_, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", nil, mockPredictor,
@@ -169,7 +169,7 @@ func TestBulkPredictWithMetrics_ClampsMatchedWithoutInputSizes(t *testing.T) {
 
 func TestBuildPredictionRequestAndTrainingEntry_EncoderSizes(t *testing.T) {
 	m := &fwkdl.Metrics{KVCacheUsagePercent: 0.5}
-	pod := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}}
+	pod := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "pod1"}}
 
 	req := buildPredictionRequest("", pod, m, 10, 1, 0.0, 5, 4)
 	assert.Equal(t, 5, req.EncoderInputSize)
@@ -190,7 +190,7 @@ func TestBulkPredictWithMetrics_Error(t *testing.T) {
 	}
 	pods := []*fwkdl.EndpointMetadata{
 		{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+			ID: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
 	inputTokenLengths := []int{1}
@@ -208,7 +208,7 @@ func TestBulkPredictWithMetrics_InputMismatch(t *testing.T) {
 	metricsStates := []*fwkdl.Metrics{{}}
 	pods := []*fwkdl.EndpointMetadata{
 		{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+			ID: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
 	inputTokenLengths := []int{1, 1} // Mismatch length
@@ -234,7 +234,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 	}
 	pods := []*fwkdl.EndpointMetadata{
 		{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+			ID: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
 	inputTokenLengths := []int{1}
@@ -265,7 +265,7 @@ func TestBulkPredictWithMetrics_ChatCompletionsInputTokenLength(t *testing.T) {
 
 	metricsStates := []*fwkdl.Metrics{{KVCacheUsagePercent: 0.5}}
 	pods := []*fwkdl.EndpointMetadata{
-		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"}},
+		{ID: types.NamespacedName{Namespace: "default", Name: "pod1"}},
 	}
 
 	inputTokenLengths := []int{2}
@@ -284,7 +284,7 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 	metricsStates := []*fwkdl.Metrics{nil} // Nil metrics state
 	pods := []*fwkdl.EndpointMetadata{
 		{
-			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pod1"},
+			ID: types.NamespacedName{Namespace: "default", Name: "pod1"},
 		},
 	}
 	inputTokenLengths := []int{1}

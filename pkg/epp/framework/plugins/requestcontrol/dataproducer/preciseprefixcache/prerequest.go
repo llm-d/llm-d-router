@@ -118,14 +118,14 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 // is disabled.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
-) {
+) error {
 	// Last-routed time is what separates a broken KV-events pipeline from an
 	// idle endpoint, so it is recorded for every routing decision, including
 	// the ones that skip speculative indexing below.
 	p.recordRouting(schedulingResult)
 
 	if !p.speculativeEnabled {
-		return
+		return nil
 	}
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
@@ -135,7 +135,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 	if err != nil {
 		logger.V(logging.TRACE).Info("No plugin state for PreRequest, skipping speculative indexing",
 			"requestID", request.RequestID)
-		return
+		return nil
 	}
 	p.pluginState.Delete(request.RequestID)
 
@@ -147,17 +147,17 @@ func (p *Producer) PreRequest(ctx context.Context,
 		}
 	}
 	if !hasKeys {
-		return
+		return nil
 	}
 
 	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return
+		return nil
 	}
 	targetEndpoint := primary.TargetEndpoints[0]
 	targetMeta := targetEndpoint.GetMetadata()
 	if targetMeta == nil {
-		return
+		return nil
 	}
 	speculativePod := kvblock.PodEntry{
 		PodIdentifier: endpointIdentifier(targetMeta.Address, targetMeta.Port),
@@ -202,4 +202,5 @@ func (p *Producer) PreRequest(ctx context.Context,
 		"pod", speculativePod.PodIdentifier,
 		"prompts", len(state.perPromptKeys),
 		"ttl", p.speculativeTTL)
+	return nil
 }

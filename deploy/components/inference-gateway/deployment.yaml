@@ -35,6 +35,7 @@ spec:
         - "9003"
         - --config-file
         - "/etc/epp/epp-config.yaml"
+        - --allow-experimental-plugins=true
         - --metrics-endpoint-auth=${METRICS_ENDPOINT_AUTH}
         - --ha-enable-leader-election=${ENABLE_LEADER_ELECTION}
         ports:

@@ -232,9 +232,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	return best, nil
 }
 
-func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) {
+func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	if request == nil {
-		return
+		return nil
 	}
 	id := programIDFor(request)
 	metrics := p.getOrCreateMetrics(id)
@@ -244,6 +244,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 	avgWaitTimeMs.WithLabelValues(id).Set(metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
+	return nil
 }
 
 // ResponseBody acts on the final stream chunk only; intermediate chunks are
