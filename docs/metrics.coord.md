@@ -35,8 +35,8 @@ for TokenReview and SubjectAccessReview on the coordinator's ServiceAccount.
 All coordinator metrics are self-instrumented: the coordinator counts and times its own work
 in-process and scrapes no other component. Two of them describe upstream behavior but are still
 measured locally, from the coordinator's side of the call: `upstream_request_duration_seconds` times
-each encode sub-request, and `conditional_decode_probes_total` records how the decode worker
-answered the conditional-decode probe.
+each outbound call, and `conditional_decode_probes_total` records how the decode worker answered the
+conditional-decode probe.
 
 One client request passes through the coordinator, the EPP behind the gateway, and the vLLM workers,
 and each of the three serves its own `/metrics`. Following a request end to end means scraping all
@@ -44,11 +44,11 @@ three: what this page does not list is on EPP's endpoint (see [Metrics](metrics.
 
 ## Labels
 
-The `step` and `phase` labels share most of their values, but measure different boundaries: a step is a pipeline stage, while a phase is a single backend call. They diverge where a stage is not one call: the `encode` step fans out one concurrent sub-request per multimodal entry, so a request with six images records one `step="encode"` observation and six `phase="encode"` observations. Steps that make no backend call at all (`render`, `replace-media-urls`) have no phase.
+The `step` and `upstream` labels share most of their values, but measure different boundaries: a step is a pipeline stage, while an upstream is a single outbound call. They diverge where a stage is not one call: the `encode` step fans out one concurrent sub-request per multimodal entry, so a request with six images records one `step="encode"` observation and six `upstream="encode"` observations.
 
-- **`step`**: A stage of the internal pipeline, observed once per request per stage. Covers local work and all backend calls made by that stage. Values: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. See [Coordinator Architecture](coordinator_architecture.md).
-- **`phase`**: A single outbound backend call. Values: `encode`, `prefill`, `decode`, `conditional-decode`.
-- **`decision_type`**: The sequence of phases a request actually executed. Values: `decode-only`, `prefill-decode`, `encode-prefill-decode`.
+- **`step`**: A stage of the internal pipeline, observed once per request per stage. Covers local work and all outbound calls made by that stage. Values: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. See [Coordinator Architecture](coordinator_architecture.md).
+- **`upstream`**: A single outbound call, whatever its destination. Values: `render`, `media-fetch`, `encode`, `prefill`, `conditional-decode`, `decode`. A step that gains an outbound call gains a value here.
+- **`decision_type`**: The sequence of disaggregation phases a request actually executed. Values: `decode-only`, `prefill-decode`, `encode-prefill-decode`.
 
 ## Error classes
 
@@ -100,23 +100,21 @@ Recorded by the pipeline executor, which brackets every step it runs. This famil
 **Key details:**
 *   Only steps that actually executed are recorded. Trailing steps from early exits (e.g., conditional-decode hit) or failures are not emitted.
 
-### Upstream phase family
+### Upstream call family
 
-Label set `{phase}` (one outbound backend call, not a pipeline stage, see [Labels](#labels)).
+Label set `{upstream}` (one outbound call, not a pipeline stage, see [Labels](#labels)).
 
-Recorded by the conditional-decode, encode, prefill, and decode steps. This family counts and times the outbound sub-requests to the gateway. (Render and media fetches are not included, their latency is tracked in `step_duration_seconds`).
+Recorded by every step that calls out: render to the renderer service, replace-media-urls to image URLs, and conditional-decode, encode, prefill, and decode to the gateway. The step family answers where time went in the pipeline; this family answers how many external calls a request made and how slow each one was.
 
 | Name | Type | Notes |
 |---|---|---|
-| `upstream_request_total` | Counter | Gateway sub-requests, one per call. (e.g. encode contributes one per image). |
-| `upstream_request_duration_seconds` | Histogram | Latency of one encode call (encode only). |
+| `upstream_request_total` | Counter | Outbound calls, one per call (encode contributes one per image, media-fetch one per URL). |
+| `upstream_request_duration_seconds` | Histogram | Latency of one call. |
 
 **Key details:**
-*   **Fan-out:** A single client request can result in multiple backend calls (e.g., one conditional-decode probe, two encode calls for two images, one prefill, one decode).
-*   **Narrower scope than steps:** 
-    *   `upstream_request_duration_seconds` is encode-only because it tracks per-image latency. Prefill and decode already have a 1:1 mapping between call latency and step duration, so their timings are tracked solely in `step_duration_seconds`.
-    *   There is no `upstream_request_error_total`. A phase-call failure aborts its step and is already counted by `step_errors_total`.
-*   **Conditional-decode:** The probe gets its own phase rather than counting as `decode`, keeping fan-out ratios accurate.
+*   **Fan-out:** A single client request can result in multiple outbound calls (e.g., three image fetches, one conditional-decode probe, three encode calls, one prefill, one decode). For the fan-out upstreams this is the only per-call latency available, since the step duration covers the whole concurrent batch.
+*   **No `upstream_request_error_total`:** A failed call aborts its step and is already counted by `step_errors_total`.
+*   **Conditional-decode:** The probe gets its own value rather than counting as `decode`, keeping fan-out ratios accurate.
 
 ### Disaggregation decision and conditional decode
 
@@ -161,7 +159,7 @@ component reports the client's full wait for output.
 
 ### Per-request image visibility
 
-Neither the coordinator nor EPP tracks per-request image count or size. Image count is only visible in aggregate via `upstream_request_total{phase="encode"}`. Size is available but unrecorded: `replace-media-urls` downloads each URL image and base64-encodes it, so every entry, inline or fetched, carries its payload through the coordinator.
+Neither the coordinator nor EPP tracks per-request image count or size. Image count is only visible in aggregate via `upstream_request_total{upstream="encode"}`. Size is available but unrecorded: `replace-media-urls` downloads each URL image and base64-encodes it, so every entry, inline or fetched, carries its payload through the coordinator.
 
 *Future candidates:* 
 *   `request_images`: Histogram of multimodal entries per request.
