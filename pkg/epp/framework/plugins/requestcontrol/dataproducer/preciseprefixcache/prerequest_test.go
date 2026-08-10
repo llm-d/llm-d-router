@@ -183,7 +183,7 @@ func TestPreRequest_RecordsRoutingWithSpeculativeIndexingDisabled(t *testing.T) 
 	p := newProducerForPreRequest(ctx, false, &fakeKVBlockIndex{})
 
 	req := &scheduling.InferenceRequest{RequestID: "req-routing"}
-	p.PreRequest(ctx, req, primaryOnly("decode", testEndpoints[0]))
+	require.NoError(t, p.PreRequest(ctx, req, primaryOnly("decode", testEndpoints[0])))
 
 	lastConfirmed, lastRouted, known := p.healthMonitor.GetHealthStatus("10.0.0.1:8080")
 	require.True(t, known)
