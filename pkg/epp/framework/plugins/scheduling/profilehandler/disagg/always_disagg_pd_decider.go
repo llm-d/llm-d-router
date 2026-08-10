@@ -25,11 +25,10 @@ type AlwaysDisaggPDDecider struct {
 // a new instance of the AlwaysDisaggPDDecider.
 func AlwaysDisaggPDDeciderPluginFactory(name string, _ *json.Decoder,
 	_ plugin.Handle) (plugin.Plugin, error) {
-	return NewAlwaysDisaggPDDecider().WithName(name), nil
+	return newAlwaysDisaggPDDecider().WithName(name), nil
 }
 
-// NewAlwaysDisaggPDDecider creates a new AlwaysDisaggPDDecider.
-func NewAlwaysDisaggPDDecider() *AlwaysDisaggPDDecider {
+func newAlwaysDisaggPDDecider() *AlwaysDisaggPDDecider {
 	return &AlwaysDisaggPDDecider{
 		typedName: plugin.TypedName{Type: AlwaysDisaggPDDeciderPluginType},
 	}

@@ -137,7 +137,7 @@ func handleWithDeciders(ctx context.Context) plugin.Handle {
 	h := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
 	p1, _ := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 4})
 	h.AddPlugin(PrefixBasedPDDeciderPluginType, p1)
-	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, NewAlwaysDisaggPDDecider())
+	h.AddPlugin(AlwaysDisaggPDDeciderPluginType, newAlwaysDisaggPDDecider())
 	h.AddPlugin(AlwaysDisaggMulimodalPluginType, NewAlwaysDisaggEncodeDecider())
 	return h
 }
@@ -1148,7 +1148,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		},
 		{
 			name:          "encodeDecider nil, pdDecider present, text-only → run prefill",
-			pdDecider:     NewAlwaysDisaggPDDecider(),
+			pdDecider:     newAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			req:           completionsRequest(testLongPrompt),
 			results: map[string]*scheduling.ProfileRunResult{
@@ -1159,7 +1159,7 @@ func TestHandler_Pick_NilDeciders(t *testing.T) {
 		},
 		{
 			name:          "encodeDecider nil, pdDecider present, multimodal → skip encode, run prefill",
-			pdDecider:     NewAlwaysDisaggPDDecider(),
+			pdDecider:     newAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			req:           multimodalLong,
 			results: map[string]*scheduling.ProfileRunResult{
@@ -1230,7 +1230,7 @@ func TestHandler_ProcessResults_NilDeciders(t *testing.T) {
 		},
 		{
 			name:          "encodeDecider nil, prefill ran successfully",
-			pdDecider:     NewAlwaysDisaggPDDecider(),
+			pdDecider:     newAlwaysDisaggPDDecider(),
 			encodeDecider: nil,
 			results: map[string]*scheduling.ProfileRunResult{
 				defaultDecodeProfile:  makeProfileRunResult("pod1"),

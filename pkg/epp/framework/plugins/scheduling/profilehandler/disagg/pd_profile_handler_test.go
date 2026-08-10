@@ -555,7 +555,7 @@ func createHandleWithDeciderPlugins(ctx context.Context) (plugin.Handle, error) 
 		return nil, err
 	}
 	handle.AddPlugin(PrefixBasedPDDeciderPluginType, plugin1)
-	plugin2 := NewAlwaysDisaggPDDecider()
+	plugin2 := newAlwaysDisaggPDDecider()
 	handle.AddPlugin(AlwaysDisaggPDDeciderPluginType, plugin2)
 
 	return handle, nil
