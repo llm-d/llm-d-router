@@ -82,8 +82,8 @@ error, 413, invalid JSON) count as `bad_request` with `model_name=unknown`.
 |---|---|---|
 | `request_total` | Counter | Every inbound client request, including malformed ones. |
 | `request_error_total` | Counter | Failed requests; adds label `error_code`. |
-| `request_duration_seconds` | Histogram | End-to-end request latency; `generalLatencyBuckets` (5ms to 1h). |
-| `request_size_bytes` | Histogram | Request body length; powers-of-2 buckets. |
+| `request_duration_seconds` | Histogram | End-to-end request latency. |
+| `request_size_bytes` | Histogram | Request body size. |
 | `response_size_bytes` | Histogram | Bytes streamed to the client, measured by a counting `ResponseWriter` wrapper in the handler rather than by parsing the body. |
 | `request_running` | Gauge | Requests in flight. |
 
@@ -98,7 +98,7 @@ Recorded by the pipeline executor, one observation per step per request. This fa
 
 | Name | Type | Notes |
 |---|---|---|
-| `pipeline_step_duration_seconds` | Histogram | Per-step latency. Uses fine-grained `stepLatencyBuckets` (100us to 60s) to capture both microsecond steps (render) and seconds-long steps (decode). |
+| `pipeline_step_duration_seconds` | Histogram | Per-step latency. |
 | `pipeline_step_errors_total` | Counter | Step failures; adds label `error_code`. |
 
 **Key details:**
@@ -139,9 +139,9 @@ Recorded by the conditional-decode, encode, prefill, and decode steps. This fami
 
 | Coordinator metric | EPP counterpart | Difference |
 |---|---|---|
-| Request family (`request_total`, etc.) | `llm_d_epp_*` (same names) | Coordinator counts single client requests at entry; EPP counts every sub-request reaching the gateway. EPP adds flow-control labels (`fairness_id`, `priority`). |
-| `disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Coordinator counts phases *executed*; EPP counts routing decisions *made* and adds plugin labels. |
-| `pipeline_step_*`, `upstream_request_*`, `decode_cache_lookups_total` | None | Unique to coordinator. |
+| Request family (`llm_d_coordinator_request_total`, etc.) | `llm_d_epp_*` (same names) | Coordinator counts single client requests at entry; EPP counts every sub-request reaching the gateway. EPP adds flow-control labels (`fairness_id`, `priority`). |
+| `llm_d_coordinator_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Coordinator counts phases *executed*; EPP counts routing decisions *made* and adds plugin labels. |
+| `llm_d_coordinator_pipeline_step_*`, `llm_d_coordinator_upstream_request_*`, `llm_d_coordinator_decode_cache_lookups_total` | None | Unique to coordinator. |
 
 **EPP-only metrics:** EPP exposes token counts, latencies (TTFT/TPOT/ITL), and metrics for scheduling, flow control, and pool aggregates. The coordinator does not measure these as they are outside its scope.
 
@@ -152,6 +152,14 @@ Recorded by the conditional-decode, encode, prefill, and decode steps. This fami
 The coordinator emits no token-count metrics. EPP already parses the vLLM `usage` block to emit `request_input_tokens`, `request_output_tokens`, and `request_cached_tokens`, and the coordinator avoids duplicating this effort. Furthermore, extracting output tokens would require the coordinator to parse the streamed SSE response, defeating the purpose of a pure byte proxy (which is why we use `response_size_bytes`).
 
 *Future candidate:* `request_prompt_tokens` (Histogram, after render) could be added to correlate prompt size with encode fan-out without needing a cross-component join.
+
+### Time to first token
+
+The coordinator emits no TTFT metric. Identifying the first token requires parsing the streamed
+response, which the decode step does not do: it proxies bytes straight to the client. EPP measures
+TTFT, but only per leg, since each phase reaches it as a separate request, so its decode-leg
+`request_ttft_seconds` starts after render, encode, and prefill have already finished. Neither
+component reports the client's full wait for output.
 
 ### Per-request image visibility
 
