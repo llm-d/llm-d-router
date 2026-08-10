@@ -281,7 +281,7 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 		return nil, nil
 	}
 
-	var digest *xxhash.Digest // one per call: the processor is shared across goroutines
+	var digest *xxhash.Digest // one per call
 	if db.HashAlgorithm == HashAlgorithmXXH64 {
 		digest = xxhash.New()
 	}
