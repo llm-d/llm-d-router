@@ -83,7 +83,6 @@ type disaggDecidersParameters struct {
 
 // DisaggProfileHandlerParameters is the current parameter format using nested maps.
 type DisaggProfileHandlerParameters struct {
-	Order      StageOrder               `json:"order,omitempty"`
 	StageOrder StageOrder               `json:"stageOrder,omitempty"`
 	Profiles   disaggProfilesParameters `json:"profiles"`
 	Deciders   disaggDecidersParameters `json:"deciders"`
@@ -93,7 +92,6 @@ type DisaggProfileHandlerParameters struct {
 // Unknown fields (e.g. pd-profile-handler's prefixPluginType, primaryPort) are
 // silently ignored by json.Unmarshal, so they need not be declared here.
 type legacyDisaggProfileHandlerParameters struct {
-	Order                    StageOrder `json:"order,omitempty"`
 	StageOrder               StageOrder `json:"stageOrder,omitempty"`
 	DecodeProfile            string     `json:"decodeProfile"`
 	PrefillProfile           string     `json:"prefillProfile"`
@@ -108,9 +106,6 @@ type legacyDisaggProfileHandlerParameters struct {
 // deprecation warning for each field in use.
 func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) DisaggProfileHandlerParameters {
 	p := DisaggProfileHandlerParameters{}
-	if l.Order != "" {
-		p.Order = l.Order
-	}
 	if l.StageOrder != "" {
 		p.StageOrder = l.StageOrder
 	}
@@ -195,7 +190,7 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	handler := NewDisaggProfileHandler(
 		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
 		pdDecider, encodeDecider,
-	).WithOrder(parameters.Order)
+	).WithStageOrder(parameters.StageOrder)
 	return handler.WithName(name), nil
 }
 
@@ -235,15 +230,11 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin
 	}
 
 	// Apply stage order defaults and validation.
-	rawOrder := parameters.Order
-	if rawOrder == "" {
-		rawOrder = parameters.StageOrder
-	}
-	parsedOrder, err := ParseStageOrder(string(rawOrder))
+	parsedOrder, err := ParseStageOrder(string(parameters.StageOrder))
 	if err != nil {
 		return nil, err
 	}
-	parameters.Order = parsedOrder
+	parameters.StageOrder = parsedOrder
 
 	// Apply profile name defaults for any fields still unset.
 	if parameters.Profiles.Decode == "" {
@@ -308,15 +299,9 @@ func (h *Handler) WithName(name string) *Handler {
 	return h
 }
 
-// WithOrder sets the stage execution order for the handler.
-func (h *Handler) WithOrder(order StageOrder) *Handler {
-	h.stageOrder = order
-	return h
-}
-
 // WithStageOrder sets the stage execution order for the handler.
-func (h *Handler) WithStageOrder(order StageOrder) *Handler {
-	h.stageOrder = order
+func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
+	h.stageOrder = stageOrder
 	return h
 }
 

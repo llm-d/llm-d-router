@@ -335,7 +335,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
 
 	profileHandle := disagg.NewDisaggProfileHandler(decode, prefill, "",
-		disagg.NewAlwaysDisaggPDDecider(), nil).WithOrder(disagg.StageOrderPrefillFirst)
+		disagg.NewAlwaysDisaggPDDecider(), nil).WithStageOrder(disagg.StageOrderPrefillFirst)
 
 	schedulerConfig := scheduling.NewSchedulerConfig(profileHandle, map[string]fwksched.SchedulerProfile{
 		prefill: prefillSchedulerProfile,

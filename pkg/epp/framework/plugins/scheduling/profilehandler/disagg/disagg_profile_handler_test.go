@@ -1448,7 +1448,7 @@ func TestHandler_Pick_PD_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
 
 // ── StageOrder & PrefillFirst tests ──────────────────────────────────────────
 
-func TestHandler_Factory_Order(t *testing.T) {
+func TestHandler_Factory_StageOrder(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := handleWithDeciders(ctx)
 
@@ -1459,29 +1459,13 @@ func TestHandler_Factory_Order(t *testing.T) {
 		expectOrder StageOrder
 	}{
 		{
-			name:        "default order is decode-first",
+			name:        "default stageOrder is decode-first",
 			params:      map[string]any{},
 			expectErr:   false,
 			expectOrder: StageOrderDecodeFirst,
 		},
 		{
-			name: "order prefill-first (kebab-case)",
-			params: map[string]any{
-				"order": "prefill-first",
-			},
-			expectErr:   false,
-			expectOrder: StageOrderPrefillFirst,
-		},
-		{
-			name: "order PrefillFirst (PascalCase)",
-			params: map[string]any{
-				"order": "PrefillFirst",
-			},
-			expectErr:   false,
-			expectOrder: StageOrderPrefillFirst,
-		},
-		{
-			name: "stageOrder prefill-first",
+			name: "stageOrder prefill-first (kebab-case)",
 			params: map[string]any{
 				"stageOrder": "prefill-first",
 			},
@@ -1489,9 +1473,17 @@ func TestHandler_Factory_Order(t *testing.T) {
 			expectOrder: StageOrderPrefillFirst,
 		},
 		{
-			name: "order decode-first (explicit)",
+			name: "stageOrder PrefillFirst (PascalCase)",
 			params: map[string]any{
-				"order": "decode-first",
+				"stageOrder": "PrefillFirst",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
+		{
+			name: "stageOrder decode-first (explicit)",
+			params: map[string]any{
+				"stageOrder": "decode-first",
 			},
 			expectErr:   false,
 			expectOrder: StageOrderDecodeFirst,
@@ -1505,20 +1497,11 @@ func TestHandler_Factory_Order(t *testing.T) {
 			expectOrder: StageOrderDecodeFirst,
 		},
 		{
-			name: "invalid order returns error",
+			name: "invalid stageOrder returns error",
 			params: map[string]any{
-				"order": "INVALID_ORDER",
+				"stageOrder": "INVALID_ORDER",
 			},
 			expectErr: true,
-		},
-		{
-			name: "legacy flat format with order",
-			params: map[string]any{
-				"decodeProfile": "decode",
-				"order":         "prefill-first",
-			},
-			expectErr:   false,
-			expectOrder: StageOrderPrefillFirst,
 		},
 		{
 			name: "legacy flat format with stageOrder",
@@ -1615,7 +1598,7 @@ func TestHandler_Pick_PrefillFirst_PD(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", tt.pdDecider, nil).
-				WithOrder(StageOrderPrefillFirst)
+				WithStageOrder(StageOrderPrefillFirst)
 			got := h.Pick(ctx, req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
@@ -1709,7 +1692,7 @@ func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
 			h := NewDisaggProfileHandler(
 				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
 				tt.pdDecider, tt.encodeDecider,
-			).WithOrder(StageOrderPrefillFirst)
+			).WithStageOrder(StageOrderPrefillFirst)
 			got := h.Pick(ctx, tt.req, profiles, tt.profileResults)
 			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
@@ -1731,7 +1714,7 @@ func TestHandler_Pick_PrefillFirst_StampsPeerEndpointBeforeDecode(t *testing.T) 
 	}
 
 	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", newAlwaysDisaggPDDecider(), nil).
-		WithOrder(StageOrderPrefillFirst)
+		WithStageOrder(StageOrderPrefillFirst)
 
 	got := h.Pick(ctx, req, profiles, profileResults)
 	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run next")
@@ -1752,7 +1735,7 @@ func TestHandler_Pick_PrefillFirst_NoPeerEndpointWhenPrefillSkipped(t *testing.T
 
 	// Prefill was skipped (nil result or not in results with nil decider)
 	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
-		WithOrder(StageOrderPrefillFirst)
+		WithStageOrder(StageOrderPrefillFirst)
 
 	got := h.Pick(ctx, req, profiles, map[string]*scheduling.ProfileRunResult{})
 	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run next")
@@ -1773,7 +1756,7 @@ func TestHandler_Pick_PrefillFirst_CustomProfiles(t *testing.T) {
 	h := NewDisaggProfileHandler(
 		customDecodeProfile, customPrefillProfile, customEncodeProfile,
 		newAlwaysDisaggPDDecider(), newAlwaysDisaggEncodeDecider(),
-	).WithOrder(StageOrderPrefillFirst)
+	).WithStageOrder(StageOrderPrefillFirst)
 
 	req := chatRequest(true, false, false)
 
@@ -1796,7 +1779,7 @@ func TestHandler_Pick_PrefillFirst_CustomProfiles(t *testing.T) {
 
 func TestHandler_ProcessResults_PrefillFirst(t *testing.T) {
 	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
-		WithOrder(StageOrderPrefillFirst)
+		WithStageOrder(StageOrderPrefillFirst)
 
 	results := map[string]*scheduling.ProfileRunResult{
 		defaultDecodeProfile:  makeProfileRunResult("decode-pod"),
