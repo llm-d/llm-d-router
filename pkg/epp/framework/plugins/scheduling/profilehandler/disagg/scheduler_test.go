@@ -283,3 +283,78 @@ func TestPDSchedule(t *testing.T) {
 		})
 	}
 }
+
+func TestPDSchedule_PrefillFirst(t *testing.T) {
+	ctx := context.Background()
+
+	endpoint1 := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "endpoint1"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	endpoint2 := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "endpoint2"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+
+	prefillDecodeResult := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			decode: {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: endpoint2,
+					},
+				},
+			},
+			prefill: {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: endpoint1,
+					},
+				},
+			},
+		},
+		PrimaryProfileName: decode,
+	}
+
+	prefillSchedulerProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewPrefillRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	decodeSchedulerProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewDecodeRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	profileHandle := disagg.NewDisaggProfileHandler(decode, prefill, "",
+		disagg.NewAlwaysDisaggPDDecider(), nil).WithOrder(disagg.StageOrderPrefillFirst)
+
+	schedulerConfig := scheduling.NewSchedulerConfig(profileHandle, map[string]fwksched.SchedulerProfile{
+		prefill: prefillSchedulerProfile,
+		decode:  decodeSchedulerProfile,
+	})
+	scheduler := scheduling.NewSchedulerWithConfig(schedulerConfig)
+
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "critical",
+		Body:        completionsBody("12345678906"),
+	}
+	input := []fwksched.Endpoint{endpoint1, endpoint2}
+
+	got, err := scheduler.Schedule(ctx, req, input)
+	assert.NoError(t, err)
+
+	if diff := cmp.Diff(prefillDecodeResult, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
+		cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+		t.Errorf("Unexpected output (-want +got): %v", diff)
+	}
+}

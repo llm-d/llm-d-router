@@ -27,10 +27,15 @@ func AlwaysDisaggMulimodalDeciderPluginFactory(name string, _ *json.Decoder, _ p
 	return newAlwaysDisaggEncodeDecider().WithName(name), nil
 }
 
-func newAlwaysDisaggEncodeDecider() *AlwaysDisaggMultimodalDecider {
+// NewAlwaysDisaggEncodeDecider creates a new AlwaysDisaggMultimodalDecider.
+func NewAlwaysDisaggEncodeDecider() *AlwaysDisaggMultimodalDecider {
 	return &AlwaysDisaggMultimodalDecider{
 		typedName: plugin.TypedName{Type: AlwaysDisaggMulimodalPluginType},
 	}
+}
+
+func newAlwaysDisaggEncodeDecider() *AlwaysDisaggMultimodalDecider {
+	return NewAlwaysDisaggEncodeDecider()
 }
 
 // TypedName returns the typed name of the plugin.

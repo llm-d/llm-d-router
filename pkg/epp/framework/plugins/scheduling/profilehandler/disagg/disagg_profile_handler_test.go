@@ -1445,3 +1445,368 @@ func TestHandler_Pick_PD_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
 	_, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
 	assert.False(t, ok, "peer endpoint attribute must not be published when prefill is skipped")
 }
+
+// ── StageOrder & PrefillFirst tests ──────────────────────────────────────────
+
+func TestHandler_Factory_Order(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	handle := handleWithDeciders(ctx)
+
+	tests := []struct {
+		name        string
+		params      map[string]any
+		expectErr   bool
+		expectOrder StageOrder
+	}{
+		{
+			name:        "default order is decode-first",
+			params:      map[string]any{},
+			expectErr:   false,
+			expectOrder: StageOrderDecodeFirst,
+		},
+		{
+			name: "order prefill-first (kebab-case)",
+			params: map[string]any{
+				"order": "prefill-first",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
+		{
+			name: "order PrefillFirst (PascalCase)",
+			params: map[string]any{
+				"order": "PrefillFirst",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
+		{
+			name: "stageOrder prefill-first",
+			params: map[string]any{
+				"stageOrder": "prefill-first",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
+		{
+			name: "order decode-first (explicit)",
+			params: map[string]any{
+				"order": "decode-first",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderDecodeFirst,
+		},
+		{
+			name: "stageOrder DecodeFirst (PascalCase)",
+			params: map[string]any{
+				"stageOrder": "DecodeFirst",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderDecodeFirst,
+		},
+		{
+			name: "invalid order returns error",
+			params: map[string]any{
+				"order": "INVALID_ORDER",
+			},
+			expectErr: true,
+		},
+		{
+			name: "legacy flat format with order",
+			params: map[string]any{
+				"decodeProfile": "decode",
+				"order":         "prefill-first",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
+		{
+			name: "legacy flat format with stageOrder",
+			params: map[string]any{
+				"decodeProfile": "decode",
+				"stageOrder":    "prefill-first",
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, _ := json.Marshal(tt.params)
+			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
+			if tt.expectErr {
+				assert.Error(t, err)
+				assert.Nil(t, p)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, p)
+				h, ok := p.(*Handler)
+				assert.True(t, ok)
+				assert.Equal(t, tt.expectOrder, h.stageOrder)
+			}
+		})
+	}
+}
+
+func TestHandler_Pick_PrefillFirst_PD(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	tests := []struct {
+		name           string
+		pdDecider      deciderPlugin
+		profileResults map[string]*scheduling.ProfileRunResult
+		want           []string
+	}{
+		{
+			name:           "prefill not run, decider approves → run prefill",
+			pdDecider:      newAlwaysDisaggPDDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{},
+			want:           []string{defaultPrefillProfile},
+		},
+		{
+			name:      "prefill done → run decode",
+			pdDecider: newAlwaysDisaggPDDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:      "prefill failed (nil) → run decode",
+			pdDecider: newAlwaysDisaggPDDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: nil,
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:           "prefill decider nil → skip prefill, run decode",
+			pdDecider:      nil,
+			profileResults: map[string]*scheduling.ProfileRunResult{},
+			want:           []string{defaultDecodeProfile},
+		},
+		{
+			name:      "decode done → done",
+			pdDecider: newAlwaysDisaggPDDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile:  makeProfileRunResult("pod2"),
+			},
+			want: []string{},
+		},
+		{
+			name:      "decode failed → done",
+			pdDecider: newAlwaysDisaggPDDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultDecodeProfile:  nil,
+			},
+			want: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", tt.pdDecider, nil).
+				WithOrder(StageOrderPrefillFirst)
+			got := h.Pick(ctx, req, profiles, tt.profileResults)
+			assert.ElementsMatch(t, tt.want, profileNames(got))
+		})
+	}
+}
+
+func TestHandler_Pick_PrefillFirst_EPD_Full(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	multimodalReq := chatRequest(true, false, false)
+	textReq := chatRequest(false, false, false)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+		defaultEncodeProfile:  &mockProfile{},
+	}
+
+	tests := []struct {
+		name           string
+		req            *scheduling.InferenceRequest
+		pdDecider      deciderPlugin
+		encodeDecider  deciderPlugin
+		profileResults map[string]*scheduling.ProfileRunResult
+		want           []string
+	}{
+		{
+			name:           "nothing run, multimodal → run prefill first",
+			req:            multimodalReq,
+			pdDecider:      newAlwaysDisaggPDDecider(),
+			encodeDecider:  newAlwaysDisaggEncodeDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{},
+			want:           []string{defaultPrefillProfile},
+		},
+		{
+			name:          "prefill done, multimodal → run encode next",
+			req:           multimodalReq,
+			pdDecider:     newAlwaysDisaggPDDecider(),
+			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+			},
+			want: []string{defaultEncodeProfile},
+		},
+		{
+			name:          "prefill done, text-only → skip encode, run decode",
+			req:           textReq,
+			pdDecider:     newAlwaysDisaggPDDecider(),
+			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:          "prefill done, encode done → run decode",
+			req:           multimodalReq,
+			pdDecider:     newAlwaysDisaggPDDecider(),
+			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile:  makeProfileRunResult("pod2"),
+			},
+			want: []string{defaultDecodeProfile},
+		},
+		{
+			name:          "all three done → done",
+			req:           multimodalReq,
+			pdDecider:     newAlwaysDisaggPDDecider(),
+			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: makeProfileRunResult("pod1"),
+				defaultEncodeProfile:  makeProfileRunResult("pod2"),
+				defaultDecodeProfile:  makeProfileRunResult("pod3"),
+			},
+			want: []string{},
+		},
+		{
+			name:          "prefill failed, multimodal → run encode next",
+			req:           multimodalReq,
+			pdDecider:     newAlwaysDisaggPDDecider(),
+			encodeDecider: newAlwaysDisaggEncodeDecider(),
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				defaultPrefillProfile: nil,
+			},
+			want: []string{defaultEncodeProfile},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewDisaggProfileHandler(
+				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
+				tt.pdDecider, tt.encodeDecider,
+			).WithOrder(StageOrderPrefillFirst)
+			got := h.Pick(ctx, tt.req, profiles, tt.profileResults)
+			assert.ElementsMatch(t, tt.want, profileNames(got))
+		})
+	}
+}
+
+func TestHandler_Pick_PrefillFirst_StampsPeerEndpointBeforeDecode(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	prefillResult := makeProfileRunResult("pod-prefill")
+	profileResults := map[string]*scheduling.ProfileRunResult{
+		defaultPrefillProfile: prefillResult,
+	}
+
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", newAlwaysDisaggPDDecider(), nil).
+		WithOrder(StageOrderPrefillFirst)
+
+	got := h.Pick(ctx, req, profiles, profileResults)
+	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run next")
+
+	peer, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
+	assert.True(t, ok, "peer endpoint attribute must be published before decode runs")
+	assert.Equal(t, prefillResult.TargetEndpoints[0], peer)
+}
+
+func TestHandler_Pick_PrefillFirst_NoPeerEndpointWhenPrefillSkipped(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+
+	// Prefill was skipped (nil result or not in results with nil decider)
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
+		WithOrder(StageOrderPrefillFirst)
+
+	got := h.Pick(ctx, req, profiles, map[string]*scheduling.ProfileRunResult{})
+	assert.ElementsMatch(t, []string{defaultDecodeProfile}, profileNames(got), "decode must run next")
+
+	_, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](req, PeerEndpointAttributeKey)
+	assert.False(t, ok, "peer endpoint attribute must not be published when prefill is skipped")
+}
+
+func TestHandler_Pick_PrefillFirst_CustomProfiles(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	profiles := map[string]scheduling.SchedulerProfile{
+		customDecodeProfile:  &mockProfile{},
+		customPrefillProfile: &mockProfile{},
+		customEncodeProfile:  &mockProfile{},
+	}
+
+	h := NewDisaggProfileHandler(
+		customDecodeProfile, customPrefillProfile, customEncodeProfile,
+		newAlwaysDisaggPDDecider(), newAlwaysDisaggEncodeDecider(),
+	).WithOrder(StageOrderPrefillFirst)
+
+	req := chatRequest(true, false, false)
+
+	// Stage 1: prefill not run → run prefill
+	got := h.Pick(ctx, req, profiles, map[string]*scheduling.ProfileRunResult{})
+	assert.ElementsMatch(t, []string{customPrefillProfile}, profileNames(got))
+
+	// Stage 2: prefill done, multimodal → run encode
+	results := map[string]*scheduling.ProfileRunResult{
+		customPrefillProfile: makeProfileRunResult("pod1"),
+	}
+	got = h.Pick(ctx, req, profiles, results)
+	assert.ElementsMatch(t, []string{customEncodeProfile}, profileNames(got))
+
+	// Stage 3: prefill done, encode done → run decode
+	results[customEncodeProfile] = makeProfileRunResult("pod2")
+	got = h.Pick(ctx, req, profiles, results)
+	assert.ElementsMatch(t, []string{customDecodeProfile}, profileNames(got))
+}
+
+func TestHandler_ProcessResults_PrefillFirst(t *testing.T) {
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
+		WithOrder(StageOrderPrefillFirst)
+
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile:  makeProfileRunResult("decode-pod"),
+		defaultPrefillProfile: makeProfileRunResult("prefill-pod"),
+	}
+
+	req := &scheduling.InferenceRequest{Headers: map[string]string{}}
+	res, err := h.ProcessResults(context.Background(), req, results)
+	assert.NoError(t, err)
+	assert.Equal(t, defaultDecodeProfile, res.PrimaryProfileName)
+	assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+	assert.Contains(t, res.ProfileResults, defaultPrefillProfile)
+}

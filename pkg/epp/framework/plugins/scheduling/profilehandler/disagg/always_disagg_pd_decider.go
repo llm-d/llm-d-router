@@ -28,10 +28,15 @@ func AlwaysDisaggPDDeciderPluginFactory(name string, _ *json.Decoder,
 	return newAlwaysDisaggPDDecider().WithName(name), nil
 }
 
-func newAlwaysDisaggPDDecider() *AlwaysDisaggPDDecider {
+// NewAlwaysDisaggPDDecider creates a new AlwaysDisaggPDDecider.
+func NewAlwaysDisaggPDDecider() *AlwaysDisaggPDDecider {
 	return &AlwaysDisaggPDDecider{
 		typedName: plugin.TypedName{Type: AlwaysDisaggPDDeciderPluginType},
 	}
+}
+
+func newAlwaysDisaggPDDecider() *AlwaysDisaggPDDecider {
+	return NewAlwaysDisaggPDDecider()
 }
 
 // TypedName returns the typed name of the plugin.
