@@ -309,8 +309,15 @@ func TestDisaggregate(t *testing.T) {
 			expectDisaggregate: false,
 		},
 		{
-			name:               "nil endpoint returns false",
+			name:               "nil endpoint with input >= nonCachedTokens returns true",
 			nonCachedTokens:    5,
+			request:            makeRequestWithTokens(10),
+			endpoint:           nil,
+			expectDisaggregate: true,
+		},
+		{
+			name:               "nil endpoint with input < nonCachedTokens returns false",
+			nonCachedTokens:    15,
 			request:            makeRequestWithTokens(10),
 			endpoint:           nil,
 			expectDisaggregate: false,

@@ -111,10 +111,6 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	if d.config.NonCachedTokens == 0 {
 		return false
 	}
-	if endpoint == nil {
-		logger.Error(nil, "prefix decider: endpoint is nil")
-		return false
-	}
 	inputTokens, err := getUserInputLenInTokens(request)
 	if err != nil {
 		logger.Error(err, "prefix decider: failed to get user input length in tokens")
@@ -129,6 +125,12 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	if inputTokens < d.config.NonCachedTokens {
 		debugLogger.Info("Input is shorter than the nonCachedToken, no disaggregated PD")
 		return false
+	}
+
+	// If no endpoint is provided (e.g. prefill-first scheduling where no decode
+	// endpoint has been selected yet), decide based on prompt length.
+	if endpoint == nil {
+		return true
 	}
 	// inspect the decode endpoint to disaggregate if prefill should run or not.
 	// if the non-cached part is short enough - no disaggregation.

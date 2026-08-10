@@ -532,10 +532,10 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter2)
 			decodeOnlyCountllmDEpp := getCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter2)
 
-			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(4))
-			gomega.Expect(prefillDecodeCountllmDEpp).Should(gomega.Equal(4))
-			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(2))
-			gomega.Expect(decodeOnlyCountllmDEpp).Should(gomega.Equal(2))
+			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(6))
+			gomega.Expect(prefillDecodeCountllmDEpp).Should(gomega.Equal(6))
+			gomega.Expect(decodeOnlyCount).Should(gomega.Equal(0))
+			gomega.Expect(decodeOnlyCountllmDEpp).Should(gomega.Equal(0))
 
 			testutils.DeleteObjects(testConfig, epp, nsName)
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
