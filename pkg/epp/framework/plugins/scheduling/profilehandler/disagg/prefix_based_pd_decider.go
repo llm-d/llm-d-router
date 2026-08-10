@@ -115,12 +115,9 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	return d
 }
 
-// PreRequest gates requests carrying "Prefer: if-available". It rejects with
-// HTTP 412 when the non-cached suffix on the chosen decode endpoint reaches
-// NonCachedTokens, mirroring disaggregate()'s promptTokens/NonCachedTokens
-// shortcuts so both decisions honor the same knobs. NonCachedTokens == 0
-// disables the gate. Fails closed (412) when the endpoint's cache state
-// cannot be read.
+// PreRequest rejects requests carrying "Prefer: if-available" with HTTP 412
+// when needsRemotePrefill reports the coordinator should run remote prefill.
+// Requests without the header are a no-op.
 func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
 	schedulingResult *scheduling.SchedulingResult) error {
 	if request == nil || !routing.IsConditionalDecode(request.Headers) {
@@ -130,42 +127,21 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 		return nil
 	}
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
-
 	endpoint := primaryDecodeEndpoint(schedulingResult)
 	if endpoint == nil {
 		debugLogger.Info("conditional-decode: no primary decode endpoint, rejecting")
 		return errCondDecodeCacheMiss
 	}
-	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
-	if !ok || prefixInfoRaw == nil {
-		debugLogger.Info("conditional-decode: endpoint has no prefix-cache match info, rejecting")
-		return errCondDecodeCacheMiss
-	}
-	info, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok {
-		debugLogger.Info("conditional-decode: prefix-cache match info has unexpected type, rejecting",
-			"type", fmt.Sprintf("%T", prefixInfoRaw))
-		return errCondDecodeCacheMiss
-	}
-	inputTokens, err := getUserInputLenInTokens(request)
+	needs, err := d.needsRemotePrefill(ctx, request, endpoint)
 	if err != nil {
-		debugLogger.Info("conditional-decode: failed to read input token count, rejecting", "error", err)
+		debugLogger.Info("conditional-decode: cache state unreadable, rejecting", "error", err.Error())
 		return errCondDecodeCacheMiss
 	}
-	if d.config.PromptTokens > 0 && inputTokens < d.config.PromptTokens {
-		debugLogger.Info("conditional-decode: prompt below promptTokens threshold, forwarding",
-			"inputTokens", inputTokens, "promptTokens", d.config.PromptTokens)
-		return nil
-	}
-	hitPrefixTokens := info.CachedBlockCount() * info.BlockSizeTokens()
-	nonCachedTokens := inputTokens - hitPrefixTokens
-	if nonCachedTokens >= d.config.NonCachedTokens {
-		debugLogger.Info("conditional-decode: non-cached suffix at or above threshold, rejecting",
-			"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+	if needs {
+		debugLogger.Info("conditional-decode: non-cached suffix at or above threshold, rejecting")
 		return errCondDecodeCacheMiss
 	}
-	debugLogger.Info("conditional-decode: non-cached suffix below threshold, forwarding",
-		"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+	debugLogger.Info("conditional-decode: forwarding")
 	return nil
 }
 
@@ -183,65 +159,66 @@ func primaryDecodeEndpoint(result *scheduling.SchedulingResult) scheduling.Endpo
 	return primary.TargetEndpoints[0]
 }
 
+// disaggregate reports whether remote prefill should run for this request.
+// Fails soft: any read failure logs at ERROR and returns false so scheduling
+// falls back to the decode-only path.
 func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {
-	logger := log.FromContext(ctx)
-	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
-
-	// NonCachedTokens defines the minimum number of non-cached tokens required
-	// to trigger disaggregated PD. A value of 0 disables disaggregation.
-	if d.config.NonCachedTokens == 0 {
+	needs, err := d.needsRemotePrefill(ctx, request, endpoint)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "prefix decider")
 		return false
 	}
+	return needs
+}
+
+// needsRemotePrefill answers whether the request's non-cached suffix on the
+// chosen endpoint meets NonCachedTokens. Returns (false, nil) when the plugin
+// is disabled, the prompt is shorter than PromptTokens, or the prompt is
+// shorter than NonCachedTokens. A non-nil error means the endpoint's cache
+// state or the request's input length could not be read; callers decide
+// whether that means "no disagg" or a hard 412.
+//
+// Uses the unweighted cached-block count, not the tier-weighted match score:
+// a RAM-cached prefix must contribute its full token count, otherwise the
+// non-cached suffix is overestimated and large local-RAM hits are misrouted
+// to remote prefill.
+func (d *PrefixBasedPDDecider) needsRemotePrefill(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (bool, error) {
+	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
+
+	if d.config.NonCachedTokens == 0 {
+		return false, nil
+	}
 	if endpoint == nil {
-		logger.Error(nil, "prefix decider: endpoint is nil")
-		return false
+		return false, errors.New("endpoint is nil")
 	}
 	inputTokens, err := getUserInputLenInTokens(request)
 	if err != nil {
-		logger.Error(err, "prefix decider: failed to get user input length in tokens")
-		return false
+		return false, fmt.Errorf("failed to get user input length in tokens: %w", err)
 	}
-
 	if d.config.PromptTokens > 0 && inputTokens < d.config.PromptTokens {
-		debugLogger.Info("Input is shorter than the promptTokens, no disaggregated PD")
-		return false
+		debugLogger.Info("Input shorter than promptTokens",
+			"inputTokens", inputTokens, "promptTokens", d.config.PromptTokens)
+		return false, nil
 	}
-
 	if inputTokens < d.config.NonCachedTokens {
-		debugLogger.Info("Input is shorter than the nonCachedToken, no disaggregated PD")
-		return false
+		debugLogger.Info("Input shorter than nonCachedTokens threshold",
+			"inputTokens", inputTokens, "threshold", d.config.NonCachedTokens)
+		return false, nil
 	}
-	// inspect the decode endpoint to disaggregate if prefill should run or not.
-	// if the non-cached part is short enough - no disaggregation.
 	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
 	if !ok || prefixInfoRaw == nil {
-		logger.Error(nil, "unable to read prefix cache state")
-		return false
+		return false, errors.New("unable to read prefix cache state")
 	}
-	prefixCacheMatchInfo, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
+	info, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 	if !ok {
-		logger.Error(nil, "wrong type of prefix cache match info")
-		return false
+		return false, fmt.Errorf("prefix cache match info has unexpected type: %T", prefixInfoRaw)
 	}
-
-	// number of cached tokens. Use the unweighted cached-block count, not the
-	// tier-weighted match score: a RAM-cached prefix must contribute its full
-	// token count here, otherwise the non-cached suffix is overestimated and
-	// requests with large local-RAM hits are misrouted to remote prefill.
-	hitPrefixTokens := prefixCacheMatchInfo.CachedBlockCount() * prefixCacheMatchInfo.BlockSizeTokens()
-	// length of non-cached suffix in tokens
+	hitPrefixTokens := info.CachedBlockCount() * info.BlockSizeTokens()
 	nonCachedTokens := inputTokens - hitPrefixTokens
-
-	debugLogger.Info("Computed hit percentage for prefix cache",
-		"absolute hit prefix len (tokens)", hitPrefixTokens,
-		"prompt length (token)", inputTokens)
-
-	if nonCachedTokens < d.config.NonCachedTokens {
-		debugLogger.Info("Non-cached suffix is smaller than threshold, using decode profile only")
-		return false // do not run prefill
-	}
-
-	return true
+	debugLogger.Info("Computed non-cached suffix",
+		"hitPrefixTokens", hitPrefixTokens, "inputTokens", inputTokens,
+		"nonCachedTokens", nonCachedTokens, "threshold", d.config.NonCachedTokens)
+	return nonCachedTokens >= d.config.NonCachedTokens, nil
 }
 
 // getUserInputLenInTokens returns an estimated token count for the user input.
