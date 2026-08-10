@@ -236,6 +236,10 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin
 	}
 	parameters.StageOrder = parsedOrder
 
+	if parameters.StageOrder == StageOrderPrefillFirst && parameters.Deciders.Prefill != "" {
+		return nil, fmt.Errorf("prefill decider is not supported in %s stage order", StageOrderPrefillFirst)
+	}
+
 	// Apply profile name defaults for any fields still unset.
 	if parameters.Profiles.Decode == "" {
 		parameters.Profiles.Decode = defaultDecodeProfile

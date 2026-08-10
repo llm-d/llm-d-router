@@ -1512,6 +1512,45 @@ func TestHandler_Factory_StageOrder(t *testing.T) {
 			expectErr:   false,
 			expectOrder: StageOrderPrefillFirst,
 		},
+		{
+			name: "prefill-first with deciders.prefill returns error",
+			params: map[string]any{
+				"stageOrder": "prefill-first",
+				"deciders": map[string]any{
+					"prefill": PrefixBasedPDDeciderPluginType,
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name: "prefill-first with legacy deciderPluginName returns error",
+			params: map[string]any{
+				"stageOrder":        "prefill-first",
+				"decodeProfile":     "decode",
+				"deciderPluginName": PrefixBasedPDDeciderPluginType,
+			},
+			expectErr: true,
+		},
+		{
+			name: "prefill-first with legacy prefillDeciderPluginName returns error",
+			params: map[string]any{
+				"stageOrder":               "prefill-first",
+				"decodeProfile":            "decode",
+				"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
+			},
+			expectErr: true,
+		},
+		{
+			name: "prefill-first with deciders.encode succeeds",
+			params: map[string]any{
+				"stageOrder": "prefill-first",
+				"deciders": map[string]any{
+					"encode": AlwaysDisaggMulimodalPluginType,
+				},
+			},
+			expectErr:   false,
+			expectOrder: StageOrderPrefillFirst,
+		},
 	}
 
 	for _, tt := range tests {
