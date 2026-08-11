@@ -116,6 +116,9 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /tmp/cache
+            - name: io-transfer-volume
+              mountPath: /tmp/io_transfer
+              readOnly: false
           resources:
             requests:
               cpu: ${PRE_CPU_RESOURCES}
@@ -126,3 +129,7 @@ spec:
       volumes:
         - name: cache
           emptyDir: {}
+        - name: io-transfer-volume
+          persistentVolumeClaim:
+            claimName: disagg-data-pvc
+            readOnly: false
