@@ -58,6 +58,16 @@ var errCondDecodeCacheMiss = errcommon.Error{
 	Msg:  "no decode worker has the requested KV cache",
 }
 
+// remotePrefillDecisionAttributeKey memoizes the needsRemotePrefill outcome on
+// the request so PreRequest can reuse the decision that disaggregate computed
+// earlier in scheduling.
+var remotePrefillDecisionAttributeKey = plugin.NewDataKey("remote-prefill-decision", PrefixBasedPDDeciderPluginType)
+
+type remotePrefillDecision struct {
+	needs bool
+	err   error
+}
+
 // PrefixBasedPDDecider is a PD decider plugin which decision is based prefix aware
 type PrefixBasedPDDecider struct {
 	typedName plugin.TypedName
@@ -178,11 +188,27 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 // state or the request's input length could not be read; callers decide
 // whether that means "no disagg" or a hard 412.
 //
-// Uses the unweighted cached-block count, not the tier-weighted match score:
-// a RAM-cached prefix must contribute its full token count, otherwise the
-// non-cached suffix is overestimated and large local-RAM hits are misrouted
-// to remote prefill.
+// The outcome is memoized on the request: disaggregate populates it during
+// scheduling, and PreRequest reuses it without recomputing.
 func (d *PrefixBasedPDDecider) needsRemotePrefill(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (bool, error) {
+	if request != nil {
+		if cached, ok := scheduling.ReadRequestAttribute[remotePrefillDecision](request, remotePrefillDecisionAttributeKey); ok {
+			return cached.needs, cached.err
+		}
+	}
+	needs, err := d.computeNeedsRemotePrefill(ctx, request, endpoint)
+	if request != nil {
+		request.PutAttribute(remotePrefillDecisionAttributeKey, remotePrefillDecision{needs: needs, err: err})
+	}
+	return needs, err
+}
+
+// computeNeedsRemotePrefill is the uncached implementation of
+// needsRemotePrefill. It reads the endpoint's unweighted cached-block count —
+// not the tier-weighted match score — so a RAM-cached prefix contributes its
+// full token count, otherwise the non-cached suffix is overestimated and large
+// local-RAM hits are misrouted to remote prefill.
+func (d *PrefixBasedPDDecider) computeNeedsRemotePrefill(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (bool, error) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	if d.config.NonCachedTokens == 0 {

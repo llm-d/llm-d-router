@@ -428,8 +428,11 @@ func TestDisaggregate_UsesUnweightedCachedBlockCount(t *testing.T) {
 		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, info)
 		return ep
 	}
-	// Exact token count via the tokenized-prompt path the decider reads.
-	req := withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens)
+	// Each scenario uses its own request: the decider memoizes its decision on
+	// the request, and production only ever pairs one request with one endpoint.
+	newRequest := func() *scheduling.InferenceRequest {
+		return withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens)
+	}
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: nonCachedTokens})
 	require.NoError(t, err)
@@ -438,14 +441,14 @@ func TestDisaggregate_UsesUnweightedCachedBlockCount(t *testing.T) {
 	// nonCached = 4096 - 240*16 = 256 < 512 → decode-only (no remote prefill).
 	fixed := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize).
 		WithCachedBlockCount(cachedBlocks))
-	assert.False(t, decider.disaggregate(ctx, req, fixed),
+	assert.False(t, decider.disaggregate(ctx, newRequest(), fixed),
 		"RAM-cached prefix must stay decode-only when the unweighted cached-block count is used")
 
 	// Buggy behavior guard: if only the tier-weighted score (192) were
 	// available as the block count, nonCached = 4096 - 192*16 = 1024 >= 512
 	// would misroute to remote prefill.
 	weightedOnly := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize))
-	assert.True(t, decider.disaggregate(ctx, req, weightedOnly),
+	assert.True(t, decider.disaggregate(ctx, newRequest(), weightedOnly),
 		"sanity: the tier-weighted score alone undercounts cached blocks and misroutes")
 }
 
@@ -740,22 +743,48 @@ func TestPreRequest_UsesUnweightedCachedBlockCount(t *testing.T) {
 		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, info)
 		return ep
 	}
-	req := withHeaders(
-		withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens),
-		map[string]string{"prefer": "if-available"},
-	)
+	// Each scenario uses its own request: the decider memoizes its decision on
+	// the request, and production only ever pairs one request with one endpoint.
+	newRequest := func() *scheduling.InferenceRequest {
+		return withHeaders(
+			withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens),
+			map[string]string{"prefer": "if-available"},
+		)
+	}
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: nonCachedTokens})
 	require.NoError(t, err)
 
 	fixed := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize).
 		WithCachedBlockCount(cachedBlocks))
-	assert.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(fixed)),
+	assert.NoError(t, decider.PreRequest(ctx, newRequest(), resultWithEndpoint(fixed)),
 		"RAM-cached prefix must forward when the unweighted cached-block count is used")
 
 	weightedOnly := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize))
-	err = decider.PreRequest(ctx, req, resultWithEndpoint(weightedOnly))
+	err = decider.PreRequest(ctx, newRequest(), resultWithEndpoint(weightedOnly))
 	var e errcommon.Error
 	require.ErrorAs(t, err, &e, "the tier-weighted score alone undercounts cached blocks and misroutes")
 	assert.Equal(t, errcommon.PreconditionFailed, e.Code)
+}
+
+// TestNeedsRemotePrefill_MemoizesOnRequest pins the guarantee that PreRequest
+// reuses the decision disaggregate made during scheduling: after disaggregate
+// records "no remote prefill", PreRequest returns nil even against an endpoint
+// whose cache state would otherwise trip the 412 gate.
+func TestNeedsRemotePrefill_MemoizesOnRequest(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 5})
+	require.NoError(t, err)
+
+	req := withHeaders(makeRequestWithTokens(10), map[string]string{"prefer": "if-available"})
+
+	// disaggregate against an endpoint whose non-cached suffix is under the
+	// threshold: 10 - 8 = 2 < 5, so the memoized outcome is "no remote prefill".
+	assert.False(t, decider.disaggregate(ctx, req, makeTestEndpoint(8)))
+
+	// A follow-up PreRequest with an endpoint that would fail the gate on its
+	// own (0 cached blocks → non-cached suffix 10 >= 5) must still forward,
+	// proving PreRequest reused the memoized decision.
+	assert.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(0))))
 }
