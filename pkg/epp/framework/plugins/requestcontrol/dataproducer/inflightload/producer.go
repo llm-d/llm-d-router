@@ -26,7 +26,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -676,14 +675,6 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 	p.requestTracker.delete(endpointID)
 	p.tokenTracker.delete(endpointID)
-	name, namespace := splitNamespacedName(endpointID)
-	labels := prometheus.Labels{
-		"endpoint_name": name,
-		"namespace":     namespace,
-		"producer_name": p.typedName.Name,
-	}
-	inflightRequests.DeletePartialMatch(labels)
-	inflightTokens.DeletePartialMatch(labels)
 }
 
 func (p *InFlightLoadProducer) GetTokens(eid string) int64 {

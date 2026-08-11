@@ -91,10 +91,11 @@ llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default"
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
 	expect(t, 0, 0)
 
-	// Endpoint removal deletes the series.
+	// Endpoint removal cleans up internal trackers, while gauge series remain at zero.
 	producer.DeleteEndpoint(fullEndpointName("ep1"))
-	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(""), "llm_d_epp_inflight_requests"))
-	require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(""), "llm_d_epp_inflight_tokens"))
+	expect(t, 0, 0)
+	require.Equal(t, int64(0), producer.GetRequests(fullEndpointName("ep1")))
+	require.Equal(t, int64(0), producer.GetTokens(fullEndpointName("ep1")))
 }
 
 func TestInflightGauges_CustomFairnessAndPriority(t *testing.T) {
@@ -275,15 +276,17 @@ llm_d_epp_inflight_requests{endpoint_name="ep2",fairness_id="flow-2",namespace="
 `
 	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
 
-	// Delete endpoint from producer-1 should only delete producer-1 series
-	producer1.DeleteEndpoint(fullEndpointName("ep1"))
+	// Complete req-1 on producer-1 -> series returns to 0
+	req1.SchedulingResult = res1
+	producer1.ResponseBody(ctx, req1, &requestcontrol.Response{EndOfStream: true}, nil)
 
-	expectedRequestsAfterDelete := `
+	expectedRequestsAfterComplete := `
 # HELP llm_d_epp_inflight_requests [ALPHA] Current number of in-flight requests per endpoint, as tracked by the in-flight load producer.
 # TYPE llm_d_epp_inflight_requests gauge
+llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="flow-1",namespace="default",priority="1",producer_name="producer-1"} 0
 llm_d_epp_inflight_requests{endpoint_name="ep2",fairness_id="flow-2",namespace="default",priority="2",producer_name="producer-2"} 1
 `
-	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequestsAfterDelete), "llm_d_epp_inflight_requests"))
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequestsAfterComplete), "llm_d_epp_inflight_requests"))
 }
 
 func TestAddedTokensEntry_Clone(t *testing.T) {
