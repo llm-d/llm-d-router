@@ -54,41 +54,32 @@ const (
 type OSLBucket int8
 
 const (
-	// OSLBucketUnknown means no reliable signal was found; consumers use their
-	// own fallback (e.g. the ratio-based token estimate). It is the zero value,
-	// so a missing attribute reads as UNKNOWN.
-	OSLBucketUnknown OSLBucket = iota
-	// OSLBucketShort predicts < 500 output tokens (e.g. tool-call JSON responses).
-	OSLBucketShort
-	// OSLBucketLong predicts >= 2000 output tokens (e.g. reasoning chains).
-	OSLBucketLong
+	// Unknown means no reliable signal was found; consumers use their own fallback
+	// (e.g. the ratio-based token estimate). It is the zero value, so a missing
+	// attribute reads as Unknown.
+	Unknown OSLBucket = iota
+	// Short predicts < 500 output tokens (e.g. tool-call JSON responses).
+	Short
+	// Long predicts >= 2000 output tokens (e.g. reasoning chains).
+	Long
 )
 
 func (b OSLBucket) String() string {
 	switch b {
-	case OSLBucketShort:
+	case Short:
 		return "SHORT"
-	case OSLBucketLong:
+	case Long:
 		return "LONG"
 	default:
 		return "UNKNOWN"
 	}
 }
 
-// EstimateOSLBucket predicts the output-length bin using request-time signals.
-//
-// Validated on 22,575 samples across 5 real-world LLM datasets
-// (KIMI-K2.5, rStar-Coder, xlam-function-calling-60k, WildChat-4.8M,
-// Nemotron-SFT-ARC-AGI-v1):
-//
-//   - enable_thinking=true  -> LONG:  90.1% precision, 79.7% recall
-//   - enable_thinking=false AND has_tools=true -> SHORT: 100.0% precision, 56.9% recall
-//
-// ISL is intentionally excluded: no correlation with OSL, adds noise.
-// See research-directions/osl-aware-scheduling/README.md for full analysis.
+// EstimateOSLBucket predicts the output-length bin using request-time signals
+// (enable_thinking, thinking_budget, has_tools, max_output_tokens).
 func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 	if body == nil {
-		return OSLBucketUnknown
+		return Unknown
 	}
 
 	var enableThinking *bool
@@ -105,29 +96,29 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 		}
 	}
 
-	// Thinking mode -> always long (reasoning chains, measured p50 = 3,848-16,530 tokens).
+	// Thinking mode → always long (reasoning chains).
 	if enableThinking != nil && *enableThinking {
-		return OSLBucketLong
+		return Long
 	}
 
-	// Large thinking budget without explicit enable_thinking -> treat as LONG.
+	// Large thinking budget without explicit enable_thinking → treat as LONG.
 	if thinkingBudget != nil && *thinkingBudget > longBudgetThresholdTokens {
-		return OSLBucketLong
+		return Long
 	}
 
-	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
+	// Tools without thinking → short tool-call JSON.
 	// Guard: enable_thinking must be explicitly false or absent. Nemotron ARC-AGI proves that
 	// has_tools=true alone is NOT a SHORT signal when enable_thinking is also true.
 	if hasTools && (enableThinking == nil || !*enableThinking) {
-		return OSLBucketShort
+		return Short
 	}
 
-	// Explicit short cap set by the client -> treat as short.
+	// Explicit short cap set by the client → treat as short.
 	if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < shortMaxOutputTokens {
-		return OSLBucketShort
+		return Short
 	}
 
-	return OSLBucketUnknown
+	return Unknown
 }
 
 // PluginFactory is the factory function for the OSL bucket plugin.
@@ -161,6 +152,19 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	return nil
 }
 
+// toJSONNumber normalizes float64 (from json.Unmarshal without UseNumber) and
+// json.Number (from a decoder with UseNumber) into a single json.Number,
+// eliminating duplicate numeric-type handling across the coercion helpers.
+func toJSONNumber(v any) (json.Number, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		return t, true
+	case float64:
+		return json.Number(strconv.FormatFloat(t, 'f', -1, 64)), true
+	}
+	return "", false
+}
+
 // boolPtrFromAny coerces a JSON-decoded value into a *bool. It accepts a native
 // bool, the strings "true"/"false"/"1"/"0", and numeric 0/1 (float64 or
 // json.Number). Any other value yields nil ("not set").
@@ -172,11 +176,9 @@ func boolPtrFromAny(v any) *bool {
 		if b, err := strconv.ParseBool(t); err == nil {
 			return &b
 		}
-	case float64:
-		b := t != 0
-		return &b
-	case json.Number:
-		if f, err := t.Float64(); err == nil {
+	}
+	if n, ok := toJSONNumber(v); ok {
+		if f, err := n.Float64(); err == nil {
 			b := f != 0
 			return &b
 		}
@@ -189,22 +191,20 @@ func boolPtrFromAny(v any) *bool {
 // value (or a non-integral / unparseable one) yields nil ("not set").
 func int64PtrFromAny(v any) *int64 {
 	switch t := v.(type) {
-	case float64:
-		i := int64(t)
-		return &i
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return &i
-		}
-	case string:
-		if i, err := strconv.ParseInt(t, 10, 64); err == nil {
-			return &i
-		}
 	case int:
 		i := int64(t)
 		return &i
 	case int64:
 		return &t
+	case string:
+		if i, err := strconv.ParseInt(t, 10, 64); err == nil {
+			return &i
+		}
+	}
+	if n, ok := toJSONNumber(v); ok {
+		if i, err := n.Int64(); err == nil {
+			return &i
+		}
 	}
 	return nil
 }

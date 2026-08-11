@@ -140,38 +140,36 @@ func (e *SimpleTokenEstimator) EstimateOutput(inputTokens int64, maxOutputTokens
 // (reasoning mode) use a flat 4096-token estimate, SHORT requests (tool-call) use
 // 100, and UNKNOWN (or missing attribute) use 1000 — preserving the ranking
 // invariant SHORT < UNKNOWN < LONG. All values are bounded by the client-requested
-// cap.
+// cap and the estimator's operator cap.
+//
+// Requires the osl-bucket RequestHeaderProcessor to have run before any Produce or
+// PreRequest call that invokes this method (RequestHeader runs before PreRequest in
+// the plugin dispatch order).
 func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
 	}
-	body := request.Body
 
 	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+	var est int64
 	switch bucket {
-	case oslbucket.OSLBucketLong:
-		est := longOutputEstimateTokens
-		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
-			est = *body.MaxOutputTokens
-		}
-		if e.MaxEstimatedOutputTokens != nil && *e.MaxEstimatedOutputTokens >= 0 && *e.MaxEstimatedOutputTokens < est {
-			est = *e.MaxEstimatedOutputTokens
-		}
-		return est
-
-	case oslbucket.OSLBucketShort:
-		est := shortOutputEstimateTokens
-		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
-			est = *body.MaxOutputTokens
-		}
-		return est
-
+	case oslbucket.Long:
+		est = longOutputEstimateTokens
+	case oslbucket.Short:
+		est = shortOutputEstimateTokens
 	default:
-		// OSLBucketUnknown or missing attribute: use a flat estimate.
-		est := unknownOutputEstimateTokens
-		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
-			est = *body.MaxOutputTokens
-		}
-		return est
+		est = unknownOutputEstimateTokens
 	}
+	return e.clampOutput(est, request.Body.MaxOutputTokens)
+}
+
+// clampOutput applies the client-requested cap and the operator cap to est.
+func (e *SimpleTokenEstimator) clampOutput(est int64, clientCap *int64) int64 {
+	if clientCap != nil && *clientCap > 0 && *clientCap < est {
+		est = *clientCap
+	}
+	if e.MaxEstimatedOutputTokens != nil && *e.MaxEstimatedOutputTokens >= 0 && *e.MaxEstimatedOutputTokens < est {
+		est = *e.MaxEstimatedOutputTokens
+	}
+	return est
 }

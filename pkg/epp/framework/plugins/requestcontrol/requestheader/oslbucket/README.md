@@ -27,14 +27,13 @@ for any subsystem, exactly like `agent-identity`.
 
 ## How It Works
 
-Classification (validated on 22,575 samples across 5 real-world LLM datasets;
-see `research-directions/osl-aware-scheduling/README.md`):
+Classification:
 
-1. `enable_thinking=true` → **LONG** (reasoning mode; p50 = 3,848–16,530 tokens).
+1. `enable_thinking=true` → **LONG** (reasoning mode).
 2. `thinking_budget > 4000` (without explicit `enable_thinking`) → **LONG**.
 3. `has_tools=true` **and** `enable_thinking` false/absent → **SHORT**
-   (tool-call JSON; p50 = 41 tokens, 100% precision). The `enable_thinking`
-   guard matters: tools alone is *not* a SHORT signal when thinking is also on.
+   (tool-call JSON). The `enable_thinking` guard matters: tools alone is *not*
+   a SHORT signal when thinking is also on.
 4. `max_output_tokens < 500` → **SHORT** (explicit client cap).
 5. Otherwise → **UNKNOWN**.
 

@@ -397,12 +397,13 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	inputTokens := p.tokenEstimator.EstimateInput(request)
 
 	if request.Body != nil {
-		bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
-		log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL estimate",
-			"requestID", request.RequestID,
-			"bucket", bucket.String(),
-			"maxOutputTokens", request.Body.MaxOutputTokens,
-		)
+		if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey); ok {
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL estimate",
+				"requestID", request.RequestID,
+				"bucket", bucket.String(),
+				"maxOutputTokens", request.Body.MaxOutputTokens,
+			)
+		}
 	}
 
 	tracked := false
@@ -456,9 +457,7 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		// Output tokens are independent of the prefix-cache discount that shapes
-		// adjustedInput. EstimateOutputFromRequest derives them from the OSL bucket
-		// published as a request attribute by the osl-bucket plugin.
+		// Adjust output tokens estimate based on the output bucket request attribute.
 		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return tokens
@@ -522,12 +521,13 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
-			bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
-			log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
-				"requestID", request.RequestID,
-				"estimatedBucket", bucket.String(),
-				"actualCompletionTokens", resp.Usage.CompletionTokens,
-			)
+			if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey); ok {
+				log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
+					"requestID", request.RequestID,
+					"estimatedBucket", bucket.String(),
+					"actualCompletionTokens", resp.Usage.CompletionTokens,
+				)
+			}
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {

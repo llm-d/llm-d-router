@@ -48,72 +48,72 @@ func TestEstimateOSLBucket(t *testing.T) {
 		body *fwkrh.InferenceRequestBody
 		want OSLBucket
 	}{
-		{name: "nil body", body: nil, want: OSLBucketUnknown},
-		{name: "empty body", body: &fwkrh.InferenceRequestBody{}, want: OSLBucketUnknown},
+		{name: "nil body", body: nil, want: Unknown},
+		{name: "empty body", body: &fwkrh.InferenceRequestBody{}, want: Unknown},
 		{
 			name: "enable_thinking=true -> LONG",
 			body: chatBody(nil, map[string]any{"enable_thinking": true}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "enable_thinking=false, no tools -> UNKNOWN",
 			body: chatBody(nil, map[string]any{"enable_thinking": false}, nil),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "has_tools=true, enable_thinking absent -> SHORT",
 			body: chatBody(oneTool, nil, nil),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "has_tools=true, enable_thinking=false -> SHORT",
 			body: chatBody(oneTool, map[string]any{"enable_thinking": false}, nil),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "has_tools=true, enable_thinking=true -> LONG (thinking overrides)",
 			body: chatBody(oneTool, map[string]any{"enable_thinking": true}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "thinking_budget>4000 without enable_thinking -> LONG",
 			body: chatBody(nil, map[string]any{"thinking_budget": float64(8000)}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "thinking_budget<=4000 -> UNKNOWN",
 			body: chatBody(nil, map[string]any{"thinking_budget": float64(4000)}, nil),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "max_output_tokens<500 -> SHORT",
 			body: chatBody(nil, nil, ptr.To(int64(100))),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "max_output_tokens=499 -> SHORT",
 			body: chatBody(nil, nil, ptr.To(int64(499))),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "max_output_tokens=500 -> UNKNOWN (boundary)",
 			body: chatBody(nil, nil, ptr.To(int64(500))),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "max_output_tokens=0 -> UNKNOWN (zero ignored)",
 			body: chatBody(nil, nil, ptr.To(int64(0))),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "enable_thinking as string \"true\" -> LONG",
 			body: chatBody(nil, map[string]any{"enable_thinking": "true"}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "no chat completions, short cap -> SHORT",
 			body: &fwkrh.InferenceRequestBody{MaxOutputTokens: ptr.To(int64(50))},
-			want: OSLBucketShort,
+			want: Short,
 		},
 	}
 
@@ -138,7 +138,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 
 		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
 		require.True(t, ok, "attribute must be set")
-		require.Equal(t, OSLBucketLong, got)
+		require.Equal(t, Long, got)
 	})
 
 	t.Run("SHORT bucket published", func(t *testing.T) {
@@ -149,7 +149,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 
 		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
 		require.True(t, ok)
-		require.Equal(t, OSLBucketShort, got)
+		require.Equal(t, Short, got)
 	})
 
 	t.Run("UNKNOWN still published", func(t *testing.T) {
@@ -158,7 +158,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 
 		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
 		require.True(t, ok)
-		require.Equal(t, OSLBucketUnknown, got)
+		require.Equal(t, Unknown, got)
 	})
 
 	t.Run("nil body is a no-op", func(t *testing.T) {
