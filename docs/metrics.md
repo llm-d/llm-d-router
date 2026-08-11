@@ -10,7 +10,7 @@ A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses two curren
 
 | Prefix | Scope |
 |---|---|
-| `llm_d_epp_` | Canonical, EPP-wide: request/latency, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, and predicted-latency metrics. |
+| `llm_d_epp_` | Canonical, EPP-wide: request/latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, and predicted-latency metrics. |
 | `llm_d_router_epp_` | The embedded llm-d-kv-cache metrics only (see [Embedded llm-d-kv-cache metrics](#embedded-llm-d-kv-cache-metrics)). |
 
 Earlier releases emitted metrics under `llm_d_inference_scheduler_`, `inference_objective_`,
@@ -332,6 +332,38 @@ Three metrics covering the ext_proc gRPC stream lifecycle. Disabled by default; 
 *   **Usage:** Rate of `code="OK"` is the healthy completion rate. Rising `code="Internal"` or
     `code="Unknown"` indicates handler errors. `code="Canceled"` is expected on Envoy restarts and
     rolling EPP updates.
+
+### In-flight load
+
+In-flight load, emitted under the `llm_d_epp_` prefix. Present only when an `InFlightLoadProducer` is
+configured: the producer owns these metrics and registers them through the plugin metrics recorder. The
+per-endpoint gauges are updated as requests are admitted and released.
+
+#### `inflight_requests`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `endpoint_name`: string — the target endpoint (pod) name.
+    *   `namespace`: string — the endpoint's namespace.
+    *   `producer_name`: string — the configured `InFlightLoadProducer` instance name, so multiple producers emit distinct series.
+    *   `fairness_id`: string — the flow-control fairness queue identity.
+    *   `priority`: string — the request priority.
+*   **Release Stage:** ALPHA
+*   **Description:** Requests currently in flight on each endpoint (scheduled, not yet completed), as tracked by the in-flight load producer.
+*   **Usage:** Per-replica queue depth for load-aware routing and capacity analysis.
+
+#### `inflight_tokens`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `endpoint_name`: string — the target endpoint (pod) name.
+    *   `namespace`: string — the endpoint's namespace.
+    *   `producer_name`: string — the configured `InFlightLoadProducer` instance name.
+    *   `fairness_id`: string — the flow-control fairness queue identity.
+    *   `priority`: string — the request priority.
+*   **Release Stage:** ALPHA
+*   **Description:** Tokens currently in flight on each endpoint — uncached prompt tokens, optionally plus estimated output tokens when the producer's `addEstimatedOutputTokens` is set.
+*   **Usage:** Per-replica token pressure, a finer load signal than request count when request sizes vary widely.
 
 ### KV-cache index
 
