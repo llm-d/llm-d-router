@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package datascope
+package datalayer
 
 import (
 	"fmt"
@@ -55,7 +55,7 @@ func BenchmarkScope(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				scoped, _ := Scope(testLogger(), plugin, endpoints)
+				scoped, _ := Scope(testLogger(), "test-extension-point", plugin, endpoints)
 				_ = Unscope(scoped)
 			}
 		})
@@ -66,7 +66,7 @@ func BenchmarkUnscopeScores(b *testing.B) {
 	for _, count := range []int{10, 100} {
 		b.Run(fmt.Sprintf("endpoints=%d", count), func(b *testing.B) {
 			endpoints, plugin := benchEndpoints(count), benchPlugin()
-			scoped, _ := Scope(testLogger(), plugin, endpoints)
+			scoped, _ := Scope(testLogger(), "test-extension-point", plugin, endpoints)
 			scores := make(map[fwksched.Endpoint]float64, len(scoped))
 			for i, endpoint := range scoped {
 				scores[endpoint] = float64(i)

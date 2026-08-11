@@ -464,6 +464,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
+		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
 		metrics.Registry.MustRegister(llmdResponseProcessingLatency)
 		metrics.Registry.MustRegister(inferenceExtensionInfo)
@@ -544,6 +545,7 @@ func Reset() {
 	llmdSchedulerAttemptsTotal.Reset()
 	pluginProcessingLatencies.Reset()
 	llmdPluginProcessingLatencies.Reset()
+	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
 	llmdResponseProcessingLatency.Reset()
 	inferenceExtensionInfo.Reset()
@@ -846,6 +848,18 @@ const (
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {
 	pluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
 	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
+}
+
+// Access kinds for RecordPluginDataScopeViolation.
+const (
+	DataScopeAccessRead  = "read"
+	DataScopeAccessWrite = "write"
+)
+
+// RecordPluginDataScopeViolation records an endpoint attribute access rejected
+// because the plugin did not declare the DataKey.
+func RecordPluginDataScopeViolation(extensionPoint, pluginType, pluginName, access string) {
+	llmdPluginDataScopeViolations.WithLabelValues(extensionPoint, pluginType, pluginName, access).Inc()
 }
 
 func RecordInferenceExtensionInfo(commitSha, buildRef string) {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package datascope
+package datalayer
 
 import (
 	"context"
@@ -74,12 +74,12 @@ func newEndpoint(t *testing.T) fwksched.Endpoint {
 
 func testLogger() logr.Logger { return log.FromContext(context.Background()) }
 
-func scopeProducerConsumer(t *testing.T, endpoint fwksched.Endpoint) (fwksched.Endpoint, *error) {
+func scopeProducerConsumer(t *testing.T, endpoint fwksched.Endpoint) (fwksched.Endpoint, *Violations) {
 	t.Helper()
 	plug := &producerConsumerPlugin{}
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
 	plug.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
-	scoped, violation := Scope(testLogger(), plug, []fwksched.Endpoint{endpoint})
+	scoped, violation := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
 	require.Len(t, scoped, 1)
 	return scoped[0], violation
 }
@@ -92,7 +92,7 @@ func TestScope_PutHonoursProduces(t *testing.T) {
 	got, ok := endpoint.Get(producedKey)
 	assert.True(t, ok, "a declared write must reach the endpoint")
 	assert.Equal(t, cloneableStr("written"), got)
-	assert.NoError(t, *violation)
+	assert.NoError(t, violation.Write())
 }
 
 func TestScope_PutOutsideProducesIsRejectedAndReported(t *testing.T) {
@@ -104,8 +104,40 @@ func TestScope_PutOutsideProducesIsRejectedAndReported(t *testing.T) {
 	value, ok := endpoint.Get(undeclaredKey)
 	assert.True(t, ok)
 	assert.Equal(t, cloneableStr("secret"), value, "an undeclared write must not overwrite another plugin's attribute")
-	require.Error(t, *violation, "an undeclared write must be reportable by the caller")
-	assert.Contains(t, (*violation).Error(), "Produces()")
+	require.Error(t, violation.Write(), "an undeclared write must be reportable by the caller")
+	assert.Contains(t, violation.Write().Error(), "Produces()")
+}
+
+// Every wrapper from one Scope call shares its Violations, so a plugin that
+// misreaches on each of N candidates is reported once rather than N times.
+func TestScope_ViolationsAreSharedAndReportTheFirstWrite(t *testing.T) {
+	endpoints := []fwksched.Endpoint{newEndpoint(t), newEndpoint(t), newEndpoint(t)}
+
+	plug := &producerPlugin{}
+	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	scoped, violations := Scope(testLogger(), "test-extension-point", plug, endpoints)
+
+	first := fwkplugin.NewDataKey("first-undeclared", "otherPlugin")
+	second := fwkplugin.NewDataKey("second-undeclared", "otherPlugin")
+	for _, endpoint := range scoped {
+		endpoint.Put(first, cloneableStr("a"))
+		endpoint.Put(second, cloneableStr("b"))
+	}
+
+	require.Error(t, violations.Write())
+	assert.Contains(t, violations.Write().Error(), first.String(),
+		"the reported violation must be the first one, not the last")
+}
+
+// Reads have no error channel, so a denied read must leave Write() nil while
+// still resolving as absent.
+func TestScope_DeniedReadDoesNotBecomeAWriteViolation(t *testing.T) {
+	endpoint := newEndpoint(t)
+	scoped, violations := scopeProducerConsumer(t, endpoint)
+
+	_, ok := scoped.Get(undeclaredKey)
+	assert.False(t, ok)
+	assert.NoError(t, violations.Write(), "a denied read must not be reported as a rejected write")
 }
 
 func TestScope_GetHonoursConsumesAndProduces(t *testing.T) {
@@ -130,7 +162,7 @@ func TestScope_GetHonoursConsumesAndProduces(t *testing.T) {
 // the case that previously fell through to unrestricted reads.
 func TestScope_PluginDeclaringNothingReachesNothing(t *testing.T) {
 	endpoint := newEndpoint(t)
-	scoped, violation := Scope(testLogger(), &testPlugin{}, []fwksched.Endpoint{endpoint})
+	scoped, violation := Scope(testLogger(), "test-extension-point", &testPlugin{}, []fwksched.Endpoint{endpoint})
 	require.Len(t, scoped, 1)
 
 	_, ok := scoped[0].Get(consumedKey)
@@ -139,7 +171,7 @@ func TestScope_PluginDeclaringNothingReachesNothing(t *testing.T) {
 	scoped[0].Put(producedKey, cloneableStr("nope"))
 	_, ok = endpoint.Get(producedKey)
 	assert.False(t, ok)
-	assert.Error(t, *violation)
+	assert.Error(t, violation.Write())
 }
 
 // A producer that declares no Consumes still reads nothing beyond its own
@@ -149,7 +181,7 @@ func TestScope_ProducerWithoutConsumesReadsOnlyItsOwnOutput(t *testing.T) {
 	plug := &producerPlugin{}
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
 
-	scoped, _ := Scope(testLogger(), plug, []fwksched.Endpoint{endpoint})
+	scoped, _ := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
 
 	_, ok := scoped[0].Get(consumedKey)
 	assert.False(t, ok, "a producer that consumes nothing must not read another plugin's attribute")
@@ -182,7 +214,7 @@ func TestScope_PassesThroughIdentityAndMetadata(t *testing.T) {
 	assert.Equal(t, endpoint.GetMetadata(), scoped.GetMetadata())
 	assert.Equal(t, endpoint.GetMetrics(), scoped.GetMetrics())
 	assert.Equal(t, endpoint.String(), scoped.String())
-	assert.Equal(t, endpoint, scoped.(*Endpoint).Unwrap())
+	assert.Equal(t, endpoint, scoped.(*ScopedEndpoint).Unwrap())
 }
 
 // The scheduler sums scorer results in a map keyed by endpoint, so a scope that
@@ -193,8 +225,8 @@ func TestUnscope_RestoresEndpointIdentity(t *testing.T) {
 
 	plug := &producerPlugin{}
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
-	scopedA, _ := Scope(testLogger(), plug, endpoints)
-	scopedB, _ := Scope(testLogger(), plug, endpoints)
+	scopedA, _ := Scope(testLogger(), "test-extension-point", plug, endpoints)
+	scopedB, _ := Scope(testLogger(), "test-extension-point", plug, endpoints)
 
 	assert.Equal(t, endpoints, Unscope(scopedA))
 
