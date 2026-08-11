@@ -33,11 +33,13 @@ spec:
             - "--skip-tokenizer-init"
             - "--enable-mm-embeds"
             - "--renderer-num-workers"
-            - ${RENDERER_NUM_WORKERS_STR}
+            - ${PRE_RENDERER_NUM_WORKERS_STR}
             - --mm-processor-cache-gb
             - "0"
             - "--port"
             - ${TARGET_PORT_STR}
+            - "--otlp-traces-endpoint"
+            - ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
           ports:
             - name: http
               containerPort: ${TARGET_PORT}
@@ -66,8 +68,12 @@ spec:
             failureThreshold: 1
             timeoutSeconds: 1
           env:
+            - name: OMP_NUM_THREADS
+              value: ${OMP_NUM_THREADS_STR}
             - name: HOME
               value: /tmp/cache
+            - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+              value: ${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL}
             - name: POD_IP
               valueFrom:
                 fieldRef:
@@ -89,7 +95,7 @@ spec:
             - name: PYTHONPATH
               value: "/opt/venv/lib/python3.12/site-packages"
             - name: VLLM_LOGGING_LEVEL
-              value: "DEBUG"
+              value: ${VLLM_LOGGING_LEVEL}
           volumeMounts:
             - name: cache
               mountPath: /tmp/cache
