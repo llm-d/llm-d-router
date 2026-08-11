@@ -182,3 +182,16 @@ type UsageLimitPolicy interface {
 	//     - Values between 0.0 and 1.0 reserve capacity headroom
 	ComputeLimit(ctx context.Context, saturation float64, priorities []int, ceilings []float64)
 }
+
+// ConfigInfo provides resolved configuration details to policy validators.
+type ConfigInfo struct {
+	// StaticPriorities lists the priority values from all explicitly configured bands,
+	// including any bands automatically initialized by the registry.
+	StaticPriorities []int
+}
+
+// ConfigValidator is an optional interface that policy plugins can implement to validate
+// their internal configuration against the global registry configuration.
+type ConfigValidator interface {
+	ValidateConfig(info ConfigInfo) error
+}

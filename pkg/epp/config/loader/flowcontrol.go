@@ -59,6 +59,19 @@ func buildFlowControlConfig(
 		return nil, fmt.Errorf("failed to resolve usage limit policy: %w", err)
 	}
 
+	if v, ok := usageLimitPolicy.(fwkfc.ConfigValidator); ok {
+		var staticPriorities []int
+		for p := range registryConfig.PriorityBands {
+			staticPriorities = append(staticPriorities, p)
+		}
+		info := fwkfc.ConfigInfo{
+			StaticPriorities: staticPriorities,
+		}
+		if err := v.ValidateConfig(info); err != nil {
+			return nil, fmt.Errorf("usage limit policy config validation failed: %w", err)
+		}
+	}
+
 	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy), nil
 }
 
@@ -131,6 +144,10 @@ func buildRegistryConfig(
 			return nil, err
 		}
 		opts = append(opts, registry.WithPriorityBand(pb))
+	}
+
+	if apiConfig.AllowDynamicPriorityProvisioning != nil {
+		opts = append(opts, registry.WithAllowDynamicPriorityProvisioning(*apiConfig.AllowDynamicPriorityProvisioning))
 	}
 
 	return registry.NewConfig(defaults, opts...)

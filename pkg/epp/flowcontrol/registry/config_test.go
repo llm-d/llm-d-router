@@ -89,6 +89,7 @@ func TestNewConfig(t *testing.T) {
 				assert.Equal(t, DefaultFairnessPolicyRef, band.FairnessPolicy.TypedName().Name)
 				assert.Equal(t, defaultPriorityBandMaxBytes, band.MaxBytes)
 				assert.Equal(t, defaultPriorityBandMaxRequests, band.MaxRequests)
+				assert.True(t, cfg.AllowDynamicPriorityProvisioning, "AllowDynamicPriorityProvisioning should default to true")
 			},
 		},
 		{
@@ -97,6 +98,7 @@ func TestNewConfig(t *testing.T) {
 				WithMaxBytes(5000),
 				WithFlowGCTimeout(1 * time.Hour),
 				WithPriorityBandGCTimeout(2 * time.Hour),
+				WithAllowDynamicPriorityProvisioning(false),
 				WithPriorityBand(mustBand(t, 1)),
 			},
 			defaults: newTestPriorityBandPolicyDefaults(),
@@ -104,6 +106,7 @@ func TestNewConfig(t *testing.T) {
 				assert.Equal(t, uint64(5000), cfg.MaxBytes)
 				assert.Equal(t, 1*time.Hour, cfg.FlowGCTimeout)
 				assert.Equal(t, 2*time.Hour, cfg.PriorityBandGCTimeout)
+				assert.False(t, cfg.AllowDynamicPriorityProvisioning)
 			},
 		},
 		{
@@ -408,4 +411,13 @@ func TestNewConfig_DefaultNegativePriorityBand(t *testing.T) {
 			"Clone should have a distinct pointer for DefaultNegativePriorityBand")
 		assert.Equal(t, original.DefaultNegativePriorityBand.MaxBytes, clone.DefaultNegativePriorityBand.MaxBytes)
 	})
+}
+
+func TestNewRegistryConfig_DefaultsDynamicPriorityProvisioningEnabled(t *testing.T) {
+	t.Parallel()
+
+	defaults := newTestPriorityBandPolicyDefaults()
+	cfg, err := NewConfig(defaults)
+	require.NoError(t, err)
+	assert.True(t, cfg.AllowDynamicPriorityProvisioning, "AllowDynamicPriorityProvisioning must default to true")
 }

@@ -106,6 +106,11 @@ type Config struct {
 	// Must be >= FlowGCTimeout to ensure flows are collected before bands.
 	// Optional: Defaults to `defaultPriorityBandGCTimeout` (10 minutes).
 	PriorityBandGCTimeout time.Duration
+
+	// AllowDynamicPriorityProvisioning controls whether the registry creates new priority bands
+	// dynamically when requested by the control plane during reconciliation.
+	// Optional: Defaults to true.
+	AllowDynamicPriorityProvisioning bool
 }
 
 func (c *Config) String() string {
@@ -248,6 +253,14 @@ func WithDefaultNegativePriorityBand(band *PriorityBandConfig) ConfigOption {
 	}
 }
 
+// WithAllowDynamicPriorityProvisioning controls whether dynamic priority band provisioning is allowed during control-plane reconciliation.
+func WithAllowDynamicPriorityProvisioning(allowed bool) ConfigOption {
+	return func(b *configBuilder) error {
+		b.config.AllowDynamicPriorityProvisioning = allowed
+		return nil
+	}
+}
+
 // --- PriorityBandConfig Functional Options ---
 
 // PriorityBandConfigOption defines a functional option for configuring a single PriorityBandConfig.
@@ -300,11 +313,12 @@ func WithBandMaxRequests(maxRequests uint64) PriorityBandConfigOption {
 func NewConfig(defaults PriorityBandPolicyDefaults, opts ...ConfigOption) (*Config, error) {
 	builder := &configBuilder{
 		config: &Config{
-			MaxBytes:              0, // no limit enforced
-			MaxRequests:           0, // no limit enforced
-			FlowGCTimeout:         defaultFlowGCTimeout,
-			PriorityBandGCTimeout: defaultPriorityBandGCTimeout,
-			PriorityBands:         make(map[int]*PriorityBandConfig),
+			MaxBytes:                         0, // no limit enforced
+			MaxRequests:                      0, // no limit enforced
+			FlowGCTimeout:                    defaultFlowGCTimeout,
+			PriorityBandGCTimeout:            defaultPriorityBandGCTimeout,
+			AllowDynamicPriorityProvisioning: true,
+			PriorityBands:                    make(map[int]*PriorityBandConfig),
 		},
 	}
 
