@@ -196,12 +196,12 @@ func (d *PrefixBasedPDDecider) needsRemotePrefill(ctx context.Context, request *
 		return false, fmt.Errorf("failed to get user input length in tokens: %w", err)
 	}
 	if d.config.PromptTokens > 0 && inputTokens < d.config.PromptTokens {
-		debugLogger.Info("Input shorter than promptTokens",
+		debugLogger.Info("Input shorter than promptTokens, disaggregation not required",
 			"inputTokens", inputTokens, "promptTokens", d.config.PromptTokens)
 		return false, nil
 	}
 	if inputTokens < d.config.NonCachedTokens {
-		debugLogger.Info("Input shorter than nonCachedTokens threshold",
+		debugLogger.Info("Input shorter than nonCachedTokens threshold, disaggregation not required",
 			"inputTokens", inputTokens, "threshold", d.config.NonCachedTokens)
 		return false, nil
 	}
