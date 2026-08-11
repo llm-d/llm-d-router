@@ -396,7 +396,12 @@ PD deciders determine whether prefill should be offloaded to a separate worker, 
 
 #### Prefix-Based PD Decider
 
-The `prefix-based-pd-decider` plugin makes the disaggregation decision according to the length of the non-cached suffix of the prompt relative to tokens already cached on the selected decode pod.
+The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. It fills two roles, sharing the same `nonCachedTokens` / `promptTokens` parameters:
+
+- Disaggregation decider inside `disagg-profile-handler` — routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)).
+- Conditional-decode gate — rejects `Prefer: if-available` requests with HTTP 412 when the same threshold would trigger remote prefill.
+
+A deployment can declare the plugin for either role independently, or both.
 
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
@@ -423,6 +428,27 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 **Conditional-decode 412 gate**
 
 Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Deployments that do not declare this plugin do not enforce the gate — conditional-decode requests are always forwarded. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
+
+The gate runs from the plugin's `PreRequest` hook, so it is independent of any `disagg-profile-handler` wiring. A deployment that wants the coordinator's cache-miss fallback but no disaggregation can declare the plugin at the top level and skip the profile handler:
+
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: approx-prefix-cache-producer
+  - type: prefix-cache-scorer
+  - type: max-score-picker
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 8
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: "prefix-cache-scorer"
+      - pluginRef: "max-score-picker"
+```
+
+Full P/D and E/P/D configurations that combine the decider and gate roles are in [Configuration Examples](#configuration-examples).
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
