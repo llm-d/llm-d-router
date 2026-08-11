@@ -18,10 +18,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -82,9 +84,21 @@ type Server struct {
 	httpServer         *http.Server
 	pipeline           *pipeline.Pipeline
 	maxRequestBodySize int64
+	gwClient           *gateway.Client
+	gatewayURL         *url.URL
 }
 
-func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
+func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
+	if gwClient == nil {
+		return nil, errors.New("server: gateway client is required")
+	}
+	gatewayURL, err := url.Parse(gwClient.BaseURL())
+	if err != nil {
+		return nil, fmt.Errorf("server: parse gateway URL %q: %w", gwClient.BaseURL(), err)
+	}
+	if gatewayURL.Host == "" {
+		return nil, fmt.Errorf("server: gateway URL %q is missing a host", gwClient.BaseURL())
+	}
 	maxBodySize := cfg.MaxRequestBodySize
 	if maxBodySize == 0 {
 		// Zero means unset; Viper fills this from the config default in
@@ -101,7 +115,12 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
 		// LimitReader to receive a negative limit and return immediate EOF.
 		return nil, fmt.Errorf("server: MaxRequestBodySize must be at most %d MB, got %d", int64((math.MaxInt64-1)/config.BytesPerMB), maxBodySize)
 	}
-	s := &Server{pipeline: p, maxRequestBodySize: maxBodySize}
+	s := &Server{
+		pipeline:           p,
+		maxRequestBodySize: maxBodySize,
+		gwClient:           gwClient,
+		gatewayURL:         gatewayURL,
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -114,6 +133,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
 	r.Post(gateway.DefaultGeneratePath, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
+	r.NotFound(s.handlePassthrough)
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,
