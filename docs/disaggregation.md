@@ -417,7 +417,7 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 
 **Parameter:**
 
-- `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation, and the threshold for the conditional-decode 412 gate. `0` disables both behaviors.
+- `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
 - `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
 
 **Conditional-decode 412 gate**
