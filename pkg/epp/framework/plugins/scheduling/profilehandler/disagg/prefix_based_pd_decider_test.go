@@ -674,12 +674,12 @@ func TestPreRequest_ConditionalDecodeGate(t *testing.T) {
 			wantReject:      true,
 		},
 		{
-			name:            "no TokenizedPrompt: zero-token prompt trivially covered",
+			name:            "no TokenizedPrompt: cache state unknown, fails closed",
 			nonCachedTokens: 5,
 			headers:         preferIfAvailable,
 			result:          resultWithEndpoint(makeTestEndpoint(0)),
 			request:         completionsRequestWithPrompt(fwkrh.Prompt{}),
-			wantReject:      false,
+			wantReject:      true,
 		},
 		{
 			name:            "input below promptTokens forwards (short-prompt shortcut)",

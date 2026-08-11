@@ -247,14 +247,16 @@ func (d *PrefixBasedPDDecider) computeNeedsRemotePrefill(ctx context.Context, re
 	return nonCachedTokens >= d.config.NonCachedTokens, nil
 }
 
-// getUserInputLenInTokens returns an estimated token count for the user input.
+// getUserInputLenInTokens returns the token count carried on the request.
+// A missing TokenizedRequest is reported as an error so the conditional-decode
+// gate fails closed on tokenizer-producer failures rather than trusting a
+// zero-length input.
 func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) {
 	if request == nil || request.Body == nil {
 		return 0, errors.New("request or request body is nil")
 	}
-
-	if tp := request.Body.TokenizedRequest; tp != nil {
-		return tp.TokenCount(), nil
+	if request.Body.TokenizedRequest == nil {
+		return 0, errors.New("prompt not tokenized")
 	}
-	return 0, nil
+	return request.Body.TokenizedRequest.TokenCount(), nil
 }
