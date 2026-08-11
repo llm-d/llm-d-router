@@ -59,6 +59,27 @@ func TestEndpointAttributeFilterFactory(t *testing.T) {
 			wantErr: "attribute",
 		},
 		{
+			name: "attribute and producer set separately",
+			parameters: `{"attribute": "GPUUtilization", "producer": "dcgm-extractor",
+				"algorithm": {"type": "threshold",
+					"threshold": {"operator": "LessThan", "value": 0.8}}}`,
+		},
+		{
+			// Guards the silent regression: the combined spelling built a key
+			// matching nothing, so the filter kept every endpoint without error.
+			name: "combined Attribute/Producer spelling is rejected",
+			parameters: `{"attribute": "GPUUtilization/dcgm-extractor",
+				"algorithm": {"type": "threshold",
+					"threshold": {"operator": "LessThan", "value": 0.8}}}`,
+			wantErr: `split it into attribute: "GPUUtilization" and producer: "dcgm-extractor"`,
+		},
+		{
+			name: "explicit empty producer allows a slash in the attribute name",
+			parameters: `{"attribute": "llm-d.ai/multicluster-queue-size", "producer": "",
+				"algorithm": {"type": "threshold",
+					"threshold": {"operator": "LessThan", "value": 10}}}`,
+		},
+		{
 			name: "invalid onMissing",
 			parameters: `{"attribute": "num_requests_running", "onMissing": "Maybe",
 				"algorithm": {"type": "threshold",

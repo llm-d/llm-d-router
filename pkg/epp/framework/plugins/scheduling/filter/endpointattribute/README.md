@@ -34,7 +34,7 @@ The plugin consumes:
 | Parameter                       | Required | Description                                                                              |
 |---------------------------------|----------|------------------------------------------------------------------------------------------|
 | `attribute`                     | yes      | Endpoint attribute to read, e.g. `num_requests_running`.                                  |
-| `producer`                      | no       | Plugin publishing the attribute. Defaults to the core metrics extractor; set to e.g. `dcgm-extractor` to read another producer's attribute. |
+| `producer`                      | no       | Plugin publishing the attribute. Omitted defaults to the core metrics extractor; set to e.g. `dcgm-extractor` to read another producer's attribute, or to `""` for a producer-agnostic attribute. An `attribute` containing `/` is rejected unless `producer` is set explicitly. |
 | `onMissing`                     | no       | `Pass` (default) or `Fail` — keep or drop endpoints missing the attribute.                |
 | `fallbackOnEmpty`               | no       | When `true`, return the unfiltered candidates if every endpoint was dropped. Default `false`. |
 | `algorithm.type`                | yes      | Only `threshold` is currently supported.                                                  |

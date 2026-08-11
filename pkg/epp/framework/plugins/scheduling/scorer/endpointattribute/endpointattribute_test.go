@@ -44,6 +44,24 @@ func TestEndpointAttributeScorerFactory(t *testing.T) {
 				"algorithm": {"type": "linear_lower_is_better"}}`,
 		},
 		{
+			name: "attributeKey and producer set separately",
+			parameters: `{"attributeKey": "GPUUtilization", "producer": "dcgm-extractor",
+				"algorithm": {"type": "linear_lower_is_better"}}`,
+		},
+		{
+			// Guards the silent regression: the combined spelling built a key
+			// matching nothing, so the scorer returned zero for every endpoint.
+			name: "combined AttributeKey/Producer spelling is rejected",
+			parameters: `{"attributeKey": "GPUUtilization/dcgm-extractor",
+				"algorithm": {"type": "linear_lower_is_better"}}`,
+			wantErr: `split it into attribute: "GPUUtilization" and producer: "dcgm-extractor"`,
+		},
+		{
+			name: "explicit empty producer allows a slash in the attribute name",
+			parameters: `{"attributeKey": "llm-d.ai/multicluster-queue-size", "producer": "",
+				"algorithm": {"type": "linear_lower_is_better"}}`,
+		},
+		{
 			name: "valid higher_is_better with explicit adaptive range",
 			parameters: `{"attributeKey": "custom.tokens_per_second",
 				"algorithm": {"type": "linear_higher_is_better",

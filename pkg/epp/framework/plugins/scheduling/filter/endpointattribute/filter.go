@@ -61,11 +61,16 @@ type algorithmParameters struct {
 
 type parameters struct {
 	Attribute string `json:"attribute"`
-	// Producer names the plugin publishing the attribute. Empty selects the
+	// Producer names the plugin publishing the attribute. Omitted selects the
 	// core metrics extractor, the only producer whose attribute names come
 	// from configuration; set it to read another producer's attribute, e.g.
-	// "dcgm-extractor".
-	Producer string `json:"producer"`
+	// "dcgm-extractor". Set it to the empty string for a producer-agnostic
+	// attribute, such as "llm-d.ai/multicluster-queue-size".
+	//
+	// A pointer distinguishes an omitted producer from one set to the empty
+	// string, which is what lets an attribute name containing "/" be told
+	// apart from the combined "Attribute/Producer" spelling.
+	Producer *string `json:"producer"`
 	// OnMissing decides what happens to endpoints that do not have the
 	// attribute: "Pass" keeps them (the default), "Fail" drops them.
 	OnMissing string `json:"onMissing"`
@@ -125,9 +130,14 @@ func NewEndpointAttributeFilter(name string, params parameters) (*EndpointAttrib
 			operatorGreaterThanOrEqual, operatorEqual, operatorNotEqual, threshold.Operator)
 	}
 
+	dataKey, err := attrmetrics.ResolveConfiguredKey("endpoint attribute filter", params.Attribute, params.Producer)
+	if err != nil {
+		return nil, err
+	}
+
 	return &EndpointAttributeFilter{
 		typedName:       plugin.TypedName{Type: EndpointAttributeFilterType, Name: name},
-		dataKey:         attrmetrics.ScalarMetricDataKey(params.Attribute).WithNonEmptyProducerName(params.Producer),
+		dataKey:         dataKey,
 		passOnMissing:   params.OnMissing == onMissingPass,
 		fallbackOnEmpty: params.FallbackOnEmpty,
 		threshold:       *threshold,

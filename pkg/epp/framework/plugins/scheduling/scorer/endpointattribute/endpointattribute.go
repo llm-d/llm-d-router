@@ -63,11 +63,16 @@ type algorithmParameters struct {
 
 type parameters struct {
 	AttributeKey string `json:"attributeKey"`
-	// Producer names the plugin publishing the attribute. Empty selects the
+	// Producer names the plugin publishing the attribute. Omitted selects the
 	// core metrics extractor, the only producer whose attribute names come
 	// from configuration; set it to read another producer's attribute, e.g.
-	// "dcgm-extractor".
-	Producer  string              `json:"producer"`
+	// "dcgm-extractor". Set it to the empty string for a producer-agnostic
+	// attribute, such as "llm-d.ai/multicluster-queue-size".
+	//
+	// A pointer distinguishes an omitted producer from one set to the empty
+	// string, which is what lets an attribute name containing "/" be told
+	// apart from the combined "Attribute/Producer" spelling.
+	Producer  *string             `json:"producer"`
 	Algorithm algorithmParameters `json:"algorithm"`
 }
 
@@ -108,9 +113,14 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 			fixed.Min, fixed.Max)
 	}
 
+	dataKey, err := attrmetrics.ResolveConfiguredKey("endpoint attribute scorer", params.AttributeKey, params.Producer)
+	if err != nil {
+		return nil, err
+	}
+
 	return &EndpointAttributeScorer{
 		typedName:     fwkplugin.TypedName{Type: EndpointAttributeScorerType, Name: name},
-		dataKey:       attrmetrics.ScalarMetricDataKey(params.AttributeKey).WithNonEmptyProducerName(params.Producer),
+		dataKey:       dataKey,
 		lowerIsBetter: params.Algorithm.Type == algorithmLinearLowerIsBetter,
 		fixedRange:    normalization.FixedRange,
 	}, nil
