@@ -166,8 +166,10 @@ func TestValidateConsumer_TypeMismatchFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "type")
 }
 
-func TestValidateConsumer_OptionalKeyChecked(t *testing.T) {
-	// Optional keys get the same existence + type check as Required.
+func TestValidateConsumer_OptionalKeyUnproducedSkipped(t *testing.T) {
+	// An Optional key with no producer is tolerated: CreateMissingDataProducers
+	// already allows a consumer to fall back at read time when an Optional
+	// dependency goes unproduced, so the registry must not error here either.
 	known := plugin.NewDataKey("alpha", "reg")
 	stranger := plugin.NewDataKey("stranger", "reg")
 	p := &regProducer{name: "p", produces: map[plugin.DataKey]any{known: regValueA{}}}
@@ -179,9 +181,27 @@ func TestValidateConsumer_OptionalKeyChecked(t *testing.T) {
 
 	r, err := BuildRegistry([]plugin.Plugin{p})
 	assert.NoError(t, err)
+	assert.NoError(t, r.ValidateConsumer(c))
+}
+
+func TestValidateConsumer_OptionalKeyProducedTypeMismatchFails(t *testing.T) {
+	// An Optional key that IS produced still gets the type check: a producer
+	// and consumer disagreeing on the value type is a real bug even when the
+	// dependency is optional.
+	known := plugin.NewDataKey("alpha", "reg")
+	optKey := plugin.NewDataKey("beta", "reg")
+	p := &regProducer{name: "p", produces: map[plugin.DataKey]any{known: regValueA{}, optKey: regValueA{}}}
+	c := &regMixedConsumer{
+		name:     "c",
+		required: map[plugin.DataKey]any{known: regValueA{}},
+		optional: map[plugin.DataKey]any{optKey: regValueB{}},
+	}
+
+	r, err := BuildRegistry([]plugin.Plugin{p})
+	assert.NoError(t, err)
 	err = r.ValidateConsumer(c)
-	assert.Error(t, err, "Optional keys must also be in the registry")
-	assert.Contains(t, err.Error(), "not produced")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "type")
 }
 
 func TestRegistry_NilSafe(t *testing.T) {

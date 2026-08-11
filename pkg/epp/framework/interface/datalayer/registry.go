@@ -121,10 +121,11 @@ func BuildRegistry(plugins []plugin.Plugin) (*Registry, error) {
 // registry recorded for it. This is run at startup, alongside the DAG
 // build, so a typo or stale key is caught before traffic flows.
 //
-// Keys the consumer marks Optional are checked the same way Required keys
-// are: the registry does not distinguish. Missing producers are still
-// handled by CreateMissingDataProducers; this validator only confirms that
-// keys which DO have producers line up by name and type.
+// Required keys with no producer are an error. Optional keys with no
+// producer are skipped: CreateMissingDataProducers already tolerates an
+// Optional key going unproduced (the consumer falls back at read time), so
+// the registry must not turn that into a startup error. An Optional key
+// that IS produced is still type-checked like a Required one.
 func (r *Registry) ValidateConsumer(c plugin.ConsumerPlugin) error {
 	if r == nil {
 		return nil
@@ -137,6 +138,9 @@ func (r *Registry) ValidateConsumer(c plugin.ConsumerPlugin) error {
 		}
 	}
 	for dk, val := range deps.Optional {
+		if !r.Has(dk) {
+			continue
+		}
 		if err := r.checkKey(name, dk, val); err != nil {
 			return err
 		}
