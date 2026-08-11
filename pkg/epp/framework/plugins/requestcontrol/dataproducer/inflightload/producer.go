@@ -39,7 +39,6 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -414,9 +413,6 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
 	fairnessID := request.FairnessID
-	if fairnessID == "" {
-		fairnessID = metadata.DefaultFairnessID
-	}
 	priority := strconv.Itoa(request.Objectives.Priority)
 
 	tracked := false
