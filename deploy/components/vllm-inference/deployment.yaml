@@ -27,12 +27,27 @@ spec:
             - "serve"
             - ${MODEL_NAME}
             - "--skip-tokenizer-init"
-            - "--enforce-eager"
+            - "-cc.mode=none"
+            - "-cc.cudagraph_mode=none"
             - "--enable-mm-embeds"
             - "--renderer-num-workers"
             - ${INF_RENDERER_NUM_WORKERS_STR}
             - --mm-processor-cache-gb
             - "0"
+            - "--runner"
+            - "pooling"
+            - "--max-model-len"
+            - "1"
+            - "--max-num-seqs"
+            - "32"
+            - "--hf-overrides"
+            - '{"dtype": "torch.float16"}'
+            - "--dtype"
+            - "float16"
+            - "-cc.pass_config.fuse_norm_quant=false"
+            - "-cc.pass_config.fuse_act_quant=false"
+            - "--model-impl"
+            - "terratorch"
             - "--port"
             - ${TARGET_PORT_STR}
             - "--otlp-traces-endpoint"
@@ -72,6 +87,10 @@ spec:
               value: ${OMP_NUM_THREADS_STR}
             - name: USER
               value: "vllm"
+            - name: VLLM_USE_DEEP_GEMM
+              value: "0"
+            - name: HF_TOKEN
+              value: ${HF_TOKEN}
             - name: HOME
               value: /tmp/cache
             - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL

@@ -58,6 +58,19 @@ spec:
             - "--io-processor-plugin"
             - ${IO_PROCESSOR_PLUGIN}
             - "--skip-tokenizer-init"
+            - "--model-impl"
+            - "terratorch"
+            - "--runner"
+            - "pooling"
+            - "--max-model-len"
+            - "1"
+            - "--max-num-seqs"
+            - "32"
+            - "-cc.cudagraph_mode=piecewise"
+            - "--hf-overrides"
+            - '{"dtype": "torch.float16"}'
+            - "--dtype"
+            - "float16"
             - "--enable-mm-embeds"
             - "--renderer-num-workers"
             - ${POST_RENDERER_NUM_WORKERS_STR}
@@ -99,6 +112,10 @@ spec:
               value: ${OMP_NUM_THREADS_STR}
             - name: HOME
               value: /tmp/cache
+            - name: HF_TOKEN
+              value: ${HF_TOKEN}
+            - name: VLLM_PLUGINS
+              value: ${IO_PROCESSOR_PLUGIN}
             - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
               value: ${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL}
             - name: POD_IP
