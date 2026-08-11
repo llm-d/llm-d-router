@@ -22,7 +22,8 @@ build_io_config() {
       io_role: $role,
       io_connector_extra_config: {
         host: "$(POD_IP)",
-        port: $port
+        port: $port,
+        max_io_threads: "$MAX_IO_THREADS"
       }
     }'
 }
@@ -98,6 +99,9 @@ export VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.19.1}"
 export VLLM_CPU_IMAGE="${VLLM_CPU_IMAGE:-vllm/vllm-openai-cpu:v0.19.1}"
 export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0}"
 
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export OMP_NUM_THREADS_STR="\"${OMP_NUM_THREADS}\""
+
 export TARGET_PORT="${TARGET_PORT:-8000}"
 export TARGET_PORT_STR="\"${TARGET_PORT}\""
 
@@ -105,7 +109,9 @@ export IO_PORT="${IO_PORT:-5000}"
 export IO_PORT_STR="\"${IO_PORT}\""
 
 export IO_CONNECTOR_TYPE="${IO_CONNECTOR_TYPE:-io-p2p}"
-export IO_CONNECTOR_CLASS="IOP2PConnector"
+export IO_CONNECTOR_CLASS="${IO_CONNECTOR_CLASS:-IOP2PConnector}"
+
+export MAX_IO_THREADS="${MAX_IO_THREADS:-16}"
 
 export PRE_IO_TRANSFER_CONFIG=$(build_io_config "io_sender")
 export INF_IO_TRANSFER_CONFIG=$(build_io_config "io_both")
@@ -113,8 +119,12 @@ export POST_IO_TRANSFER_CONFIG=$(build_io_config "io_receiver")
 
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
-export RENDERER_NUM_WORKERS="${RENDERER_NUM_WORKERS:-1}"
-export RENDERER_NUM_WORKERS_STR="\"${RENDERER_NUM_WORKERS}\""
+export PRE_RENDERER_NUM_WORKERS="${PRE_RENDERER_NUM_WORKERS:-1}"
+export PRE_RENDERER_NUM_WORKERS_STR="\"${PRE_RENDERER_NUM_WORKERS}\""
+export INF_RENDERER_NUM_WORKERS="${INF_RENDERER_NUM_WORKERS:-1}"
+export INF_RENDERER_NUM_WORKERS_STR="\"${INF_RENDERER_NUM_WORKERS}\""
+export POST_RENDERER_NUM_WORKERS="${POST_RENDERER_NUM_WORKERS:-1}"
+export POST_RENDERER_NUM_WORKERS_STR="\"${POST_RENDERER_NUM_WORKERS}\""
 
 # Python dependencies for the terratorch plugin
 export IO_PROCESSOR_PLUGIN="${IO_PROCESSOR_PLUGIN:-terratorch_segmentation}"
@@ -160,6 +170,9 @@ export JAEGER_IP="${JAEGER_IP:-127.0.0.1}"
 export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://${JAEGER_IP}:4317}"
 export OTEL_TRACES_SAMPLER_ARG="${OTEL_TRACES_SAMPLER_ARG:-0.1}"
 export OTEL_TRACES_SAMPLER_ARG_STR="\"${OTEL_TRACES_SAMPLER_ARG}\""
+
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:-http/protobuf}"
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://${JAEGER_IP}:4318/v1/traces}"
 
 # ------------------------------------------------------------------------------
 # Deployment
