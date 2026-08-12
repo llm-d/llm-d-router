@@ -99,7 +99,7 @@ export VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.19.1}"
 export VLLM_CPU_IMAGE="${VLLM_CPU_IMAGE:-vllm/vllm-openai-cpu:v0.19.1}"
 export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0}"
 
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-96}"
 export OMP_NUM_THREADS_STR="\"${OMP_NUM_THREADS}\""
 
 export TARGET_PORT="${TARGET_PORT:-8000}"
