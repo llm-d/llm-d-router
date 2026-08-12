@@ -79,13 +79,14 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 // preserving the ranking invariant SHORT < UNKNOWN < LONG. The estimate is bounded
 // by the client-requested cap and the estimator's operator cap.
 //
-// The bucket is read from a request attribute set by the osl-bucket plugin's
-// RequestHeader hook. That hook runs before this method (RequestHeader precedes
-// both Produce and PreRequest in the dispatch order), but the ordering is not
-// enforced by a declared Produce/Consume dependency. When the osl-bucket plugin is
-// not enabled, the attribute is absent and reads as its zero value, Unknown, so
-// every request is estimated as UNKNOWN; the producer logs a one-time warning in
-// that case (see InFlightLoadProducer.warnMissingOSLBucket).
+// Ordering dependency: the bucket comes from an attribute that the osl-bucket
+// plugin publishes in its RequestHeader hook, which this method reads. The read is
+// correct only because the framework always runs RequestHeader before both Produce
+// and PreRequest -- this method's only callers -- so the publish happens first.
+// This is a phase guarantee, not a declared Produce/Consume dependency. When the
+// osl-bucket plugin is not enabled, the attribute is absent and reads as its zero
+// value, Unknown, so every request is estimated as UNKNOWN; the producer logs a
+// one-time warning in that case (see InFlightLoadProducer.warnMissingOSLBucket).
 func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
