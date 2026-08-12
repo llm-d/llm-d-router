@@ -149,6 +149,44 @@ schedulingProfiles:
   - pluginRef: queue-scorer
     weight: 1
 `,
+	"coordinatorPrefillTopologyConfig": `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: prefill-filter
+- type: max-score-picker
+- type: topology-extractor
+- type: topology-stamp-handler
+  parameters:
+    profileName: default
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: max-score-picker
+`,
+	"coordinatorDecodeTopologyConfig": `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: decode-filter
+- type: max-score-picker
+- type: topology-extractor
+- type: topology-affinity-filter
+  parameters:
+    peerTopologyHeader: x-peer-topology
+- type: topology-affinity-scorer
+  parameters:
+    peerTopologyHeader: x-peer-topology
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: topology-affinity-filter
+  - pluginRef: max-score-picker
+  - pluginRef: topology-affinity-scorer
+    weight: 1
+`,
 	"epdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:

@@ -24,8 +24,81 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
+
+// TestNewDecodeProxyRequest_ForwardsPeerTopology verifies that a non-empty
+// reqCtx.PeerTopology, captured by PrefillStep from the prefill response, is
+// set on the outgoing decode request's x-peer-topology header.
+func TestNewDecodeProxyRequest_ForwardsPeerTopology(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: "/inference/v1/generate",
+		PeerTopology: "host=node12,zone=us-east1-a",
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got, want := req.Header.Get(gateway.PeerTopologyHeader), "host=node12,zone=us-east1-a"; got != want {
+		t.Fatalf("x-peer-topology header = %q, want %q", got, want)
+	}
+}
+
+// TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty verifies that no
+// x-peer-topology header is set on the decode request when the prefill
+// response carried none (single-EPP-in-coordinator or no topology-stamp-handler).
+func TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: "/inference/v1/generate",
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got := req.Header.Get(gateway.PeerTopologyHeader); got != "" {
+		t.Fatalf("expected no x-peer-topology header, got %q", got)
+	}
+}
+
+// TestNewDecodeProxy_StripsPeerTopologyFromClientResponse verifies that
+// x-peer-topology never reaches the client, even if a decode profile's
+// response carries it (e.g. topology-stamp-handler misconfigured on decode
+// rather than prefill). The header is meaningful only between the prefill and
+// decode legs; ModifyResponse must strip it before ReverseProxy copies
+// upstream response headers to the client.
+func TestNewDecodeProxy_StripsPeerTopologyFromClientResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(gateway.PeerTopologyHeader, "host=node12,zone=us-east1-a")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, upstream.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	proxy := newDecodeProxy(logr.Discard(), http.DefaultTransport, nil)
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get(gateway.PeerTopologyHeader); got != "" {
+		t.Fatalf("x-peer-topology leaked to client response, got %q", got)
+	}
+}
 
 // TestNewDecodeProxy_MidStreamTruncationLogged drives the proxy against an
 // upstream that promises a large Content-Length, writes a few bytes, then drops
