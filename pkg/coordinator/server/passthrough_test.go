@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -184,6 +185,40 @@ func TestPassthrough_TransportErrorReturns502(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 on transport error, got %d", rec.Code)
+	}
+}
+
+func TestPassthrough_StreamsChunksAsTheyArrive(t *testing.T) {
+	// Upstream writes two chunks with an explicit Flush() between them. The
+	// upstream sets an explicit Content-Length and a non-SSE Content-Type so
+	// httputil.ReverseProxy's auto-flush for text/event-stream and unknown
+	// (chunked) content lengths does not paper over a missing FlushInterval: -1
+	// on the coordinator's proxy.
+	const body = "chunk1chunk2"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter is not a Flusher")
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("chunk1"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("chunk2"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	srv := newTestServerWithGateway(nil, upstream.URL)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := doPassthrough(t, srv, req)
+
+	if !rec.Flushed {
+		t.Fatal("expected passthrough to flush downstream; FlushInterval: -1 regression?")
+	}
+	if got := rec.Body.String(); got != body {
+		t.Fatalf("body: got %q want %q", got, body)
 	}
 }
 
