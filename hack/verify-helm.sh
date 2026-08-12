@@ -236,6 +236,11 @@ if ! grep -q -- '--secure-serving=false' "${flag_render_output}"; then
   exit 1
 fi
 
+if ! HELM="${HELM}" bash "${SCRIPT_ROOT}/hack/verify-plugins-config.sh"; then
+  echo "Structured plugins configuration validation failed"
+  exit 1
+fi
+
 echo "Verifying llm-d-router-standalone agentgateway renders plaintext EPP and custom listener ports..."
 agentgateway_render_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-render.yaml"
 agentgateway_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=http' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=http' > ${agentgateway_render_output}"

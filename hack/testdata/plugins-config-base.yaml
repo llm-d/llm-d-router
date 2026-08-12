@@ -1,0 +1,22 @@
+router:
+  modelServers:
+    matchLabels:
+      app: llm-instance-gateway
+  epp:
+    pluginsConfigFile: structured-plugins.yaml
+    pluginsCustomConfig:
+      extra-plugins.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+    pluginsConfig:
+      apiVersion: llm-d.ai/v1alpha1
+      kind: EndpointPickerConfig
+      featureGates:
+        - flowControl=false
+      plugins:
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+      schedulingProfiles:
+        - name: default
+          plugins:
+            - pluginRef: queue-scorer

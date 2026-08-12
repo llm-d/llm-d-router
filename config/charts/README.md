@@ -103,7 +103,7 @@ Since both charts use `routerlib` under the hood, all configurations and customi
 
 ### 1. EPP Core Configuration
 
-Core settings for the Endpoint Picker Proxy (EPP) container and pod, including scaling, images, command-line flags, custom environment variables, resources, and custom plugins configuration (`pluginsCustomConfig`).
+Core settings for the Endpoint Picker Proxy (EPP) container and pod, including scaling, images, command-line flags, custom environment variables, resources, and plugins configuration.
 
 > [!NOTE]
 > **High Availability (HA) Modes**:
@@ -132,7 +132,8 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
 | `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
-| `router.epp.pluginsCustomConfig` | Inline custom YAML configuration for EPP plugins. | `{}` |
+| `router.epp.pluginsConfig` | Structured EPP configuration rendered into `pluginsConfigFile`. | `{}` |
+| `router.epp.pluginsCustomConfig` | Additional raw ConfigMap entries keyed by file name. | `{}` |
 | `router.epp.volumes` | Extra volumes for EPP pod. | `[]` |
 | `router.epp.volumeMounts` | Extra volume mounts for EPP container. | `[]` |
 
@@ -206,6 +207,53 @@ router:
     - name: model-volume
       emptyDir: {}
 ```
+
+#### Structured Plugins Configuration
+
+Use `router.epp.pluginsConfig` to share an EPP configuration across Helm values files.
+It provides the complete contents of `pluginsConfigFile`; it does not inherit plugins
+from the chart's built-in configurations. An empty map leaves the built-in files unchanged.
+
+For example, `base-values.yaml` defines the plugins and scheduling profiles:
+
+```yaml
+router:
+  modelServers:
+    matchLabels:
+      app: vllm
+  epp:
+    pluginsConfigFile: custom-plugins.yaml
+    pluginsConfig:
+      apiVersion: llm-d.ai/v1alpha1
+      kind: EndpointPickerConfig
+      plugins:
+        - type: queue-scorer
+      schedulingProfiles:
+        - name: default
+          plugins:
+            - pluginRef: queue-scorer
+```
+
+An overlay, `feature-gates.yaml`, sets the feature gates:
+
+```yaml
+router:
+  epp:
+    pluginsConfig:
+      featureGates:
+        - flowControl
+```
+
+```shell
+helm template router config/charts/llm-d-router-gateway \
+  -f base-values.yaml -f feature-gates.yaml
+```
+
+Helm merges maps across values files and replaces lists as a whole. The overlay
+preserves the base plugins and profiles, but replaces any base `featureGates` list.
+YAML comments are not retained in the rendered structured configuration.
+`pluginsCustomConfig` can provide other raw configuration files alongside it.
+Defining the same filename through both settings is an error.
 
 ---
 

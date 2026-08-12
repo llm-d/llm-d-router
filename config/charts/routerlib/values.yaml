@@ -37,6 +37,10 @@ epp:
   env: []
   
   pluginsConfigFile: "default-plugins.yaml"
+  # Structured EPP configuration rendered into pluginsConfigFile. Maps merge
+  # across values files; lists are replaced according to Helm's merge rules.
+  pluginsConfig: {}
+  # Additional raw ConfigMap entries keyed by file name.
   pluginsCustomConfig: {}
   
   # Define additional container ports

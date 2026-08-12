@@ -1,10 +1,20 @@
 {{- define "llm-d-epp.config" -}}
+{{- $pluginsConfig := .Values.router.epp.pluginsConfig | default dict }}
+{{- if not (kindIs "map" $pluginsConfig) }}
+{{- fail "router.epp.pluginsConfig must be a map" }}
+{{- end }}
+{{- $pluginsConfigFile := .Values.router.epp.pluginsConfigFile | default "default-plugins.yaml" }}
+{{- $pluginsCustomConfig := .Values.router.epp.pluginsCustomConfig | default dict }}
+{{- if and $pluginsConfig (hasKey $pluginsCustomConfig $pluginsConfigFile) }}
+{{- fail (printf "router.epp.pluginsConfig and router.epp.pluginsCustomConfig cannot both define %q" $pluginsConfigFile) }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "llm-d-router.name" . }}
   namespace: {{ .Release.Namespace }}
 data:
+  {{- if or (not $pluginsConfig) (ne $pluginsConfigFile "default-plugins.yaml") }}
   default-plugins.yaml: |
     {{- $modelServerProtocol := .Values.router.modelServers.protocol | default "http" }}
     {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
@@ -86,6 +96,8 @@ data:
       - pluginRef: {{ $p }}
       {{- end }}
     {{- end }}
+  {{- end }}
+  {{- if or (not $pluginsConfig) (ne $pluginsConfigFile "payload-agnostic.yaml") }}
   payload-agnostic.yaml: |
     # Request-format agnostic routing. Use this when the request format is
     # unknown or unsupported, so the EPP cannot rely on scorers that read the
@@ -110,8 +122,13 @@ data:
         weight: 1
       - pluginRef: session-affinity-scorer
         weight: 1
-  {{- if .Values.router.epp.pluginsCustomConfig }}
-  {{- .Values.router.epp.pluginsCustomConfig | toYaml | nindent 2 }}
+  {{- end }}
+  {{- if $pluginsConfig }}
+  {{ $pluginsConfigFile | quote }}: |
+  {{- $pluginsConfig | toYaml | nindent 4 }}
+  {{- end }}
+  {{- if $pluginsCustomConfig }}
+  {{- $pluginsCustomConfig | toYaml | nindent 2 }}
   {{- end }}
   
 ---
