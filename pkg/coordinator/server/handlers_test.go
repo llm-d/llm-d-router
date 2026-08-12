@@ -44,6 +44,19 @@ func (s stubStep) Name() string { return s.name }
 
 func (s stubStep) Execute(context.Context, *pipeline.RequestContext) error { return s.err }
 
+// capturingStep records the RequestContext it saw, for assertions on what the
+// handler populated before the pipeline ran.
+type capturingStep struct {
+	captured *pipeline.RequestContext
+}
+
+func (s *capturingStep) Name() string { return "capture" }
+
+func (s *capturingStep) Execute(_ context.Context, rc *pipeline.RequestContext) error {
+	s.captured = rc
+	return nil
+}
+
 func newTestServer(stepErr error) *Server {
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", err: stepErr}})
 	srv, err := New(config.ServerConfig{}, p)
@@ -233,6 +246,38 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 	rec := postInferenceWithRequestID(t, newTestServer(stepErr), overlong)
 	if strings.Contains(rec.Body.String(), overlong) {
 		t.Fatalf("overlong request_id must not leak to the client: %q", rec.Body.String())
+	}
+}
+
+func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
+	// x-peer-topology and epp-profile are headers the coordinator alone injects
+	// (copied from the prefill response, or set to select a profile); a
+	// client-supplied value must never survive into OriginalHeaders, since a
+	// later step trusts it as coordinator-generated.
+	step := &capturingStep{}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set(reqcommon.PeerTopologyHeaderKey, "host=attacker,zone=evil")
+	req.Header.Set(gateway.EPPProfileHeader, "decode")
+	req.Header.Set("x-user-data", "keep-me")
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if step.captured == nil {
+		t.Fatal("pipeline step did not run")
+	}
+	if got := step.captured.OriginalHeaders.Get(reqcommon.PeerTopologyHeaderKey); got != "" {
+		t.Fatalf("client-supplied x-peer-topology must be stripped, got %q", got)
+	}
+	if got := step.captured.OriginalHeaders.Get(gateway.EPPProfileHeader); got != "" {
+		t.Fatalf("client-supplied epp-profile must be stripped, got %q", got)
+	}
+	if got := step.captured.OriginalHeaders.Get("x-user-data"); got != "keep-me" {
+		t.Fatalf("unrelated headers must pass through, got %q", got)
 	}
 }
 

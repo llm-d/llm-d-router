@@ -23,7 +23,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -37,10 +39,9 @@ const PluginType = "topology-stamp-handler"
 
 // defaultHeaderName is the response header the encoded topology is written
 // to, and the header topology-affinity-filter/-scorer read the peer topology
-// from in coordinator deployments. Must match gateway.PeerTopologyHeader in
-// pkg/coordinator/gateway and peerTopologyHeaderName in
-// pkg/epp/util/request/headers.go.
-const defaultHeaderName = "x-peer-topology"
+// from in coordinator deployments. Defaults to reqcommon.PeerTopologyHeaderKey,
+// the single definition gateway.PeerTopologyHeader must match.
+const defaultHeaderName = reqcommon.PeerTopologyHeaderKey
 
 type parameters struct {
 	// HeaderName is the response header the encoded topology is written to.
@@ -54,7 +55,10 @@ type parameters struct {
 	TopologyProducerName string `json:"topologyProducerName,omitempty"`
 }
 
-var _ fwkrc.ResponseHeaderProcessor = &Handler{}
+var (
+	_ fwkrc.ResponseHeaderProcessor = &Handler{}
+	_ fwkplugin.ConsumerPlugin      = &Handler{}
+)
 
 // Factory creates a topology stamp handler.
 func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -72,7 +76,7 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 	}
 	return &Handler{
 		typedName:   fwkplugin.TypedName{Type: PluginType, Name: name},
-		headerName:  params.HeaderName,
+		headerName:  strings.ToLower(params.HeaderName),
 		profileName: params.ProfileName,
 		dataKey:     attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(params.TopologyProducerName),
 	}, nil
@@ -89,6 +93,15 @@ type Handler struct {
 
 func (h *Handler) TypedName() fwkplugin.TypedName {
 	return h.typedName
+}
+
+// Consumes returns the Topology attribute as optional: a missing producer
+// logs a startup warning rather than an error, since ResponseHeader already
+// no-ops when the attribute is absent.
+func (h *Handler) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Optional: map[fwkplugin.DataKey]any{h.dataKey: attrtopology.Topology{}},
+	}
 }
 
 // ResponseHeader stamps h.headerName on response with the encoded topology of

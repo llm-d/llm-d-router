@@ -47,11 +47,14 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.DestinationEndpointServedKey,
 		errcommon.RequestDroppedReasonHeaderKey,
 		"Content-Length",
-		"x-peer-topology",
 	}
 
 	for _, header := range systemHeaders {
 		assert.True(t, IsSystemOwnedHeader(header), "header %q should be system-owned", header)
 	}
 	assert.False(t, IsSystemOwnedHeader("x-user-data"))
+	// x-peer-topology must reach both the backend request (harmless, model
+	// servers ignore it) and the response to the coordinator/client
+	// (topology-stamp-handler's own output) unfiltered.
+	assert.False(t, IsSystemOwnedHeader("x-peer-topology"))
 }

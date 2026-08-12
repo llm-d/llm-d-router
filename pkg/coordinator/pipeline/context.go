@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 var hopByHopHeaders = map[string]bool{
@@ -34,8 +36,19 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var internalForwardingHeaders = map[string]bool{
-	"epp-profile":     true,
-	"x-peer-topology": true,
+	"epp-profile":                   true,
+	reqcommon.PeerTopologyHeaderKey: true,
+}
+
+// StripInternalHeaders removes headers the coordinator alone injects into
+// requests it forwards (e.g. x-peer-topology, copied from the prefill
+// response onto the decode request). Call this on a client request's headers
+// as soon as they are received, so a client-supplied value is never mistaken
+// for one the coordinator generated itself.
+func StripInternalHeaders(headers http.Header) {
+	for key := range internalForwardingHeaders {
+		headers.Del(key)
+	}
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding

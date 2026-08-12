@@ -17,6 +17,8 @@ limitations under the License.
 package topology
 
 import (
+	"strings"
+
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
@@ -47,7 +49,7 @@ func PeerTopology(request *fwksched.InferenceRequest, dataKey, headerName string
 	if headerName == "" {
 		return nil, false
 	}
-	header := request.Headers[headerName]
+	header := request.Headers[strings.ToLower(headerName)]
 	if header == "" {
 		return nil, false
 	}
