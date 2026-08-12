@@ -85,7 +85,7 @@ type (
 	}
 )
 
-// Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
+// Default engine configurations for vLLM, SGLang, ATOM, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
 		Name:                "vllm",
@@ -104,6 +104,14 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:           "sglang:cache_config_info",
 		CacheBlockSizeLabelName: "page_size",
 		CacheNumBlocksLabelName: "num_pages",
+	},
+	{
+		Name:                "atom",
+		QueuedRequestsSpec:  "atom:requests_waiting",
+		RunningRequestsSpec: "atom:requests_running",
+		KVUsageSpec:         "atom:kv_cache_usage_ratio",
+		LoRASpec:            "",
+		CacheInfoSpec:       "atom:cache_config_info",
 	},
 	{
 		Name:                "trtllm-serve",
