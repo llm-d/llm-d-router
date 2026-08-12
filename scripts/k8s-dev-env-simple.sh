@@ -17,13 +17,14 @@ build_io_config() {
     --arg connector "$IO_CONNECTOR_CLASS" \
     --arg role "$role" \
     --arg port "$IO_PORT" \
+    --argjson max_io_threads "$MAX_IO_THREADS" \
     '{
       io_connector: $connector,
       io_role: $role,
       io_connector_extra_config: {
         host: "$(POD_IP)",
         port: $port,
-        max_io_threads: "$MAX_IO_THREADS"
+        max_io_threads: $max_io_threads
       }
     }'
 }
