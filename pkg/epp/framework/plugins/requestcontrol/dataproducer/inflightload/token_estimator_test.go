@@ -48,69 +48,8 @@ func requestWithBucket(bucket oslbucket.OSLBucket, maxOut *int64) *fwksched.Infe
 	return req
 }
 
-func TestSimpleTokenEstimator_Estimate(t *testing.T) {
-	estimator := NewSimpleTokenEstimator()
-
-	testCases := []struct {
-		name     string
-		request  *fwksched.InferenceRequest
-		expected int64
-	}{
-		{
-			name:     "Nil request",
-			request:  nil,
-			expected: 0,
-		},
-		{
-			name:     "Empty request",
-			request:  &fwksched.InferenceRequest{},
-			expected: 0,
-		},
-		{
-			name: "Body nil",
-			request: &fwksched.InferenceRequest{
-				Body: nil,
-			},
-			expected: 0,
-		},
-		{
-			name: "Body without tokenized prompt",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{},
-			},
-			expected: 0,
-		},
-		{
-			name: "Empty tokenized prompt",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{},
-				},
-			},
-			expected: 0,
-		},
-		{
-			name:     "Single token",
-			request:  tokenizedRequest(1),
-			expected: 3, // 1 input + round(1*1.5)=2 output
-		},
-		{
-			name:     "Ten tokens",
-			request:  tokenizedRequest(10),
-			expected: 25, // 10 input + round(10*1.5)=15 output
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			actual := estimator.Estimate(tc.request)
-			require.Equal(t, tc.expected, actual)
-		})
-	}
-}
-
 func TestSimpleTokenEstimator_EstimateInput(t *testing.T) {
-	estimator := NewSimpleTokenEstimator()
+	estimator := NewSimpleTokenEstimator(nil)
 
 	testCases := []struct {
 		name     string
@@ -152,90 +91,14 @@ func TestSimpleTokenEstimator_EstimateInput(t *testing.T) {
 	}
 }
 
-func TestSimpleTokenEstimator_EstimateOutput(t *testing.T) {
-	testCases := []struct {
-		name        string
-		ratio       float64
-		operatorCap *int64
-		inputTokens int64
-		clientCap   *int64
-		expected    int64
-	}{
-		{name: "Zero input", ratio: 2.0, inputTokens: 0, expected: 0},
-		{name: "Negative input", ratio: 2.0, inputTokens: -5, expected: 0},
-		{name: "Positive input, no caps", ratio: 2.0, inputTokens: 8, expected: 16},
-		{name: "Zero ratio", ratio: 0.0, inputTokens: 100, expected: 0},
-		{name: "Client cap binds", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(50)), expected: 50},
-		{name: "Client cap looser than estimate", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(500)), expected: 150},
-		{name: "Client cap zero binds", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(0)), expected: 0},
-		{name: "Negative client cap ignored", ratio: 1.5, inputTokens: 100, clientCap: ptr.To(int64(-10)), expected: 150},
-		{name: "Operator cap binds", ratio: 1.5, operatorCap: ptr.To(int64(40)), inputTokens: 100, expected: 40},
-		{name: "Both caps, client tighter", ratio: 1.5, operatorCap: ptr.To(int64(80)), inputTokens: 100, clientCap: ptr.To(int64(30)), expected: 30},
-		{name: "Both caps, operator tighter", ratio: 1.5, operatorCap: ptr.To(int64(30)), inputTokens: 100, clientCap: ptr.To(int64(80)), expected: 30},
-		{name: "Both caps, estimate tightest", ratio: 1.5, operatorCap: ptr.To(int64(500)), inputTokens: 100, clientCap: ptr.To(int64(500)), expected: 150},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			estimator := &SimpleTokenEstimator{OutputRatio: tc.ratio, MaxEstimatedOutputTokens: tc.operatorCap}
-			require.Equal(t, tc.expected, estimator.EstimateOutput(tc.inputTokens, tc.clientCap))
-		})
-	}
-}
-
-func TestSimpleTokenEstimator_Estimate_HonorsClientCap(t *testing.T) {
-	estimator := NewSimpleTokenEstimator() // ratio 1.5, no operator cap
-
-	// 10 input tokens, client caps output at 3 -> 10 + min(15, 3) = 13.
-	req := tokenizedRequest(10)
-	req.Body.MaxOutputTokens = ptr.To(int64(3))
-	require.Equal(t, int64(13), estimator.Estimate(req))
-
-	// Without a client cap, the full ratio applies -> 10 + 15 = 25.
-	require.Equal(t, int64(25), estimator.Estimate(tokenizedRequest(10)))
-}
-
-func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
-	estimator := &SimpleTokenEstimator{OutputRatio: 2.0}
-
-	testCases := []struct {
-		name     string
-		request  *fwksched.InferenceRequest
-		expected int64
-	}{
-		{
-			name:     "Empty tokenized prompt with custom config",
-			request:  tokenizedRequest(0),
-			expected: 0,
-		},
-		{
-			name:     "Four tokens with custom config",
-			request:  tokenizedRequest(4),
-			expected: 12, // 4 input + 4*2.0=8 output
-		},
-		{
-			name:     "Ten tokens with custom config",
-			request:  tokenizedRequest(10),
-			expected: 30, // 10 input + 10*2.0=20 output
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			actual := estimator.Estimate(tc.request)
-			require.Equal(t, tc.expected, actual)
-		})
-	}
-}
-
 func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
-	e := NewSimpleTokenEstimator()
+	e := NewSimpleTokenEstimator(nil)
 
-	t.Run("nil request → 0", func(t *testing.T) {
+	t.Run("nil request -> 0", func(t *testing.T) {
 		require.Equal(t, int64(0), e.EstimateOutputFromRequest(nil))
 	})
 
-	t.Run("LONG bucket → flat 4096", func(t *testing.T) {
+	t.Run("LONG bucket -> flat 4096", func(t *testing.T) {
 		req := requestWithBucket(oslbucket.Long, nil)
 		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(req))
 	})
@@ -245,7 +108,7 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 		require.Equal(t, int64(2000), e.EstimateOutputFromRequest(req))
 	})
 
-	t.Run("SHORT bucket → 100", func(t *testing.T) {
+	t.Run("SHORT bucket -> 100", func(t *testing.T) {
 		req := requestWithBucket(oslbucket.Short, nil)
 		require.Equal(t, int64(100), e.EstimateOutputFromRequest(req))
 	})
@@ -255,19 +118,46 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 		require.Equal(t, int64(50), e.EstimateOutputFromRequest(req))
 	})
 
-	t.Run("UNKNOWN bucket → flat 1000", func(t *testing.T) {
-		req := tokenizedRequest(100)
-		req.PutAttribute(oslbucket.OSLBucketKey, oslbucket.Unknown)
-		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
-	})
-
-	t.Run("missing attribute → flat 1000", func(t *testing.T) {
-		req := tokenizedRequest(100) // no osl-bucket attribute set
+	t.Run("UNKNOWN bucket -> flat 1000", func(t *testing.T) {
+		req := requestWithBucket(oslbucket.Unknown, nil)
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("UNKNOWN capped by max_output_tokens", func(t *testing.T) {
 		req := requestWithBucket(oslbucket.Unknown, ptr.To(int64(400)))
 		require.Equal(t, int64(400), e.EstimateOutputFromRequest(req))
+	})
+
+	// A missing attribute reads as the zero value (UNKNOWN): the estimate is the
+	// flat UNKNOWN value and does NOT scale with input length -- input tokens carry
+	// no output-length signal, which is the whole premise of the osl-bucket plugin.
+	t.Run("missing attribute -> UNKNOWN 1000 (input length ignored)", func(t *testing.T) {
+		req := tokenizedRequest(100) // no osl-bucket attribute
+		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("missing attribute, untokenized -> UNKNOWN 1000", func(t *testing.T) {
+		req := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
+		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
+	})
+}
+
+func TestEstimateOutputFromRequest_OperatorCap(t *testing.T) {
+	t.Run("LONG capped by operator cap", func(t *testing.T) {
+		e := NewSimpleTokenEstimator(ptr.To(int64(200)))
+		req := requestWithBucket(oslbucket.Long, nil)
+		require.Equal(t, int64(200), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("operator cap 0 clamps to 0", func(t *testing.T) {
+		e := NewSimpleTokenEstimator(ptr.To(int64(0)))
+		req := requestWithBucket(oslbucket.Long, nil)
+		require.Equal(t, int64(0), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("client cap tighter than operator cap wins", func(t *testing.T) {
+		e := NewSimpleTokenEstimator(ptr.To(int64(300)))
+		req := requestWithBucket(oslbucket.Long, ptr.To(int64(150)))
+		require.Equal(t, int64(150), e.EstimateOutputFromRequest(req))
 	})
 }

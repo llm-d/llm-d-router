@@ -17,11 +17,11 @@ publishes the result via `request.PutAttribute("osl-bucket", bucket)`:
 
 | Bin | Meaning | Typical output |
 |-----|---------|----------------|
-| `LONG` | reasoning chain | ≥ 2,000 tokens |
+| `LONG` | reasoning chain | >= 2,000 tokens |
 | `SHORT` | tool-call / short response | < 500 tokens |
-| `UNKNOWN` | no reliable signal | consumers fall back to their own estimate |
+| `UNKNOWN` | no reliable signal | consumers apply their neutral middle estimate |
 
-The plugin only classifies and publishes — it does not itself change routing.
+The plugin only classifies and publishes -- it does not itself change routing.
 Separating production from consumption means the bin is a reliable shared signal
 for any subsystem, exactly like `agent-identity`.
 
@@ -29,13 +29,20 @@ for any subsystem, exactly like `agent-identity`.
 
 Classification:
 
-1. `enable_thinking=true` → **LONG** (reasoning mode).
-2. `thinking_budget > 4000` (without explicit `enable_thinking`) → **LONG**.
-3. `has_tools=true` **and** `enable_thinking` false/absent → **SHORT**
+1. `enable_thinking=true` -> **LONG** (reasoning mode).
+2. `thinking_budget > 4000` (without explicit `enable_thinking`) -> **LONG**.
+3. `has_tools=true` **and** `enable_thinking` false/absent -> **SHORT**
    (tool-call JSON). The `enable_thinking` guard matters: tools alone is *not*
    a SHORT signal when thinking is also on.
-4. `max_output_tokens < 500` → **SHORT** (explicit client cap).
-5. Otherwise → **UNKNOWN**.
+4. `max_output_tokens < 500` -> **SHORT** (explicit client cap).
+5. Otherwise -> **UNKNOWN**.
+
+The `enable_thinking`, `thinking_budget`, and tools signals are all read from the
+chat-completions body (`chat_template_kwargs` and `tools`). Other body shapes
+(Claude `/v1/messages`, OpenAI `/v1/responses`) are not inspected for these: their
+thinking signals are not surfaced, so a tool-call there could not be told apart
+from a reasoning request and is left UNKNOWN. `max_output_tokens` is the
+normalized client cap and applies regardless of shape.
 
 `UNKNOWN` is still published (as the zero value), so a missing attribute and an
 explicit UNKNOWN read the same. The plugin is stateless and safe under
@@ -43,12 +50,13 @@ concurrent use.
 
 ## Inputs Consumed
 
-- `request.Body.ChatCompletions.ChatTemplateKWArgs` — `enable_thinking`,
+- `request.Body.ChatCompletions.ChatTemplateKWArgs` -- `enable_thinking`,
   `thinking_budget` (populated by vLLM from the client's `extra_body`).
-- `request.Body.ChatCompletions.Tools` — presence implies `has_tools`.
-- `request.Body.MaxOutputTokens` — normalized client output cap.
+  Chat-completions only.
+- `request.Body.ChatCompletions.Tools` -- presence implies `has_tools`.
+- `request.Body.MaxOutputTokens` -- normalized client output cap.
 
-ISL (input length) is intentionally *not* consumed — it has no correlation with
+ISL (input length) is intentionally *not* consumed -- it has no correlation with
 OSL and only adds noise.
 
 ## Outputs Produced
@@ -73,16 +81,34 @@ plugins:
   - type: token-load-scorer
 ```
 
-The token estimator degrades gracefully when `osl-bucket` is absent: with no
-attribute set, every request reads as UNKNOWN and uses the flat UNKNOWN output
-estimate (1,000 tokens).
+### Relationship to `addEstimatedOutputTokens`
+
+This plugin only publishes the bucket; the `inflight-load-producer`'s
+`addEstimatedOutputTokens` option decides whether the bucket is *used* to add
+estimated output tokens to the in-flight load. They are independent switches:
+
+| `osl-bucket` | `addEstimatedOutputTokens` | Behavior |
+|--------------|----------------------------|----------|
+| off | off | Output tokens not added to in-flight load. |
+| off | on | Output added, but every request reads as UNKNOWN (flat estimate); the producer logs a one-time warning. |
+| on | off | Bucket published for other consumers, not added to in-flight load. |
+| on | on | Bucket published and used for the per-request output estimate. Intended setup. |
+
+When the attribute is absent, it reads as its zero value, `UNKNOWN`, so an
+explicitly-published UNKNOWN and a missing attribute produce the same estimate.
+
+**Ordering is a phase guarantee, not a list-order requirement.** The producer
+reads the bucket in its `Produce` / `PreRequest` hooks, which the framework runs
+after all `RequestHeader` hooks (where this plugin publishes) -- regardless of the
+order plugins appear in the config. That guarantee is not expressed as a declared
+`Produce`/`Consume` dependency, so the only way the read fails is if this plugin is
+not enabled at all, in which case every request falls back to `UNKNOWN`.
 
 ## Limitations
 
-- **Recall, not precision, is the tradeoff.** ~43% of genuinely short requests
-  (no-signal chat traffic) fall through to UNKNOWN and get no routing benefit —
-  acceptable, since they are not *harmed*. Precision on SHORT is 100%, so a long
-  request is never misclassified as short.
+- **Conservative by design.** A request with no reliable signal is left UNKNOWN
+  rather than guessed, so some genuinely short requests get no routing benefit --
+  but a long request is never labeled SHORT.
 - **Signals must be present on the wire.** `enable_thinking` / `thinking_budget`
   only appear when the client sends them (via `extra_body`) and the server model
   supports them (e.g. GLM 5.2, Kimi K3).

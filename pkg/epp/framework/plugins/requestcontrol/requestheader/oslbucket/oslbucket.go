@@ -17,8 +17,8 @@ limitations under the License.
 // Package oslbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-sequence-length (OSL) bin for a request from request-time signals
 // (enable_thinking, has_tools, thinking_budget) and publishes it as a request
-// attribute. Downstream consumers — the in-flight token estimator today, and
-// flow-control queue ordering / KV-pressure gating in the future — read it via
+// attribute. Downstream consumers -- the in-flight token estimator today, and
+// flow-control queue ordering / KV-pressure gating in the future -- read it via
 // scheduling.ReadRequestAttribute to make output-length-aware decisions.
 package oslbucket
 
@@ -54,9 +54,9 @@ const (
 type OSLBucket int8
 
 const (
-	// Unknown means no reliable signal was found; consumers use their own fallback
-	// (e.g. the ratio-based token estimate). It is the zero value, so a missing
-	// attribute reads as Unknown.
+	// Unknown means no reliable signal was found; consumers apply their own
+	// neutral middle estimate. It is the zero value, so a missing attribute
+	// reads as Unknown.
 	Unknown OSLBucket = iota
 	// Short predicts < 500 output tokens (e.g. tool-call JSON responses).
 	Short
@@ -84,9 +84,12 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 
 	var enableThinking *bool
 	var thinkingBudget *int64
-	hasTools := false
+	hasTools := requestHasTools(body)
+
+	// enable_thinking / thinking_budget are only carried in chat-completions
+	// chat_template_kwargs (vLLM populates them from the client's extra_body); the
+	// Claude messages and OpenAI responses shapes do not surface these signals.
 	if body.ChatCompletions != nil {
-		hasTools = len(body.ChatCompletions.Tools) > 0
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
 		if v, ok := kwArgs["enable_thinking"]; ok {
 			enableThinking = boolPtrFromAny(v)
@@ -96,29 +99,39 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 		}
 	}
 
-	// Thinking mode → always long (reasoning chains).
+	// Thinking mode -> always long (reasoning chains).
 	if enableThinking != nil && *enableThinking {
 		return Long
 	}
 
-	// Large thinking budget without explicit enable_thinking → treat as LONG.
-	if thinkingBudget != nil && *thinkingBudget > longBudgetThresholdTokens {
+	// Large thinking budget, only when enable_thinking is not explicitly set ->
+	// treat as LONG. An explicit enable_thinking=false is the stronger signal and
+	// is respected: the request falls through rather than being forced to LONG.
+	if enableThinking == nil && thinkingBudget != nil && *thinkingBudget > longBudgetThresholdTokens {
 		return Long
 	}
 
-	// Tools without thinking → short tool-call JSON.
-	// Guard: enable_thinking must be explicitly false or absent. Nemotron ARC-AGI proves that
-	// has_tools=true alone is NOT a SHORT signal when enable_thinking is also true.
+	// Tools without thinking -> short tool-call JSON. The enable_thinking guard
+	// matters: has_tools=true alone is not a SHORT signal when thinking is also on.
 	if hasTools && (enableThinking == nil || !*enableThinking) {
 		return Short
 	}
 
-	// Explicit short cap set by the client → treat as short.
+	// Explicit short cap set by the client -> treat as short.
 	if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < shortMaxOutputTokens {
 		return Short
 	}
 
 	return Unknown
+}
+
+// requestHasTools reports whether the request carries tool definitions. Only the
+// chat-completions shape is inspected: the thinking signals (enable_thinking,
+// thinking_budget) that distinguish a SHORT tool-call from a LONG reasoning
+// request are only surfaced there, so classifying tools on a shape whose thinking
+// signals we cannot read would risk labeling a thinking request SHORT.
+func requestHasTools(body *fwkrh.InferenceRequestBody) bool {
+	return body.ChatCompletions != nil && len(body.ChatCompletions.Tools) > 0
 }
 
 // PluginFactory is the factory function for the OSL bucket plugin.

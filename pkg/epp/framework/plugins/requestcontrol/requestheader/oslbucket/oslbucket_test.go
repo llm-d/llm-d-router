@@ -81,6 +81,11 @@ func TestEstimateOSLBucket(t *testing.T) {
 			want: Long,
 		},
 		{
+			name: "thinking_budget>4000 with enable_thinking=false -> UNKNOWN (explicit false wins)",
+			body: chatBody(nil, map[string]any{"enable_thinking": false, "thinking_budget": float64(8000)}, nil),
+			want: Unknown,
+		},
+		{
 			name: "thinking_budget<=4000 -> UNKNOWN",
 			body: chatBody(nil, map[string]any{"thinking_budget": float64(4000)}, nil),
 			want: Unknown,
@@ -114,6 +119,16 @@ func TestEstimateOSLBucket(t *testing.T) {
 			name: "no chat completions, short cap -> SHORT",
 			body: &fwkrh.InferenceRequestBody{MaxOutputTokens: ptr.To(int64(50))},
 			want: Short,
+		},
+		{
+			name: "tools only on messages shape -> UNKNOWN (not inspected)",
+			body: &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{Tools: oneTool}},
+			want: Unknown,
+		},
+		{
+			name: "tools only on responses shape -> UNKNOWN (not inspected)",
+			body: &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{Tools: oneTool}},
+			want: Unknown,
 		},
 	}
 

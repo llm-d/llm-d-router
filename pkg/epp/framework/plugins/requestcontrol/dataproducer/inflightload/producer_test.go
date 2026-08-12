@@ -21,14 +21,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -37,6 +41,7 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -582,7 +587,10 @@ func (f *stubSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
 func (f *stubSchedulingEndpoint) Keys() []string { return f.attr.Keys() }
 
 // makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
-// which is what the estimator reads to derive the input token count.
+// which is what the estimator reads to derive the input token count. No osl-bucket
+// attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
+// matching a deployment where the osl-bucket plugin is not enabled, hence the
+// unknownOutputEstimateTokens output the counter-tracking tests expect.
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
@@ -784,7 +792,7 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	endpointID := fullEndpointName(endpointName)
 
 	// 4 input + unknownOutputEstimateTokens output (UNKNOWN) per profile.
-	// Two profiles both targeting the same endpoint => 2 requests, 2× that.
+	// Two profiles both targeting the same endpoint => 2 requests, 2x that.
 	perProfile := int64(4) + unknownOutputEstimateTokens
 	req := makeTokenRequest("req-shared", 4)
 	res := &fwksched.SchedulingResult{
@@ -1211,50 +1219,6 @@ func TestInFlightLoadProducer_PanicSafety(t *testing.T) {
 	})
 }
 
-func TestInFlightLoadProducerFactory_OutputRatio(t *testing.T) {
-	t.Parallel()
-
-	newProducer := func(t *testing.T, cfg Config) (*InFlightLoadProducer, error) {
-		raw, err := json.Marshal(cfg)
-		require.NoError(t, err)
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		p, err := InFlightLoadProducerFactory("inflight-load-producer",
-			json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
-		if err != nil {
-			return nil, err
-		}
-		return p.(*InFlightLoadProducer), nil
-	}
-
-	t.Run("default when unset", func(t *testing.T) {
-		t.Parallel()
-		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true})
-		require.NoError(t, err)
-		require.Equal(t, int64(15), p.tokenEstimator.EstimateOutput(10, nil)) // 10 * 1.5
-	})
-
-	t.Run("custom ratio applied", func(t *testing.T) {
-		t.Parallel()
-		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(2.0)})
-		require.NoError(t, err)
-		require.Equal(t, int64(20), p.tokenEstimator.EstimateOutput(10, nil)) // 10 * 2.0
-	})
-
-	t.Run("zero ratio is valid", func(t *testing.T) {
-		t.Parallel()
-		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(0.0)})
-		require.NoError(t, err)
-		require.Equal(t, int64(0), p.tokenEstimator.EstimateOutput(10, nil))
-	})
-
-	t.Run("negative ratio rejected", func(t *testing.T) {
-		t.Parallel()
-		_, err := newProducer(t, Config{AddEstimatedOutputTokens: true, OutputRatio: ptr.To(-1.0)})
-		require.Error(t, err)
-	})
-}
-
 func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 	t.Parallel()
 
@@ -1275,15 +1239,18 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		t.Parallel()
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(40))})
 		require.NoError(t, err)
-		// 100 * 1.5 = 150, capped to 40.
-		require.Equal(t, int64(40), p.tokenEstimator.EstimateOutput(100, nil))
+		// LONG bucket estimates 4096, capped to the operator cap of 40.
+		req := requestWithBucket(oslbucket.Long, nil)
+		require.Equal(t, int64(40), p.tokenEstimator.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("estimate below cap is unaffected", func(t *testing.T) {
 		t.Parallel()
-		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(1000))})
+		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(5000))})
 		require.NoError(t, err)
-		require.Equal(t, int64(150), p.tokenEstimator.EstimateOutput(100, nil))
+		// LONG bucket estimates 4096, below the operator cap of 5000.
+		req := requestWithBucket(oslbucket.Long, nil)
+		require.Equal(t, int64(4096), p.tokenEstimator.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("negative cap rejected", func(t *testing.T) {
@@ -1291,4 +1258,31 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		_, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(-1))})
 		require.Error(t, err)
 	})
+}
+
+// TestInFlightLoadProducer_WarnsOnceOnMissingOSLBucket verifies that when
+// AddEstimatedOutputTokens is enabled but requests carry no osl-bucket attribute
+// (the osl-bucket plugin is not enabled), the producer logs the misconfiguration
+// warning exactly once across many requests, not per request.
+func TestInFlightLoadProducer_WarnsOnceOnMissingOSLBucket(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t) // AddEstimatedOutputTokens: true
+
+	var warnings int
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "no osl-bucket attribute is present") {
+			warnings++
+		}
+	}, funcr.Options{Verbosity: logutil.DEFAULT})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	res := makeSchedulingResult("warn-endpoint")
+	// makeTokenRequest sets no osl-bucket attribute, so each PreRequest hits the
+	// missing-attribute branch; the sync.Once must collapse them to one warning.
+	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w1", 4), res))
+	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w2", 4), res))
+	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w3", 4), res))
+
+	require.Equal(t, 1, warnings, "missing-osl-bucket warning must fire exactly once")
 }

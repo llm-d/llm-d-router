@@ -17,32 +17,19 @@ limitations under the License.
 package inflightload
 
 import (
-	"math"
-
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
 )
 
-// TokenEstimator estimates the number of tokens for an LLM request.
+// TokenEstimator estimates token counts for an LLM request.
 type TokenEstimator interface {
-	// Estimate returns the total estimated token count (input + output) for the request.
-	Estimate(request *fwksched.InferenceRequest) int64
-	// EstimateInput returns only the estimated input token count for the request.
+	// EstimateInput returns the estimated input token count for the request.
 	EstimateInput(request *fwksched.InferenceRequest) int64
-	// EstimateOutput returns the estimated output token count given the input token
-	// count, bounded by the client-requested cap (maxOutputTokens, nil if unset)
-	// and the estimator's configured operator cap.
-	EstimateOutput(inputTokens int64, maxOutputTokens *int64) int64
-	// EstimateOutputFromRequest returns the estimated output token count from the
-	// OSL bucket published as a request attribute by the osl-bucket plugin
-	// (LONG/SHORT/UNKNOWN mapped to flat estimates), bounded by the
-	// client-requested cap.
+	// EstimateOutputFromRequest returns the estimated output token count for a
+	// request from the OSL bucket published by the osl-bucket plugin, bounded by
+	// the client-requested cap and the estimator's operator cap.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 }
-
-// DefaultOutputRatio is the estimated output-to-input token ratio used when no
-// ratio is configured.
-const DefaultOutputRatio = 1.5
 
 const (
 	// longOutputEstimateTokens is the flat output-token estimate for a LONG
@@ -52,7 +39,7 @@ const (
 	longOutputEstimateTokens int64 = 4096
 	// unknownOutputEstimateTokens is the flat output-token estimate for an
 	// UNKNOWN request (no OSL signal). It sits at the midpoint of the UNKNOWN
-	// zone (500–1,999 tokens), preserving the ranking invariant
+	// zone (500-1,999 tokens), preserving the ranking invariant
 	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
 	// TODO(osl): replace with a dynamic estimate (e.g. per-pool running average
 	// of observed CompletionTokens) in a follow-up PR.
@@ -62,50 +49,19 @@ const (
 	shortOutputEstimateTokens int64 = 100
 )
 
-// SimpleTokenEstimator derives input tokens from the tokenized prompt and
-// estimates output tokens as inputTokens * OutputRatio, bounded by the
-// client-requested cap and an optional operator cap.
+// SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
+// OSL bucket published by the osl-bucket plugin to a flat output-token estimate,
+// bounded by the client-requested cap and an optional operator cap.
 type SimpleTokenEstimator struct {
-	OutputRatio float64
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens
-	// regardless of input length or the client-requested cap. nil means no cap.
+	// regardless of the client-requested cap. nil means no cap.
 	MaxEstimatedOutputTokens *int64
 }
 
-// NewSimpleTokenEstimator returns a SimpleTokenEstimator with the default output
-// ratio and no operator cap.
-func NewSimpleTokenEstimator() TokenEstimator {
-	return NewSimpleTokenEstimatorWithRatio(DefaultOutputRatio)
-}
-
-// NewSimpleTokenEstimatorWithRatio returns a SimpleTokenEstimator that estimates
-// output tokens as round(inputTokens * ratio), with no operator cap.
-func NewSimpleTokenEstimatorWithRatio(ratio float64) TokenEstimator {
-	return NewSimpleTokenEstimatorWithConfig(ratio, nil)
-}
-
-// NewSimpleTokenEstimatorWithConfig returns a SimpleTokenEstimator with the given
-// output ratio and an optional operator cap (maxOutput, nil for no cap) on the
-// estimated output tokens.
-func NewSimpleTokenEstimatorWithConfig(ratio float64, maxOutput *int64) TokenEstimator {
-	return &SimpleTokenEstimator{
-		OutputRatio:              ratio,
-		MaxEstimatedOutputTokens: maxOutput,
-	}
-}
-
-// Estimate returns the total estimated token count (input + output) for the request.
-// Output tokens are estimated as inputTokens * OutputRatio.
-func (e *SimpleTokenEstimator) Estimate(request *fwksched.InferenceRequest) int64 {
-	inputTokens := e.EstimateInput(request)
-	if inputTokens == 0 {
-		return 0
-	}
-	var maxOutputTokens *int64
-	if request != nil && request.Body != nil {
-		maxOutputTokens = request.Body.MaxOutputTokens
-	}
-	return inputTokens + e.EstimateOutput(inputTokens, maxOutputTokens)
+// NewSimpleTokenEstimator returns a SimpleTokenEstimator with an optional operator
+// cap (maxOutput, nil for no cap) on the estimated output tokens.
+func NewSimpleTokenEstimator(maxOutput *int64) TokenEstimator {
+	return &SimpleTokenEstimator{MaxEstimatedOutputTokens: maxOutput}
 }
 
 // EstimateInput returns the input token count read from the tokenized prompt,
@@ -117,40 +73,28 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 	return int64(request.Body.TokenizedPrompt.TokenCount())
 }
 
-// EstimateOutput returns the estimated output token count given the input token
-// count. The raw estimate (round(inputTokens * OutputRatio)) is bounded by the
-// client-requested cap (maxOutputTokens, nil if unset) and the configured
-// operator cap (MaxEstimatedOutputTokens), each applied only when non-negative.
-func (e *SimpleTokenEstimator) EstimateOutput(inputTokens int64, maxOutputTokens *int64) int64 {
-	if inputTokens <= 0 {
-		return 0
-	}
-	est := int64(math.Round(float64(inputTokens) * e.OutputRatio))
-	if maxOutputTokens != nil && *maxOutputTokens >= 0 && *maxOutputTokens < est {
-		est = *maxOutputTokens
-	}
-	if e.MaxEstimatedOutputTokens != nil && *e.MaxEstimatedOutputTokens >= 0 && *e.MaxEstimatedOutputTokens < est {
-		est = *e.MaxEstimatedOutputTokens
-	}
-	return est
-}
-
-// EstimateOutputFromRequest returns the estimated output token count from the OSL
-// bucket published by the osl-bucket plugin as a request attribute. LONG requests
-// (reasoning mode) use a flat 4096-token estimate, SHORT requests (tool-call) use
-// 100, and UNKNOWN (or missing attribute) use 1000 — preserving the ranking
-// invariant SHORT < UNKNOWN < LONG. All values are bounded by the client-requested
-// cap and the estimator's operator cap.
+// EstimateOutputFromRequest returns the estimated output token count for a request
+// from the OSL bucket published by the osl-bucket plugin: LONG (reasoning) maps to
+// a flat 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to 1000 --
+// preserving the ranking invariant SHORT < UNKNOWN < LONG. The estimate is bounded
+// by the client-requested cap and the estimator's operator cap.
 //
-// Requires the osl-bucket RequestHeaderProcessor to have run before any Produce or
-// PreRequest call that invokes this method (RequestHeader runs before PreRequest in
-// the plugin dispatch order).
+// The bucket is read from a request attribute set by the osl-bucket plugin's
+// RequestHeader hook. That hook runs before this method (RequestHeader precedes
+// both Produce and PreRequest in the dispatch order), but the ordering is not
+// enforced by a declared Produce/Consume dependency. When the osl-bucket plugin is
+// not enabled, the attribute is absent and reads as its zero value, Unknown, so
+// every request is estimated as UNKNOWN; the producer logs a one-time warning in
+// that case (see InFlightLoadProducer.warnMissingOSLBucket).
 func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
 	}
 
+	// An absent attribute reads as the zero value (Unknown) and is handled by the
+	// switch default; there is no separate fallback path.
 	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+
 	var est int64
 	switch bucket {
 	case oslbucket.Long:
@@ -163,7 +107,10 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 	return e.clampOutput(est, request.Body.MaxOutputTokens)
 }
 
-// clampOutput applies the client-requested cap and the operator cap to est.
+// clampOutput bounds est by the client-requested cap and the operator cap. The
+// client cap applies only when positive (a zero or unset cap is treated as no
+// cap, consistent with the osl-bucket classifier's handling of max_output_tokens);
+// the operator cap applies whenever non-negative.
 func (e *SimpleTokenEstimator) clampOutput(est int64, clientCap *int64) int64 {
 	if clientCap != nil && *clientCap > 0 && *clientCap < est {
 		est = *clientCap
