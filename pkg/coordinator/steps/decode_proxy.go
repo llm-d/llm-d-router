@@ -104,11 +104,21 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 // request-scoped logger to make the truncation observable with the request id.
 func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Director:       func(_ *http.Request) {},
-		FlushInterval:  -1,
-		Transport:      transport,
-		ModifyResponse: modifyResponse,
-		ErrorLog:       log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
+		Director:      func(_ *http.Request) {},
+		FlushInterval: -1,
+		Transport:     transport,
+		// A decode profile's response headers are otherwise copied verbatim to
+		// the client; strip coordinator-internal headers (e.g. x-peer-topology,
+		// meaningful only between the prefill and decode legs) so a plugin
+		// configured on the decode profile can't leak them to the caller.
+		ModifyResponse: func(resp *http.Response) error {
+			pipeline.StripInternalHeaders(resp.Header)
+			if modifyResponse != nil {
+				return modifyResponse(resp)
+			}
+			return nil
+		},
+		ErrorLog: log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
 			if errors.Is(proxyErr, errCacheMiss) {
 				return
