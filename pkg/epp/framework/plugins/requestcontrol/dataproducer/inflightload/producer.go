@@ -43,6 +43,13 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
+
+	// Pod-role label and values -- canonical definitions in
+	// pkg/epp/framework/plugins/scheduling/filter/bylabel/roles.go.
+	podRoleLabel         = "llm-d.ai/role"
+	podRolePrefill       = "prefill"
+	podRoleEncodePrefill = "encode-prefill"
+	podRoleDecode        = "decode"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -444,16 +451,53 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
-	tokens := adjustedInput
+
+	// In P/D disaggregation the load is role-specific:
+	//   prefill-only endpoint -> ISL (it processes the input, not the output)
+	//   decode-only endpoint  -> OSL_est (it generates the output, ISL was handled by prefill)
+	//   monolithic / combined -> ISL + OSL_est (existing behavior, no P/D split)
+	// The split is derived from the pod-role label and only activates with known roles.
+	if endpointHasPrefillOnlyRole(endpoint) {
+		return adjustedInput
+	}
+
 	if p.addEstimatedOutputTokens {
 		var maxOutputTokens *int64
 		if request != nil && request.Body != nil {
 			maxOutputTokens = request.Body.MaxOutputTokens
 		}
-		// Output tokens are based on the full input, not the cached portion.
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
+		if endpointHasDecodeOnlyRole(endpoint) {
+			// Decode-only endpoint: ISL was already accounted for by the prefill worker.
+			// Output tokens are estimated from the full input length (not the cached
+			// portion) since generation length does not depend on cache state.
+			return p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
+		}
+		// Monolithic or combined-role: include both. Output tokens are based on the
+		// full input, not the cached portion.
+		return adjustedInput + p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
 	}
-	return tokens
+	return adjustedInput
+}
+
+// endpointHasPrefillOnlyRole reports whether the endpoint is labeled as a
+// prefill-only worker (including encode-prefill). Combined-role endpoints
+// (prefill-decode, both) return false -- they also do decode work.
+func endpointHasPrefillOnlyRole(endpoint fwksched.Endpoint) bool {
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return false
+	}
+	role := endpoint.GetMetadata().Labels[podRoleLabel]
+	return role == podRolePrefill || role == podRoleEncodePrefill
+}
+
+// endpointHasDecodeOnlyRole reports whether the endpoint is labeled as a
+// decode-only worker. Combined-role endpoints (prefill-decode, both) return
+// false -- they also do prefill work.
+func endpointHasDecodeOnlyRole(endpoint fwksched.Endpoint) bool {
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return false
+	}
+	return endpoint.GetMetadata().Labels[podRoleLabel] == podRoleDecode
 }
 
 func (p *InFlightLoadProducer) ResponseBody(
