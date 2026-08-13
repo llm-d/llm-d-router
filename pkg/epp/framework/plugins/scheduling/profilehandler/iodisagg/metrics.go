@@ -89,7 +89,7 @@ func IODisaggDecisionType(preprocessUsed, inferenceUsed, postprocessUsed bool) s
 	case preprocessUsed:
 		return DecisionTypePreprocessOnly // Not supported yeet
 	case postprocessUsed:
-		return DecisionTypePreprocessOnly // Not supported yeet
+		return DecisionTypePostprocessOnly // Not supported yeet
 	default:
 		return DecisionTypeNoDisaggregation // Not supported yet
 	}
