@@ -5,7 +5,9 @@
 # named "envoy", mounted by this Deployment), which lives in envoy.yaml
 # (single EPP) or envoy-3-epp.yaml (per-role EPPs).
 #
-# Placeholder ${NAMESPACE} is substituted by the suite before apply.
+# Placeholders ${NAMESPACE} and ${ENVOY_NODE_PORT} are substituted by the suite
+# before apply. Each parallel process gets its own NodePort so the gateways do
+# not collide on one cluster.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -96,7 +98,7 @@ spec:
       port: 8081
       protocol: TCP
       targetPort: 8081
-      nodePort: 30080
+      nodePort: ${ENVOY_NODE_PORT}
   selector:
     app: envoy
   type: NodePort
