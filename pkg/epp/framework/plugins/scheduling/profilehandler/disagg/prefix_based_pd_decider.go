@@ -153,6 +153,10 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	if request == nil || !routing.IsConditionalDecode(request.Headers) {
 		return nil
 	}
+	// Claim ownership of the header for the director's default-deny check:
+	// this plugin evaluated the preference, even if its own decision is to
+	// forward (below).
+	request.PutAttribute(routing.ConditionalDecodeHandledAttributeKey, true)
 	if d.config.NonCachedTokens == 0 {
 		return nil
 	}

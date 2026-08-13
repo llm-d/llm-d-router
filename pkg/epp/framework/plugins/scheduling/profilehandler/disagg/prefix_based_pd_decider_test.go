@@ -10,6 +10,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -787,4 +788,57 @@ func TestNeedsRemotePrefill_MemoizesOnRequest(t *testing.T) {
 	// own (0 cached blocks → non-cached suffix 10 >= 5) must still forward,
 	// proving PreRequest reused the memoized decision.
 	assert.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(0))))
+}
+
+// TestPreRequest_ClaimsConditionalDecodeAttribute pins the contract with the
+// director's default-deny check: whenever PreRequest sees a Prefer:if-available
+// request it must mark ConditionalDecodeHandledAttributeKey so the director
+// knows some plugin owned the header. Non-conditional-decode requests must
+// leave the attribute unset.
+func TestPreRequest_ClaimsConditionalDecodeAttribute(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tests := []struct {
+		name            string
+		nonCachedTokens int
+		headers         map[string]string
+		wantClaim       bool
+	}{
+		{
+			name:            "conditional-decode request is claimed even when gate is disabled",
+			nonCachedTokens: 0,
+			headers:         map[string]string{"prefer": "if-available"},
+			wantClaim:       true,
+		},
+		{
+			name:            "conditional-decode request is claimed when gate is enabled",
+			nonCachedTokens: 5,
+			headers:         map[string]string{"prefer": "if-available"},
+			wantClaim:       true,
+		},
+		{
+			name:            "non-conditional-decode request is not claimed",
+			nonCachedTokens: 5,
+			headers:         map[string]string{"prefer": "return=minimal"},
+			wantClaim:       false,
+		},
+		{
+			name:            "request without Prefer header is not claimed",
+			nonCachedTokens: 5,
+			headers:         nil,
+			wantClaim:       false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: tt.nonCachedTokens})
+			require.NoError(t, err)
+
+			req := withHeaders(makeRequestWithTokens(10), tt.headers)
+			_ = decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(10)))
+
+			_, claimed := req.GetAttribute(routing.ConditionalDecodeHandledAttributeKey)
+			assert.Equal(t, tt.wantClaim, claimed)
+		})
+	}
 }

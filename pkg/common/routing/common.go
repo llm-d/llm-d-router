@@ -7,6 +7,8 @@ package routing
 import (
 	"net/url"
 	"strings"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const (
@@ -37,6 +39,14 @@ const (
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
 )
+
+// ConditionalDecodeHandledAttributeKey is the request-attribute key a plugin
+// sets when it has evaluated the "Prefer: if-available" preference for a
+// request. The director consults this after PreRequest plugins run: a
+// conditional-decode request that no plugin claimed is rejected with 412 so
+// misconfigurations (gate plugin forgotten) surface as a fast fallback rather
+// than a silent forward.
+var ConditionalDecodeHandledAttributeKey = fwkplugin.NewDataKey("conditional-decode.handled", "")
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
 // This is useful for gRPC clients that expect host:port format only.

@@ -45,6 +45,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -2151,4 +2152,91 @@ func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testin
 	defer ps.mu.Unlock()
 	assert.Empty(t, ps.respsOnStreaming[0].TerminationCause,
 		"mid-stream chunks carry no cause: the stream has not ended")
+}
+
+// TestPrepareRequest_ConditionalDecodeDefaultDeny pins the director's
+// default-deny for "Prefer: if-available" requests: after PreRequest plugins
+// run, if no plugin marked ConditionalDecodeHandledAttributeKey, the request
+// is rejected with 412. Requests either without the header or where a plugin
+// claimed the header pass through.
+func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	scheduleResult := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address: "192.168.1.100",
+							Port:    "8000",
+							ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "decode",
+	}
+
+	claimingPlugin := &mockPreRequestPlugin{
+		name: "claimer",
+		modifyFn: func(r *fwksched.InferenceRequest) {
+			r.PutAttribute(routing.ConditionalDecodeHandledAttributeKey, true)
+		},
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		plugins     []fwkrc.PreRequest
+		wantErrCode string
+	}{
+		{
+			name:    "no Prefer header is unaffected",
+			headers: map[string]string{},
+		},
+		{
+			name:    "conditional-decode with no plugin registered → 412",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: nil,
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name:    "conditional-decode with a plugin that does not claim → 412",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrc.PreRequest{
+				&mockPreRequestPlugin{name: "noop"},
+			},
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name:    "conditional-decode with a plugin that claims → forward",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrc.PreRequest{claimingPlugin},
+		},
+		{
+			name:    "unrelated Prefer token is not a conditional-decode → unaffected",
+			headers: map[string]string{routing.PreferHeader: "return=minimal"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(tt.plugins...)}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req-" + tt.name, Headers: tt.headers},
+			}
+
+			_, err := dir.prepareRequest(ctx, reqCtx, scheduleResult)
+
+			if tt.wantErrCode == "" {
+				assert.NoError(t, err)
+				return
+			}
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
+	}
 }
