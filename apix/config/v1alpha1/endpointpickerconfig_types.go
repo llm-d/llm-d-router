@@ -397,13 +397,14 @@ type FlowControlConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
-	// DefaultRequestTTL bounds how long a request may wait in the queue before it is evicted.
+	// DefaultRequestTTL bounds how long a request may wait in the queue while the candidate pool has
+	// endpoints; NoEndpointRequestTTL bounds that wait while it has none.
 	// If omitted, it defaults to 60s. This is a queue-wait budget: a request that cannot dispatch
-	// within it is shed with a retryable backpressure error rather than served late, and it is the
-	// only bound on queue wait when neither the client nor the gateway enforces a request deadline.
+	// within it is shed with a retryable backpressure error rather than served late, and with no
+	// client or gateway deadline it is the only bound on waiting against a pool that has endpoints.
 	// Where such deadlines exist and fire sooner, they evict the request first (client disconnect).
-	// An explicit "0s" disables the TTL: requests then wait until client disconnect or controller
-	// shutdown.
+	// An explicit "0s" disables eviction while the pool has endpoints: such requests then wait until
+	// client disconnect or controller shutdown.
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
 
 	// +optional

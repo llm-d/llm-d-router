@@ -27,9 +27,9 @@ const (
 	// defaultRequestTTL is the default Time-To-Live applied to queued requests when the configuration
 	// does not specify one. It is a queue-wait budget: a request still undispatched after this long is
 	// shed with a retryable backpressure signal instead of being served with severely degraded
-	// time-to-first-token. It is also the only bound on queue wait when neither the client nor the
-	// gateway enforces a request deadline (the well-lit guides configure no gateway request timeout);
-	// where such deadlines exist and fire sooner, context cancellation evicts the request first.
+	// time-to-first-token. With no client or gateway deadline (the well-lit guides configure no gateway
+	// request timeout) it is the only bound on waiting against a pool that has endpoints; where such
+	// deadlines exist and fire sooner, context cancellation evicts the request first.
 	defaultRequestTTL = 60 * time.Second
 	// defaultNoEndpointRequestTTL is the default queue-wait budget applied while the candidate pool has
 	// no endpoints. It is deliberately equal to `defaultRequestTTL`, so splitting the budget is opt-in:
@@ -56,10 +56,10 @@ const (
 type Config struct {
 	// DefaultRequestTTL is the default Time-To-Live applied to requests that do not specify their own
 	// TTL hint. Because the admission adapter does not currently plumb a per-request hint, this value
-	// governs every request entering flow control.
-	// Optional: Defaults to `defaultRequestTTL` (60s). An explicit zero disables the TTL entirely, in
-	// which case queued requests are bounded only by request context cancellation (client disconnect
-	// or gateway timeout).
+	// governs every request entering flow control while the candidate pool has endpoints.
+	// Optional: Defaults to `defaultRequestTTL` (60s). An explicit zero disables eviction in that
+	// regime, in which case such requests are bounded only by request context cancellation (client
+	// disconnect or gateway timeout).
 	DefaultRequestTTL time.Duration
 
 	// NoEndpointRequestTTL is the queue-wait budget that replaces `DefaultRequestTTL` while the candidate
