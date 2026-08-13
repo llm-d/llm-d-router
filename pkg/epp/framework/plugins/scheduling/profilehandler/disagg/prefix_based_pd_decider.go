@@ -145,8 +145,8 @@ func (d *PrefixBasedPDDecider) Consumes() plugin.DataDependencies {
 // 412 only when the gate legitimately fires — the chosen decode endpoint's
 // non-cached suffix meets NonCachedTokens — or when the scheduling result
 // has no primary decode endpoint (defensive). Any error evaluating the gate
-// (missing tokenization, missing/wrong-typed cache attribute) is logged at
-// Info and the request is forwarded, matching disaggregate's soft-fail.
+// (missing tokenization, missing/wrong-typed cache attribute) is logged and
+// the request is forwarded, matching disaggregate's soft-fail.
 // Requests without the header are a no-op.
 func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
 	schedulingResult *scheduling.SchedulingResult) error {
@@ -169,7 +169,7 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	needs, err := d.needsRemotePrefill(ctx, request, endpoint)
 	if err != nil {
-		logger.Info("conditional-decode: error evaluating gate, forwarding", "error", err.Error())
+		logger.Error(err, "conditional-decode: error evaluating gate, forwarding")
 		return nil
 	}
 	if needs {
@@ -195,12 +195,12 @@ func primaryDecodeEndpoint(result *scheduling.SchedulingResult) scheduling.Endpo
 }
 
 // disaggregate reports whether remote prefill should run for this request.
-// Fails soft: any read failure logs at INFO and returns false so scheduling
+// Fails soft: any read failure is logged and returns false so scheduling
 // falls back to the decode-only path.
 func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {
 	needs, err := d.needsRemotePrefill(ctx, request, endpoint)
 	if err != nil {
-		log.FromContext(ctx).Info("prefix decider: error evaluating disaggregation, decode only", "error", err.Error())
+		log.FromContext(ctx).Error(err, "prefix decider: error evaluating disaggregation, decode only")
 		return false
 	}
 	return needs
