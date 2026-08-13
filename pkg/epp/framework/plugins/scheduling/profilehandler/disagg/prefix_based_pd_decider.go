@@ -272,9 +272,9 @@ func (d *PrefixBasedPDDecider) computeNeedsRemotePrefill(ctx context.Context, re
 }
 
 // getUserInputLenInTokens returns the token count carried on the request.
-// A missing TokenizedRequest is reported as an error so the conditional-decode
-// gate fails closed on tokenizer-producer failures rather than trusting a
-// zero-length input.
+// A missing TokenizedRequest is reported as an error so the soft-fail branch
+// in PreRequest and disaggregate surfaces the tokenizer failure in the log
+// rather than silently treating an untokenized request as zero-length input.
 func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) {
 	if request == nil || request.Body == nil {
 		return 0, errors.New("request or request body is nil")
