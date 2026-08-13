@@ -18,6 +18,7 @@ package latencypredictorclient
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -138,6 +139,14 @@ func TestValidateTrainingEntry_PredictedFields(t *testing.T) {
 	ok := 10.0
 	entry.PredictedTTFT = &ok
 	assert.NoError(t, predictor.ValidateTrainingEntry(entry))
+
+	nan := math.NaN()
+	entry.PredictedTTFT = &nan
+	assert.Error(t, predictor.ValidateTrainingEntry(entry))
+
+	inf := math.Inf(1)
+	entry.PredictedTTFT = &inf
+	assert.Error(t, predictor.ValidateTrainingEntry(entry))
 }
 
 // TestPredictBayesianRidge_EncoderCoefficients verifies the TTFT linear model

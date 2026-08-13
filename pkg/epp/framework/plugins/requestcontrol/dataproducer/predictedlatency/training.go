@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
@@ -137,9 +138,9 @@ func recordTTFTTrainingData(
 }
 
 // predictedLatencyMSPtr returns a pointer for optional predicted_* JSON fields.
-// Zero means no selected prediction was available and must be omitted.
+// Zero or non-finite values mean no usable selected prediction and must be omitted.
 func predictedLatencyMSPtr(ms float64) *float64 {
-	if ms <= 0 {
+	if ms <= 0 || math.IsNaN(ms) || math.IsInf(ms, 0) {
 		return nil
 	}
 	return &ms
