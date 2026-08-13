@@ -6,10 +6,11 @@ on:
     branches:
       - main
 
-# Serializes runs on the same PR, matching pr-kind-label.yaml
+# Cancels superseded runs on the same PR. Safe because the job only adds
+# labels (sync-labels: false, no remove-then-add), unlike pr-kind-label.yaml.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   area-label:
