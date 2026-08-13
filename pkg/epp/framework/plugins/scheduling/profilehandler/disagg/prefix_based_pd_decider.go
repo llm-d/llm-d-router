@@ -196,15 +196,14 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 // The outcome is memoized on the request: disaggregate populates it during
 // scheduling, and PreRequest reuses it without recomputing.
 func (d *PrefixBasedPDDecider) needsRemotePrefill(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (bool, error) {
-	if request != nil {
-		if cached, ok := scheduling.ReadRequestAttribute[remotePrefillDecision](request, remotePrefillDecisionAttributeKey); ok {
-			return cached.needs, cached.err
-		}
+	if request == nil {
+		return false, errors.New("request is nil")
+	}
+	if cached, ok := scheduling.ReadRequestAttribute[remotePrefillDecision](request, remotePrefillDecisionAttributeKey); ok {
+		return cached.needs, cached.err
 	}
 	needs, err := d.computeNeedsRemotePrefill(ctx, request, endpoint)
-	if request != nil {
-		request.PutAttribute(remotePrefillDecisionAttributeKey, remotePrefillDecision{needs: needs, err: err})
-	}
+	request.PutAttribute(remotePrefillDecisionAttributeKey, remotePrefillDecision{needs: needs, err: err})
 	return needs, err
 }
 
