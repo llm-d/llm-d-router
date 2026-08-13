@@ -141,6 +141,12 @@ jobs:
 
   build-coordinator:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -161,6 +167,7 @@ jobs:
           tarball: /tmp/coordinator-image.tar
 
       - name: Push coordinator image for both AMD64 and ARM64
+        id: push-coordinator
         uses: ./.github/actions/docker-build-and-push
         with:
           docker-file: Dockerfile.coordinator
@@ -172,6 +179,13 @@ jobs:
           commit-sha: ${{ github.sha }}
           push: 'true'
           additional-tags: ${{ inputs.coordinator-additional-tags }}
+
+      - name: Attest coordinator image provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/llm-d/${{ inputs.coordinator-image-name }}
+          subject-digest: ${{ steps.push-coordinator.outputs.digest }}
+          push-to-registry: true
 
   push-helm-charts:
     needs: [build-epp, build-sidecar, build-coordinator]
