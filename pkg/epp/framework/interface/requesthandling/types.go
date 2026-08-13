@@ -104,7 +104,8 @@ type InferenceRequestBody struct {
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
-	// GenerateRequest is the representation of the vLLM /inference/v1/generate request body.
+	// Generate holds pre-tokenized input for native generate endpoints
+	// (vLLM /inference/v1/generate and SGLang /generate).
 	Generate *GenerateRequest `json:"generate,omitempty"`
 	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations request body.
 	Images *ImagesGenerationsRequest `json:"images,omitempty"`
@@ -483,9 +484,9 @@ func (i *ImagesGenerationsRequest) String() string {
 		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
 }
 
-// GenerateRequest is a structured representation of the fields we parse out of the vLLM
-// request at /inference/v1/generate.
-// Unlike the OpenAI-compatible endpoints, this API accepts pre-tokenized input (token IDs).
+// GenerateRequest holds pre-tokenized input for native generate endpoints
+// (vLLM /inference/v1/generate and SGLang /generate). Unlike OpenAI-compatible
+// endpoints, these APIs accept pre-tokenized input (token IDs).
 // This struct includes fields usable for plugins and scheduling decisions.
 type GenerateRequest struct {
 	// TokenIDs are the pre-tokenized input token IDs.
