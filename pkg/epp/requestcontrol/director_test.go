@@ -2182,7 +2182,7 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 	claimingPlugin := &mockPreRequestPlugin{
 		name: "claimer",
 		modifyFn: func(r *fwksched.InferenceRequest) {
-			r.PutAttribute(routing.ConditionalDecodeHandledAttributeKey, true)
+			r.PutAttribute(fwkrc.ConditionalDecodeHandledAttributeKey, true)
 		},
 	}
 
@@ -2197,9 +2197,9 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 			headers: map[string]string{},
 		},
 		{
-			name:    "conditional-decode with no plugin registered → 412",
-			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
-			plugins: nil,
+			name:        "conditional-decode with no plugin registered → 412",
+			headers:     map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins:     nil,
 			wantErrCode: errcommon.PreconditionFailed,
 		},
 		{

@@ -38,8 +38,8 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -476,7 +476,7 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	// claimed the header. Ensures a missing gate plugin surfaces as a 412 so
 	// the coordinator's cache-miss fallback runs, instead of a silent forward.
 	if routing.IsConditionalDecode(reqCtx.SchedulingRequest.Headers) {
-		if _, handled := reqCtx.SchedulingRequest.GetAttribute(routing.ConditionalDecodeHandledAttributeKey); !handled {
+		if _, handled := reqCtx.SchedulingRequest.GetAttribute(fwkrc.ConditionalDecodeHandledAttributeKey); !handled {
 			return reqCtx, errcommon.Error{
 				Code: errcommon.PreconditionFailed,
 				Msg:  "conditional-decode request received but no gate plugin is configured",

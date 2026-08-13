@@ -10,9 +10,9 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -837,7 +837,7 @@ func TestPreRequest_ClaimsConditionalDecodeAttribute(t *testing.T) {
 			req := withHeaders(makeRequestWithTokens(10), tt.headers)
 			_ = decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(10)))
 
-			_, claimed := req.GetAttribute(routing.ConditionalDecodeHandledAttributeKey)
+			_, claimed := req.GetAttribute(fwkrc.ConditionalDecodeHandledAttributeKey)
 			assert.Equal(t, tt.wantClaim, claimed)
 		})
 	}
