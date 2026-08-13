@@ -130,9 +130,19 @@ func recordTTFTTrainingData(
 		entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatch
 	}
 	entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
+	entry.PredictedTTFT = predictedLatencyMSPtr(predictedLatencyCtx.predictedTTFT)
 	if err := predictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 		logger.V(logutil.DEBUG).Error(err, "record TTFT training failed")
 	}
+}
+
+// predictedLatencyMSPtr returns a pointer for optional predicted_* JSON fields.
+// Zero means no selected prediction was available and must be omitted.
+func predictedLatencyMSPtr(ms float64) *float64 {
+	if ms <= 0 {
+		return nil
+	}
+	return &ms
 }
 
 // refreshLastSeenMetrics updates predictedLatencyCtx.lastSeenMetrics from scheduling results.
