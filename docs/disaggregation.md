@@ -429,12 +429,13 @@ A deployment can declare the plugin for either role independently, or both.
 
 Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Deployments that do not declare this plugin do not enforce the gate — conditional-decode requests are always forwarded. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
 
-The gate runs from the plugin's `PreRequest` hook, so it is independent of any `disagg-profile-handler` wiring. A deployment that wants the coordinator's cache-miss fallback but no disaggregation can declare the plugin at the top level and skip the profile handler:
+The gate runs from the plugin's `PreRequest` hook, so it is independent of any `disagg-profile-handler` wiring. A deployment that wants the coordinator's cache-miss fallback but no disaggregation can declare the plugin at the top level and skip the profile handler. The plugin declares its data dependencies (`PrefixCacheMatchInfo` and `TokenizedPrompt`) as required, so a missing producer surfaces as a startup error rather than a silent per-request forward:
 
 ```yaml
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
+  - type: token-producer
   - type: approx-prefix-cache-producer
   - type: prefix-cache-scorer
   - type: max-score-picker

@@ -15,6 +15,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -47,8 +48,9 @@ func (p PrefixBasedPDDeciderConfig) validate() error {
 
 // compile-time type assertions
 var (
-	_ deciderPlugin    = &PrefixBasedPDDecider{}
-	_ fwkrc.PreRequest = &PrefixBasedPDDecider{}
+	_ deciderPlugin         = &PrefixBasedPDDecider{}
+	_ fwkrc.PreRequest      = &PrefixBasedPDDecider{}
+	_ plugin.ConsumerPlugin = &PrefixBasedPDDecider{}
 )
 
 // errCondDecodeCacheMiss is the 412 returned by the conditional-decode gate
@@ -123,6 +125,20 @@ func (d *PrefixBasedPDDecider) TypedName() plugin.TypedName {
 func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	d.typedName.Name = name
 	return d
+}
+
+// Consumes declares the request- and endpoint-scoped data the plugin reads
+// when evaluating the gate. Required so operators opting into the plugin
+// standalone (not just as a disagg-profile-handler decider) get startup
+// validation instead of a silent per-request forward when a producer is
+// missing.
+func (d *PrefixBasedPDDecider) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedRequest{},
+		},
+	}
 }
 
 // PreRequest gates requests carrying "Prefer: if-available". It returns HTTP
