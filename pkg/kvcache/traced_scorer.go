@@ -47,7 +47,7 @@ func (t *tracedScorer) Score(
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 ) (map[string]float64, error) {
 	tracer := tracing.Tracer(TracerScope)
-	_, span := tracer.Start(ctx, "compute_scores",
+	ctx, span := tracer.Start(ctx, "compute_scores",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
