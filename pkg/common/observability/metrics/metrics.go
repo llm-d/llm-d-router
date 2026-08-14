@@ -22,6 +22,11 @@ import (
 	compbasemetrics "k8s.io/component-base/metrics"
 )
 
+const (
+	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
+	LLMDRouterEndpointPickerSubsystem = "llm_d_epp"
+)
+
 // HelpMsgWithStability is a helper function to create a help message with stability level.
 func HelpMsgWithStability(msg string, stability compbasemetrics.StabilityLevel) string {
 	return fmt.Sprintf("[%v] %v", stability, msg)
