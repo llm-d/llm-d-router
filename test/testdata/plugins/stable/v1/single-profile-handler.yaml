@@ -1,0 +1,13 @@
+# Frozen configuration surface of the single-profile-handler plugin.
+# The handler takes no parameters; the picker is present only because a
+# scheduling profile needs one.
+# See ../README.md: this file must not be edited to fix a failing test.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: single-profile-handler
+- type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: max-score-picker
