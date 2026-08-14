@@ -170,17 +170,18 @@ func (fr *FlowRegistry) deleteFlow(key flowcontrol.FlowKey) {
 	fr.logger.V(logging.DEBUG).Info("Deleting queue instance.", "flowKey", key)
 	if val, ok := fr.priorityBands.Load(key.Priority); ok {
 		band := val.(*priorityBand)
-		// Requests in a queue that are asynchronously finalized (e.g., due to client
-		// stream cancellation or context timeout), they are left in the queue for the
-		// GC process to clean them up, including updating the capacity. Here we remove
-		// a flow queue, potentially with such requests waiting for GC, therefor the
-		// capacity stats are updated here before removing the queue.
+		// Requests that are asynchronously finalized (e.g., due to client stream
+		// cancellation or context timeout) are left in the queue for the cleanup sweep.
+		// A queue deleted here may still hold such items, and the sweep may still hold a
+		// ManagedQueue handle to it (handles are resolved before processing, without
+		// registry locks). Draining through the wrapper both empties the queue and
+		// deducts the stats in one critical section, so a later mutation through a stale
+		// handle observes an empty queue and propagates nothing.
 		if mq, ok := band.queues[key.ID]; ok && mq != nil {
-			// Safe-guard: Deduct any unswept capacity before destroying the queue
-			if mqLen := int64(mq.Len()); mqLen > 0 {
-				fr.logger.V(logging.DEBUG).Info("Deregistering non-empty queue during GC, flushing stats",
-					"flowKey", key, "unsweptCount", mqLen)
-				fr.propagateStatsDelta(key.Priority, -mqLen, -int64(mq.ByteSize()))
+			if mq.Len() > 0 {
+				fr.logger.V(logging.DEBUG).Info("Deregistering non-empty queue during GC, draining unswept items",
+					"flowKey", key, "unsweptCount", mq.Len())
+				mq.Drain()
 			}
 		}
 		delete(band.queues, key.ID)
