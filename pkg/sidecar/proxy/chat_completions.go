@@ -69,9 +69,10 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		)
 		defer span.End()
 
-		// Tag every log line of this request with the trace it belongs to. The
-		// proxy logger is process-scoped, so seed it into the context first;
-		// handlers reached from here pick it up through log.FromContext.
+		// Tag this handler's log lines with the trace they belong to. The proxy
+		// logger is process-scoped, so seed it into the context first. Connectors
+		// reached from here still log through s.logger and stay uncorrelated;
+		// the request context carries the correlated logger for them to adopt.
 		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
 		logger := log.FromContext(ctx)
 
