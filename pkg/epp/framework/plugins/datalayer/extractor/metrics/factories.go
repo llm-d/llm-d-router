@@ -66,10 +66,14 @@ type (
 	}
 
 	customMetricConfigParams struct {
-		// AttributeKey is the endpoint attribute key where the scalar value is stored.
+		// AttributeKey is the endpoint attribute key where the extracted value is stored.
 		AttributeKey string `json:"attributeKey"`
 		// MetricSpec defines the source metric specification string.
 		MetricSpec string `json:"metricSpec"`
+		// LabelName, when set, extracts the named Prometheus label's string value
+		// instead of the metric's numeric gauge/counter value. The result is stored
+		// as a StringMetricValue attribute.
+		LabelName string `json:"labelName,omitempty"`
 	}
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
@@ -269,6 +273,7 @@ func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []
 		custom = append(custom, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         spec,
+			LabelName:    cfg.LabelName,
 		})
 	}
 	return custom, errs
