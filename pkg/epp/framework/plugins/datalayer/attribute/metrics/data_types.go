@@ -37,6 +37,14 @@ func (v ScalarMetricValue) Clone() fwkdl.Cloneable {
 	return v
 }
 
+// StringMetricValue is a string endpoint attribute extracted from a Prometheus
+// metric label on an info-style gauge (e.g. a compatibility hash).
+type StringMetricValue string
+
+func (v StringMetricValue) Clone() fwkdl.Cloneable {
+	return v
+}
+
 // ScalarMetricDataKey returns the key under which the core metrics extractor
 // publishes the custom scalar metric configured as attributeKey. The data type
 // of a custom metric is chosen in configuration rather than in code, so the key
@@ -45,8 +53,18 @@ func ScalarMetricDataKey(attributeKey string) plugin.DataKey {
 	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
 }
 
+// StringMetricDataKey returns the key under which the core metrics extractor
+// publishes a string metric label value configured as attributeKey.
+func StringMetricDataKey(attributeKey string) plugin.DataKey {
+	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
+}
+
 func ReadScalarMetricValue(attrs fwkdl.AttributeMap, key plugin.DataKey) (ScalarMetricValue, bool) {
 	return fwkdl.ReadAttribute[ScalarMetricValue](attrs, key)
+}
+
+func ReadStringMetricValue(attrs fwkdl.AttributeMap, key plugin.DataKey) (StringMetricValue, bool) {
+	return fwkdl.ReadAttribute[StringMetricValue](attrs, key)
 }
 
 // ResolveConfiguredKey builds the key a plugin reads from an attribute name and

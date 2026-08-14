@@ -87,7 +87,7 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 
 var _ fwkplugin.ProducerPlugin = &Extractor{}
 
-// Produces declares the custom scalar metric attributes, whose names come from
+// Produces declares the custom metric attributes, whose names come from
 // the per-engine mappings in configuration, plus the per-pod metric fields this
 // extractor writes into the endpoint's Metrics struct that a scorer or filter
 // declares as a Consumes() dependency. Declaring both lets the data-attribute
@@ -104,7 +104,11 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
-			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+			if custom.LabelName != "" {
+				produced[attrmetrics.StringMetricDataKey(custom.AttributeKey)] = attrmetrics.StringMetricValue("")
+			} else {
+				produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+			}
 		}
 	}
 	return produced
@@ -202,7 +206,26 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
 			continue
 		}
-		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
+		if custom.LabelName != "" {
+			value, ok := extractLabelValue(metric, custom.LabelName)
+			if !ok {
+				errs = append(errs, fmt.Errorf(
+					"custom metric %q: label %q not found",
+					custom.AttributeKey,
+					custom.LabelName,
+				))
+				continue
+			}
+			ep.GetAttributes().Put(
+				attrmetrics.StringMetricDataKey(custom.AttributeKey),
+				attrmetrics.StringMetricValue(value),
+			)
+		} else {
+			ep.GetAttributes().Put(
+				attrmetrics.ScalarMetricDataKey(custom.AttributeKey),
+				attrmetrics.ScalarMetricValue(extractValue(metric)),
+			)
+		}
 		updated = true
 	}
 
