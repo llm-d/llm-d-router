@@ -640,14 +640,19 @@ func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 }
 
 // anthropicImageToURL converts an Anthropic image source to an OpenAI-shaped
-// URL. Base64 sources (the default when the type is missing) become data URIs
-// with a image/jpeg media type when absent; URL sources pass through.
+// URL. Sources carrying a URL pass it through (URL sources, and sources
+// missing a type); base64 sources become data URIs, with an image/jpeg media
+// type when absent. Sources with neither a URL nor data yield "" so the
+// caller drops the block.
 func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
 	if src == nil {
 		return ""
 	}
-	if src.Type == "url" {
+	if src.Type == "url" || src.URL != "" {
 		return src.URL
+	}
+	if src.Data == "" {
+		return ""
 	}
 	mediaType := src.MediaType
 	if mediaType == "" {

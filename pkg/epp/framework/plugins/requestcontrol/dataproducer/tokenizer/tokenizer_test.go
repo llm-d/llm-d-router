@@ -802,6 +802,37 @@ func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				}},
 			},
 		},
+		{
+			name: "image with no media type defaults to jpeg",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", Data: "abc123"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: &tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/jpeg;base64,abc123"}},
+					},
+				}},
+			},
+		},
+		{
+			name: "image source with neither URL nor data is dropped",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: &tokenizerTypes.Content{Raw: "Describe this"}},
+			},
+		},
 	}
 
 	for _, tt := range tests {
