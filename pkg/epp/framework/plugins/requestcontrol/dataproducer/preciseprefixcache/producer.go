@@ -143,9 +143,6 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	if parameters.IndexerConfig.TokenizersPoolConfig != nil {
 		return nil, errors.New("tokenizersPoolConfig is not supported; configure a token-producer plugin instead")
 	}
-	if err := requireRealTokenProducer(handle); err != nil {
-		return nil, err
-	}
 
 	p, err := New(handle.Context(), name, parameters)
 	if err != nil {
@@ -155,16 +152,30 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	return p, nil
 }
 
-// requireRealTokenProducer verifies that an engine-aligned token-producer
-// (vllm/uds backend) is already loaded in handle when this factory runs. The
-// estimate backend emits byte-packed pseudo-tokens, which would silently
-// corrupt the KV-block hashes this producer feeds to the indexer. The
-// framework's auto-default for the TokenizedPrompt data key fires *after*
-// explicit factories, so absence of any token-producer here also means an
-// estimate-backed one is about to be auto-created. Both cases fail with the
-// same actionable message; the token-producer must come earlier in the YAML
-// than the precise-prefix-cache-producer. See #1471.
-func requireRealTokenProducer(handle plugin.Handle) error {
+// ValidateTokenProducer verifies that when a precise-prefix-cache-producer is
+// configured, an engine-aligned token-producer (vllm/uds backend) is present in
+// the handle. The estimate backend emits byte-packed pseudo-tokens, which would
+// silently corrupt the KV-block hashes this producer feeds to the indexer.
+//
+// This runs at the runner level after CreateMissingDataProducers, not inside the
+// factory: factory instantiation order is decided by the plugin DAG's
+// topological sort (which seeds from a map and so varies per process start), not
+// by the plugins-list order, so a factory-time check cannot rely on the
+// token-producer being constructed first. By the time this runs, every plugin --
+// explicit and auto-defaulted (an absent token-producer is auto-created as the
+// estimate backend) -- is in the handle, so the check is order-independent. See #1471.
+func ValidateTokenProducer(handle plugin.Handle) error {
+	hasPrecise := false
+	for _, p := range handle.GetAllPlugins() {
+		if p.TypedName().Type == PluginType {
+			hasPrecise = true
+			break
+		}
+	}
+	if !hasPrecise {
+		return nil
+	}
+
 	for _, p := range handle.GetAllPlugins() {
 		typeName := p.TypedName().Type
 		//nolint:staticcheck // SA1019: intentionally accept the deprecated 'tokenizer' alias so existing configs keep working.
@@ -180,8 +191,8 @@ func requireRealTokenProducer(handle plugin.Handle) error {
 		}
 	}
 	return fmt.Errorf(
-		"%s requires an engine-aligned token-producer (vllm or udsTokenizerConfig backend) "+
-			"configured earlier in the plugins list", PluginType)
+		"%s requires an engine-aligned token-producer (vllm or udsTokenizerConfig backend); "+
+			"configure a token-producer plugin with a vllm or udsTokenizerConfig backend", PluginType)
 }
 
 // New constructs a precise-prefix-cache-producer. The instance name becomes

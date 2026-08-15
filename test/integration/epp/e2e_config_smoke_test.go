@@ -189,11 +189,11 @@ schedulingProfiles:
     weight: 2
 `,
 	// Regression test for #1471: a precise-prefix-cache-producer paired with
-	// an explicit vllm-backed token-producer must load cleanly. The mirror
-	// case (no token-producer or estimate-backed) is covered by the unit
-	// test TestPluginFactory_RejectsMissingRealTokenProducer in the
-	// preciseprefixcache package; this smoke test confirms the harness still
-	// accepts a well-configured precise pipeline end-to-end.
+	// an explicit vllm-backed token-producer must load cleanly through the full
+	// runner path, which is where ValidateTokenProducer runs (after auto-defaults,
+	// order-independent). The mirror case (no token-producer or estimate-backed)
+	// is covered by the unit test TestValidateTokenProducer in the
+	// preciseprefixcache producer package.
 	"preciseConfigWithVLLMTokenProducer": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:

@@ -34,7 +34,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -97,18 +96,6 @@ func TestAnyMMHit(t *testing.T) {
 	}
 }
 
-// installRealTokenProducer pre-registers a vllm-backed token-producer in the
-// handle so preciseproducer.PluginFactory's startup-time check for an
-// engine-aligned tokenizer (#1471) is satisfied. Tests that exercise the
-// producer factory in isolation must call this first.
-func installRealTokenProducer(t *testing.T, handle fwkplugin.Handle) {
-	t.Helper()
-	raw := json.RawMessage(`{"modelName":"test-model"}`)
-	tp, err := tokenproducer.PluginFactory(tokenproducer.PluginType, fwkplugin.StrictDecoder(raw), handle)
-	require.NoError(t, err)
-	handle.AddPlugin(tp.TypedName().Name, tp)
-}
-
 // In self-host mode the plugin satisfies Scorer, DataProducer, PreRequest,
 // and EndpointExtractor.
 func TestPluginFactory_SelfHostInterfaces(t *testing.T) {
@@ -154,8 +141,6 @@ func TestPluginFactory_DefersToExistingProducer(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-	installRealTokenProducer(t, handle)
-
 	existing, err := preciseproducer.PluginFactory("my-precise", nil, handle)
 	require.NoError(t, err)
 	handle.AddPlugin(existing.TypedName().Name, existing)
@@ -175,8 +160,6 @@ func TestPluginFactory_RejectsMultipleExistingProducers(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-	installRealTokenProducer(t, handle)
-
 	first, err := preciseproducer.PluginFactory("first", nil, handle)
 	require.NoError(t, err)
 	handle.AddPlugin(first.TypedName().Name, first)
@@ -213,8 +196,6 @@ func TestLegacyProducer_ConsumesDropsTokenizedPromptWhenPoolSet(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-	installRealTokenProducer(t, handle)
-
 	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
 	require.NoError(t, err)
 
@@ -235,8 +216,6 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-	installRealTokenProducer(t, handle)
-
 	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
 	require.NoError(t, err)
 
@@ -277,8 +256,6 @@ func TestLegacyProducer_TokensFlowToEndpointAttribute(t *testing.T) {
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
 
 	// Small block size for a predictable totalBlocks: 16 tokens / 4 = 4 blocks.
-	installRealTokenProducer(t, handle)
-
 	const blockSize = 4
 	rawCfg := json.RawMessage(`{"tokenProcessorConfig":{"blockSize":4}}`)
 	inner, err := preciseproducer.PluginFactory("inner", fwkplugin.StrictDecoder(rawCfg), handle)
@@ -321,8 +298,6 @@ func TestLegacyProducer_KeepsExistingTokenizedPrompt(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-	installRealTokenProducer(t, handle)
-
 	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
 	require.NoError(t, err)
 
