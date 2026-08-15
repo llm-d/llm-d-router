@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -267,10 +269,10 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 			want: &fwkrh.InferenceRequestBody{
 				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
-					Tools: []any{
-						map[string]any{
-							"name":        "get_weather",
-							"description": "Get the weather",
+					Tools: []fwkrh.AnthropicTool{
+						{
+							Name:        "get_weather",
+							Description: "Get the weather",
 						},
 					},
 					Messages: []fwkrh.AnthropicMessage{
@@ -723,4 +725,60 @@ func TestAnthropicParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseRequest_ToolBlocks verifies tool_use, tool_result, and thinking
+// blocks survive parsing with their raw JSON (input order preserved) intact.
+func TestParseRequest_ToolBlocks(t *testing.T) {
+	parser := NewAnthropicParser()
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"tools": [{
+			"name": "get_weather",
+			"description": "Get the weather",
+			"input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}
+		}],
+		"messages": [
+			{"role": "user", "content": "Weather in Zurich?"},
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "need the tool"},
+				{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Zurich"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "toolu_01", "content": [
+					{"type": "text", "text": "Sunny"}
+				]}
+			]}
+		]
+	}`
+
+	got, err := parser.ParseRequest(context.Background(), []byte(body), map[string]string{":path": "/v1/messages"})
+	require.NoError(t, err)
+	require.NotNil(t, got.Body.Messages)
+
+	msgs := got.Body.Messages.Messages
+	require.Len(t, msgs, 3)
+
+	assistant := msgs[1].Content.Structured
+	require.Len(t, assistant, 2)
+	assert.Equal(t, "thinking", assistant[0].Type)
+	assert.Equal(t, "need the tool", assistant[0].Thinking)
+	assert.Equal(t, "tool_use", assistant[1].Type)
+	assert.Equal(t, "toolu_01", assistant[1].ID)
+	assert.Equal(t, "get_weather", assistant[1].Name)
+	assert.JSONEq(t, `{"city": "Zurich"}`, string(assistant[1].Input))
+	assert.Equal(t, `{"city": "Zurich"}`, string(assistant[1].Input), "input must keep wire bytes")
+
+	toolResult := msgs[2].Content.Structured
+	require.Len(t, toolResult, 1)
+	assert.Equal(t, "tool_result", toolResult[0].Type)
+	assert.Equal(t, "toolu_01", toolResult[0].ToolUseID)
+	assert.Equal(t, "Sunny", toolResult[0].Content.Structured[0].Text)
+
+	tools := got.Body.Messages.Tools
+	require.Len(t, tools, 1)
+	assert.Equal(t, "get_weather", tools[0].Name)
+	assert.Equal(t, `{"type": "object", "properties": {"city": {"type": "string"}}}`, string(tools[0].InputSchema),
+		"input_schema must keep wire bytes for order-faithful re-serialization")
 }

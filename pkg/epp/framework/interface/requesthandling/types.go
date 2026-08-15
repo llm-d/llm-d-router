@@ -676,9 +676,19 @@ type MessagesRequest struct {
 	// not a message with role "system".
 	System AnthropicContent `json:"system,omitempty"`
 	// Tools field for tool use capabilities.
-	Tools []any `json:"tools,omitempty"`
+	Tools []AnthropicTool `json:"tools,omitempty"`
 	// CacheSalt isolates prefix caches for security.
 	CacheSalt string `json:"cache_salt,omitempty"`
+}
+
+// AnthropicTool is a tool definition in the Anthropic schema. InputSchema keeps
+// the raw JSON bytes so the wire key order survives downstream re-serialization.
+type AnthropicTool struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
+	Strict       *bool           `json:"strict,omitempty"`
+	DeferLoading *bool           `json:"defer_loading,omitempty"`
 }
 
 func (r *MessagesRequest) String() string {
@@ -743,11 +753,23 @@ func (ac AnthropicContent) textLen() int {
 	return n
 }
 
+// AnthropicContentBlock is one block of an Anthropic content array. Field sets
+// are disjoint per Type; Input and InputSchema keep raw JSON bytes to preserve
+// the wire key order for token-faithful re-serialization.
 type AnthropicContentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 	// image source fields (base64 or URL)
 	Source *AnthropicImageSource `json:"source,omitempty"`
+	// tool_use fields (assistant messages): the model's request to call a tool.
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	// tool_result fields (user messages): the outcome of a tool_use call.
+	ToolUseID string           `json:"tool_use_id,omitempty"`
+	Content   AnthropicContent `json:"content,omitempty"`
+	// thinking field (assistant messages): extended-thinking replay.
+	Thinking string `json:"thinking,omitempty"`
 }
 
 type AnthropicImageSource struct {
