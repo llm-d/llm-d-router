@@ -88,12 +88,13 @@ func TestPluginFactory_Validation(t *testing.T) {
 		errContain string
 	}{
 		{
-			name:      "empty object selects estimate",
-			params:    `{}`,
-			expectErr: false,
+			name:       "empty object requires a backend",
+			params:     `{}`,
+			expectErr:  true,
+			errContain: "exactly one of 'estimate' or 'vllm'",
 		},
 		{
-			name:      "nil parameters select estimate",
+			name:      "nil parameters use framework estimate default",
 			params:    "",
 			expectErr: false,
 		},
@@ -141,7 +142,7 @@ func TestPluginFactory_Validation(t *testing.T) {
 			name:       "vllm and estimate are mutually exclusive",
 			params:     `{"modelName":"m","vllm":{},"estimate":{}}`,
 			expectErr:  true,
-			errContain: "only one of 'estimate' or 'vllm'",
+			errContain: "exactly one of 'estimate' or 'vllm'",
 		},
 		{
 			name:       "invalid estimate image mode",

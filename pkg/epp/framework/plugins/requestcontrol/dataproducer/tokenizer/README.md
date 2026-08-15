@@ -19,12 +19,13 @@ upstream list shape, sorted by placeholder offset.
 
 ## Backend
 
-The `vllm` and `estimate` parameters are mutually exclusive:
+Exactly one of `vllm` or `estimate` must be configured when declaring a
+`token-producer`:
 
 - **`estimate`** (default): tokenizer-free byte-packing - no model, no service.
   The framework auto-creates this backend for any config whose plugins consume
   `TokenizedPrompt` (prefix cache, context-length, P/D routing) without declaring
-  a `token-producer`. Add an `estimate` block only to tune its behavior.
+  a `token-producer`.
 - **`vllm`**: calls vLLM's `/v1/completions/render` and
   `/v1/chat/completions/render` over plain HTTP (TLS is not supported). Future
   protocol fields (e.g. `grpc`) can be added alongside `url` under the same

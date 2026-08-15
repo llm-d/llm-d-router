@@ -111,7 +111,11 @@ type resolution struct {
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	config := tokenizerPluginConfig{}
 
-	if rawParameters != nil {
+	if rawParameters == nil {
+		// Default producers are instantiated without parameters. Materialize the
+		// estimate arm so all constructed configs satisfy the oneof contract.
+		config.Estimate = &estimateConfig{}
+	} else {
 		if err := rawParameters.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin - %w", PluginType, err)
 		}
@@ -126,11 +130,11 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 }
 
 func (config *tokenizerPluginConfig) validate() error {
-	if config.Estimate != nil && config.VLLM != nil {
-		return fmt.Errorf("invalid configuration for '%s' plugin: only one of 'estimate' or 'vllm' may be set", PluginType)
-	}
 	if config.ModelName != "" && config.VLLM == nil {
 		return fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' requires 'vllm'", PluginType)
+	}
+	if (config.Estimate == nil) == (config.VLLM == nil) {
+		return fmt.Errorf("invalid configuration for '%s' plugin: exactly one of 'estimate' or 'vllm' must be set", PluginType)
 	}
 	if config.VLLM != nil && config.ModelName == "" {
 		return fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' must be specified", PluginType)
@@ -160,7 +164,7 @@ func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin
 // NewPlugin constructs the configured vLLM or estimate backend.
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	if config == nil {
-		config = &tokenizerPluginConfig{}
+		config = &tokenizerPluginConfig{Estimate: &estimateConfig{}}
 	}
 	if err := config.validate(); err != nil {
 		return nil, err

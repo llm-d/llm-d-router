@@ -276,7 +276,7 @@ func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
 	require.Error(t, err)
 	assert.Nil(t, p)
-	assert.Contains(t, err.Error(), "only one of 'estimate' or 'vllm'")
+	assert.Contains(t, err.Error(), "exactly one of 'estimate' or 'vllm'")
 }
 
 func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
