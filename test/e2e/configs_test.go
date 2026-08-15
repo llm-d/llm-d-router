@@ -185,7 +185,6 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
-    backend: vllm
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: http://localhost:8000
@@ -218,7 +217,6 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
-    backend: vllm
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: http://localhost:8000

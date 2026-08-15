@@ -316,7 +316,7 @@ router:
 
 Runs a tokenizer sidecar that EPP queries to tokenize incoming requests, enabling precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
 
-The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer`, `backend: vllm`, and `vllm:`.
+The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`.
 
 #### Tokenizer Sidecar Parameters
 
@@ -371,72 +371,6 @@ router:
       - mountPath: /models
         name: model-cache-volume
 ```
-
-#### UDS Tokenizer Backend (deprecated)
-
-The `llm-d-uds-tokenizer` sidecar (gRPC over a Unix Domain Socket) is no longer
-templated by this chart; the render backend above supersedes it. If you still
-need it during migration, set it up in two steps.
-
-**Step 1 — inject the sidecar into the EPP deployment.** The chart does not
-render it, so patch it in yourself (e.g. via kustomize). The EPP container must
-mount the shared socket volume so it can reach the tokenizer:
-
-```yaml
-spec:
-  template:
-    spec:
-      containers:
-        # Existing EPP container — add the shared socket mount.
-        - name: epp
-          volumeMounts:
-            - name: tokenizer-uds
-              mountPath: /tmp/tokenizer
-        # The deprecated sidecar.
-        - name: tokenizer-uds
-          image: ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1
-          env:
-            - name: TOKENIZERS_DIR
-              value: /tokenizers
-            - name: HF_HOME
-              value: /tokenizers
-            # Required for gated/private tokenizers on HuggingFace.
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: llm-d-hf-token
-                  key: HF_TOKEN
-          volumeMounts:
-            - name: tokenizers
-              mountPath: /tokenizers
-            - name: tokenizer-uds
-              mountPath: /tmp/tokenizer
-      volumes:
-        - name: tokenizers
-          emptyDir: {}
-        - name: tokenizer-uds
-          emptyDir: {}
-```
-
-**Step 2 — point EPP at the socket.** Configure the tokenizer plugin via
-`router.epp.pluginsCustomConfig` (the chart writes this into the EPP config
-mounted at `/config`). Select the deprecated UDS backend with `backend: uds`
-and point it at the socket with `udsTokenizerConfig`:
-
-```yaml
-router:
-  epp:
-    pluginsCustomConfig:
-      custom-plugins.yaml: |
-        plugins:
-          - type: token-producer
-            parameters:
-              backend: uds
-              modelName: "Qwen/Qwen3-32B"
-              udsTokenizerConfig:
-                socketFile: /tmp/tokenizer/tokenizer-uds.socket
-```
----
 
 ### 6. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
 

@@ -269,14 +269,14 @@ func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
 func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	params := `{
 		"modelName": "m",
-		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"},
-		"vllm": {"url": "http://localhost:8000"}
+		"vllm": {"url": "http://localhost:8000"},
+		"estimate": {}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
 	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
 	require.Error(t, err)
 	assert.Nil(t, p)
-	assert.Contains(t, err.Error(), "only one of")
+	assert.Contains(t, err.Error(), "only one of 'estimate' or 'vllm'")
 }
 
 func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
