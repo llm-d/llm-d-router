@@ -19,8 +19,8 @@ upstream list shape, sorted by placeholder offset.
 
 ## Backend
 
-Exactly one of `vllm` or `estimate` must be configured when declaring a
-`token-producer`:
+Canonical `token-producer` configuration selects exactly one of `vllm` or
+`estimate`:
 
 - **`estimate`** (default): tokenizer-free byte-packing - no model, no service.
   The framework auto-creates this backend for any config whose plugins consume
@@ -37,6 +37,11 @@ Exactly one of `vllm` or `estimate` must be configured when declaring a
 > requires real tokens — configure a `vllm` `token-producer` explicitly for it.
 > If omitted, the auto-created `estimate` producer satisfies the dependency but
 > silently degrades precise cache correlation.
+
+> [!WARNING]
+> The deprecated `udsTokenizerConfig` backend used a gRPC-over-UDS tokenizer
+> sidecar. It is no longer supported. Migrate to `vllm`; see
+> [Migration](#migration-from-udstokenizerconfig) below.
 
 ## Config
 
@@ -103,6 +108,35 @@ Plugin config — dedicated render Service:
 ```
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+
+## Migration from `udsTokenizerConfig`
+
+The deprecated UDS backend ran a per-pod tokenizer sidecar and connected over a
+shared Unix domain socket. Replace it with the vLLM HTTP render backend, which
+can use a co-located `vllm launch render` sidecar or a shared render Service.
+
+Before:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    udsTokenizerConfig:
+      socketFile: /tmp/tokenizer/tokenizer-uds.socket
+```
+
+After:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      url: "http://localhost:8000"   # or a shared render Service
+```
+
+See the [Deployment](#deployment) section above for sidecar and shared-Service
+options.
 
 ---
 

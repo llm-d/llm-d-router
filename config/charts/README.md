@@ -372,6 +372,13 @@ router:
         name: model-cache-volume
 ```
 
+#### UDS Tokenizer Backend (deprecated)
+
+The deprecated `llm-d-uds-tokenizer` sidecar used gRPC over a Unix Domain
+Socket. It is no longer templated by this chart, and the EPP tokenizer plugin no
+longer supports `udsTokenizerConfig`. Migrate existing deployments to the vLLM
+HTTP render backend described above.
+
 ### 6. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
 
 Enables latency predictor containers inside the EPP deployment to feed metrics to a latency scorer plugin, allowing EPP to route traffic based on real-time predicted latencies.
