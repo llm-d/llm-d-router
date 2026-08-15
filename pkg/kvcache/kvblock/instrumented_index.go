@@ -66,6 +66,39 @@ func (m *instrumentedIndex) Lookup(
 	return pods, nil
 }
 
+// ScoredLookup forwards the fused lookup capability with the same request,
+// latency, and hit metrics as Lookup. Returns ErrScoredLookupUnsupported when
+// the wrapped backend lacks the capability.
+func (m *instrumentedIndex) ScoredLookup(ctx context.Context, requestKeys []BlockHash,
+	podIdentifierSet sets.Set[string], tierWeights map[string]float64,
+) (map[string]PodMatchStats, error) {
+	inner, ok := m.next.(ScoredLookupIndex)
+	if !ok {
+		return nil, ErrScoredLookupUnsupported
+	}
+
+	timer := prometheus.NewTimer(metrics.LookupLatency)
+	defer timer.ObserveDuration()
+
+	metrics.LookupRequests.Inc()
+
+	result, err := inner.ScoredLookup(ctx, requestKeys, podIdentifierSet, tierWeights)
+	if err != nil {
+		return nil, err
+	}
+
+	maxHit := 0
+	for _, stats := range result {
+		if stats.MatchedBlocks > maxHit {
+			maxHit = stats.MatchedBlocks
+		}
+	}
+	metrics.MaxPodHitCount.Add(float64(maxHit))
+	metrics.LookupHits.Add(float64(maxHit))
+
+	return result, nil
+}
+
 func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
 	return m.next.GetRequestKey(ctx, engineKey)
 }
@@ -81,7 +114,8 @@ func recordHitMetrics(requestKeys []BlockHash, keyToPods map[BlockHash][]PodEntr
 }
 
 // maxContiguousPodHits returns the longest contiguous prefix chain any single
-// pod holds, counting from the first request key. One state map serves the
+// pod holds, counting from the first request key - the same quantity the
+// fused ScoredLookup path reports as MatchedBlocks. One state map serves the
 // whole fold; a pod stays in the chain while its last-seen key is the
 // preceding one, and duplicate device tiers at a key count once.
 func maxContiguousPodHits(requestKeys []BlockHash, keyToPods map[BlockHash][]PodEntry) int {
