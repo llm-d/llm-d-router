@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -721,6 +722,111 @@ func TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens(t *testi
 	if tp.TokenCount() != len(tp.PerPromptTokens[0])+len(tp.PerPromptTokens[1]) {
 		t.Errorf("flat TokenIDs length %d != sum of per-prompt lengths %d+%d",
 			tp.TokenCount(), len(tp.PerPromptTokens[0]), len(tp.PerPromptTokens[1]))
+	}
+}
+
+// TestPackBytes_ASCII_Unchanged asserts that ASCII-only input produces identical
+// packed tokens before and after the UTF-8-aware rewrite, preserving cache keys.
+func TestPackBytes_ASCII_Unchanged(t *testing.T) {
+	raw := []byte("hello, llm-d!")
+	tokens := packBytes(raw)
+	aligned := align(raw)
+	expected := make([]uint32, len(aligned)/bytesPerToken)
+	for i := range expected {
+		expected[i] = binary.LittleEndian.Uint32(aligned[i*bytesPerToken:])
+	}
+	assert.Equal(t, expected, tokens, "ASCII-only output must match legacy 4-byte-slicing")
+}
+
+// TestPackBytes_Chinese_CharBoundary asserts each CJK character resides entirely
+// within one slot and is not split across slot boundaries.
+func TestPackBytes_Chinese_CharBoundary(t *testing.T) {
+	raw := []byte("路由缓存永不漂移")
+	tokens := packBytes(raw)
+	assert.Len(t, tokens, 8, "each 3-byte character gets its own slot")
+	assert.Equal(t, raw[0], byte(tokens[0]&0xFF), "first character leading byte must sit at slot start")
+}
+
+// TestPackBytes_Mixed_CJK_Latin asserts that mixed CJK and Latin text produces
+// correct character-aligned slots without splitting any character.
+func TestPackBytes_Mixed_CJK_Latin(t *testing.T) {
+	raw := []byte("all your 缓存 are belong to us")
+	tokens := packBytes(raw)
+	assert.NotEmpty(t, tokens, "mixed-language text must produce tokens")
+	assertNoCharSplit(t, tokens)
+}
+
+// TestPackBytes_Emoji_FourByte asserts that 4-byte UTF-8 characters (emoji) stay
+// in a single slot and do not get broken up.
+func TestPackBytes_Emoji_FourByte(t *testing.T) {
+	raw := []byte("🐱 llm-d → 月 ✨")
+	tokens := packBytes(raw)
+	assert.NotEmpty(t, tokens, "emoji-bearing text must produce tokens")
+	assertNoCharSplit(t, tokens)
+}
+
+// TestPackBytes_Invalid_UTF8 tolerates malformed bytes without crashing.
+func TestPackBytes_Invalid_UTF8(t *testing.T) {
+	raw := []byte{0x48, 0x65, 0x6C, 0x6C, 0x6F, 0xFE, 0x80, 0xBF, 0x21} // "Hello" + junk + "!"
+	tokens := packBytes(raw)
+	assert.NotEmpty(t, tokens, "invalid UTF-8 must not crash and still produce tokens")
+}
+
+func TestPackBytes_InvalidUTF8PreservesBytePacking(t *testing.T) {
+	raw := []byte{'A', 'B', 'C', 0xE2, 'D', 'E'}
+	aligned := align(append([]byte(nil), raw...))
+	expected := make([]uint32, len(aligned)/bytesPerToken)
+	for i := range expected {
+		expected[i] = binary.LittleEndian.Uint32(aligned[i*bytesPerToken:])
+	}
+
+	assert.Equal(t, expected, packBytes(raw))
+}
+
+// TestPackBytes_Empty covers nil and zero-length inputs.
+func TestPackBytes_Empty(t *testing.T) {
+	assert.Nil(t, packBytes(nil), "nil input must return nil")
+	assert.Nil(t, packBytes([]byte{}), "empty input must return nil")
+}
+
+func TestEstimatedTokenStream_MultimodalOffsetAfterUTF8Text(t *testing.T) {
+	const content = "image payload"
+	var stream estimatedTokenStream
+	stream.appendText([]byte("ab路"))
+	stream.appendMMAsset(fwkrh.ModalityImage, content, 1)
+
+	tokens, features, _ := stream.finish()
+	require.Len(t, features, 1)
+	feature := features[0]
+	require.Less(t, feature.Offset, len(tokens))
+	assert.Equal(
+		t,
+		uint32(xxhash.Sum64String(content)),
+		tokens[feature.Offset],
+		"feature offset must point to its placeholder token",
+	)
+}
+
+// assertNoCharSplit verifies every multi-byte UTF-8 character is wholly contained
+// within one slot, without checking exact byte correspondence against raw input.
+func assertNoCharSplit(t *testing.T, tokens []uint32) {
+	t.Helper()
+	for _, tok := range tokens {
+		b := [4]byte{
+			byte(tok & 0xFF),
+			byte((tok >> 8) & 0xFF),
+			byte((tok >> 16) & 0xFF),
+			byte((tok >> 24) & 0xFF),
+		}
+		used := 0
+		for i := 0; i < bytesPerToken; {
+			size := utf8CharSize(b[i:])
+			if used+size > bytesPerToken && size < bytesPerToken {
+				t.Fatalf("character split across slot boundary (token=%08x, slot byte %d)", tok, i)
+			}
+			used += size
+			i += size
+		}
 	}
 }
 
