@@ -6,15 +6,14 @@ metrics endpoint and what it serves, see [Scrape topology](#scrape-topology) bel
 
 ## Subsystems and naming
 
-A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses two current subsystems:
+A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses the canonical subsystem:
 
 | Prefix | Scope |
 |---|---|
-| `llm_d_epp_` | Canonical, EPP-wide: request/latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, and predicted-latency metrics. |
-| `llm_d_router_epp_` | The embedded llm-d-kv-cache metrics only (see [Embedded llm-d-kv-cache metrics](#embedded-llm-d-kv-cache-metrics)). |
+| `llm_d_epp_` | Canonical, EPP-wide: request/latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, predicted latency, and embedded KV-cache metrics. |
 
 Earlier releases emitted metrics under `llm_d_inference_scheduler_`, `inference_objective_`,
-`inference_pool_`, `inference_extension_`, and `kvcache_`. Those prefixes are **deprecated** but
+`inference_pool_`, `inference_extension_`, `llm_d_router_epp_`, and `kvcache_`. Those prefixes are **deprecated** but
 still emitted: each recorder that has a deprecated predecessor writes both the legacy series and its
 current twin (dual emission), so existing dashboards keep working during migration. See [Deprecated series](#deprecated-series).
 
@@ -36,7 +35,7 @@ metrics, distinct from the EPP metrics above; scrape the pods directly to collec
 
 When the precise prefix cache is enabled (`precise-prefix-cache-producer` /
 `precise-prefix-cache-scorer`) with `indexerConfig.kvBlockIndexConfig.enableMetrics: true`, the
-embedded llm-d-kv-cache index registers its `llm_d_router_epp_kv_cache_*` metrics on the **same**
+embedded llm-d-kv-cache index registers its `llm_d_epp_kv_cache_*` metrics on the **same**
 controller-runtime registry the EPP `/metrics` endpoint already serves. No separate kv-cache HTTP
 endpoint or scrape target is required.
 
@@ -47,7 +46,7 @@ operator opts in.
 ## Deprecated series
 
 All deprecated series are still emitted as back-compat aliases alongside their current twins. Prefer
-the current `llm_d_epp_*` (or `llm_d_router_epp_*`) names in new dashboards and alerts.
+the current `llm_d_epp_*` names in new dashboards and alerts.
 
 | Deprecated prefix | Current replacement |
 |---|---|
@@ -55,7 +54,7 @@ the current `llm_d_epp_*` (or `llm_d_router_epp_*`) names in new dashboards and 
 | `inference_objective_*` (request/latency, predicted latency) | `llm_d_epp_*` |
 | `inference_pool_*` (pool averages, queue size) | `llm_d_epp_*` |
 | `inference_extension_*` (scheduler, plugin, info, flow control, prefix indexer) | `llm_d_epp_*` |
-| `kvcache_index_*`, `kvcache_kvevents_*` | `llm_d_router_epp_kv_cache_*` |
+| `kvcache_index_*`, `kvcache_kvevents_*` | `llm_d_epp_kv_cache_*` |
 
 ## Metrics catalog
 
@@ -367,7 +366,7 @@ per-endpoint gauges are updated as requests are admitted and released.
 
 ### KV-cache index
 
-Prefix `llm_d_router_epp_`. Registered only when the embedded llm-d-kv-cache metrics are enabled (see
+Prefix `llm_d_epp_`. Registered only when the embedded llm-d-kv-cache metrics are enabled (see
 [Embedded llm-d-kv-cache metrics](#embedded-llm-d-kv-cache-metrics)). Unlabeled.
 
 | Name | Type | Notes |

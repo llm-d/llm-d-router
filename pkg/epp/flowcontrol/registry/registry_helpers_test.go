@@ -381,6 +381,72 @@ func TestRegistry_DeleteFlow(t *testing.T) {
 		"Accessing a deleted flow must return ErrFlowInstanceNotFound")
 }
 
+// TestRegistry_DeleteFlow_StaleHandleStats covers the interleaving where the cleanup sweep
+// resolves a ManagedQueue handle (processAllQueuesConcurrently phase 1), GC deletes the still
+// non-empty flow, and the sweep then mutates through the stale handle (phase 3). Each item must be
+// deducted from the aggregates exactly once: the uint64 casts in Stats() require the aggregates to
+// never go negative.
+func TestRegistry_DeleteFlow_StaleHandleStats(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		staleOp func(t *testing.T, mq contracts.ManagedQueue, item flowcontrol.QueueItemAccessor)
+	}{
+		{
+			name: "Drain",
+			staleOp: func(t *testing.T, mq contracts.ManagedQueue, _ flowcontrol.QueueItemAccessor) {
+				assert.Empty(t, mq.Drain(), "Stale handle must observe an empty queue after deleteFlow")
+			},
+		},
+		{
+			name: "Cleanup",
+			staleOp: func(t *testing.T, mq contracts.ManagedQueue, _ flowcontrol.QueueItemAccessor) {
+				items := mq.Cleanup(func(_ flowcontrol.QueueItemAccessor) bool { return true })
+				assert.Empty(t, items, "Stale handle must observe an empty queue after deleteFlow")
+			},
+		},
+		{
+			name: "Remove",
+			staleOp: func(t *testing.T, mq contracts.ManagedQueue, item flowcontrol.QueueItemAccessor) {
+				_, err := mq.Remove(item.Handle())
+				assert.Error(t, err, "Removing an item already accounted for by deleteFlow must fail")
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newTestHarness(t)
+			item := h.addItem(h.highPriorityKey1, 100)
+
+			// The sweep resolves handles before processing, without holding registry locks in between.
+			mq, err := h.registry.ManagedQueue(h.highPriorityKey1)
+			require.NoError(t, err, "Test setup: resolving the ManagedQueue handle must succeed")
+
+			h.registry.mu.Lock()
+			h.registry.deleteFlow(h.highPriorityKey1)
+			h.registry.mu.Unlock()
+
+			stats := h.registry.Stats()
+			assert.Zero(t, stats.TotalLen, "deleteFlow must deduct the unswept items from the total length")
+			assert.Zero(t, stats.TotalByteSize, "deleteFlow must deduct the unswept items from the total byte size")
+
+			tc.staleOp(t, mq, item)
+
+			stats = h.registry.Stats()
+			assert.Zero(t, stats.TotalLen,
+				"A stale-handle mutation after deleteFlow must not deduct the same items again (uint64 underflow)")
+			assert.Zero(t, stats.TotalByteSize,
+				"A stale-handle mutation after deleteFlow must not deduct the same items again (uint64 underflow)")
+			bandStats := stats.PerPriorityBandStats[highPriority]
+			assert.Zero(t, bandStats.Len, "Per-band length must not underflow after a stale-handle mutation")
+			assert.Zero(t, bandStats.ByteSize, "Per-band byte size must not underflow after a stale-handle mutation")
+		})
+	}
+}
+
 func TestRegistry_DynamicProvisioning(t *testing.T) {
 	t.Parallel()
 

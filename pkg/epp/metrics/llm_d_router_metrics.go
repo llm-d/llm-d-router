@@ -25,7 +25,7 @@ import (
 
 const (
 	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
-	LLMDRouterEndpointPickerSubsystem = "llm_d_epp"
+	LLMDRouterEndpointPickerSubsystem = metricsutil.LLMDRouterEndpointPickerSubsystem
 )
 
 var (

@@ -31,7 +31,7 @@ import (
 // routerSubsystem is the router's standard EPP metrics subsystem. New metrics
 // are emitted under it; the legacy kvcache_* names are retained as deprecated
 // aliases so existing scrapers keep working during the migration.
-const routerSubsystem = "llm_d_router_epp"
+const routerSubsystem = metricsutil.LLMDRouterEndpointPickerSubsystem
 
 // podIdentifierLabel is the label key carried by the per-pod kvevents metrics.
 // Keeping it as a constant localizes label-schema changes to this package.
@@ -43,7 +43,7 @@ const (
 )
 
 // dualCounter emits a value to both the deprecated kvcache_* counter and the
-// current llm_d_router_epp_* counter. It satisfies prometheus.Collector so both
+// current llm_d_epp_* counter. It satisfies prometheus.Collector so both
 // register, and exposes the recording/read methods the call sites use.
 type dualCounter struct {
 	deprecated, current prometheus.Counter
