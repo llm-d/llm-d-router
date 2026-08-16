@@ -44,11 +44,18 @@ import (
 // handleInference's sanitization.
 func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
-	if !validRequestID.MatchString(requestID) {
+	clientRequestID := requestID
+	requestIDReplaced := !validRequestID.MatchString(requestID)
+	if requestIDReplaced {
 		requestID = uuid.New().String()
 	}
 
 	logger := ctrl.Log.WithName("passthrough").WithValues(reqcommon.RequestIDHeaderKey, requestID)
+	if requestIDReplaced && clientRequestID != "" {
+		// Log the rejected length, never the raw value, to avoid reflecting
+		// attacker-controlled content into the log.
+		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
+	}
 	logger.V(logutil.DEFAULT).Info("received request", "method", r.Method, "path", r.URL.Path)
 
 	// A passthrough response may stream (e.g. /v1/messages with stream:true).
