@@ -94,6 +94,9 @@ var _ fwkplugin.ProducerPlugin = &Extractor{}
 func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	produced := map[fwkplugin.DataKey]any{}
 	for _, mapping := range ext.registry.Mappings() {
+		for _, tiered := range mapping.TieredOffloading {
+			produced[attrmetrics.ScalarMetricDataKey(tiered.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+		}
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
 		}
@@ -184,6 +187,28 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		} else {
 			clone.CacheNumBlocks = int(extractValue(metric))
 			updated = true
+		}
+	}
+
+	if len(mapping.TieredOffloading) > 0 { // only work on vLLM as it is configured with TieredOffloading
+		metrics := make([]*dto.Metric, len(mapping.TieredOffloading))
+		fetchErrs := make([]error, len(mapping.TieredOffloading))
+		tieringDetected := false
+		for i, tiered := range mapping.TieredOffloading {
+			metrics[i], fetchErrs[i] = tiered.Spec.getLatestMetric(families)
+			if fetchErrs[i] == nil {
+				tieringDetected = true
+			}
+		}
+		if tieringDetected { // when none tiering metrics exist, skip adding into attribute
+			for i, tiered := range mapping.TieredOffloading {
+				if fetchErrs[i] != nil { // only report missing tiering metrics
+					errs = append(errs, fmt.Errorf("tiering metric %q: %w", tiered.AttributeKey, fetchErrs[i]))
+					continue
+				}
+				ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(tiered.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metrics[i])))
+				updated = true
+			}
 		}
 	}
 
