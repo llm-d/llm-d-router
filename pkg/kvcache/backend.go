@@ -16,20 +16,28 @@ limitations under the License.
 
 package kvcache
 
+// KVCacheBackendConfig assigns a scoring weight to a device tier, identified
+// by the medium field in KV-cache events.
 type KVCacheBackendConfig struct {
-	// Name is the identifier for this medium (e.g., "gpu", "cpu", "disk")
+	// Name is matched against the lowercased medium string in KV-cache
+	// events, for example "gpu", "cpu", "storage".
 	Name string `json:"name"`
 	// Weight is the scoring weight for blocks stored on this medium
 	Weight float64 `json:"weight"`
 }
 
-// DefaultKVCacheBackendConfig returns the default backend weights, tunable
-// via IndexerConfig.BackendConfigs.
+// DefaultKVCacheBackendConfig returns the default tier weights, tunable via
+// IndexerConfig.BackendConfigs. "storage" covers the vLLM tiering offload;
+// "shared_storage" and "object_store" cover the llm-d filesystem backend.
+// Offloaded tiers score conservatively because promotion speed varies widely
+// across media (NVMe vs CephFS vs S3); deployments on fast storage should
+// raise these values.
 func DefaultKVCacheBackendConfig() []*KVCacheBackendConfig {
 	return []*KVCacheBackendConfig{
 		{Name: "gpu", Weight: 1.0},
 		{Name: "cpu", Weight: 0.8},
 		{Name: "shared_storage", Weight: 0.4},
+		{Name: "storage", Weight: 0.3},
 		{Name: "object_store", Weight: 0.2},
 	}
 }
