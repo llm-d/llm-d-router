@@ -61,8 +61,8 @@ OSL and only adds noise.
 
 ## Outputs Produced
 
-- `scheduling.InferenceRequest` attribute `"osl-bucket"` (`oslbucket.OSLBucket`).
-  Read it with `scheduling.ReadRequestAttribute[oslbucket.OSLBucket](req, oslbucket.OSLBucketKey)`.
+- `scheduling.InferenceRequest` attribute `"osl-bucket"` (`oslbucket.Bucket`).
+  Read it with `scheduling.ReadRequestAttribute[oslbucket.Bucket](req, oslbucket.AttributeKey)`.
 
 ## Configuration
 

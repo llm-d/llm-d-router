@@ -40,11 +40,11 @@ func tokenizedRequest(n int) *fwksched.InferenceRequest {
 
 // requestWithBucket builds a request whose OSL bucket attribute is set (as the
 // osl-bucket plugin would), plus an optional client output cap.
-func requestWithBucket(bucket oslbucket.OSLBucket, maxOut *int64) *fwksched.InferenceRequest {
+func requestWithBucket(bucket oslbucket.Bucket, maxOut *int64) *fwksched.InferenceRequest {
 	req := &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{MaxOutputTokens: maxOut},
 	}
-	req.PutAttribute(oslbucket.OSLBucketKey, bucket)
+	req.PutAttribute(oslbucket.AttributeKey, bucket)
 	return req
 }
 

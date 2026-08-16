@@ -46,7 +46,7 @@ func TestEstimateOSLBucket(t *testing.T) {
 	tests := []struct {
 		name string
 		body *fwkrh.InferenceRequestBody
-		want OSLBucket
+		want Bucket
 	}{
 		{name: "nil body", body: nil, want: Unknown},
 		{name: "empty body", body: &fwkrh.InferenceRequestBody{}, want: Unknown},
@@ -151,7 +151,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 		}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		got, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.True(t, ok, "attribute must be set")
 		require.Equal(t, Long, got)
 	})
@@ -162,7 +162,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 		}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		got, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.True(t, ok)
 		require.Equal(t, Short, got)
 	})
@@ -171,7 +171,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 		req := &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		got, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.True(t, ok)
 		require.Equal(t, Unknown, got)
 	})
@@ -180,7 +180,7 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 		req := &scheduling.InferenceRequest{}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		_, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		_, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.False(t, ok, "no attribute when body is nil")
 	})
 }

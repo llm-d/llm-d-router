@@ -411,7 +411,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	priority := strconv.Itoa(request.Objectives.Priority)
 
 	if request.Body != nil {
-		if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey); ok {
+		if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey); ok {
 			// -1 signals "no client cap" so the log renders a value, not a pointer.
 			maxOutputTokens := int64(-1)
 			if request.Body.MaxOutputTokens != nil {
@@ -570,7 +570,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
-			if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey); ok {
+			if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey); ok {
 				log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
 					"requestID", request.RequestID,
 					"estimatedBucket", bucket.String(),

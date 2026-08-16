@@ -32,21 +32,21 @@ type TokenEstimator interface {
 }
 
 const (
-	// longOutputEstimateTokens is the flat output-token estimate for a LONG
-	// (reasoning) request. It is deliberately a fixed value rather than the
-	// client's thinking_budget: the estimate exists to rank requests by load,
-	// where the LONG-vs-SHORT separation dominates, not to predict exact length.
-	longOutputEstimateTokens int64 = 4096
-	// unknownOutputEstimateTokens is the flat output-token estimate for an
-	// UNKNOWN request (no OSL signal). It sits at the midpoint of the UNKNOWN
-	// zone (500-1,999 tokens), preserving the ranking invariant
+	// LongOutputTokens is the flat output-token estimate for a LONG (reasoning)
+	// request. It is deliberately a fixed value rather than the client's
+	// thinking_budget: the estimate exists to rank requests by load, where the
+	// LONG-vs-SHORT separation dominates, not to predict exact length.
+	LongOutputTokens int64 = 4096
+	// UnknownOutputTokens is the flat output-token estimate for an UNKNOWN
+	// request (no OSL signal). It sits at the midpoint of the UNKNOWN zone
+	// (500-1,999 tokens), preserving the ranking invariant
 	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
 	// TODO(osl): replace with a dynamic estimate (e.g. per-pool running average
 	// of observed CompletionTokens) in a follow-up PR.
-	unknownOutputEstimateTokens int64 = 1000
-	// shortOutputEstimateTokens is the flat output-token estimate for a SHORT
+	UnknownOutputTokens int64 = 1000
+	// ShortOutputTokens is the flat output-token estimate for a SHORT
 	// (tool-call) request.
-	shortOutputEstimateTokens int64 = 100
+	ShortOutputTokens int64 = 100
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
@@ -94,16 +94,16 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 
 	// An absent attribute reads as the zero value (Unknown) and is handled by the
 	// switch default; there is no separate fallback path.
-	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey)
 
 	var est int64
 	switch bucket {
 	case oslbucket.Long:
-		est = longOutputEstimateTokens
+		est = LongOutputTokens
 	case oslbucket.Short:
-		est = shortOutputEstimateTokens
+		est = ShortOutputTokens
 	default:
-		est = unknownOutputEstimateTokens
+		est = UnknownOutputTokens
 	}
 	return e.clampOutput(est, request.Body.MaxOutputTokens)
 }

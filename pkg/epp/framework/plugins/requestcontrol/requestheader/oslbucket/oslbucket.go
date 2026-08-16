@@ -33,10 +33,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-// OSLBucketKey is the request-attribute key under which this plugin
+// AttributeKey is the request-attribute key under which this plugin
 // publishes the predicted OSL bin. Downstream consumers read it via
-// scheduling.ReadRequestAttribute[OSLBucket].
-var OSLBucketKey = plugin.NewDataKey("osl-bucket", "")
+// scheduling.ReadRequestAttribute[Bucket].
+var AttributeKey = plugin.NewDataKey("osl-bucket", "")
 
 const (
 	// PluginType is the plugin type name used in the EPP config.
@@ -50,22 +50,22 @@ const (
 	shortMaxOutputTokens = 500
 )
 
-// OSLBucket is the predicted output-sequence-length category for a request,
+// Bucket is the predicted output-sequence-length category for a request,
 // derived from request-time signals before any tokens are generated.
-type OSLBucket int8
+type Bucket int8
 
 const (
 	// Unknown means no reliable signal was found; consumers apply their own
 	// neutral middle estimate. It is the zero value, so a missing attribute
 	// reads as Unknown.
-	Unknown OSLBucket = iota
+	Unknown Bucket = iota
 	// Short predicts < 500 output tokens (e.g. tool-call JSON responses).
 	Short
 	// Long predicts >= 2000 output tokens (e.g. reasoning chains).
 	Long
 )
 
-func (b OSLBucket) String() string {
+func (b Bucket) String() string {
 	switch b {
 	case Short:
 		return "SHORT"
@@ -78,7 +78,7 @@ func (b OSLBucket) String() string {
 
 // EstimateOSLBucket predicts the output-length bin using request-time signals
 // (enable_thinking, thinking_budget, has_tools, max_output_tokens).
-func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
+func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) Bucket {
 	if body == nil {
 		return Unknown
 	}
@@ -162,7 +162,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	if request == nil || request.Body == nil {
 		return nil
 	}
-	request.PutAttribute(OSLBucketKey, EstimateOSLBucket(request.Body))
+	request.PutAttribute(AttributeKey, EstimateOSLBucket(request.Body))
 	return nil
 }
 
