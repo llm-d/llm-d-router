@@ -32,21 +32,25 @@ import (
 // Attribute and event names. The gen_ai.* names are the upstream GenAI
 // semantic-convention attributes (Opt-In, Development stability); the
 // llm_d.payload.* names are llm-d extensions defined in the proposal, kept
-// outside the reserved gen_ai.* namespace.
-// https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/
+// outside the reserved gen_ai.* namespace. The GenAI conventions live in
+// the dedicated semantic-conventions-genai repo:
+// https://github.com/open-telemetry/semantic-conventions-genai .
 const (
 	// EventInferenceDetails is the upstream GenAI event that carries payload
-	// attributes: gen_ai.client.inference.operation.details.
+	// attributes: gen_ai.client.inference.operation.details (still at
+	// opt_in / development stability as of 2026-08).
 	EventInferenceDetails = "gen_ai.client.inference.operation.details"
 
 	// AttrInputMessages is gen_ai.input.messages: the structured request
-	// messages (role/parts), serialised to JSON when recorded on a span event.
+	// messages (role/parts), serialised to JSON when recorded on a span
+	// event. Value follows the ChatMessage schema (model/gen-ai/
+	// gen-ai-input-messages.json in the semconv-genai repo).
 	AttrInputMessages = "gen_ai.input.messages"
-	// AttrSystemInstructions is gen_ai.system_instructions: system-level
-	// instruction *text*, per the upstream semantic convention. Non-text
-	// system content (e.g. images in a system message) is dropped and marked
-	// on llm_d.payload.truncated; multiple system-role messages and multiple
-	// text parts within one message are joined with "\n\n".
+	// AttrSystemInstructions is gen_ai.system_instructions: the current
+	// authoritative schema (model/gen-ai/gen-ai-system-instructions.json)
+	// defines this as an array of TextPart / GenericPart, NOT a plain
+	// instruction string. Same JSON-serialised part shape as
+	// gen_ai.input.messages, with a narrower part-type vocabulary.
 	AttrSystemInstructions = "gen_ai.system_instructions"
 
 	// AttrTruncated is llm_d.payload.truncated (llm-d extension): true when
@@ -54,11 +58,17 @@ const (
 	AttrTruncated = "llm_d.payload.truncated"
 )
 
-// Part types and modalities from the upstream input-messages schema.
-// https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-input-messages.json
+// Part types and modalities from the upstream input-messages schema:
+// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/model/gen-ai/gen-ai-input-messages.json
+// Only the part types llm-d emits are named here; other schema types
+// (BlobPart, FilePart, ServerToolCallPart, CompactionPart, GenericPart)
+// are recognised implicitly via the Part struct's optional fields.
 const (
-	partTypeText = "text"
-	partTypeURI  = "uri"
+	partTypeText             = "text"
+	partTypeURI              = "uri"
+	partTypeToolCall         = "tool_call"
+	partTypeToolCallResponse = "tool_call_response"
+	partTypeReasoning        = "reasoning"
 
 	modalityImage = "image"
 	modalityVideo = "video"
@@ -74,62 +84,60 @@ type chatMessage struct {
 	Parts []part `json:"parts"`
 }
 
-// part mirrors the upstream message-part schema. Exactly one of Content or
-// URI is set, per the part Type.
+// part mirrors the upstream message-part schema. Field sets are disjoint
+// by Type:
+//   - text / reasoning: Content
+//   - uri:              URI, MimeType, Modality
+//   - tool_call:        ID, Name, Arguments
+//   - tool_call_response: ID, Response
+//
+// Arguments and Response are raw JSON so the model's own key order survives
+// downstream re-serialization (matches the upstream ToolCallRequestPart /
+// ToolCallResponsePart definitions).
 type part struct {
-	Type     string `json:"type"`
-	Content  string `json:"content,omitempty"`
-	URI      string `json:"uri,omitempty"`
-	MimeType string `json:"mime_type,omitempty"`
-	Modality string `json:"modality,omitempty"`
+	Type      string          `json:"type"`
+	Content   string          `json:"content,omitempty"`
+	URI       string          `json:"uri,omitempty"`
+	MimeType  string          `json:"mime_type,omitempty"`
+	Modality  string          `json:"modality,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Response  json.RawMessage `json:"response,omitempty"`
 }
 
 // extraction is the intermediate result of converting a parsed request body
-// into semantic-convention form. system is a plain string (concatenation of
-// text-only system content) per the semconv definition of
-// gen_ai.system_instructions.
+// into semantic-convention form. Both messages and system carry the same
+// TextPart / GenericPart structured shape that the semconv schema requires;
+// system is emitted as gen_ai.system_instructions, messages as
+// gen_ai.input.messages.
 type extraction struct {
 	messages []chatMessage
-	system   string
+	system   []part
 	// truncated is set when content was dropped: inline blob parts (no offload
-	// backend exists in Phase 1), non-textual prompts (token IDs), or non-text
-	// content on a system-role message (system instructions are text-only).
+	// backend exists in Phase 1), non-textual prompts (token IDs), or opaque
+	// tool-call payloads (OpenAI assistant tool_calls, which the parser
+	// currently exposes as []any and we can't semantic-extract without a
+	// bespoke re-parse).
 	truncated bool
 }
 
 func (e extraction) empty() bool {
-	return len(e.messages) == 0 && e.system == "" && !e.truncated
+	return len(e.messages) == 0 && len(e.system) == 0 && !e.truncated
 }
 
-// partsToTextString extracts the concatenated text of parts, joining multiple
-// text parts with a blank line. Non-text parts (uri, blob, etc.) are dropped
-// and mark *truncated. This is how system-role content is normalised into the
-// plain-string value required by gen_ai.system_instructions.
-func partsToTextString(parts []part, truncated *bool) string {
-	var texts []string
+// appendSystemParts adds parts to ext.system, filtering to the part-type
+// vocabulary the SystemInstructions schema allows (TextPart today; the
+// schema also permits GenericPart for forward-compat, but llm-d emits only
+// text at that carrier). Non-text parts mark the event truncated so
+// consumers can tell a media / tool part was dropped rather than never sent.
+func appendSystemParts(ext *extraction, parts []part) {
 	for _, p := range parts {
 		if p.Type == partTypeText {
-			if p.Content != "" {
-				texts = append(texts, p.Content)
-			}
+			ext.system = append(ext.system, p)
 			continue
 		}
-		*truncated = true
-	}
-	return strings.Join(texts, "\n\n")
-}
-
-// appendSystemText joins additional system-instruction text with any already
-// captured, using a blank-line separator so multiple system messages remain
-// legible.
-func appendSystemText(existing, next string) string {
-	switch {
-	case next == "":
-		return existing
-	case existing == "":
-		return next
-	default:
-		return existing + "\n\n" + next
+		ext.truncated = true
 	}
 }
 
@@ -193,7 +201,7 @@ func (c *Capturer) CaptureRequest(ctx context.Context, body *fwkrh.InferenceRequ
 	if kv, ok := c.inlineJSON(ctx, ref, AttrInputMessages, ext.messages, len(ext.messages) > 0, &ext.truncated); ok {
 		attrs = append(attrs, kv)
 	}
-	if kv, ok := c.inlineString(ctx, ref, AttrSystemInstructions, ext.system, &ext.truncated); ok {
+	if kv, ok := c.inlineJSON(ctx, ref, AttrSystemInstructions, ext.system, len(ext.system) > 0, &ext.truncated); ok {
 		attrs = append(attrs, kv)
 	}
 	if ext.truncated {
@@ -231,24 +239,6 @@ func (c *Capturer) inlineJSON(ctx context.Context, ref PayloadRef, key string, v
 	return attribute.String(key, string(data)), true
 }
 
-// inlineString attaches v as a plain string attribute after offering its bytes
-// to the backend for the size check. Used for attributes whose semantic
-// convention is a plain string (gen_ai.system_instructions). Follows the same
-// error contract as inlineJSON.
-func (c *Capturer) inlineString(ctx context.Context, ref PayloadRef, key, v string, truncated *bool) (attribute.KeyValue, bool) {
-	if v == "" {
-		return attribute.KeyValue{}, false
-	}
-	if _, err := c.store.Store(ctx, ref, []byte(v)); err != nil {
-		if !errors.Is(err, ErrPayloadTooLarge) {
-			c.logger.Error(err, "payload store rejected attribute", "attribute", key)
-		}
-		*truncated = true
-		return attribute.KeyValue{}, false
-	}
-	return attribute.String(key, v), true
-}
-
 // extract converts the parsed request body into semantic-convention messages.
 // Phase 1 covers the chat-completions, completions and Anthropic-messages
 // shapes; other request types produce no event.
@@ -269,11 +259,21 @@ func extractChatCompletions(req *fwkrh.ChatCompletionsRequest) extraction {
 	var ext extraction
 	for _, msg := range req.Messages {
 		parts := contentToParts(msg.Content, &ext.truncated)
-		// System-level guidance is recorded as gen_ai.system_instructions, a
-		// plain string per the upstream convention; non-text parts (media,
-		// blobs) are dropped and flagged via llm_d.payload.truncated.
+		// OpenAI models assistant tool-call requests as a separate ToolCalls
+		// field (typed []any at the parser layer) rather than as content
+		// parts. We don't semantic-extract those into tool_call parts yet —
+		// mark the event truncated so consumers know assistant-side tool
+		// history was elided.
+		if len(msg.ToolCalls) > 0 {
+			ext.truncated = true
+		}
+		// System-level guidance is recorded as gen_ai.system_instructions,
+		// which follows the SystemInstructions schema (array of TextPart /
+		// GenericPart) — the same structured shape as input.messages, with a
+		// narrower part-type vocabulary. appendSystemParts enforces that
+		// narrower vocabulary.
 		if msg.Role == "system" || msg.Role == "developer" {
-			ext.system = appendSystemText(ext.system, partsToTextString(parts, &ext.truncated))
+			appendSystemParts(&ext, parts)
 			continue
 		}
 		if len(parts) == 0 {
@@ -346,10 +346,9 @@ func extractCompletions(req *fwkrh.CompletionsRequest) extraction {
 
 func extractAnthropicMessages(req *fwkrh.MessagesRequest) extraction {
 	var ext extraction
-	// Anthropic's `system` field is text-oriented (either a bare string or a
-	// list of content blocks); non-text blocks are dropped as truncated to
-	// match the semconv definition of gen_ai.system_instructions.
-	ext.system = partsToTextString(anthropicContentToParts(req.System, &ext.truncated), &ext.truncated)
+	// Same schema restriction as ChatCompletions: system content is limited
+	// to TextPart / GenericPart.
+	appendSystemParts(&ext, anthropicContentToParts(req.System, &ext.truncated))
 	for _, msg := range req.Messages {
 		parts := anthropicContentToParts(msg.Content, &ext.truncated)
 		if len(parts) == 0 {
@@ -378,7 +377,16 @@ func anthropicContentToParts(content fwkrh.AnthropicContent, truncated *bool) []
 			})
 		default:
 			// base64 image sources are blob parts (no offload backend in
-			// Phase 1) and unrecognised block types are not representable.
+			// Phase 1).
+			//
+			// tool_use / tool_result / thinking blocks land with
+			// llm-d/llm-d-router#2389 (which extends AnthropicContentBlock
+			// with ID / Name / Input / ToolUseID / Content / Thinking
+			// fields). Once that PR lands, wire them here as semconv
+			// ToolCallRequestPart / ToolCallResponsePart / ReasoningPart —
+			// the part-type constants and Part struct fields are already
+			// in place. Until then unrecognised block types mark truncated
+			// so consumers can tell the event isn't the whole request.
 			*truncated = true
 		}
 	}

@@ -108,14 +108,21 @@ func TestCaptureChatCompletions(t *testing.T) {
 		t.Fatalf("unexpected user parts: %+v", msgs[0].Parts)
 	}
 
-	sys, ok := eventAttr(t, stub, AttrSystemInstructions)
+	sysJSON, ok := eventAttr(t, stub, AttrSystemInstructions)
 	if !ok {
 		t.Fatal("event missing gen_ai.system_instructions")
 	}
-	// gen_ai.system_instructions is a plain string per the upstream semconv,
-	// not a JSON-serialised []part. Guard against regressing to the old shape.
-	if sys != "You are terse." {
-		t.Fatalf("system instructions want plain string %q, got %q", "You are terse.", sys)
+	// gen_ai.system_instructions is an array of TextPart / GenericPart per
+	// the current semantic-conventions-genai schema
+	// (model/gen-ai/gen-ai-system-instructions.json). Guard against
+	// regressing to the plain-string emission an earlier Copilot review
+	// asked for based on an outdated snapshot of the semconv.
+	var sysParts []part
+	if err := json.Unmarshal([]byte(sysJSON), &sysParts); err != nil {
+		t.Fatalf("gen_ai.system_instructions is not valid JSON: %v", err)
+	}
+	if len(sysParts) != 1 || sysParts[0].Type != "text" || sysParts[0].Content != "You are terse." {
+		t.Fatalf("unexpected system instructions: %s", sysJSON)
 	}
 
 	if _, ok := eventAttr(t, stub, AttrTruncated); ok {
@@ -123,10 +130,12 @@ func TestCaptureChatCompletions(t *testing.T) {
 	}
 }
 
-// TestCaptureSystemInstructionsPlainString covers the semconv-compliance path:
-// multiple system messages are joined into one plain-string attribute, and
-// non-text system content is dropped and flagged as truncated.
-func TestCaptureSystemInstructionsPlainString(t *testing.T) {
+// TestCaptureSystemInstructionsStructured covers the current semconv path:
+// gen_ai.system_instructions is emitted as a JSON array of parts (same
+// TextPart shape as gen_ai.input.messages entries), not a joined plain
+// string. Multiple system-role messages append into one attribute; non-text
+// system content is dropped and marks truncated.
+func TestCaptureSystemInstructionsStructured(t *testing.T) {
 	body := &fwkrh.InferenceRequestBody{
 		ChatCompletions: &fwkrh.ChatCompletionsRequest{
 			Messages: []fwkrh.Message{
@@ -142,20 +151,56 @@ func TestCaptureSystemInstructionsPlainString(t *testing.T) {
 
 	stub := captureOnSpan(t, inlineCapturer(4096), body)
 
-	sys, ok := eventAttr(t, stub, AttrSystemInstructions)
+	sysJSON, ok := eventAttr(t, stub, AttrSystemInstructions)
 	if !ok {
 		t.Fatal("event missing gen_ai.system_instructions")
 	}
-	// Multiple system-role messages are joined with a blank-line separator.
-	want := "You are terse.\n\nAnswer in French."
-	if sys != want {
-		t.Fatalf("system instructions want %q, got %q", want, sys)
+	var sysParts []part
+	if err := json.Unmarshal([]byte(sysJSON), &sysParts); err != nil {
+		t.Fatalf("gen_ai.system_instructions is not valid JSON: %v", err)
 	}
-	// Any content that isn't a text part (e.g. an image on a system message)
-	// is dropped and must mark the event truncated so operators know the
-	// captured value isn't the whole system message.
+	// System / developer text lines each become one TextPart, in message
+	// order; the image on the developer message is dropped and marks
+	// truncated. Also asserts the URI attached to the earlier user
+	// message never leaks into system_instructions.
+	if len(sysParts) != 2 {
+		t.Fatalf("want 2 system TextParts (system+developer text), got %d: %s", len(sysParts), sysJSON)
+	}
+	if sysParts[0].Type != "text" || sysParts[0].Content != "You are terse." {
+		t.Fatalf("unexpected first system part: %+v", sysParts[0])
+	}
+	if sysParts[1].Type != "text" || sysParts[1].Content != "Answer in French." {
+		t.Fatalf("unexpected second system part: %+v", sysParts[1])
+	}
 	if v, ok := eventAttr(t, stub, AttrTruncated); !ok || v != truncatedTrue {
 		t.Error("expected llm_d.payload.truncated=true when non-text system content is dropped")
+	}
+}
+
+// TestCaptureOpenAIAssistantToolCallsMarksTruncated documents the current
+// gap: OpenAI's Message.ToolCalls field is typed []any at the parser layer,
+// so we can't semantic-extract it into semconv tool_call parts without a
+// bespoke re-parse. Until the parser exposes typed tool-call structs, an
+// assistant message that carries tool_calls records the visible content but
+// flags truncation so consumers know the assistant turn isn't complete.
+func TestCaptureOpenAIAssistantToolCallsMarksTruncated(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{
+				{Role: "user", Content: fwkrh.Content{Raw: "What's the weather in NYC?"}},
+				{
+					Role:      "assistant",
+					Content:   fwkrh.Content{Raw: ""},
+					ToolCalls: []any{map[string]any{"id": "call_1", "type": "function"}},
+				},
+			},
+		},
+	}
+
+	stub := captureOnSpan(t, inlineCapturer(4096), body)
+
+	if v, ok := eventAttr(t, stub, AttrTruncated); !ok || v != truncatedTrue {
+		t.Error("expected llm_d.payload.truncated=true when assistant.tool_calls is present but not semantic-extracted")
 	}
 }
 
