@@ -41,9 +41,12 @@ func TestNewConfig(t *testing.T) {
 			opts:      nil,
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:        defaultRequestTTL,
-				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
-				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
+				DefaultRequestTTL:           defaultRequestTTL,
+				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
+				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
+				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
+				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
 			},
 		},
 		{
@@ -53,9 +56,12 @@ func TestNewConfig(t *testing.T) {
 			},
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:        0,
-				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
-				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
+				DefaultRequestTTL:           0,
+				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
+				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
+				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
+				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
 			},
 		},
 		{
@@ -65,9 +71,12 @@ func TestNewConfig(t *testing.T) {
 			},
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:        10 * time.Second,
-				ExpiryCleanupInterval:    defaultExpiryCleanupInterval,
-				EnqueueChannelBufferSize: defaultEnqueueChannelBufferSize,
+				DefaultRequestTTL:           10 * time.Second,
+				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
+				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
+				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
+				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
 			},
 		},
 		{
@@ -79,9 +88,12 @@ func TestNewConfig(t *testing.T) {
 			},
 			expectErr: false,
 			expectedCfg: Config{
-				DefaultRequestTTL:        10 * time.Second,
-				ExpiryCleanupInterval:    2 * time.Second,
-				EnqueueChannelBufferSize: 50,
+				DefaultRequestTTL:           10 * time.Second,
+				ExpiryCleanupInterval:       2 * time.Second,
+				EnqueueChannelBufferSize:    50,
+				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
+				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
+				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
 			},
 		},
 		{
@@ -109,6 +121,46 @@ func TestNewConfig(t *testing.T) {
 			name: "InvalidEnqueueChannelBufferSize_ShouldError",
 			opts: []ConfigOption{
 				WithEnqueueChannelBufferSize(-1),
+			},
+			expectErr: true,
+		},
+		{
+			name: "WithEvictionOptions_ShouldUpdateConfig",
+			opts: []ConfigOption{
+				WithEnableEviction(true),
+				WithMaxRevocationsPerDecision(5),
+				WithEvictionConfirmationGrace(50 * time.Millisecond),
+				WithEvictionConfirmationTimeout(30 * time.Second),
+			},
+			expectErr: false,
+			expectedCfg: Config{
+				DefaultRequestTTL:           defaultRequestTTL,
+				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
+				EnableEviction:              true,
+				MaxRevocationsPerDecision:   5,
+				EvictionConfirmationGrace:   50 * time.Millisecond,
+				EvictionConfirmationTimeout: 30 * time.Second,
+			},
+		},
+		{
+			name: "ZeroMaxRevocationsPerDecision_ShouldError",
+			opts: []ConfigOption{
+				WithMaxRevocationsPerDecision(0),
+			},
+			expectErr: true,
+		},
+		{
+			name: "NegativeEvictionConfirmationGrace_ShouldError",
+			opts: []ConfigOption{
+				WithEvictionConfirmationGrace(-1 * time.Second),
+			},
+			expectErr: true,
+		},
+		{
+			name: "ZeroEvictionConfirmationTimeout_ShouldError",
+			opts: []ConfigOption{
+				WithEvictionConfirmationTimeout(0),
 			},
 			expectErr: true,
 		},
@@ -186,6 +238,19 @@ func TestNewConfigFromAPI(t *testing.T) {
 				DefaultRequestTTL: &metav1.Duration{Duration: -1 * time.Minute},
 			},
 			expectedErr: "DefaultRequestTTL cannot be negative",
+		},
+		{
+			name: "EnableEviction_ShouldTranslate_WithInternalDefaults",
+			apiConfig: &configapi.FlowControlConfig{
+				EnableEviction: true,
+			},
+			assertion: func(t *testing.T, cfg *Config) {
+				assert.True(t, cfg.EnableEviction, "EnableEviction should be translated")
+				// Pacing and sizing parameters are internal: defaulted here, derived at wiring time.
+				assert.Equal(t, defaultMaxRevocationsPerDecision, cfg.MaxRevocationsPerDecision)
+				assert.Equal(t, defaultEvictionConfirmationGrace, cfg.EvictionConfirmationGrace)
+				assert.Equal(t, defaultEvictionConfirmationTimeout, cfg.EvictionConfirmationTimeout)
+			},
 		},
 	}
 

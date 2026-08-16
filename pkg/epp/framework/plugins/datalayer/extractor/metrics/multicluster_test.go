@@ -26,6 +26,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
@@ -52,10 +53,10 @@ func TestMultiClusterMetricsPipeline(t *testing.T) {
 	ep := newEndpointAt(mustHost(t, srv.URL), nil)
 	require.NoError(t, source.Dispatch(context.Background(), ep))
 
-	kv, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.MultiClusterKVCacheUtilizationKey)
+	kv, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.MultiClusterKVCacheUtilizationDataKey)
 	require.True(t, ok, "pool KV-cache utilization attribute")
 	require.InDelta(t, 0.62, float64(kv), 1e-9)
-	q, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.MultiClusterQueueSizeKey)
+	q, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.MultiClusterQueueSizeDataKey)
 	require.True(t, ok, "pool queue size attribute")
 	require.InDelta(t, 4, float64(q), 1e-9)
 }
@@ -113,13 +114,13 @@ func TestMultiClusterMetricsExtractor(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			assertAttr(t, ep, attrmetrics.MultiClusterKVCacheUtilizationKey, tc.wantKV)
-			assertAttr(t, ep, attrmetrics.MultiClusterQueueSizeKey, tc.wantQ)
+			assertAttr(t, ep, attrmetrics.MultiClusterKVCacheUtilizationDataKey, tc.wantKV)
+			assertAttr(t, ep, attrmetrics.MultiClusterQueueSizeDataKey, tc.wantQ)
 		})
 	}
 }
 
-func assertAttr(t *testing.T, ep fwkdl.Endpoint, key string, want *float64) {
+func assertAttr(t *testing.T, ep fwkdl.Endpoint, key fwkplugin.DataKey, want *float64) {
 	t.Helper()
 	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), key)
 	if want == nil {
@@ -142,7 +143,7 @@ func TestMultiClusterMetricsExtractorCustomNames(t *testing.T) {
 	data := sourcemetrics.PrometheusMetricMap{"custom_kv": gauge(0.3), "custom_queue": gauge(2)}
 	require.NoError(t, ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
 
-	kv, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.MultiClusterKVCacheUtilizationKey)
+	kv, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.MultiClusterKVCacheUtilizationDataKey)
 	require.True(t, ok)
 	require.InDelta(t, 0.3, float64(kv), 1e-9)
 }

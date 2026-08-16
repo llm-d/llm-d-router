@@ -121,7 +121,7 @@ func TestReadInFlightLoad(t *testing.T) {
 
 	// Attribute present: both fields come from InFlightLoad.
 	epWithLoad := createTestEndpoint("pod2", 0.5, 5, 0)
-	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
+	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
 	got = pl.readInFlightLoad(epWithLoad)
 	assert.Equal(t, int64(42), got.tokens)
 	assert.Equal(t, 3, got.requests)

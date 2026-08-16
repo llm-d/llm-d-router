@@ -287,6 +287,7 @@ func (f *mockProcessorFactory) new(
 	_ time.Duration,
 	_ int,
 	_ logr.Logger,
+	_ *internal.ReclamationController,
 ) processor {
 	if f.processor != nil {
 		return f.processor

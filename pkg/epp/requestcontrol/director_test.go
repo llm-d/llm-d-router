@@ -86,7 +86,7 @@ type mockScheduler struct {
 
 func (m *mockScheduler) Schedule(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.SchedulingResult, error) {
 	if endpoints != nil && m.dataProduced {
-		data, ok := endpoints[0].Get(mockProducedDataKey.String())
+		data, ok := endpoints[0].Get(mockProducedDataKey)
 		if !ok || data.(mockProducedDataType).value != 42 {
 			return nil, errors.New("expected produced data not found in pod")
 		}
@@ -135,7 +135,7 @@ func (m *mockDataProducerPlugin) Consumes() fwkplugin.DataDependencies {
 }
 
 func (m *mockDataProducerPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	endpoints[0].Put(mockProducedDataKey.String(), mockProducedDataType{value: 42})
+	endpoints[0].Put(mockProducedDataKey, mockProducedDataType{value: 42})
 	return nil
 }
 
@@ -169,7 +169,7 @@ func (m *mockAdmissionPlugin) Admit(ctx context.Context, request *fwksched.Infer
 
 type mockRequestHeaderPlugin struct {
 	name           string
-	attributeKey   string
+	attributeKey   fwkplugin.DataKey
 	attributeValue string
 }
 
@@ -1981,7 +1981,7 @@ func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
 func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 	endpointWith := func(matched, total int) fwksched.Endpoint {
 		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
 		return fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
@@ -1996,7 +1996,7 @@ func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 	}
 	endpointWithWrongType := func() fwksched.Endpoint {
 		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey, wrongTypeAttr{})
 		return fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
 			nil, attrs,
@@ -2084,7 +2084,7 @@ func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
 	scheduleResultWith := func(matched, total int) *fwksched.SchedulingResult {
 		attrs := fwkdl.NewAttributes()
 		if matched >= 0 {
-			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 				attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
 		}
 		return &fwksched.SchedulingResult{

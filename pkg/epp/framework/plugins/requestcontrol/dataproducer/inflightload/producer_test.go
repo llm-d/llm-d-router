@@ -93,12 +93,12 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 	// The discount reads PrefixCacheMatchInfo from the configured producer's key
 	// (indexed 2*4=8, matched 1*4=4 -> uncached 4).
 	hit := newStubSchedulingEndpoint("ep-hit")
-	hit.Put(preciseKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	hit.Put(preciseKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 	require.Equal(t, int64(4), producer.estimateRequestTokens(hit, nil, 5))
 
 	// Data under the approx (default) key is ignored, so it falls back to inputTokens.
 	miss := newStubSchedulingEndpoint("ep-miss")
-	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, nil, 5))
 }
 
@@ -114,7 +114,7 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	// 1. Produce with nil request -> should not put anything
 	err := producer.Produce(context.Background(), nil, endpoints)
 	require.NoError(t, err)
-	_, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	_, ok := endpoint.Get(producer.uncachedRequestTokensDk)
 	require.False(t, ok)
 
 	// 2. Produce with request -> should put UncachedRequestTokens
@@ -123,13 +123,13 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 
 	require.NoError(t, err)
 
-	val, ok := endpoint.Get(producer.uncachedRequestTokensDk.String())
+	val, ok := endpoint.Get(producer.uncachedRequestTokensDk)
 	require.True(t, ok)
 	uncached := val.(*attrconcurrency.UncachedRequestTokens)
 	require.Equal(t, int64(10), uncached.Tokens)
 
 	// Verify that InFlightLoad was NOT put/overwritten by Produce
-	_, ok = endpoint.Get(producer.dk.String())
+	_, ok = endpoint.Get(producer.dk)
 	require.False(t, ok, "InFlightLoad should not be populated by Produce")
 }
 
@@ -151,7 +151,7 @@ func TestInFlightLoadProducer_Extract(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify dynamic attribute is registered
-	key := producer.dk.String()
+	key := producer.dk
 	val, ok := endpoint.Get(key)
 	require.True(t, ok)
 
@@ -575,11 +575,13 @@ func (f *stubSchedulingEndpoint) GetMetrics() *datalayer.Metrics             { r
 func (f *stubSchedulingEndpoint) UpdateMetrics(*datalayer.Metrics)           {}
 func (f *stubSchedulingEndpoint) GetAttributes() datalayer.AttributeMap      { return f.attr }
 func (f *stubSchedulingEndpoint) String() string                             { return "" }
-func (f *stubSchedulingEndpoint) Put(key string, val datalayer.Cloneable)    { f.attr.Put(key, val) }
-func (f *stubSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
+func (f *stubSchedulingEndpoint) Put(key fwkplugin.DataKey, val datalayer.Cloneable) {
+	f.attr.Put(key, val)
+}
+func (f *stubSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable, bool) {
 	return f.attr.Get(key)
 }
-func (f *stubSchedulingEndpoint) Keys() []string { return f.attr.Keys() }
+func (f *stubSchedulingEndpoint) Keys() []fwkplugin.DataKey { return f.attr.Keys() }
 
 // makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
 // which is what the estimator reads to derive the input token count.
@@ -706,7 +708,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
 	//   total tokens = 4 + 12 = 16
 	endpoint := newStubSchedulingEndpoint(endpointName)
-	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 
 	req := makeTokenRequest("req-prefix", 8)
 	res := &fwksched.SchedulingResult{
@@ -744,9 +746,9 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 
 	// 8 input tokens, output 12.
 	epA := newStubSchedulingEndpoint(podA)
-	epA.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
+	epA.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(2, 2, 4)) // fully cached
 	epB := newStubSchedulingEndpoint(podB)
-	epB.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
+	epB.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(0, 2, 4)) // none cached
 
 	req := makeTokenRequest("req-multi-cache", 8)
 	res := &fwksched.SchedulingResult{
@@ -1042,11 +1044,11 @@ func TestUncachedInputTokens_Overestimate(t *testing.T) {
 	//   matchedTokens = 1 * 4 = 4
 
 	endpoint := newStubSchedulingEndpoint("test-ep")
-	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 
 	inputTokens := int64(5)
 
-	uncached := uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey.String())
+	uncached := uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey)
 
 	// When the prefix cache says 4 tokens are definitely uncached in the indexed portion (8-4),
 	// we trust that over the smaller (approximate) estimate of 5.

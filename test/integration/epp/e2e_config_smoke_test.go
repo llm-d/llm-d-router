@@ -221,7 +221,8 @@ plugins:
 - type: endpoint-attribute-filter
   name: gpu-utilization-filter
   parameters:
-    attribute: "GPUUtilization/dcgm-extractor"
+    attribute: "GPUUtilization"
+    producer: "dcgm-extractor"
     onMissing: "Pass"
     fallbackOnEmpty: true
     algorithm:
@@ -232,7 +233,8 @@ plugins:
 - type: endpoint-attribute-scorer
   name: gpu-utilization-scorer
   parameters:
-    attributeKey: "GPUUtilization/dcgm-extractor"
+    attributeKey: "GPUUtilization"
+    producer: "dcgm-extractor"
     algorithm:
       type: "linear_lower_is_better"
       normalization:

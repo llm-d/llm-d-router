@@ -142,7 +142,8 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		h.clock,
 		expiryCleanupInterval,
 		100,
-		h.logger)
+		h.logger,
+		nil)
 	require.NotNil(t, h.processor, "NewProcessor should not return nil")
 
 	t.Cleanup(func() { h.Stop() })

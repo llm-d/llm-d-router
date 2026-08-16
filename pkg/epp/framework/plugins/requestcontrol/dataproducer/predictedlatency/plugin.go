@@ -87,7 +87,7 @@ type PredictedLatency struct {
 // flight and Requests the active request count. Returns false when the
 // attribute is absent (e.g. an endpoint added before the producer injected it).
 func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*attrconcurrency.InFlightLoad, bool) {
-	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey.String()); ok {
+	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load, true
 		}

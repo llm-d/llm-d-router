@@ -38,6 +38,7 @@ The plugin consumes:
 | Parameter                                    | Required | Description                                                                    |
 |----------------------------------------------|----------|--------------------------------------------------------------------------------|
 | `attributeKey`                               | yes      | Endpoint attribute to read, e.g. `custom.queue_depth`.                          |
+| `producer`                                   | no       | Plugin publishing the attribute. Omitted defaults to the core metrics extractor; set to e.g. `dcgm-extractor` to read another producer's attribute, or to `""` for a producer-agnostic attribute. An `attributeKey` containing `/` is rejected unless `producer` is set explicitly. |
 | `algorithm.type`                             | yes      | `linear_lower_is_better` or `linear_higher_is_better`.                          |
 | `algorithm.normalization`                    | no       | At most one strategy: `adaptiveRange` (the default) or `fixedRange`.            |
 | `algorithm.normalization.fixedRange.min/max` | no       | Bounds for `fixedRange` normalization; `min` must be less than `max`.           |

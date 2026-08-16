@@ -252,7 +252,7 @@ func TestPDSchedule(t *testing.T) {
 
 			inputTokens := len(test.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			for _, pod := range test.input {
-				pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, inputTokens, 1))
+				pod.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(0, inputTokens, 1))
 			}
 			got, err := scheduler.Schedule(ctx, test.req, test.input)
 
@@ -267,7 +267,7 @@ func TestPDSchedule(t *testing.T) {
 			if test.wantRes2 != nil { // Checking the prefix match in the decode pod.
 				// update number of cached tokens for the following schedule call
 				for _, pod := range test.input {
-					pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(inputTokens, inputTokens, 1))
+					pod.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(inputTokens, inputTokens, 1))
 				}
 
 				got, err = scheduler.Schedule(ctx, test.req, test.input)
