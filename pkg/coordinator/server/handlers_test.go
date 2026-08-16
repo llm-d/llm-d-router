@@ -188,6 +188,13 @@ func TestNew_RejectsGatewayURLWithoutHost(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsUnparsableGatewayURL(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, "http://gw:notaport")); err == nil {
+		t.Fatal("expected error for unparsable gateway URL")
+	}
+}
+
 // deadlineRecorder wraps httptest.ResponseRecorder with a SetWriteDeadline
 // method so http.NewResponseController can reach it; it records the deadline
 // the handler sets.
