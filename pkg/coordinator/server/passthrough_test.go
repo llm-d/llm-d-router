@@ -17,13 +17,18 @@ limitations under the License.
 package server
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/go-logr/logr"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -219,6 +224,67 @@ func TestPassthrough_StreamsChunksAsTheyArrive(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != body {
 		t.Fatalf("body: got %q want %q", got, body)
+	}
+}
+
+// logCaptureSink is a logr.LogSink that records every Info and Error call.
+// Tests use it to assert which log level a code path takes.
+type logCaptureSink struct {
+	infos  []capturedLog
+	errors []capturedLog
+}
+
+type capturedLog struct {
+	level int
+	msg   string
+	err   error
+}
+
+func (s *logCaptureSink) Init(_ logr.RuntimeInfo) {}
+func (s *logCaptureSink) Enabled(_ int) bool      { return true }
+func (s *logCaptureSink) Info(level int, msg string, _ ...any) {
+	s.infos = append(s.infos, capturedLog{level: level, msg: msg})
+}
+func (s *logCaptureSink) Error(err error, msg string, _ ...any) {
+	s.errors = append(s.errors, capturedLog{msg: msg, err: err})
+}
+func (s *logCaptureSink) WithValues(_ ...any) logr.LogSink { return s }
+func (s *logCaptureSink) WithName(_ string) logr.LogSink   { return s }
+
+func TestPassthrough_ClientCancelNotLoggedAsError(t *testing.T) {
+	// Client disconnects (context.Canceled) and request-context deadlines are
+	// routine events, not backend faults. They must not surface as Error logs;
+	// non-cancellation errors still must.
+	gwURL, err := url.Parse("http://gw:80")
+	if err != nil {
+		t.Fatalf("parse gateway URL: %v", err)
+	}
+
+	cases := []struct {
+		name          string
+		err           error
+		wantErrorLogs int
+	}{
+		{"client cancelled", context.Canceled, 0},
+		{"context deadline exceeded", context.DeadlineExceeded, 0},
+		{"transport failure", errors.New("boom"), 1},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &logCaptureSink{}
+			proxy := newPassthroughProxy(logr.New(sink), gwURL, http.DefaultTransport, "req-1")
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			proxy.ErrorHandler(rec, req, tt.err)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status: got %d want 502", rec.Code)
+			}
+			if got := len(sink.errors); got != tt.wantErrorLogs {
+				t.Fatalf("Error-level logs: got %d (%v), want %d", got, sink.errors, tt.wantErrorLogs)
+			}
+		})
 	}
 }
 

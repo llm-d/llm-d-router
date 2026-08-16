@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -79,7 +80,13 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 		Transport:     transport,
 		ErrorLog:      log.New(&passthroughErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			logger.Error(err, "passthrough proxy error")
+			// Client cancellation and request-context deadlines are routine events on
+			// public routes, not backend faults; keep them out of error dashboards.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				logger.V(logutil.VERBOSE).Info("passthrough proxy: client cancelled", "error", err)
+			} else {
+				logger.Error(err, "passthrough proxy error")
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}

@@ -110,7 +110,13 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 			if errors.Is(proxyErr, errCacheMiss) {
 				return
 			}
-			logger.Error(proxyErr, "proxy error")
+			// Client cancellation and request-context deadlines are routine events on
+			// public routes, not backend faults; keep them out of error dashboards.
+			if errors.Is(proxyErr, context.Canceled) || errors.Is(proxyErr, context.DeadlineExceeded) {
+				logger.V(logutil.VERBOSE).Info("decode proxy: client cancelled", "error", proxyErr)
+			} else {
+				logger.Error(proxyErr, "proxy error")
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
