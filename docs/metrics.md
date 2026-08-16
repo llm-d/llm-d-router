@@ -374,8 +374,8 @@ Prefix `llm_d_epp_`. Registered only when the embedded llm-d-kv-cache metrics ar
 | `kv_cache_index_admissions_total` | Counter | Blocks admitted to the index. |
 | `kv_cache_index_evictions_total` | Counter | Blocks evicted from the index. |
 | `kv_cache_index_lookup_requests_total` | Counter | Index lookups performed. |
-| `kv_cache_index_lookup_hits_total` | Counter | Lookups that matched at least one block. |
-| `kv_cache_index_max_pod_hit_count_total` | Counter | Best per-pod hit count observed per lookup. |
+| `kv_cache_index_lookup_hits_total` | Counter | Contiguous prefix blocks matched by the best pod per lookup. |
+| `kv_cache_index_max_pod_hit_count_total` | Counter | Longest contiguous per-pod prefix chain observed per lookup. |
 | `kv_cache_index_lookup_latency_seconds` | Histogram | Index lookup latency. |
 | `kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | Deduplicated removal hashes suppressed. |
 | `kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | Deduplicated removal hashes forwarded. |
