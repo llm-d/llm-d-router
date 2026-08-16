@@ -173,6 +173,39 @@ func BenchmarkScoredLookup(b *testing.B) {
 	}
 }
 
+// BenchmarkScoredLookupParallel measures the fused walk under concurrent
+// request traffic sharing one index.
+func BenchmarkScoredLookupParallel(b *testing.B) {
+	const numKeys = 3750
+	tierWeights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
+	for _, numPods := range []int{8, 96} {
+		b.Run(fmt.Sprintf("keys=3750/pods=%d", numPods), func(b *testing.B) {
+			idx, keys := populateIndex(b, numKeys, numPods)
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			// Only a size check runs in the timed loop, and it reports with
+			// Error rather than Fatal: FailNow from a RunParallel worker
+			// would exit that goroutine and stall the benchmark instead of
+			// failing it. TestScoredLookupConcurrentReadersAgree validates
+			// full per-pod results under the same contention.
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					stats, err := idx.ScoredLookup(ctx, keys, nil, tierWeights)
+					if err != nil {
+						b.Error(err)
+						return
+					}
+					if len(stats) != numPods {
+						b.Errorf("unexpected stats size %d", len(stats))
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkScoredLookupAfterChurn measures the fused walk after 10,000
 // since-cleared pods have been interned, pinning that per-request cost tracks
 // live candidates rather than interner history.
