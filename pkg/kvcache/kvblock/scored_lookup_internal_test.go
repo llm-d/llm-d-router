@@ -19,10 +19,14 @@ package kvblock
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Both metric paths must report the same hit quantity: the legacy Lookup fold
@@ -53,6 +57,41 @@ func TestHitMetricPathsAgree(t *testing.T) {
 	assert.Equal(t, 2, legacyHits)
 	assert.Equal(t, legacyHits, stats["pod-a"].MatchedBlocks,
 		"legacy and fused paths must feed the hit metrics the same quantity")
+}
+
+func TestScoredLookupColdScratchDoesNotTrackPodHistory(t *testing.T) {
+	measure := func(churnPods int) uint64 {
+		ctx := log.IntoContext(context.Background(), logr.Discard())
+		index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 128, PodCacheSize: 128})
+		require.NoError(t, err)
+
+		keys := []BlockHash{10, 20}
+		for i := 0; i < 96; i++ {
+			entry := []PodEntry{{PodIdentifier: fmt.Sprintf("pod-live-%d", i), DeviceTier: "gpu"}}
+			require.NoError(t, index.Add(ctx, nil, keys, entry))
+		}
+		for i := 0; i < churnPods; i++ {
+			pod := fmt.Sprintf("pod-gone-%d", i)
+			require.NoError(t, index.Add(ctx, nil, []BlockHash{999}, []PodEntry{{PodIdentifier: pod, DeviceTier: "gpu"}}))
+			require.NoError(t, index.Clear(ctx, pod))
+		}
+
+		scoredScratchPool = sync.Pool{New: func() any { return &scoredScratch{} }}
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		stats, err := index.ScoredLookup(ctx, keys, nil, map[string]float64{"gpu": 1})
+		require.NoError(t, err)
+		require.Len(t, stats, 96)
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+
+	measure(0) // warm lazy runtime and package initialization
+	withoutChurn := measure(0)
+	withChurn := measure(20_000)
+	assert.Less(t, withChurn, withoutChurn+128*1024,
+		"cold request scratch must scale with live candidates, not interned pod history")
 }
 
 // BenchmarkMaxContiguousPodHits measures the hit-metric fold on the legacy

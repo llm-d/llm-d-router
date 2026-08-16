@@ -397,7 +397,11 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	results := make([]endpointResult, 0, len(endpoints))
 	for _, ep := range endpoints {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		md := ep.GetMetadata()
 		if md == nil {
 			continue
@@ -421,7 +425,10 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
 		}
-		ep.Put(p.dk, info)
+		results = append(results, endpointResult{endpoint: ep, info: info})
+	}
+	if err := p.publishEndpointResults(ctx, results); err != nil {
+		return err
 	}
 
 	if p.speculativeEnabled {
@@ -481,7 +488,11 @@ func (p *Producer) produceFused(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	results := make([]endpointResult, 0, len(endpoints))
 	for _, ep := range endpoints {
+		if err := ctx.Err(); err != nil {
+			return true, err
+		}
 		md := ep.GetMetadata()
 		if md == nil {
 			continue
@@ -501,7 +512,10 @@ func (p *Producer) produceFused(ctx context.Context, span trace.Span,
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
 		}
-		ep.Put(p.dk, info)
+		results = append(results, endpointResult{endpoint: ep, info: info})
+	}
+	if err := p.publishEndpointResults(ctx, results); err != nil {
+		return true, err
 	}
 
 	if p.speculativeEnabled {
@@ -522,4 +536,19 @@ func (p *Producer) produceFused(ctx context.Context, span trace.Span,
 		v.Info("Produce completed", "blockKeys", totalBlocks, "scores", scores)
 	}
 	return true, nil
+}
+
+type endpointResult struct {
+	endpoint scheduling.Endpoint
+	info     *attrprefix.PrefixCacheMatchInfo
+}
+
+func (p *Producer) publishEndpointResults(ctx context.Context, results []endpointResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, result := range results {
+		result.endpoint.Put(p.dk, result.info)
+	}
+	return nil
 }

@@ -41,7 +41,7 @@ import (
 
 type fakeKVCacheIndexer struct {
 	computeFromTokens func(ctx context.Context, tokens []uint32, model string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error)
-	index             *fakeKVBlockIndex
+	index             kvblock.Index
 }
 
 func (f *fakeKVCacheIndexer) ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint32, model string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
@@ -86,6 +86,17 @@ func (f *fakeKVBlockIndex) Clear(ctx context.Context, podIdentifier string) erro
 		return f.clearFn(ctx, podIdentifier)
 	}
 	return nil
+}
+
+type fakeScoredKVBlockIndex struct {
+	*fakeKVBlockIndex
+	scoredLookup func(ctx context.Context, keys []kvblock.BlockHash, podSet sets.Set[string], tierWeights map[string]float64) (map[string]kvblock.PodMatchStats, error)
+}
+
+func (f *fakeScoredKVBlockIndex) ScoredLookup(ctx context.Context, keys []kvblock.BlockHash,
+	podSet sets.Set[string], tierWeights map[string]float64,
+) (map[string]kvblock.PodMatchStats, error) {
+	return f.scoredLookup(ctx, keys, podSet, tierWeights)
 }
 
 type fakeKVBlockScorer struct {
@@ -135,6 +146,21 @@ func freshEndpoints() []scheduling.Endpoint {
 				Port:    "8080",
 			}, nil, nil),
 	}
+}
+
+type cancelOnMetadataEndpoint struct {
+	scheduling.Endpoint
+	cancel   context.CancelFunc
+	calls    int
+	cancelOn int
+}
+
+func (e *cancelOnMetadataEndpoint) GetMetadata() *fwkdl.EndpointMetadata {
+	e.calls++
+	if e.calls == e.cancelOn {
+		e.cancel()
+	}
+	return e.Endpoint.GetMetadata()
 }
 
 func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer, scorer kvcache.KVBlockScorer) *Producer {
@@ -205,6 +231,71 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 	assert.Equal(t, 0, info2.MatchBlocks())
 	assert.Equal(t, 1, info2.TotalBlocks())
 	assert.Nil(t, info2.MM(), "text-only request must leave MM untracked")
+}
+
+func TestProduce_CancellationPublishesNoEndpointResults(t *testing.T) {
+	for _, fused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fused=%t", fused), func(t *testing.T) {
+			baseCtx := utils.NewTestContext(t)
+			ctx, cancel := context.WithCancel(baseCtx)
+			defer cancel()
+
+			const key = kvblock.BlockHash(0xCAFE)
+			baseIndex := &fakeKVBlockIndex{
+				lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+					return map[kvblock.BlockHash][]kvblock.PodEntry{
+						key: {{PodIdentifier: "10.0.0.1:8080"}},
+					}, nil
+				},
+			}
+			var index kvblock.Index = baseIndex
+			if fused {
+				index = &fakeScoredKVBlockIndex{
+					fakeKVBlockIndex: baseIndex,
+					scoredLookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string], _ map[string]float64) (map[string]kvblock.PodMatchStats, error) {
+						return map[string]kvblock.PodMatchStats{
+							"10.0.0.1:8080": {
+								WeightedScore: 1,
+								MatchedBlocks: 1,
+								BlocksByTier:  map[string]int{"gpu": 1},
+							},
+						}, nil
+					},
+				}
+			}
+
+			idx := &fakeKVCacheIndexer{
+				computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+					return []kvblock.BlockHash{key}, nil
+				},
+				index: index,
+			}
+			scorer := &fakeKVBlockScorer{
+				score: func(_ context.Context, _ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+					return map[string]float64{"10.0.0.1:8080": 1}, nil
+				},
+			}
+			p := newProducerWithIndexer(baseCtx, idx, scorer)
+			endpoints := freshEndpoints()
+			endpoints[1] = &cancelOnMetadataEndpoint{
+				Endpoint: endpoints[1], cancel: cancel, cancelOn: 2,
+			}
+			req := &scheduling.InferenceRequest{
+				RequestID:   "req-cancel-publish",
+				TargetModel: "test-model",
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, testBlockSize)}},
+				},
+			}
+
+			err := p.Produce(ctx, req, endpoints)
+			require.ErrorIs(t, err, context.Canceled)
+			for _, ep := range endpoints {
+				_, published := ep.Get(p.dk)
+				assert.False(t, published, "canceled production must not publish a partial result")
+			}
+		})
+	}
 }
 
 // No tokens → no-op (no prompt-string fallback).

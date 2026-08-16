@@ -114,38 +114,56 @@ func (in *interner) snapshot() []string {
 	return in.names
 }
 
-// scoredScratch holds the interned-pod-indexed tables a ScoredLookup call
-// needs, reused through a pool so steady-state per-request cost does not grow
-// with the number of pods ever interned. A cold scratch (pool miss, e.g.
-// after a GC cycle) still allocates ~12 bytes per interned pod. Validity is
-// generation-stamped: an entry is meaningful only when its stamp equals the
-// current call's gen, so reuse needs no zeroing.
+type scoredSlotRef struct {
+	podIdx  uint32
+	slotRef uint32 // request-local slot plus one; zero marks an empty bucket
+}
+
+// scoredScratch maps candidate pod ids to request-local slots in an
+// open-addressed table. It is reused through a pool so both warm and cold
+// request state scale with the first key's live entries rather than the
+// append-only pod interner.
 type scoredScratch struct {
-	gen uint32
-	// slotRef maps an interned pod id to its request-local slot: the
-	// validity generation in the high 32 bits, the slot in the low 32.
-	slotRef []uint64
-	// allowGen stamps pods that pass the call's pod-identifier filter.
-	allowGen []uint32
+	slots []scoredSlotRef
 }
 
 var scoredScratchPool = sync.Pool{New: func() any { return &scoredScratch{} }}
 
-// nextGen advances the scratch generation, resizing the tables to nPods and
-// clearing them on generation wrap-around so stale stamps can never match.
-func (sc *scoredScratch) nextGen(nPods int) uint32 {
-	if len(sc.slotRef) < nPods {
-		sc.slotRef = make([]uint64, nPods)
-		sc.allowGen = make([]uint32, nPods)
-		sc.gen = 0
+func (sc *scoredScratch) reset(numEntries int) {
+	size := 2
+	for size < numEntries*2 {
+		size <<= 1
 	}
-	if sc.gen == ^uint32(0) {
-		clear(sc.slotRef)
-		clear(sc.allowGen)
-		sc.gen = 0
+	if cap(sc.slots) < size {
+		sc.slots = make([]scoredSlotRef, size)
+	} else {
+		sc.slots = sc.slots[:size]
+		clear(sc.slots)
 	}
-	sc.gen++
-	return sc.gen
+}
+
+func (sc *scoredScratch) lookup(podIdx uint32) (int32, bool) {
+	mask := uint32(len(sc.slots) - 1)
+	idx := podIdx * 2654435761 & mask
+	for {
+		ref := sc.slots[idx]
+		if ref.slotRef == 0 {
+			return 0, false
+		}
+		if ref.podIdx == podIdx {
+			return int32(ref.slotRef - 1), true
+		}
+		idx = (idx + 1) & mask
+	}
+}
+
+func (sc *scoredScratch) insert(podIdx uint32, slot int32) {
+	mask := uint32(len(sc.slots) - 1)
+	idx := podIdx * 2654435761 & mask
+	for sc.slots[idx].slotRef != 0 {
+		idx = (idx + 1) & mask
+	}
+	sc.slots[idx] = scoredSlotRef{podIdx: podIdx, slotRef: uint32(slot) + 1}
 }
 
 // slotCursor is one candidate's per-key working state.
@@ -219,16 +237,7 @@ retry:
 		}
 	}
 
-	gen := sc.nextGen(nPods)
-
 	filtered := podIdentifierSet.Len() > 0
-	if filtered {
-		for id := range podIdentifierSet {
-			if idx, ok := m.pods.lookup(id); ok && int(idx) < nPods {
-				sc.allowGen[idx] = gen
-			}
-		}
-	}
 
 	// Per-slot working state for the candidate pods, in slot order.
 	var (
@@ -238,8 +247,6 @@ retry:
 		active     []int32      // slots still in the any-tier chain
 		keyStamp   uint32
 	)
-	genRef := uint64(gen) << 32
-
 	for idx, key := range requestKeys {
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -251,23 +258,24 @@ retry:
 		keyStamp++
 		firstKey := idx == 0
 		pc.mu.Lock()
+		if firstKey {
+			sc.reset(len(pc.entries))
+		}
 		for i := range pc.entries {
 			rec := &pc.entries[i]
 			if int(rec.podIdx) >= nPods {
 				continue // interned after this lookup's snapshot
 			}
-			if filtered && sc.allowGen[rec.podIdx] != gen {
-				continue
-			}
-			ref := sc.slotRef[rec.podIdx]
-			var s int32
+			s, hasSlot := sc.lookup(rec.podIdx)
 			switch {
-			case ref>>32 == uint64(gen):
-				s = int32(uint32(ref))
+			case hasSlot:
 			case firstKey:
+				if filtered && !podIdentifierSet.Has(podNames[rec.podIdx]) {
+					continue
+				}
 				// The first key defines the candidate set: assign slots.
 				s = int32(len(chains))
-				sc.slotRef[rec.podIdx] = genRef | uint64(uint32(s))
+				sc.insert(rec.podIdx, s)
 				chains = append(chains, slotChain{podIdx: rec.podIdx})
 				cur = append(cur, slotCursor{})
 				tierCounts = append(tierCounts, make([]int, nTiers)...)
