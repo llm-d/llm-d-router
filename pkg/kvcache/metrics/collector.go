@@ -37,6 +37,11 @@ const routerSubsystem = "llm_d_router_epp"
 // Keeping it as a constant localizes label-schema changes to this package.
 const podIdentifierLabel = "pod_identifier"
 
+const (
+	cacheKindLabel = "cache_kind"
+	reasonLabel    = "reason"
+)
+
 // dualCounter emits a value to both the deprecated kvcache_* counter and the
 // current llm_d_router_epp_* counter. It satisfies prometheus.Collector so both
 // register, and exposes the recording/read methods the call sites use.
@@ -134,6 +139,22 @@ var (
 	DedupRemovedHashesForwarded = newDualCounter("kvevents", "dedup_removed_hashes_forwarded_total",
 		"kv_cache_events_dedup_removed_hashes_forwarded_total",
 		"Block hashes forwarded for eviction after the KV-event dedup filter (block hashes, not BlockRemoved events)")
+	// KVEventStoresSkipped counts group-aware stores that cannot safely
+	// contribute to prefix indexing.
+	KVEventStoresSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_stores_skipped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-cache store events skipped before prefix indexing",
+			compbasemetrics.ALPHA),
+	}, []string{cacheKindLabel, reasonLabel})
+	// KVEventRemovalsSkipped counts removals for groups excluded from prefix
+	// indexing.
+	KVEventRemovalsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_removals_skipped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
+			compbasemetrics.ALPHA),
+	}, []string{cacheKindLabel, reasonLabel})
 
 	// SubscriberActive tracks the number of ZMQ subscribers currently managed by
 	// the SubscriberManager. A subscriber is counted from creation until it is
@@ -189,6 +210,7 @@ func Collectors() []prometheus.Collector {
 		Admissions, Evictions,
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
+		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
 	}

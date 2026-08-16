@@ -8,6 +8,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
@@ -35,17 +36,17 @@ func newStubEndpoint(name string, queueSize int) *stubEndpoint {
 	}
 }
 
-func (f *stubEndpoint) GetMetadata() *datalayer.EndpointMetadata   { return f.metadata }
-func (f *stubEndpoint) UpdateMetadata(*datalayer.EndpointMetadata) {}
-func (f *stubEndpoint) GetMetrics() *datalayer.Metrics             { return f.metrics }
-func (f *stubEndpoint) UpdateMetrics(*datalayer.Metrics)           {}
-func (f *stubEndpoint) GetAttributes() datalayer.AttributeMap      { return f.attr }
-func (f *stubEndpoint) String() string                             { return f.metadata.ID.String() }
-func (f *stubEndpoint) Put(key string, val datalayer.Cloneable)    { f.attr.Put(key, val) }
-func (f *stubEndpoint) Get(key string) (datalayer.Cloneable, bool) {
+func (f *stubEndpoint) GetMetadata() *datalayer.EndpointMetadata           { return f.metadata }
+func (f *stubEndpoint) UpdateMetadata(*datalayer.EndpointMetadata)         {}
+func (f *stubEndpoint) GetMetrics() *datalayer.Metrics                     { return f.metrics }
+func (f *stubEndpoint) UpdateMetrics(*datalayer.Metrics)                   {}
+func (f *stubEndpoint) GetAttributes() datalayer.AttributeMap              { return f.attr }
+func (f *stubEndpoint) String() string                                     { return f.metadata.ID.String() }
+func (f *stubEndpoint) Put(key fwkplugin.DataKey, val datalayer.Cloneable) { f.attr.Put(key, val) }
+func (f *stubEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable, bool) {
 	return f.attr.Get(key)
 }
-func (f *stubEndpoint) Keys() []string                { return f.attr.Keys() }
+func (f *stubEndpoint) Keys() []fwkplugin.DataKey     { return f.attr.Keys() }
 func (f *stubEndpoint) Clone() datalayer.AttributeMap { return f.attr.Clone() }
 
 func newTestEndpoint(name string, queueSize int) scheduling.Endpoint {
@@ -54,7 +55,7 @@ func newTestEndpoint(name string, queueSize int) scheduling.Endpoint {
 
 func newTestEndpointWithLoad(name string, requests int64) scheduling.Endpoint {
 	ep := newStubEndpoint(name, 0)
-	ep.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: requests})
+	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: requests})
 	return ep
 }
 
@@ -218,7 +219,7 @@ func TestActiveRequest_IdleThresholdAndMaxBusyScore(t *testing.T) {
 		assert.Equal(t, 1.0, scores[podA])
 		assert.Equal(t, 1.0, scores[podB])
 
-		podA.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: 1})
+		podA.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 1})
 
 		scores = scorer.Score(ctx, nil, []scheduling.Endpoint{podA, podB})
 		assert.Equal(t, 0.0, scores[podA], "Busy pod scores 0.0 in binary mode")
@@ -263,7 +264,7 @@ func TestActiveRequest_DefaultParamsProduceContinuousScores(t *testing.T) {
 func inFlightRequests(t *testing.T, endpoint scheduling.Endpoint) int64 {
 	t.Helper()
 
-	val, ok := endpoint.Get(attrconcurrency.InFlightLoadDataKey.String())
+	val, ok := endpoint.Get(attrconcurrency.InFlightLoadDataKey)
 	require.True(t, ok)
 	load, ok := val.(*attrconcurrency.InFlightLoad)
 	require.True(t, ok)

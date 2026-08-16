@@ -21,7 +21,7 @@ const ProgramAwarePluginType = "program-aware-fairness"
 
 // enqueueTimeAttributeKey is the per-request attribute under which Pick
 // stashes the flow-control enqueue timestamp for PreRequest to read back.
-const enqueueTimeAttributeKey = "program-aware/enqueue-time"
+var enqueueTimeAttributeKey = plugin.NewDataKey("enqueue-time", ProgramAwarePluginType)
 
 type Config struct {
 	Strategy             string  `json:"strategy,omitempty"`

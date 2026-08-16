@@ -465,12 +465,15 @@ The `disagg-profile-handler` plugin is the entry point for all disaggregation to
 
 ### Parameters
 
+- `stageOrder` (optional, default: `decode-first`): order of execution for disaggregation stages.
+  - `decode-first`: Decode runs first, followed by Encode (optional) and Prefill (optional). The PD decider inspects the chosen decode pod's cache state to determine whether prefill should be disaggregated.
+  - `prefill-first`: Prefill runs first, followed by Encode (optional) and Decode. When the prefill profile is configured, prefill always runs, and the chosen prefill pod is published so the decode stage can apply topology affinity constraints (e.g., co-locating decode on the same rack).
 - `profiles` (optional): names of the scheduling profiles to use.
   - `decode` (default: `decode`)
   - `prefill` (default: `prefill`)
   - `encode` (default: `encode`)
 - `deciders` (optional): decider plugins that control whether each stage runs.
-  - `prefill`: enables P/D disaggregation when set.
+  - `prefill`: enables P/D disaggregation when set (used in `decode-first` mode).
   - `encode`: enables E disaggregation when set.
 
 ### Examples
@@ -483,7 +486,7 @@ No deciders are configured -- all requests are handled by the decode profile alo
 - type: disagg-profile-handler
 ```
 
-#### P/D (Prefill/Decode)
+#### P/D (Prefill/Decode, Decode-First)
 
 ```yaml
 - type: disagg-profile-handler
@@ -502,6 +505,16 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
       prefill: my-prefill
     deciders:
       prefill: prefix-based-pd-decider
+```
+
+#### P/D (Prefill/Decode, Prefill-First)
+
+In `prefill-first` mode, prefill runs first without requiring a PD decider, and publishes the selected prefill endpoint so subsequent decode scheduling can match against it (e.g., via topology affinity).
+
+```yaml
+- type: disagg-profile-handler
+  parameters:
+    stageOrder: prefill-first
 ```
 
 #### E/PD (Encode/Prefill-Decode)
