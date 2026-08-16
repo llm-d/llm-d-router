@@ -256,7 +256,28 @@ func TestValidateDirectValues(t *testing.T) {
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
 	}
+}
 
+func TestValidateRefreshMetricsIntervalFloor(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshMetricsInterval = 10 * time.Millisecond
+	if err := opts.Validate(); err != nil {
+		t.Fatalf("Expected Validate() to clamp, not fail: %v", err)
+	}
+	if opts.RefreshMetricsInterval != MinRefreshMetricsInterval {
+		t.Errorf("Expected RefreshMetricsInterval to be clamped to %s, got %s",
+			MinRefreshMetricsInterval, opts.RefreshMetricsInterval)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshMetricsInterval = 50 * time.Millisecond
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to pass for RefreshMetricsInterval of 50ms, got %v", err)
+	}
 }
 
 func TestDrainTimeoutFlag(t *testing.T) {
