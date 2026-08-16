@@ -33,11 +33,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+// OSLBucketKey is the request-attribute key under which this plugin
+// publishes the predicted OSL bin. Downstream consumers read it via
+// scheduling.ReadRequestAttribute[OSLBucket].
+var OSLBucketKey = plugin.NewDataKey("osl-bucket", "")
+
 const (
-	// OSLBucketKey is the request-attribute key under which this plugin
-	// publishes the predicted OSL bin. Downstream consumers read it via
-	// scheduling.ReadRequestAttribute[OSLBucket].
-	OSLBucketKey = "osl-bucket"
 	// PluginType is the plugin type name used in the EPP config.
 	PluginType = "osl-bucket"
 
@@ -201,7 +202,7 @@ func boolPtrFromAny(v any) *bool {
 
 // int64PtrFromAny coerces a JSON-decoded value into a *int64. It accepts
 // float64, json.Number, an integer string, and native int/int64. Any other
-// value (or a non-integral / unparseable one) yields nil ("not set").
+// value (or a non-integral / unparsable one) yields nil ("not set").
 func int64PtrFromAny(v any) *int64 {
 	switch t := v.(type) {
 	case int:
