@@ -431,7 +431,7 @@ Requests carrying `Prefer: if-available` (used by the coordinator's speculative 
 
 Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
 
-The gate runs from the plugin's `PreRequest` hook, so it is independent of any `disagg-profile-handler` wiring. A deployment that wants the coordinator's cache-miss fallback but no disaggregation can declare the plugin at the top level and skip the profile handler. The plugin declares its data dependencies (`PrefixCacheMatchInfo` and `TokenizedPrompt`) as required, so a missing producer surfaces as a startup error rather than a silent per-request forward:
+A minimal coordinator-topology configuration:
 
 ```yaml
 apiVersion: llm-d.ai/v1alpha1
@@ -450,6 +450,8 @@ schedulingProfiles:
       - pluginRef: "prefix-cache-scorer"
       - pluginRef: "max-score-picker"
 ```
+
+The plugin declares `PrefixCacheMatchInfo` and `TokenizedPrompt` as required dependencies, so a missing producer surfaces as a startup error rather than a silent per-request forward.
 
 Full P/D and E/P/D configurations that combine the decider and gate roles are in [Configuration Examples](#configuration-examples).
 
