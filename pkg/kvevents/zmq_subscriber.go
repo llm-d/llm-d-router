@@ -28,10 +28,32 @@ import (
 
 const (
 	retryInterval       = 5 * time.Second
-	replayTimeout       = 30 * time.Second
-	replaySocketTimeout = 10 * time.Second
+	replayTimeout       = 2 * time.Minute
+	replaySocketTimeout = 2 * time.Second
 	replayCooldown      = 30 * time.Second
+	maxConcurrentReplay = 8
 )
+
+type replayLimiter chan struct{}
+
+func newReplayLimiter(limit int) replayLimiter {
+	return make(replayLimiter, limit)
+}
+
+func (l replayLimiter) acquire(ctx context.Context) bool {
+	select {
+	case l <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (l replayLimiter) release() {
+	<-l
+}
+
+var processReplayLimiter = newReplayLimiter(maxConcurrentReplay)
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
@@ -253,73 +275,109 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 // requestReplay requests buffered events starting from startSeq.
 func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool {
 	logger := log.FromContext(ctx).WithName("zmq-replay")
+	waitStarted := time.Now()
+	if !processReplayLimiter.acquire(ctx) {
+		return false
+	}
+	defer processReplayLimiter.release()
+	if waitDuration := time.Since(waitStarted); waitDuration >= time.Second {
+		logger.Info("Replay admitted after waiting for process capacity",
+			"waitDuration", waitDuration, "replayEndpoint", z.replayEndpoint)
+	}
+
 	replayCtx, cancel := context.WithTimeout(ctx, replayTimeout)
 	defer cancel()
 
-	dealer := zmq4.NewDealer(replayCtx, zmq4.WithTimeout(replaySocketTimeout))
-	defer dealer.Close()
-	if err := dealer.Dial(z.replayEndpoint); err != nil {
-		z.lastReplayFailure = time.Now()
-		logger.Error(err, "Failed to connect replay socket",
-			"replayEndpoint", z.replayEndpoint)
-		return false
-	}
-
-	seqBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(seqBytes, startSeq)
-	if err := dealer.SendMulti(zmq4.NewMsgFrom([]byte{}, seqBytes)); err != nil {
-		z.lastReplayFailure = time.Now()
-		logger.Error(err, "Failed to send replay request",
-			"startSeq", startSeq, "replayEndpoint", z.replayEndpoint)
-		return false
-	}
-
 	replayed := 0
+	nextSeq := startSeq
+	attempt := 0
 	for {
-		select {
-		case <-replayCtx.Done():
+		if replayCtx.Err() != nil {
 			z.lastReplayFailure = time.Now()
 			logger.Info("Replay timed out",
-				"replayed", replayed, "replayEndpoint", z.replayEndpoint)
+				"replayed", replayed, "attempts", attempt,
+				"replayEndpoint", z.replayEndpoint)
 			return false
-		default:
 		}
+		attempt++
 
-		msg, err := dealer.Recv()
-		if err != nil {
+		attemptCtx, attemptCancel := context.WithTimeout(replayCtx, replaySocketTimeout)
+		dealer := zmq4.NewDealer(attemptCtx, zmq4.WithTimeout(replaySocketTimeout))
+		if err := dealer.Dial(z.replayEndpoint); err != nil {
+			attemptCancel()
 			z.lastReplayFailure = time.Now()
-			logger.Error(err, "Failed to receive replay message",
-				"replayed", replayed, "replayEndpoint", z.replayEndpoint)
+			logger.Error(err, "Failed to connect replay socket",
+				"replayEndpoint", z.replayEndpoint)
 			return false
 		}
 
-		frames := msg.Frames
-		if len(frames) > 0 && len(frames[0]) == 0 {
-			frames = frames[1:]
-		}
-		if len(frames) == 3 && len(frames[2]) == 0 {
-			break
-		}
-
-		topic, seq, payload, ok := parseEventFrame(frames)
-		if !ok {
+		seqBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(seqBytes, nextSeq)
+		if err := dealer.SendMulti(zmq4.NewMsgFrom([]byte{}, seqBytes)); err != nil {
+			dealer.Close()
+			attemptCancel()
 			z.lastReplayFailure = time.Now()
-			logger.Error(nil, "Malformed replay frame",
-				"frameCount", len(frames), "replayed", replayed)
+			logger.Error(err, "Failed to send replay request",
+				"startSeq", nextSeq, "replayEndpoint", z.replayEndpoint)
 			return false
 		}
-		if z.hasLastSeq && seq <= z.lastSeq {
+
+		attemptReplayed := 0
+		complete := false
+		for {
+			msg, err := dealer.Recv()
+			if err != nil {
+				break
+			}
+
+			frames := msg.Frames
+			if len(frames) > 0 && len(frames[0]) == 0 {
+				frames = frames[1:]
+			}
+			if len(frames) == 3 && len(frames[2]) == 0 {
+				complete = true
+				break
+			}
+
+			topic, seq, payload, ok := parseEventFrame(frames)
+			if !ok {
+				dealer.Close()
+				attemptCancel()
+				z.lastReplayFailure = time.Now()
+				logger.Error(nil, "Malformed replay frame",
+					"frameCount", len(frames), "replayed", replayed)
+				return false
+			}
+			if z.hasLastSeq && seq <= z.lastSeq {
+				continue
+			}
+
+			z.addTask(topic, seq, payload)
+			z.lastSeq = seq
+			z.hasLastSeq = true
+			replayed++
+			attemptReplayed++
+		}
+
+		dealer.Close()
+		attemptCancel()
+		if complete {
+			z.lastReplayFailure = time.Time{}
+			logger.Info("Replay complete", "replayed", replayed,
+				"attempts", attempt, "startSeq", startSeq,
+				"replayEndpoint", z.replayEndpoint)
+			return true
+		}
+		if replayCtx.Err() != nil {
 			continue
 		}
 
-		z.addTask(topic, seq, payload)
-		z.lastSeq = seq
-		z.hasLastSeq = true
-		replayed++
+		if z.hasLastSeq {
+			nextSeq = z.lastSeq + 1
+		}
+		logger.Info("Replay response interrupted, resuming",
+			"attempt", attempt, "attemptReplayed", attemptReplayed,
+			"replayed", replayed, "nextSeq", nextSeq,
+			"replayEndpoint", z.replayEndpoint)
 	}
-
-	z.lastReplayFailure = time.Time{}
-	logger.Info("Replay complete", "replayed", replayed,
-		"startSeq", startSeq, "replayEndpoint", z.replayEndpoint)
-	return true
 }

@@ -145,10 +145,12 @@ type replayMessage struct {
 }
 
 type replayBuffer struct {
-	mu       sync.RWMutex
-	messages []replayMessage
-	fail     atomic.Bool
-	requests atomic.Int32
+	mu           sync.RWMutex
+	messages     []replayMessage
+	fail         atomic.Bool
+	partialOnce  atomic.Bool
+	partialAfter int
+	requests     atomic.Int32
 }
 
 func (b *replayBuffer) set(messages ...replayMessage) {
@@ -186,6 +188,8 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 			buffer.mu.RLock()
 			messages := append([]replayMessage(nil), buffer.messages...)
 			buffer.mu.RUnlock()
+			partial := buffer.partialOnce.CompareAndSwap(true, false)
+			sent := 0
 			for _, replay := range messages {
 				if replay.seq < startSeq {
 					continue
@@ -195,6 +199,13 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 				)); err != nil {
 					return
 				}
+				sent++
+				if partial && sent == buffer.partialAfter {
+					break
+				}
+			}
+			if partial && sent == buffer.partialAfter {
+				continue
 			}
 			if err := router.Send(zmq4.NewMsgFrom(
 				clientID, []byte{}, []byte{}, seqFrame(math.MaxUint64), []byte{},
@@ -440,6 +451,12 @@ type replayHarness struct {
 }
 
 func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replayHarness {
+	return newReplayHarnessWithPartial(t, messages, fail, 0)
+}
+
+func newReplayHarnessWithPartial(
+	t *testing.T, messages []replayMessage, fail bool, partialAfter int,
+) *replayHarness {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 
@@ -455,6 +472,8 @@ func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replay
 	buffer := startReplayBuffer(t, ctx, replayEndpoint)
 	buffer.set(messages...)
 	buffer.fail.Store(fail)
+	buffer.partialAfter = partialAfter
+	buffer.partialOnce.Store(partialAfter > 0)
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
@@ -479,6 +498,21 @@ func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replay
 		pub:    pub,
 		topic:  []byte("kv@10.0.0.1:8000@TestModel"),
 	}
+}
+
+func TestZMQSubscriber_ProactiveReplayResumesAfterPartialResponse(t *testing.T) {
+	h := newReplayHarnessWithPartial(t, []replayMessage{
+		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
+		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+	}, false, 2)
+
+	require.Eventually(t, func() bool { return h.buffer.requests.Load() == 2 },
+		5*time.Second, 50*time.Millisecond, "partial replay should resume on a new request")
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
 }
 
 func (h *replayHarness) send(t *testing.T, seq uint64, payload []byte) {
