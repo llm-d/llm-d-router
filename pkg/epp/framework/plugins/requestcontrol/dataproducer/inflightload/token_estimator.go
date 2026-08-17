@@ -108,10 +108,12 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 	return e.clampOutput(est, request.Body.MaxOutputTokens)
 }
 
-// clampOutput bounds est by the client-requested cap and the operator cap. The
-// client cap applies only when positive (a zero or unset cap is treated as no
-// cap, consistent with the osl-bucket classifier's handling of max_output_tokens);
-// the operator cap applies whenever non-negative.
+// clampOutput bounds est by the client-requested cap and the operator cap.
+// Client cap applies only when positive (> 0): MaxOutputTokens=0 is treated as
+// "no cap", matching the osl-bucket classifier's convention. This intentionally
+// diverges from the prior ratio-based estimator (which used >= 0 and clamped to 0)
+// and from InferenceRequestBody.MaxOutputTokens's contract elsewhere. Operator cap
+// uses >= 0, so MaxEstimatedOutputTokens=0 still clamps to 0.
 func (e *SimpleTokenEstimator) clampOutput(est int64, clientCap *int64) int64 {
 	if clientCap != nil && *clientCap > 0 && *clientCap < est {
 		est = *clientCap
