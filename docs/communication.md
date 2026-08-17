@@ -361,7 +361,7 @@ The coordinator attempts an early decode immediately after rendering. This allow
 
 The coordinator adds the `Prefer: if-available` HTTP header to signal that the decode worker should only proceed if the KV cache is already available. If it responds with 412 Precondition Failed, the pipeline continues as normal.
 
-The 412 is enforced by the `prefix-based-pd-decider` plugin's conditional-decode gate; see [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
+The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode gate when configured. When no gate plugin is configured, the router still returns 412 by default for any `Prefer: if-available` request so a missing gate surfaces as this pipeline restart rather than a silent forward. See [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
 
 ### Request (/v1/completions)
 
