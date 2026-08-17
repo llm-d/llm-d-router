@@ -542,8 +542,10 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 }
 
 // partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets
-// based on the llm-d.ai/role pod label. Endpoints without a role label, without metadata,
-// or with an unrecognized role value default to the decode bucket for monolithic deployment safety.
+// based on the llm-d.ai/role pod label. Endpoints without a role label or without metadata
+// default to the decode bucket, matching the decode-filter's allowsNoLabel convention for
+// monolithic deployment safety. Encode-only pods and unrecognized role values are excluded
+// from all buckets because they are rejected by every role filter and receive no traffic.
 func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
 	for _, ep := range endpoints {
 		if ep == nil {
@@ -558,12 +560,16 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 		switch role {
 		case bylabel.RolePrefill, bylabel.RoleEncodePrefill:
 			prefill = append(prefill, ep)
-		case bylabel.RoleDecode:
+		case bylabel.RoleDecode, "":
 			decode = append(decode, ep)
 		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode:
 			interleaved = append(interleaved, ep)
+		case bylabel.RoleEncode:
+			// Encode-only pods receive no prefill or decode traffic; excluding them
+			// keeps both stage signals clean.
 		default:
-			decode = append(decode, ep)
+			// Unrecognized role values are rejected by every role filter and receive
+			// no traffic; counting them anywhere dilutes the stage signal.
 		}
 	}
 	return

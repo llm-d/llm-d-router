@@ -1147,7 +1147,7 @@ func TestProcessor(t *testing.T) {
 				assert.Empty(t, interleaved)
 			})
 
-			t.Run("should default unrecognized role to decode", func(t *testing.T) {
+			t.Run("should exclude unrecognized role from all buckets", func(t *testing.T) {
 				t.Parallel()
 				endpoints := []fwkdl.Endpoint{
 					makeEndpoint(map[string]string{bylabel.RoleLabel: "unknown-role"}),
@@ -1155,7 +1155,19 @@ func TestProcessor(t *testing.T) {
 
 				prefill, decode, interleaved := partitionEndpoints(endpoints)
 				assert.Empty(t, prefill)
-				assert.Len(t, decode, 1)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude encode-only endpoints from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
 				assert.Empty(t, interleaved)
 			})
 
