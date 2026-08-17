@@ -247,7 +247,7 @@ plugins:
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false                  # enable kv-block index metrics (prometheus)
-        metricsLoggingInterval: 6000000000    # log kv-block metrics as well (1m in nanoseconds)
+        metricsLoggingInterval: 60000000000   # log kv-block metrics as well (1m in nanoseconds)
 - type: decode-filter
 - type: max-score-picker
 - type: disagg-profile-handler
