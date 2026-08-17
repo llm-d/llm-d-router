@@ -72,6 +72,9 @@ type FileDiscovery struct {
 	typedName fwkplugin.TypedName
 	path      string
 	watchFile bool
+	// validateAddress checks an endpoint address. Injected at construction so a
+	// variant can loosen it without load() branching on the plugin type.
+	validateAddress func(string) error
 	// mu guards endpoints, which DumpState reads concurrently with load.
 	mu sync.RWMutex
 	// endpoints is the set of endpoint identities applied to the datastore
@@ -89,9 +92,15 @@ var (
 	_ fwkplugin.StateDumper   = (*FileDiscovery)(nil)
 )
 
-// Factory is the plugin factory for file-discovery.
+// Factory is the plugin factory for file-discovery. Endpoint addresses must be IPv4.
 func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	p := &params{WatchFile: false}
+	return newFileDiscovery(PluginType, name, parameters, validateIPv4Address)
+}
+
+// newFileDiscovery decodes the shared file-discovery parameters and builds a
+// FileDiscovery with the given address validator. name defaults to pluginType.
+func newFileDiscovery(pluginType, name string, parameters *json.Decoder, validateAddress func(string) error) (*FileDiscovery, error) {
+	p := &params{}
 	if parameters != nil {
 		if err := parameters.Decode(p); err != nil {
 			return nil, fmt.Errorf("file-discovery: failed to parse parameters: %w", err)
@@ -101,15 +110,25 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		return nil, errors.New("file-discovery: 'path' parameter is required")
 	}
 	if name == "" {
-		name = PluginType
+		name = pluginType
 	}
 	return &FileDiscovery{
-		typedName: fwkplugin.TypedName{Type: PluginType, Name: name},
-		path:      p.Path,
-		watchFile: p.WatchFile,
-		endpoints: make(map[types.NamespacedName]struct{}),
-		ready:     make(chan struct{}),
+		typedName:       fwkplugin.TypedName{Type: pluginType, Name: name},
+		path:            p.Path,
+		watchFile:       p.WatchFile,
+		validateAddress: validateAddress,
+		endpoints:       make(map[types.NamespacedName]struct{}),
+		ready:           make(chan struct{}),
 	}, nil
+}
+
+// validateIPv4Address requires the address to be an IPv4 literal, matching the pod
+// discovery contract.
+func validateIPv4Address(address string) error {
+	if ip := net.ParseIP(address); ip == nil || ip.To4() == nil {
+		return fmt.Errorf("invalid IPv4 address %q", address)
+	}
+	return nil
 }
 
 func (f *FileDiscovery) TypedName() fwkplugin.TypedName { return f.typedName }
@@ -238,8 +257,8 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 	incoming := make(map[types.NamespacedName]struct{}, len(ef.Endpoints))
 	var errs []error
 	for _, e := range ef.Endpoints {
-		if ip := net.ParseIP(e.Address); ip == nil || ip.To4() == nil {
-			errs = append(errs, fmt.Errorf("endpoint %q: invalid IPv4 address %q", e.Name, e.Address))
+		if err := f.validateAddress(e.Address); err != nil {
+			errs = append(errs, fmt.Errorf("endpoint %q: %w", e.Name, err))
 			continue
 		}
 		if portNum, err := strconv.Atoi(e.Port); err != nil || portNum < 1 || portNum > 65535 {

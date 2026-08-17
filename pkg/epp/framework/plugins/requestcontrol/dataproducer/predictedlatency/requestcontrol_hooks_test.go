@@ -166,7 +166,7 @@ func TestPredictedLatency_PreRequest_NoSchedulingResult(t *testing.T) {
 	request := createTestInferenceRequest("test", 100, 50)
 
 	// Call PreRequest with nil scheduling result
-	router.PreRequest(ctx, request, nil)
+	_ = router.PreRequest(ctx, request, nil)
 
 	// Should not create SLO context
 	_, err := router.getPredictedLatencyContextForRequest(request)
@@ -183,7 +183,7 @@ func TestPredictedLatency_PreRequest_EmptySchedulingResult(t *testing.T) {
 	}
 
 	// Call PreRequest with empty scheduling result
-	router.PreRequest(ctx, request, schedulingResult)
+	_ = router.PreRequest(ctx, request, schedulingResult)
 
 	// Should not create SLO context
 	_, err := router.getPredictedLatencyContextForRequest(request)
@@ -209,7 +209,7 @@ func TestPredictedLatency_PreRequest_Success(t *testing.T) {
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, newRequestPriorityQueue())
 
 	beforeTime := time.Now()
-	router.PreRequest(ctx, request, schedulingResult)
+	_ = router.PreRequest(ctx, request, schedulingResult)
 	afterTime := time.Now()
 
 	// Verify SLO context was updated
@@ -239,7 +239,7 @@ func TestPredictedLatency_PreRequest_AddsToQueue(t *testing.T) {
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// PreRequest should create the queue
-	router.PreRequest(ctx, request, schedulingResult)
+	_ = router.PreRequest(ctx, request, schedulingResult)
 
 	// Verify queue was created and request was added
 	value, exists := router.runningRequestLists.Load(endpoint.GetMetadata().ID)
@@ -269,10 +269,10 @@ func TestPredictedLatency_PreRequest_QueueAlreadyExists(t *testing.T) {
 	predictedLatencyCtx2.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request2, predictedLatencyCtx2)
 	// Add first request
-	router.PreRequest(ctx, request1, schedulingResult)
+	_ = router.PreRequest(ctx, request1, schedulingResult)
 
 	// Add second request to same pod
-	router.PreRequest(ctx, request2, schedulingResult)
+	_ = router.PreRequest(ctx, request2, schedulingResult)
 
 	// Verify both are in the same queue
 	value, exists := router.runningRequestLists.Load(endpoint.GetMetadata().ID)
@@ -862,14 +862,12 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 	assert.NotNil(t, ctx.lastSeenMetrics)
 	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
 	assert.NotNil(t, ctx.predictionsForScheduling)
-	assert.Empty(t, ctx.tpotObservations)
 	assert.Empty(t, ctx.predictedTPOTObservations)
 	assert.Zero(t, ctx.generatedTokenCount)
 	assert.Zero(t, ctx.ttft)
 	assert.Zero(t, ctx.avgTPOT)
 	assert.Nil(t, ctx.targetMetadata)
 	assert.Nil(t, ctx.schedulingResult)
-	assert.Nil(t, ctx.decodeTokenSampler)
 	assert.Equal(t, 2, ctx.inputTokenCount)
 }
 
@@ -970,9 +968,9 @@ func TestPredictedLatency_MultipleRequests_SamePod(t *testing.T) {
 	}
 
 	// Add all requests
-	router.PreRequest(ctx, request1, schedulingResult)
-	router.PreRequest(ctx, request2, schedulingResult)
-	router.PreRequest(ctx, request3, schedulingResult)
+	_ = router.PreRequest(ctx, request1, schedulingResult)
+	_ = router.PreRequest(ctx, request2, schedulingResult)
+	_ = router.PreRequest(ctx, request3, schedulingResult)
 
 	// Verify queue has all requests
 	value, exists := router.runningRequestLists.Load(endpoint.GetMetadata().ID)
@@ -998,7 +996,7 @@ func TestPredictedLatency_RequestLifecycle_ResponseEndOfStream(t *testing.T) {
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	// 1. PreRequest
-	router.PreRequest(ctx, request, schedulingResult)
+	_ = router.PreRequest(ctx, request, schedulingResult)
 
 	// Verify context exists
 	retrievedCtx, err := router.getPredictedLatencyContextForRequest(request)
@@ -1055,8 +1053,8 @@ func TestPredictedLatency_MultipleRequests_DifferentPods(t *testing.T) {
 	predictedLatencyCtx2.avgTPOTSLO = 50
 	router.setPredictedLatencyContextForRequest(request2, predictedLatencyCtx2)
 	// Add requests to different pods
-	router.PreRequest(ctx, request1, schedulingResult1)
-	router.PreRequest(ctx, request2, schedulingResult2)
+	_ = router.PreRequest(ctx, request1, schedulingResult1)
+	_ = router.PreRequest(ctx, request2, schedulingResult2)
 
 	// Verify separate queues were created
 	value1, exists1 := router.runningRequestLists.Load(endpoint1.GetMetadata().ID)
@@ -1132,7 +1130,7 @@ func BenchmarkPredictedLatency_PreRequest(b *testing.B) {
 		predictedLatencyCtx := newPredictedLatencyContext(request)
 		predictedLatencyCtx.avgTPOTSLO = 50
 		router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
-		router.PreRequest(ctx, request, schedulingResult)
+		_ = router.PreRequest(ctx, request, schedulingResult)
 	}
 }
 

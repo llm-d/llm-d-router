@@ -121,7 +121,7 @@ func TestReadInFlightLoad(t *testing.T) {
 
 	// Attribute present: both fields come from InFlightLoad.
 	epWithLoad := createTestEndpoint("pod2", 0.5, 5, 0)
-	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
+	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
 	got = pl.readInFlightLoad(epWithLoad)
 	assert.Equal(t, int64(42), got.tokens)
 	assert.Equal(t, 3, got.requests)
@@ -391,16 +391,10 @@ func TestPredictedLatencyFactory(t *testing.T) {
 			expectErr:  false,
 		},
 		{
-			name:       "invalid samplingMean <= 0",
-			pluginName: "bad-sampling-mean",
-			jsonParams: `{"samplingMean": -1.0}`,
-			expectErr:  true,
-		},
-		{
-			name:       "invalid maxSampledTokens < 0",
-			pluginName: "bad-max-tokens",
-			jsonParams: `{"maxDecodeTokenSamplesForPrediction": -1}`,
-			expectErr:  true,
+			name:       "deprecated sampling params are accepted and ignored",
+			pluginName: "deprecated-sampling-params",
+			jsonParams: `{"samplingMean": -1.0, "maxDecodeTokenSamplesForPrediction": -1}`,
+			expectErr:  false,
 		},
 		{
 			name:       "invalid sloBufferFactor <= 0",

@@ -135,7 +135,7 @@ func TestPreRequestNilRequest(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		handler.PreRequest(ctx, nil, result)
+		_ = handler.PreRequest(ctx, nil, result)
 	})
 }
 
@@ -149,7 +149,7 @@ func TestPreRequestNilSchedulingResult(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		handler.PreRequest(ctx, request, nil)
+		_ = handler.PreRequest(ctx, request, nil)
 	})
 }
 
@@ -183,7 +183,7 @@ func TestPrefillHeaderHandlerBackwardCompat(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.PrefillEndpointHeader])
 	_, encodeSet := request.Headers[routing.EncoderEndpointsHeader]
@@ -213,7 +213,7 @@ func TestPreRequestPrefillProfileExists(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.PrefillEndpointHeader])
 }
@@ -231,7 +231,7 @@ func TestPreRequestPrefillProfileNotExists(t *testing.T) {
 		ProfileResults:     map[string]*scheduling.ProfileRunResult{},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	_, exists := request.Headers[routing.PrefillEndpointHeader]
 	assert.False(t, exists)
@@ -258,7 +258,7 @@ func TestPreRequestClearsExistingPrefillHeader(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.PrefillEndpointHeader])
 }
@@ -278,7 +278,7 @@ func TestPreRequestClearsHeaderWhenNoPrefillResult(t *testing.T) {
 		ProfileResults:     map[string]*scheduling.ProfileRunResult{},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	val := request.Headers[routing.PrefillEndpointHeader]
 	assert.Equal(t, "", val)
@@ -303,7 +303,7 @@ func TestPreRequestCustomPrefillProfile(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.PrefillEndpointHeader])
 }
@@ -327,7 +327,7 @@ func TestPreRequestPrefillProfileNilResult(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		handler.PreRequest(ctx, request, result)
+		_ = handler.PreRequest(ctx, request, result)
 	})
 	_, exists := request.Headers[routing.PrefillEndpointHeader]
 	assert.False(t, exists)
@@ -350,7 +350,7 @@ func TestPreRequestPrefillEmptyTargetEndpoints(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		handler.PreRequest(ctx, request, result)
+		_ = handler.PreRequest(ctx, request, result)
 	})
 	_, exists := request.Headers[routing.PrefillEndpointHeader]
 	assert.False(t, exists)
@@ -375,7 +375,7 @@ func TestPreRequestPrefillIPv6Address(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testIPv6Addr, testPort), request.Headers[routing.PrefillEndpointHeader])
 }
@@ -403,7 +403,7 @@ func TestPreRequestEncodeProfileExists(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.EncoderEndpointsHeader])
 }
@@ -422,7 +422,7 @@ func TestPreRequestEncodeProfileNotExists(t *testing.T) {
 		ProfileResults:     map[string]*scheduling.ProfileRunResult{},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	_, exists := request.Headers[routing.EncoderEndpointsHeader]
 	assert.False(t, exists)
@@ -450,7 +450,7 @@ func TestPreRequestEncodeClearsExistingHeader(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.EncoderEndpointsHeader])
 }
@@ -471,7 +471,7 @@ func TestPreRequestEncodeClearsHeaderWhenNoEncodeResult(t *testing.T) {
 		ProfileResults:     map[string]*scheduling.ProfileRunResult{},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	val := request.Headers[routing.EncoderEndpointsHeader]
 	assert.Equal(t, "", val)
@@ -497,7 +497,7 @@ func TestPreRequestEncodeCustomProfile(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testAddr, testPort), request.Headers[routing.EncoderEndpointsHeader])
 }
@@ -522,7 +522,7 @@ func TestPreRequestEncodeIPv6Address(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	assert.Equal(t, net.JoinHostPort(testIPv6Addr, testPort), request.Headers[routing.EncoderEndpointsHeader])
 }
@@ -546,7 +546,7 @@ func TestPreRequestEncodeProfileNilResult(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		handler.PreRequest(ctx, request, result)
+		_ = handler.PreRequest(ctx, request, result)
 	})
 	_, exists := request.Headers[routing.EncoderEndpointsHeader]
 	assert.False(t, exists)
@@ -571,7 +571,7 @@ func TestPreRequestEncodeEmptyTargetEndpoints(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		handler.PreRequest(ctx, request, result)
+		_ = handler.PreRequest(ctx, request, result)
 	})
 	val := request.Headers[routing.EncoderEndpointsHeader]
 	assert.Equal(t, "", val)
@@ -599,7 +599,7 @@ func TestPreRequestEncodeMultipleEndpoints(t *testing.T) {
 		},
 	}
 
-	handler.PreRequest(ctx, request, result)
+	_ = handler.PreRequest(ctx, request, result)
 
 	expected := strings.Join([]string{
 		net.JoinHostPort(testAddr, testPort),

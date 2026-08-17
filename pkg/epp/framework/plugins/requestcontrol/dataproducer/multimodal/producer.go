@@ -285,7 +285,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		}
 		matchedItems := p.matchedItemsForPod(metadata.ID.String(), requestItems)
 		p.recordHitRatio(len(matchedItems), len(requestItems))
-		endpoint.Put(p.dk.String(), attrmm.NewEncoderCacheMatchInfo(
+		endpoint.Put(p.dk, attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
 			requestItems,
 		))

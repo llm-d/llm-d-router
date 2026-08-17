@@ -772,10 +772,7 @@ func TestFlowRegistry_deletePriorityBand(t *testing.T) {
 		assert.False(t, ok, "Band should be removed from config")
 
 		// Verify removed from ordered list
-		h.fr.mu.RLock()
-		orderedList := h.fr.orderedPriorityLevels
-		h.fr.mu.RUnlock()
-		for _, p := range orderedList {
+		for _, p := range h.fr.AllOrderedPriorityLevels() {
 			assert.NotEqual(t, dynamicPrio, p, "Band priority should be removed from ordered list in registry")
 		}
 	})

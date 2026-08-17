@@ -21,7 +21,7 @@ const ProgramAwarePluginType = "program-aware-fairness"
 
 // enqueueTimeAttributeKey is the per-request attribute under which Pick
 // stashes the flow-control enqueue timestamp for PreRequest to read back.
-const enqueueTimeAttributeKey = "program-aware/enqueue-time"
+var enqueueTimeAttributeKey = plugin.NewDataKey("enqueue-time", ProgramAwarePluginType)
 
 type Config struct {
 	Strategy             string  `json:"strategy,omitempty"`
@@ -232,9 +232,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	return best, nil
 }
 
-func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) {
+func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	if request == nil {
-		return
+		return nil
 	}
 	id := programIDFor(request)
 	metrics := p.getOrCreateMetrics(id)
@@ -244,6 +244,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 	avgWaitTimeMs.WithLabelValues(id).Set(metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
+	return nil
 }
 
 // ResponseBody acts on the final stream chunk only; intermediate chunks are

@@ -20,11 +20,13 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
@@ -55,6 +57,25 @@ const (
 	LegacyPluginType = "tokenizer"
 
 	tokenizedPromptKeyID = "TokenizedPrompt"
+
+	// anthropicBillingHeaderPrefix marks Claude Code system text that carries a
+	// per-request hash; vLLM strips it server-side, so the tokenizer must too.
+	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
+
+	// defaultImageMediaType fills in Anthropic base64 image sources with no
+	// media_type, matching vLLM's conversion.
+	defaultImageMediaType = "image/jpeg"
+)
+
+// Content-block types the Anthropic Messages conversion reads and emits.
+const (
+	blockTypeText             = "text"
+	blockTypeImage            = "image"
+	blockTypeImageURL         = "image_url"
+	blockTypeThinking         = "thinking"
+	blockTypeRedactedThinking = "redacted_thinking"
+	blockTypeToolUse          = "tool_use"
+	blockTypeToolResult       = "tool_result"
 )
 
 var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
@@ -370,7 +391,7 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 	for _, msg := range chat.Messages {
 		conv := tokenizerTypes.Conversation{
 			Role:      msg.Role,
-			Content:   tokenizerTypes.Content{Raw: msg.Content.Raw},
+			Content:   &tokenizerTypes.Content{Raw: msg.Content.Raw},
 			ToolCalls: msg.ToolCalls,
 		}
 		for _, block := range msg.Content.Structured {
@@ -395,70 +416,249 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 	}
 }
 
-// MessagesToRenderChatRequest converts an Anthropic MessagesRequest to a
-// tokenization RenderChatRequest for vLLM /render endpoint with System, Message and Tools set in RenderChatRequest only.
+// MessagesToRenderChatRequest converts an Anthropic MessagesRequest into the
+// OpenAI chat shape vLLM builds when serving /v1/messages, so the render
+// backend and the server apply the identical chat-template pipeline to the
+// same request and prefix-cache blocks line up.
 func MessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.RenderChatRequest {
 	conversation := make([]tokenizerTypes.Conversation, 0, 1+len(msg.Messages))
 
-	if msg.System.Raw != "" || len(msg.System.Structured) > 0 {
+	if sys := anthropicSystemText(msg.System); sys != "" {
 		conversation = append(conversation, tokenizerTypes.Conversation{
 			Role:    "system",
-			Content: convertAnthropicContent(msg.System),
+			Content: &tokenizerTypes.Content{Raw: sys},
 		})
 	}
 
 	for _, m := range msg.Messages {
-		conversation = append(conversation, tokenizerTypes.Conversation{
-			Role:    m.Role, // role: user, assistant, system
-			Content: convertAnthropicContent(m.Content),
-		})
+		if m.Role == "system" {
+			// Not valid Anthropic input; tolerated the way vLLM does.
+			if text := anthropicSystemText(m.Content); text != "" {
+				conversation = append(conversation, tokenizerTypes.Conversation{
+					Role:    "system",
+					Content: &tokenizerTypes.Content{Raw: text},
+				})
+			}
+			continue
+		}
+		conversation = appendAnthropicMessage(conversation, m)
 	}
 
 	return &tokenizerTypes.RenderChatRequest{
 		Conversation: conversation,
-		Tools:        msg.Tools,
+		Tools:        convertAnthropicTools(msg.Tools),
 	}
 }
 
-// convertAnthropicContent converts an AnthropicContent to the kv-cache tokenizer Content type
-// mapping Anthropic image blocks to OpenAI-shaped image_url blocks.
-func convertAnthropicContent(ac fwkrh.AnthropicContent) tokenizerTypes.Content {
+// anthropicSystemText joins the system prompt's text blocks with no
+// separator, dropping Claude Code's per-request billing header so it does not
+// defeat prefix caching (mirrors vLLM).
+func anthropicSystemText(ac fwkrh.AnthropicContent) string {
 	if ac.Raw != "" {
-		return tokenizerTypes.Content{Raw: ac.Raw}
+		return ac.Raw
 	}
-	blocks := make([]tokenizerTypes.ContentBlock, 0, len(ac.Structured))
-	for _, b := range ac.Structured {
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == blockTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String()
+}
+
+// appendAnthropicMessage appends the conversations for one message. User
+// tool_result blocks append their tool messages immediately, so those precede
+// the user message that carried them - the order vLLM emits.
+func appendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.AnthropicMessage) []tokenizerTypes.Conversation {
+	if m.Content.Raw != "" {
+		return append(conversation, tokenizerTypes.Conversation{
+			Role:    m.Role,
+			Content: &tokenizerTypes.Content{Raw: m.Content.Raw},
+		})
+	}
+
+	var contentBlocks []tokenizerTypes.ContentBlock
+	var toolCalls []any
+	var reasoning strings.Builder
+	for _, b := range m.Content.Structured {
 		switch b.Type {
-		case "text":
-			blocks = append(blocks, tokenizerTypes.ContentBlock{
-				Type: "text",
-				Text: b.Text,
-			})
-		case "image":
-			if url := anthropicImageToURL(b.Source); url != "" {
-				blocks = append(blocks, tokenizerTypes.ContentBlock{
-					Type:     "image_url",
-					ImageURL: tokenizerTypes.ImageBlock{URL: url},
+		case blockTypeText:
+			if b.Text != "" {
+				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{Type: blockTypeText, Text: b.Text})
+			}
+		case blockTypeImage:
+			contentBlocks = appendImageBlock(contentBlocks, b.Source)
+		case blockTypeThinking:
+			reasoning.WriteString(b.Thinking)
+		case blockTypeRedactedThinking:
+			// Opaque safety-filtered reasoning; parses but contributes no tokens.
+		case blockTypeToolUse:
+			toolCalls = append(toolCalls, anthropicToolCall(b))
+		case blockTypeToolResult:
+			if m.Role == "user" {
+				conversation = appendAnthropicToolResult(conversation, b)
+			} else {
+				text, _ := anthropicToolResultContent(b)
+				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{
+					Type: blockTypeText,
+					Text: "Tool result: " + text,
 				})
 			}
 		}
 	}
-	return tokenizerTypes.Content{Structured: blocks}
+
+	conv := tokenizerTypes.Conversation{Role: m.Role}
+	if reasoning.Len() > 0 {
+		conv.Reasoning = reasoning.String()
+	}
+	conv.ToolCalls = toolCalls
+	switch {
+	case len(contentBlocks) == 1 && contentBlocks[0].Type == blockTypeText:
+		conv.Content = &tokenizerTypes.Content{Raw: contentBlocks[0].Text}
+	case len(contentBlocks) > 0:
+		conv.Content = &tokenizerTypes.Content{Structured: contentBlocks}
+	}
+	// A user message reduced to bare tool_results has no content of its own;
+	// its tool messages were already appended above.
+	if m.Role == "user" && conv.Content == nil {
+		return conversation
+	}
+	return append(conversation, conv)
 }
 
-// anthropicImageToURL converts an Anthropic image source to an OpenAI-shaped URL.
-// Base64 sources become data URIs; URL sources pass through.
+// appendImageBlock maps an Anthropic image source to an OpenAI image_url
+// content block; sources that resolve to no URL are dropped.
+func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.AnthropicImageSource) []tokenizerTypes.ContentBlock {
+	if url := anthropicImageToURL(src); url != "" {
+		blocks = append(blocks, tokenizerTypes.ContentBlock{
+			Type:     blockTypeImageURL,
+			ImageURL: tokenizerTypes.ImageBlock{URL: url},
+		})
+	}
+	return blocks
+}
+
+// anthropicToolCall converts a tool_use block into an OpenAI function tool
+// call. Arguments are CPython json.dumps formatted (separators, ASCII
+// escaping, wire key order) - the exact string vLLM renders into the prompt.
+func anthropicToolCall(b fwkrh.AnthropicContentBlock) map[string]any {
+	id := b.ID
+	if id == "" {
+		// vLLM falls back to call_<unix-time>; a fixed stand-in only keeps the
+		// rendered length stable (ids are generated in practice).
+		id = "call_0000000000"
+	}
+	return map[string]any{
+		"id":   id,
+		"type": "function",
+		"function": map[string]any{
+			"name":      b.Name,
+			"arguments": pythonArguments(b.Input),
+		},
+	}
+}
+
+// pythonArguments renders tool_use input as json.dumps(input or {}): absent,
+// null, and empty-object inputs all render as "{}".
+func pythonArguments(raw json.RawMessage) string {
+	switch string(bytes.TrimSpace(raw)) {
+	case "", "null", "{}":
+		return "{}"
+	}
+	if out, err := pythonDumps(raw); err == nil {
+		return out
+	}
+	return "{}"
+}
+
+// appendAnthropicToolResult appends a tool-role message for a user
+// tool_result block; images in the result follow as their own user message.
+func appendAnthropicToolResult(conversation []tokenizerTypes.Conversation, b fwkrh.AnthropicContentBlock) []tokenizerTypes.Conversation {
+	text, imageBlocks := anthropicToolResultContent(b)
+	conversation = append(conversation, tokenizerTypes.Conversation{
+		Role:       "tool",
+		ToolCallID: b.ToolUseID,
+		Content:    &tokenizerTypes.Content{Raw: text},
+	})
+	if len(imageBlocks) > 0 {
+		conversation = append(conversation, tokenizerTypes.Conversation{
+			Role:    "user",
+			Content: &tokenizerTypes.Content{Structured: imageBlocks},
+		})
+	}
+	return conversation
+}
+
+// anthropicToolResultContent splits a tool_result's content into its text
+// (block texts joined with newlines) and image blocks.
+func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
+	if b.Content.Raw != "" {
+		return b.Content.Raw, nil
+	}
+	var parts []string
+	var imageBlocks []tokenizerTypes.ContentBlock
+	for _, item := range b.Content.Structured {
+		switch item.Type {
+		case blockTypeText:
+			parts = append(parts, item.Text)
+		case blockTypeImage:
+			imageBlocks = appendImageBlock(imageBlocks, item.Source)
+		}
+	}
+	return strings.Join(parts, "\n"), imageBlocks
+}
+
+// convertAnthropicTools rewrites Anthropic tool definitions into OpenAI
+// function tools. input_schema passes through as raw JSON so the template's
+// re-serialization keeps the wire key order.
+func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(tools))
+	for _, t := range tools {
+		var schema json.RawMessage = bytes.TrimSpace(t.InputSchema)
+		if len(schema) == 0 || bytes.Equal(schema, []byte("null")) {
+			schema = json.RawMessage(`{"type":"object"}`)
+		}
+		fn := map[string]any{
+			"name":       t.Name,
+			"parameters": schema,
+		}
+		if t.Description != "" {
+			fn["description"] = t.Description
+		}
+		if t.Strict != nil {
+			fn["strict"] = *t.Strict
+		}
+		if t.DeferLoading != nil {
+			fn["defer_loading"] = *t.DeferLoading
+		}
+		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	return out
+}
+
+// anthropicImageToURL converts an Anthropic image source to an OpenAI-shaped
+// URL. Sources carrying a URL pass it through (URL sources, and sources
+// missing a type); base64 sources become data URIs, with an image/jpeg media
+// type when absent. Sources with neither a URL nor data yield "" so the
+// caller drops the block.
 func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
 	if src == nil {
 		return ""
 	}
-	if src.URL != "" {
+	if src.Type == "url" || src.URL != "" {
 		return src.URL
 	}
-	if src.Data != "" {
-		return "data:" + src.MediaType + ";base64," + src.Data
+	if src.Data == "" {
+		return ""
 	}
-	return ""
+	mediaType := src.MediaType
+	if mediaType == "" {
+		mediaType = defaultImageMediaType
+	}
+	return "data:" + mediaType + ";base64," + src.Data
 }
 
 // convertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal

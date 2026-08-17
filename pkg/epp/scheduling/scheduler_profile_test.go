@@ -24,6 +24,11 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -420,6 +425,53 @@ func TestEnforceScoreRange(t *testing.T) {
 	}
 }
 
+func TestRequestSpanAttributes(t *testing.T) {
+	tests := []struct {
+		name    string
+		request *fwksched.InferenceRequest
+		keys    []string
+		values  []string
+	}{
+		{name: "nil request"},
+		{name: "empty request", request: &fwksched.InferenceRequest{}},
+		{
+			name:    "model and request ID",
+			request: &fwksched.InferenceRequest{TargetModel: "model", RequestID: "request"},
+			keys:    []string{"gen_ai.request.model", "gen_ai.request.id"},
+			values:  []string{"model", "request"},
+		},
+		{
+			name:    "model only",
+			request: &fwksched.InferenceRequest{TargetModel: "model"},
+			keys:    []string{"gen_ai.request.model"},
+			values:  []string{"model"},
+		},
+		{
+			name:    "request ID only",
+			request: &fwksched.InferenceRequest{RequestID: "request"},
+			keys:    []string{"gen_ai.request.id"},
+			values:  []string{"request"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := requestSpanAttributes(test.request)
+			if len(got) != len(test.keys) {
+				t.Fatalf("requestSpanAttributes() returned %d attributes, want %d", len(got), len(test.keys))
+			}
+			for i := range got {
+				if string(got[i].Key) != test.keys[i] {
+					t.Errorf("attribute %d key = %q, want %q", i, got[i].Key, test.keys[i])
+				}
+				if got[i].Value.AsString() != test.values[i] {
+					t.Errorf("attribute %d value = %q, want %q", i, got[i].Value.AsString(), test.values[i])
+				}
+			}
+		})
+	}
+}
+
 func TestRunWithOutOfRangeScores(t *testing.T) {
 	// Scorer that returns negative score
 	negativeScorer := &testPlugin{
@@ -654,6 +706,225 @@ func (p *filterOnlyPlugin) Filter(_ context.Context, _ *fwksched.InferenceReques
 	return endpoints
 }
 
+// fixedScoresScorer returns a caller-supplied score per endpoint name, letting
+// tests assert aggregate span attributes (max/avg) over a non-uniform map.
+type fixedScoresScorer struct {
+	typedName fwkplugin.TypedName
+	scores    map[string]float64
+}
+
+func (s *fixedScoresScorer) TypedName() fwkplugin.TypedName { return s.typedName }
+
+func (s *fixedScoresScorer) Category() fwksched.ScorerCategory { return fwksched.Distribution }
+
+func (s *fixedScoresScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	// A nil score table models a scorer that declines to score any endpoint,
+	// exercising the empty-map aggregate guard in runScorer.
+	if s.scores == nil {
+		return map[fwksched.Endpoint]float64{}
+	}
+	out := make(map[fwksched.Endpoint]float64, len(endpoints))
+	for _, e := range endpoints {
+		out[e] = s.scores[e.GetMetadata().ID.Name]
+	}
+	return out
+}
+
+// installSpanRecorder routes spans to an in-memory recorder for the duration of
+// the test and restores an explicit no-op provider afterward. Restoring the
+// no-op provider (rather than the global proxy returned by GetTracerProvider)
+// ensures later tests do not inherit this test's recording SDK provider.
+func installSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+	return recorder
+}
+
+// findSpan returns the first recorded span with the given name, or nil.
+func findSpan(spans tracetest.SpanStubs, name string) *tracetest.SpanStub {
+	for i := range spans {
+		if spans[i].Name == name {
+			return &spans[i]
+		}
+	}
+	return nil
+}
+
+func spanFloat(t *testing.T, span *tracetest.SpanStub, key string) float64 {
+	t.Helper()
+	for _, a := range span.Attributes {
+		if string(a.Key) == key {
+			return a.Value.AsFloat64()
+		}
+	}
+	t.Fatalf("span %q missing attribute %q", span.Name, key)
+	return 0
+}
+
+func spanInt(t *testing.T, span *tracetest.SpanStub, key string) int64 {
+	t.Helper()
+	for _, a := range span.Attributes {
+		if string(a.Key) == key {
+			return a.Value.AsInt64()
+		}
+	}
+	t.Fatalf("span %q missing attribute %q", span.Name, key)
+	return 0
+}
+
+func spanHasAttr(span *tracetest.SpanStub, key string) bool {
+	for _, a := range span.Attributes {
+		if string(a.Key) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunScorerPluginsTracing verifies the scheduler scoring path emits a parent
+// llm_d.epp.scoring span with one llm_d.epp.scorer.<type> child per scorer,
+// carrying the documented identity, weight, candidate-count, and aggregate
+// score attributes, and no per-endpoint attribute keys.
+func TestRunScorerPluginsTracing(t *testing.T) {
+	recorder := installSpanRecorder(t)
+
+	scorerA := &fixedScoresScorer{
+		typedName: fwkplugin.TypedName{Type: "scorer-a", Name: "a"},
+		scores:    map[string]float64{"pod1": 0.2, "pod2": 0.8},
+	}
+	scorerB := &fixedScoresScorer{
+		typedName: fwkplugin.TypedName{Type: "scorer-b", Name: "b"},
+		scores:    map[string]float64{"pod1": 0.5, "pod2": 0.5},
+	}
+	picker := &testPlugin{TypeRes: "picker", PickRes: k8stypes.NamespacedName{Name: "pod1"}}
+
+	profile := NewSchedulerProfile().
+		WithScorers(NewWeightedScorer(scorerA, 0.25), NewWeightedScorer(scorerB, 0.75)).
+		WithPicker(picker)
+
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil),
+	}
+	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: "req-123"}
+
+	if _, err := profile.Run(context.Background(), request, input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	spans := tracetest.SpanStubsFromReadOnlySpans(recorder.Ended())
+	parent := findSpan(spans, "llm_d.epp.scoring")
+	if parent == nil {
+		t.Fatalf("missing parent span llm_d.epp.scoring; got %d spans", len(spans))
+	}
+	if got := spanInt(t, parent, "llm_d.epp.scorer.count"); got != 2 {
+		t.Errorf("parent llm_d.epp.scorer.count = %d, want 2", got)
+	}
+	if got := spanInt(t, parent, "llm_d.epp.scoring.candidate_endpoints"); got != 2 {
+		t.Errorf("parent candidate_endpoints = %d, want 2", got)
+	}
+
+	childA := findSpan(spans, "llm_d.epp.scorer.scorer-a")
+	childB := findSpan(spans, "llm_d.epp.scorer.scorer-b")
+	if childA == nil || childB == nil {
+		t.Fatalf("missing per-scorer child spans (a=%v b=%v)", childA != nil, childB != nil)
+	}
+
+	// Both children must nest under the parent scoring span.
+	if childA.Parent.SpanID() != parent.SpanContext.SpanID() {
+		t.Errorf("scorer-a span is not a child of the scoring span")
+	}
+
+	if got := spanFloat(t, childA, "llm_d.epp.scorer.weight"); got != 0.25 {
+		t.Errorf("scorer-a weight = %v, want 0.25", got)
+	}
+	if got := spanInt(t, childA, "llm_d.epp.scorer.candidate_endpoints"); got != 2 {
+		t.Errorf("scorer-a candidate_endpoints = %d, want 2", got)
+	}
+	// scorer-a scores {0.2, 0.8}: max 0.8, avg 0.5.
+	if got := spanFloat(t, childA, "llm_d.epp.scorer.score.max"); got != 0.8 {
+		t.Errorf("scorer-a score.max = %v, want 0.8", got)
+	}
+	if got := spanFloat(t, childA, "llm_d.epp.scorer.score.avg"); got != 0.5 {
+		t.Errorf("scorer-a score.avg = %v, want 0.5", got)
+	}
+	if got := spanInt(t, childA, "llm_d.epp.scorer.endpoints_scored"); got != 2 {
+		t.Errorf("scorer-a endpoints_scored = %d, want 2", got)
+	}
+
+	// Cardinality guard: no per-pod/per-endpoint identifier attribute keys.
+	for _, span := range []*tracetest.SpanStub{parent, childA, childB} {
+		for _, a := range span.Attributes {
+			key := string(a.Key)
+			if strings.Contains(key, "pod") || strings.Contains(key, "endpoint.") || strings.Contains(key, "namespacedname") {
+				t.Errorf("span %q carries per-endpoint attribute key %q", span.Name, key)
+			}
+		}
+	}
+}
+
+// TestRunScorerPluginsTracingDisabled verifies scoring works and records no
+// spans when the global provider is the default no-op, and that an empty
+// candidate set still emits the parent span without dividing by zero.
+func TestRunScorerPluginsTracingDisabled(t *testing.T) {
+	// Explicitly install a no-op provider so this test exercises the
+	// tracing-disabled path regardless of provider state left by other tests.
+	otel.SetTracerProvider(tracenoop.NewTracerProvider())
+	t.Cleanup(func() { otel.SetTracerProvider(tracenoop.NewTracerProvider()) })
+
+	scorer := &testPlugin{TypeRes: "noop", ScoreRes: 0.5}
+	picker := &testPlugin{TypeRes: "picker", PickRes: k8stypes.NamespacedName{Name: "pod1"}}
+
+	profile := NewSchedulerProfile().
+		WithScorers(NewWeightedScorer(scorer, 1)).
+		WithPicker(picker)
+
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+	}
+	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
+
+	if _, err := profile.Run(context.Background(), request, input); err != nil {
+		t.Fatalf("unexpected error with no-op tracer: %v", err)
+	}
+	if scorer.ScoreCallCount != 1 {
+		t.Errorf("scorer called %d times, want 1", scorer.ScoreCallCount)
+	}
+}
+
+// TestRunScorerEmptyCandidateAvg verifies a scorer that returns an empty score
+// map does not trigger a divide-by-zero when computing the average attribute.
+func TestRunScorerEmptyCandidateAvg(t *testing.T) {
+	recorder := installSpanRecorder(t)
+
+	empty := &fixedScoresScorer{typedName: fwkplugin.TypedName{Type: "empty", Name: "e"}}
+	picker := &testPlugin{TypeRes: "picker", PickRes: k8stypes.NamespacedName{Name: "pod1"}}
+	profile := NewSchedulerProfile().
+		WithScorers(NewWeightedScorer(empty, 1)).
+		WithPicker(picker)
+
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+	}
+	request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: "req-1"}
+
+	if _, err := profile.Run(context.Background(), request, input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	child := findSpan(tracetest.SpanStubsFromReadOnlySpans(recorder.Ended()), "llm_d.epp.scorer.empty")
+	if child == nil {
+		t.Fatal("missing scorer span for empty scorer")
+	}
+	// With no scored endpoints, aggregate attributes are omitted entirely.
+	if spanHasAttr(child, "llm_d.epp.scorer.score.avg") {
+		t.Error("empty scorer span should not carry a score.avg attribute")
+	}
+}
+
 func findEndpoints(endpoints []fwksched.Endpoint, names ...k8stypes.NamespacedName) []fwksched.Endpoint {
 	res := []fwksched.Endpoint{}
 	for _, endpoint := range endpoints {
@@ -665,3 +936,54 @@ func findEndpoints(endpoints []fwksched.Endpoint, names ...k8stypes.NamespacedNa
 	}
 	return res
 }
+
+// declaringScorer reads one attribute and declares it, standing in for every
+// real scorer that consumes producer output.
+type declaringScorer struct {
+	key   fwkplugin.DataKey
+	reads map[string]bool
+}
+
+func (s *declaringScorer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "declaring-scorer", Name: "declaring-scorer"}
+}
+
+func (s *declaringScorer) Category() fwksched.ScorerCategory { return fwksched.Distribution }
+
+func (s *declaringScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{s.key: nil}}
+}
+
+func (s *declaringScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
+	for _, endpoint := range endpoints {
+		_, ok := endpoint.Get(s.key)
+		s.reads[endpoint.GetMetadata().ID.Name] = ok
+		scores[endpoint] = 1
+	}
+	return scores
+}
+
+// A scorer's declarations live on the plugin, not on the WeightedScorer that
+// carries its weight; scoping the wrapper would deny every declared read.
+func TestRunScorer_ScopesTheWrappedPluginDeclarations(t *testing.T) {
+	key := fwkplugin.NewDataKey("declared", "some-producer")
+
+	attrs := fwkdl.NewAttributes()
+	attrs.Put(key, testScoreAttr("value"))
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "ep-1"}},
+		&fwkdl.Metrics{}, attrs)
+
+	scorer := &declaringScorer{key: key, reads: map[string]bool{}}
+	scores := runScorer(context.Background(), nil, false,
+		NewWeightedScorer(scorer, 1), &fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
+
+	assert.True(t, scorer.reads["ep-1"], "a weighted scorer must still reach the key it declares")
+	assert.Equal(t, map[fwksched.Endpoint]float64{endpoint: 1}, scores,
+		"scores must come back keyed by the original endpoint")
+}
+
+type testScoreAttr string
+
+func (a testScoreAttr) Clone() fwkdl.Cloneable { return a }

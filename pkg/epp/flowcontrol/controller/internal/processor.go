@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -75,6 +76,10 @@ type Processor struct {
 	cleanupSweepInterval time.Duration
 	logger               logr.Logger
 
+	// reclamation, when non-nil, enables demand-driven in-flight eviction on HoL blocking.
+	// See docs/flow-control-eviction.md.
+	reclamation *ReclamationController
+
 	// lifecycleCtx controls the processor's lifetime. Monitored by Submit* methods for safe shutdown.
 	lifecycleCtx context.Context
 
@@ -86,6 +91,11 @@ type Processor struct {
 	// from one caused by backpressure against a contended but non-empty pool. Only accessed from the Run goroutine, so
 	// it needs no synchronization.
 	poolEmpty bool
+
+	// ceilings is the reusable output buffer handed to the UsageLimitPolicy each dispatch cycle,
+	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
+	// synchronization.
+	ceilings []float64
 
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
@@ -111,6 +121,7 @@ func NewProcessor(
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
+	reclamation *ReclamationController,
 ) *Processor {
 	return &Processor{
 		registry:             registry,
@@ -124,6 +135,7 @@ func NewProcessor(
 		logger:               logger,
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
+		reclamation:          reclamation,
 	}
 }
 
@@ -183,6 +195,9 @@ func (p *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
 // It uses a `select` statement to interleave accepting new requests with dispatching existing ones, balancing
 // responsiveness with throughput.
 func (p *Processor) Run(ctx context.Context) {
+	// Log any panic with processor context before the default handlers repanic; the process
+	// fail-stops rather than continuing on state a panicked goroutine may have left inconsistent.
+	defer utilruntime.HandleCrashWithLogger(p.logger)
 	p.logger.V(logutil.DEFAULT).Info("Processor run loop starting.")
 	defer p.logger.V(logutil.DEFAULT).Info("Processor run loop stopped.")
 
@@ -417,7 +432,8 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	p.recordCapacityUtilization()
 
 	priorities := p.registry.AllOrderedPriorityLevels()
-	ceilings := p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities)
+	ceilings := p.ceilingsBuffer(len(priorities))
+	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
 
 	for i, priority := range priorities {
 		// --- Viability Check (Saturation/HoL Blocking) ---
@@ -426,6 +442,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		if saturation >= usageLimit {
 			p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
 				"priority", priority, "saturation", saturation, "usageLimit", usageLimit)
+			if p.reclamation != nil {
+				p.maybeReclaim(ctx, saturation, priorities, ceilings, i)
+			}
 			// Stop the dispatch cycle entirely to respect strict policy decision and prevent priority inversion where
 			// lower-priority work might exacerbate the saturation affecting high-priority work.
 			return false
@@ -457,6 +476,20 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		return true
 	}
 	return false
+}
+
+// ceilingsBuffer returns the reusable ceilings buffer sized to n, every element reset to 1.0 (no
+// gating). Pre-filling guarantees that an entry the policy does not write fails open rather than
+// carrying a stale value from the previous cycle.
+func (p *Processor) ceilingsBuffer(n int) []float64 {
+	if cap(p.ceilings) < n {
+		p.ceilings = make([]float64, n)
+	}
+	buf := p.ceilings[:n]
+	for i := range buf {
+		buf[i] = 1.0
+	}
+	return buf
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
@@ -499,7 +532,11 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		return nil
 	}
 
-	removedItem := removedItemAcc.(*FlowItem)
+	removedItem, ok := removedItemAcc.(*FlowItem)
+	if !ok {
+		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
+		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
+	}
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
 	return nil
@@ -510,6 +547,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 func (p *Processor) runCleanupSweep(ctx context.Context) {
 	defer p.wg.Done()
 	logger := p.logger.WithName("runCleanupSweep")
+	defer utilruntime.HandleCrashWithLogger(logger)
 	logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine starting.")
 	defer logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine stopped.")
 
@@ -532,7 +570,8 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 func (p *Processor) sweepFinalizedItems() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
-			return itemAcc.(*FlowItem).FinalState() != nil
+			item, ok := itemAcc.(*FlowItem)
+			return ok && item.FinalState() != nil
 		}
 		removedItems := managedQ.Cleanup(predicate)
 		if len(removedItems) > 0 {
@@ -680,6 +719,7 @@ func (p *Processor) processAllQueuesConcurrently(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Go(func() {
+			defer utilruntime.HandleCrashWithLogger(logger)
 			for task := range tasks {
 				processFn(task.mq, task.logger)
 			}

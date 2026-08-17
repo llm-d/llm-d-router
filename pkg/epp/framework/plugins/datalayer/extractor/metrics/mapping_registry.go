@@ -64,6 +64,16 @@ func (r *MappingRegistry) Register(engineType string, mapping *Mapping) error {
 	return nil
 }
 
+// Mappings returns every registered mapping, for callers that must describe the
+// registry as a whole rather than resolve one engine.
+func (r *MappingRegistry) Mappings() []*Mapping {
+	mappings := make([]*Mapping, 0, len(r.mappings))
+	for _, mapping := range r.mappings {
+		mappings = append(mappings, mapping)
+	}
+	return mappings
+}
+
 // Get finds the mapping for the given engine type, falling back to "default" if not found.
 func (r *MappingRegistry) Get(engineType string) (*Mapping, bool) {
 	if engineType == "" {

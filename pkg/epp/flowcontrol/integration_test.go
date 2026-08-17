@@ -73,6 +73,10 @@ func TestConcurrentSaturationReads(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 
+	// Track PreRequest errors via atomic counter — require/assert must not be
+	// called from non-test goroutines.
+	var preRequestErrs atomic.Int32
+
 	// Writer: track and release 200 requests rapidly.
 	wg.Add(1)
 	go func() {
@@ -91,7 +95,9 @@ func TestConcurrentSaturationReads(t *testing.T) {
 					"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
 				},
 			}
-			pd.producer.PreRequest(ctx, req, result)
+			if err := pd.producer.PreRequest(ctx, req, result); err != nil {
+				preRequestErrs.Add(1)
+			}
 			req.SchedulingResult = result
 			pd.producer.ResponseBody(ctx, req,
 				&requestcontrol.Response{EndOfStream: true}, pd.epMeta)
@@ -117,6 +123,8 @@ func TestConcurrentSaturationReads(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	require.Equal(t, int32(0), preRequestErrs.Load(),
+		"PreRequest returned errors during concurrent tracking")
 	require.Equal(t, int32(0), saturationViolations.Load(),
 		"saturation was outside [0.0, 1.0] during concurrent reads")
 	require.InDelta(t, 0.0, pd.detector.Saturation(ctx, endpoints), 1e-9,
@@ -164,7 +172,7 @@ func TestSaturationFullLoop(t *testing.T) {
 				"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
 			},
 		}
-		pd.producer.PreRequest(h.ctx, req, result)
+		require.NoError(t, pd.producer.PreRequest(h.ctx, req, result))
 	}
 
 	// Verify the detector sees saturation via the real Locate->Saturation path.
@@ -453,7 +461,7 @@ func TestUsageLimitThresholdGatesDispatch(t *testing.T) {
 				"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
 			},
 		}
-		pd.producer.PreRequest(h.ctx, req, result)
+		require.NoError(t, pd.producer.PreRequest(h.ctx, req, result))
 	}
 
 	// saturation=0.5, threshold=0.5: 0.5 >= 0.5 -> HoL blocking should trigger.
@@ -657,8 +665,8 @@ func TestEvictionPipeline(t *testing.T) {
 	reqCtx, reqCancel := context.WithCancel(ctx)
 	defer reqCancel()
 
-	requestEvictor.PreRequest(reqCtx, sheddableReq, makeResult())
-	requestEvictor.PreRequest(reqCtx, protectedReq, makeResult())
+	require.NoError(t, requestEvictor.PreRequest(reqCtx, sheddableReq, makeResult()))
+	require.NoError(t, requestEvictor.PreRequest(reqCtx, protectedReq, makeResult()))
 
 	inFlight, evictable := requestEvictor.Stats()
 	require.Equal(t, 2, inFlight, "both requests should be tracked in-flight")
@@ -669,7 +677,7 @@ func TestEvictionPipeline(t *testing.T) {
 	sheddableCh := reg.Get("shed-1")
 	require.NotNil(t, sheddableCh, "sheddable request should have an eviction channel")
 
-	evictedIDs, err := requestEvictor.EvictN(ctx, 1)
+	evictedIDs, err := requestEvictor.EvictN(ctx, 1, 0)
 	require.NoError(t, err)
 	require.Equal(t, []string{"shed-1"}, evictedIDs)
 
@@ -994,7 +1002,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 			"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
 		},
 	}
-	producer.PreRequest(ctx, oldReq, oldResult)
+	require.NoError(t, producer.PreRequest(ctx, oldReq, oldResult))
 
 	sat := detector.Saturation(ctx, []datalayer.Endpoint{ep})
 	require.Greater(t, sat, 0.0, "saturation should be nonzero with in-flight request")
@@ -1050,7 +1058,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 			"decode": {TargetEndpoints: []fwksched.Endpoint{newSchedEp}},
 		},
 	}
-	producer.PreRequest(ctx, newReq, newResult)
+	require.NoError(t, producer.PreRequest(ctx, newReq, newResult))
 	require.Equal(t, int64(1), producer.GetRequests(eid),
 		"new request on re-registered endpoint should be tracked")
 
@@ -1111,7 +1119,7 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 			"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
 		},
 	}
-	producer.PreRequest(ctx, req, result)
+	require.NoError(t, producer.PreRequest(ctx, req, result))
 
 	require.Greater(t, detector.Saturation(ctx, []datalayer.Endpoint{newEp}), 0.0,
 		"new endpoint should show in-flight load before stale delete")

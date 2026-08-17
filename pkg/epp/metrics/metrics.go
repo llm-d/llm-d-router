@@ -464,6 +464,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
+		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
 		metrics.Registry.MustRegister(llmdResponseProcessingLatency)
 		metrics.Registry.MustRegister(inferenceExtensionInfo)
@@ -488,6 +489,11 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationsIssuedTotal)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationsTotal)
+		metrics.Registry.MustRegister(llmdFlowControlReclaimTarget)
+		metrics.Registry.MustRegister(llmdFlowControlPendingReclaim)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationConfirmationDuration)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
@@ -543,6 +549,7 @@ func Reset() {
 	llmdSchedulerAttemptsTotal.Reset()
 	pluginProcessingLatencies.Reset()
 	llmdPluginProcessingLatencies.Reset()
+	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
 	llmdResponseProcessingLatency.Reset()
 	inferenceExtensionInfo.Reset()
@@ -565,6 +572,11 @@ func Reset() {
 	flowControlDispatchCycleDuration.Reset()
 	llmdFlowControlDispatchCycleDuration.Reset()
 	llmdFlowControlRequestsTotal.Reset()
+	llmdFlowControlRevocationsIssuedTotal.Reset()
+	llmdFlowControlRevocationsTotal.Reset()
+	llmdFlowControlReclaimTarget.Reset()
+	llmdFlowControlPendingReclaim.Reset()
+	llmdFlowControlRevocationConfirmationDuration.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	DataLayerPollErrorsTotal.Reset()
@@ -846,6 +858,18 @@ func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string
 	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
 }
 
+// Access kinds for RecordPluginDataScopeViolation.
+const (
+	DataScopeAccessRead  = "read"
+	DataScopeAccessWrite = "write"
+)
+
+// RecordPluginDataScopeViolation records an endpoint attribute access rejected
+// because the plugin did not declare the DataKey.
+func RecordPluginDataScopeViolation(extensionPoint, pluginType, pluginName, access string) {
+	llmdPluginDataScopeViolations.WithLabelValues(extensionPoint, pluginType, pluginName, access).Inc()
+}
+
 func RecordInferenceExtensionInfo(commitSha, buildRef string) {
 	inferenceExtensionInfo.WithLabelValues(commitSha, buildRef).Set(1)
 	llmdInferenceExtensionInfo.WithLabelValues(commitSha, buildRef).Set(1)
@@ -969,6 +993,39 @@ func RecordFlowControlGlobalCapacityUtilizationBytes(inferencePool string, ratio
 // IncFlowControlRequestsTotal increments the total request counter for a given outcome.
 func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
 	llmdFlowControlRequestsTotal.WithLabelValues(outcome, priority, inferencePool).Inc()
+}
+
+// Terminal revocation outcomes for the flow control revocations counter. Every issued revocation
+// eventually increments exactly one outcome.
+const (
+	RevocationOutcomeConfirmed = "confirmed"
+	RevocationOutcomeTimedOut  = "timed_out"
+)
+
+// RecordFlowControlRevocationsIssued counts revocations at issue time, labeled by the demand
+// band's priority.
+func RecordFlowControlRevocationsIssued(inferencePool, priority string, n int) {
+	llmdFlowControlRevocationsIssuedTotal.WithLabelValues(priority, inferencePool).Add(float64(n))
+}
+
+// RecordFlowControlRevocations increments the revocation counter for a terminal outcome.
+func RecordFlowControlRevocations(inferencePool, outcome string, n int) {
+	llmdFlowControlRevocationsTotal.WithLabelValues(outcome, inferencePool).Add(float64(n))
+}
+
+// RecordFlowControlReclaimTarget records the last computed reclamation deficit.
+func RecordFlowControlReclaimTarget(inferencePool string, target float64) {
+	llmdFlowControlReclaimTarget.WithLabelValues(inferencePool).Set(target)
+}
+
+// RecordFlowControlPendingReclaim records the capacity debited for unconfirmed revocations.
+func RecordFlowControlPendingReclaim(inferencePool string, pending float64) {
+	llmdFlowControlPendingReclaim.WithLabelValues(inferencePool).Set(pending)
+}
+
+// RecordFlowControlRevocationConfirmationDuration records issue-to-confirmation latency.
+func RecordFlowControlRevocationConfirmationDuration(inferencePool string, duration time.Duration) {
+	llmdFlowControlRevocationConfirmationDuration.WithLabelValues(inferencePool).Observe(duration.Seconds())
 }
 
 // DeleteFlowControlFlowSeries removes every flow-control series labeled with the given fairness ID

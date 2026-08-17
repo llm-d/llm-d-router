@@ -29,6 +29,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -42,6 +43,7 @@ type healthServer struct {
 	isLeader              *atomic.Bool
 	leaderElectionEnabled bool
 	supporters            []appProtocolSupporter
+	readinessCheckers     []fwkplugin.ReadinessChecker
 	draining              *atomic.Bool // nil or false: not draining. Set on SIGTERM during graceful shutdown.
 }
 
@@ -53,16 +55,18 @@ const (
 func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckRequest) (*healthPb.HealthCheckResponse, error) {
 	isLive := s.datastore.PoolHasSynced()
 	protocolMatches := s.checkProtocolSupport(isLive)
+	pluginReadinessErr := s.checkPluginReadiness(in.Service)
+	pluginsReady := pluginReadinessErr == nil
 	// While draining (graceful shutdown), every non-liveness check reports
 	// NOT_SERVING so Kubernetes removes the EPP from the Service endpoints, while
 	// the ext_proc server keeps serving. Liveness stays SERVING to avoid a
 	// restart mid-drain.
 	draining := s.draining != nil && s.draining.Load()
 
-	// If leader election is disabled, use current logic: all checks are based on whether the pool has synced.
+	// Without leader election, named liveness still excludes plugin readiness.
 	if !s.leaderElectionEnabled {
-		if !isLive || !protocolMatches || draining {
-			s.logger.Error(nil, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches, "draining", draining)
+		if !isLive || !protocolMatches || !pluginsReady || draining {
+			s.logger.Error(pluginReadinessErr, "gRPC health check not serving (leader election disabled)", "service", in.Service, "isLive", isLive, "protocolMatches", protocolMatches, "pluginsReady", pluginsReady, "draining", draining)
 			return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 		}
 		s.logger.V(logutil.TRACE).Info("gRPC health check serving (leader election disabled)", "service", in.Service)
@@ -77,12 +81,12 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	switch in.Service {
 	case ReadinessCheckService:
 		checkName = "readiness"
-		isPassing = isLive && s.isLeader.Load() && protocolMatches && !draining
+		isPassing = isLive && s.isLeader.Load() && protocolMatches && pluginsReady && !draining
 	case "": // Handle overall server health for load balancers that use an empty service name.
 		checkName = "empty service name (considered as overall health)"
 		// The overall health for a load balancer should reflect readiness to accept traffic,
 		// which is true only for the leader pod that has synced its data.
-		isPassing = isLive && s.isLeader.Load() && protocolMatches && !draining
+		isPassing = isLive && s.isLeader.Load() && protocolMatches && pluginsReady && !draining
 	case LivenessCheckService:
 		checkName = "liveness"
 		// Any pod that is running and can respond to this gRPC check is considered "live".
@@ -93,19 +97,31 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	case extProcPb.ExternalProcessor_ServiceDesc.ServiceName:
 		// The main service is considered ready only on the leader.
 		checkName = "ext_proc"
-		isPassing = isLive && s.isLeader.Load() && protocolMatches && !draining
+		isPassing = isLive && s.isLeader.Load() && protocolMatches && pluginsReady && !draining
 	default:
 		s.logger.Error(nil, "gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVICE_UNKNOWN}, nil
 	}
 
 	if !isPassing {
-		s.logger.Error(nil, fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load())
+		s.logger.Error(pluginReadinessErr, fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load(), "pluginsReady", pluginsReady)
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 	}
 
 	s.logger.V(logutil.TRACE).Info(fmt.Sprintf("gRPC %s check serving", checkName), "service", in.Service)
 	return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVING}, nil
+}
+
+func (s *healthServer) checkPluginReadiness(service string) error {
+	if service != "" && service != ReadinessCheckService && service != extProcPb.ExternalProcessor_ServiceDesc.ServiceName {
+		return nil
+	}
+	for _, checker := range s.readinessCheckers {
+		if err := checker.CheckReady(); err != nil {
+			return fmt.Errorf("plugin %s is not ready: %w", checker.TypedName(), err)
+		}
+	}
+	return nil
 }
 
 func (s *healthServer) checkProtocolSupport(isLive bool) bool {

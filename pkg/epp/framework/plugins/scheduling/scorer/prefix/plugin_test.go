@@ -35,7 +35,7 @@ func TestPrefixPluginScore(t *testing.T) {
 	producerName := "approx-prefix-cache-producer"
 	p, _ := New(context.Background(), PrefixCacheScorerPluginType, producerName)
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
 
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
 	endpoint1.Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
@@ -57,7 +57,7 @@ func TestPrefixPluginScoreWithWeights(t *testing.T) {
 	p.matchLengthWeight = 0.5
 	p.matchLengthScaleTokens = 100
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
 
 	// Endpoint 1: match 5, total 10, block size 1
 	// matchRatio = 5/10 = 0.5

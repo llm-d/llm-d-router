@@ -128,7 +128,7 @@ featureGates:
 
 			endpointCandidates := contracts.EndpointCandidates(
 				requestcontrol.NewDatastoreEndpointCandidates(ds))
-			_, admissionController, controlPlane :=
+			_, admissionController, controlPlane, _ :=
 				r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 			if wantEnabled {
