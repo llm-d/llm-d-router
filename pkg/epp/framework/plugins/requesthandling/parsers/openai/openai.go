@@ -17,6 +17,7 @@ limitations under the License.
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -188,7 +189,7 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(string(chunk))
+	usage := extractUsageStreaming(chunk)
 	return &fwkrh.ParsedResponse{
 		Usage: usage,
 	}, nil
@@ -369,8 +370,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	data: {"response":{"usage":{"input_tokens":31,..},...},"type":"response.completed"}
 //
 // It extracts usage from events with type="response.completed".
-func extractUsageStreaming(responseText string) *fwkrh.Usage {
-
+func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 	var streamResponse struct {
 		Usage    *fwkrh.Usage `json:"usage"`
 		Response struct {
@@ -379,18 +379,17 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 		Type string `json:"type"`
 	}
 
-	lines := strings.SplitSeq(responseText, "\n")
+	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := strings.CutPrefix(line, streamingRespPrefix)
+		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
 		if !ok {
 			continue
 		}
 		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if content == "[DONE]" || !strings.Contains(content, "usage") {
+		if bytes.Equal(content, []byte("[DONE]")) || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
-		byteSlice := []byte(content)
-		if err := json.Unmarshal(byteSlice, &streamResponse); err != nil {
+		if err := json.Unmarshal(content, &streamResponse); err != nil {
 			continue
 		}
 		// Standard ChatCompletion / vLLM usage format
