@@ -121,6 +121,8 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
+		migrateDiscoveryConfig(logger, rawConfig)
+
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
 		logger.Info("A configuration wasn't specified. A default one is being used.")
@@ -141,6 +143,37 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	}
 
 	return rawConfig, featureConfig, nil
+}
+
+// migrateDiscoveryConfig lifts deprecated discovery fields into the consolidated
+// discovery section. It handles two deprecated forms:
+//   - dataLayer.discovery.pluginRef (bare) -> dataLayer.discovery.endpoints.pluginRef
+//   - dataLayer.peerDiscovery              -> dataLayer.discovery.peers
+func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPickerConfig) {
+	if rawConfig.DataLayer == nil {
+		return
+	}
+	dl := rawConfig.DataLayer
+
+	//nolint:staticcheck // SA1019: dl.Discovery.PluginRef is deprecated: use discovery.endpoints instead.
+	if dl.Discovery != nil && dl.Discovery.PluginRef != "" {
+		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead.")
+		if dl.Discovery.Endpoints == nil {
+			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
+		}
+	}
+
+	//nolint:staticcheck // SA1019: dl.PeerDiscovery is deprecated: use discovery.peers instead.
+	if dl.PeerDiscovery != nil {
+		logger.Info("DEPRECATION: dataLayer.peerDiscovery is deprecated, use dataLayer.discovery.peers instead. If both are set, the new field is used.")
+		if dl.Discovery == nil {
+			dl.Discovery = &configapi.DiscoveryConfig{}
+		}
+		if dl.Discovery.Peers == nil {
+			//nolint:staticcheck // SA1019: dl.PeerDiscovery is deprecated: use discovery.peers instead.
+			dl.Discovery.Peers = &configapi.PeerDiscoveryConfig{PluginRef: dl.PeerDiscovery.PluginRef}
+		}
+	}
 }
 
 // InstantiateAndConfigure performs the heavy lifting of plugin instantiation, system architecture injection, and

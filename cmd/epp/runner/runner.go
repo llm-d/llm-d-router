@@ -257,7 +257,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
-	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil {
+	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil && rawConfig.DataLayer.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
 	}
 
@@ -923,13 +923,13 @@ func resolvePoolNamespace(poolNamespace string) string {
 }
 
 // resolveDiscovery returns the discovery plugin identified by
-// rawConfig.DataLayer.Discovery.PluginRef. The plugin is expected to have
-// already been instantiated and registered in r.PluginHandle by
+// rawConfig.DataLayer.Discovery.Endpoints.PluginRef. The plugin is expected to
+// have already been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo; this function only looks it up and verifies its
 // type, so the loader-created instance (with its real Handle wired in) is the
 // one the runner drives.
 func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
-	ref := rawConfig.DataLayer.Discovery.PluginRef
+	ref := rawConfig.DataLayer.Discovery.Endpoints.PluginRef
 	p := r.PluginHandle.Plugin(ref)
 	if p == nil {
 		return nil, fmt.Errorf("discovery: no plugin found with name %q", ref)
