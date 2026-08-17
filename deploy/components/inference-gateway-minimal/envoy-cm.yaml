@@ -116,6 +116,7 @@ data:
                     normalize_path: true
                     merge_slashes: true
                     server_header_transformation: PASS_THROUGH
+                    preserve_external_request_id: true
 
                     common_http_protocol_options:
                       headers_with_underscores_action: REJECT_REQUEST

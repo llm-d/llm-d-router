@@ -183,15 +183,18 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 		return
 	}
 
-	// Generate unique request UUID
-	reqUUID, err := uuid.NewUUID()
-	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+	// Use X-Request-Id header if present, otherwise generate a new UUID.
+	requestID := r.Header.Get(requestHeaderRequestID)
+	if requestID == "" {
+		reqUUID, err := uuid.NewUUID()
+		if err != nil {
+			if err := errorBadGateway(err, w); err != nil {
+				s.logger.Error(err, "failed to send error response to client")
+			}
+			return
 		}
-		return
+		requestID = reqUUID.String()
 	}
-	requestID := reqUUID.String()
 
 	model := ioProcessorRequest["model"]
 
