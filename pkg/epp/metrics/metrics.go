@@ -951,7 +951,7 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 }
 
 // RecordFlowControlPoolSaturation records the current saturation level for an inference pool
-// partitioned by pipeline stage ("prefill", "decode", "interleaved", or "effective").
+// partitioned by pipeline stage ("prefill", "decode", or "effective").
 func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation float64) {
 	flowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)

@@ -1393,11 +1393,6 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "decode"))
 	require.NoError(t, err)
 	require.Equal(t, 0.7, val)
-
-	RecordFlowControlPoolSaturation(pool, "interleaved", 0.6)
-	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "interleaved"))
-	require.NoError(t, err)
-	require.Equal(t, 0.6, val)
 }
 
 func TestFlowControlRequestsTotalMetric(t *testing.T) {

@@ -447,7 +447,12 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
 
-	prefillPool, decodePool, interleavedPool := partitionEndpoints(pool)
+	prefillOnly, decodeOnly, interleaved := partitionEndpoints(pool)
+
+	// Interleaved pods serve both stages, so they contribute capacity to both pools,
+	// mirroring how the scheduling filters route requests.
+	prefillPool := append(prefillOnly, interleaved...)
+	decodePool := append(decodeOnly, interleaved...)
 
 	saturation := -1.0
 	for _, part := range []struct {
@@ -456,7 +461,6 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}{
 		{"prefill", prefillPool},
 		{"decode", decodePool},
-		{"interleaved", interleavedPool},
 	} {
 		if len(part.endpoints) == 0 {
 			continue

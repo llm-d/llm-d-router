@@ -1261,6 +1261,39 @@ func TestProcessor(t *testing.T) {
 				assert.True(t, dispatched, "should dispatch when only non-empty partitions are healthy")
 			})
 
+			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+					makeEndpoint(bylabel.RolePrefillDecode), // interleaved
+				}
+
+				// Track which endpoints each Saturation call receives.
+				var calls [][]string
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					var roles []string
+					for _, ep := range endpoints {
+						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
+					}
+					calls = append(calls, roles)
+					return 0.2
+				}
+
+				h.processor.dispatchCycle(context.Background())
+
+				require.Len(t, calls, 2, "detector should be called once per stage")
+				// Prefill pool: prefill + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RolePrefill, bylabel.RolePrefillDecode}, calls[0])
+				// Decode pool: decode + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RoleDecode, bylabel.RolePrefillDecode}, calls[1])
+			})
+
 			t.Run("should behave like monolithic when no role labels exist", func(t *testing.T) {
 				t.Parallel()
 				h := newTestHarness(t, testCleanupTick)
