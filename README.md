@@ -6,19 +6,63 @@
 
 # llm-d Router
 
-> [!IMPORTANT]
-> **Terminology Change**: The *Inference Scheduler* has been renamed to **llm-d Router**; see [Terminology](README.md#terminology).
-
-> [!IMPORTANT]
-> **API & Code Consolidation**: Core Endpoint Picker (EPP) code and the `InferenceObjective` and `InferenceModelRewrite` APIs have been merged into this repository from [Gateway API Inference Extension (GIE)]. The GIE repository now exclusively hosts the `InferencePool` API—an extension of the [Kubernetes Gateway API]—and defines the Endpoint Picker Protocol.
-
-The **llm-d Router** is the intelligent entry point for inference traffic, delivering LLM load and prefix-cache aware routing, request prioritization, and advanced flow control across diverse request formats to fulfill complex serving objectives. It supports a flexible deployment model: it can run in **Standalone Mode** (where a self-managed Envoy proxy runs alongside the EPP in the same pod) or integrate with L7 load balancers—including self-managed instances (e.g., Istio, AgentGateway) and cloud-managed services (e.g., Google Cloud's Application Load Balancer)—via the Kubernetes Gateway API. 
+The **llm-d Router** is the intelligent entry point for inference traffic on Kubernetes: it delivers LLM load- and prefix-cache-aware routing, request prioritization, and advanced flow control to place each request on the best model server.
 
 The router achieves its intelligence through an **Endpoint Picker (EPP)** that integrates with production-grade proxies (such as [Envoy]) via the [ext-proc] protocol, injecting real-time signals into the data plane to optimize request placement.
 
 <p align="center">
   <img src="docs/images/llm-d-router.svg" width="800" alt="llm-d Router Architecture">
 </p>
+
+## Who This Is For
+
+Platform and infrastructure teams running LLM inference on Kubernetes who need routing that is aware of real backend state — KV-cache locality, current load, and per-request priority — rather than plain round-robin or least-connections load balancing. If you operate multiple model-server replicas (e.g. vLLM, SGLang) behind a gateway and want to improve TTFT/throughput and meet latency SLOs, this is for you.
+
+## Quick Evaluation Path
+
+The fastest way to try the router locally, with no GPU required. This spins up the EPP, a vLLM simulator, and a Gateway API implementation in a local [KIND] cluster.
+
+**Prerequisites:** [Make] `v4+`, [Go] `v1.25+`, [Docker] (or [Podman]), [KIND], [kubectl] `v1.25+`.
+
+1. Bring up the local environment:
+
+   ```bash
+   make env-dev-kind
+   ```
+
+2. Port-forward the gateway (in a separate terminal):
+
+   ```bash
+   kubectl --context kind-llm-d-router-dev \
+     port-forward service/inference-gateway-istio 8080:80
+   ```
+
+3. Send a request and confirm you get a routed response:
+
+   ```bash
+   curl -s -w '\n' http://localhost:8080/v1/completions \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"TinyLlama/TinyLlama-1.1B-Chat-v1.0","prompt":"hi","max_tokens":10,"temperature":0}' | jq
+   ```
+
+A successful completion response means the request was routed through the EPP to a backend. For the full development workflow, additional scenarios (P/D disaggregation, multimodal), and configuration, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+## Architecture at a Glance
+
+The router runs in one of two deployment modes:
+
+### 1. Standalone Mode
+A lightweight deployment where a self-managed Envoy proxy runs alongside the EPP in the same pod. This mode is ideal for clusters without Gateway API infrastructure or for basic testing and local evaluations.
+
+### 2. Gateway Mode (Inference Gateway)
+The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
+
+Both modes are specified in the [Kubernetes Gateway API Inference Extensions]. For more details on the routing logic and the different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide].
+
+> [!NOTE]
+> The project provides tools for automatic Envoy installation. However, if you install or
+> configure it yourself, please note that the only supported [request_body_mode and response_body_mode](https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto)
+> is `FULL_DUPLEX_STREAMED`
 
 ## Core Components and APIs
 
@@ -30,25 +74,6 @@ This repository hosts the following core components:
     - **InferenceModelRewrite**: Directs the EPP to perform model name rewriting, enabling flexible traffic management for A/B testing and canary rollouts.
 - **Disaggregation Sidecar**: A coordination component deployed alongside model servers (typically as a sidecar to the decode worker). It orchestrates complex multi-stage inference lifecycles, such as **P/D (Prefill/Decode)** and **E/P/D (Encode/Prefill/Decode)**, by communicating with specialized encode and prefill workers to manage KV-cache and embedding transfers. For more details, see the [Disaggregation Documentation].
 
-## Modes of Operation
-
-The llm-d Router supports two primary deployment modes as specified in the [Kubernetes Gateway API Inference Extensions]:
-
-### 1. Standalone Mode
-A lightweight deployment where a self-managed Envoy proxy runs alongside the EPP in the same pod. This mode is ideal for clusters without Gateway API infrastructure or for basic testing and local evaluations.
-
-### 2. Gateway Mode (Inference Gateway)
-The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
-
-For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide].
-
----
-
-> [!NOTE]
-> The project provides tools for automatic Envoy installation. However, if you install or
-> configure it yourself, please note that the only supported [request_body_mode and response_body_mode](https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto)
-> is `FULL_DUPLEX_STREAMED`
-
 ## Terminology
 
 To ensure clarity across the project, we use the following standard terminology:
@@ -57,6 +82,14 @@ To ensure clarity across the project, we use the following standard terminology:
 - **llm-d Endpoint Picker (EPP)**: The specific component that implements the routing intelligence and scoring logic. Use this term when referring to capabilities or configurations specific to the EPP itself, rather than the request routing system as a whole.
 - **Inference Gateway**: A synonym for the **llm-d Router** when operating in **Gateway Mode**.
 - **Request Scheduler**: A sub-component within the EPP responsible for the queuing and dispatching of requests.
+
+## Project Status / Migration Notes
+
+> [!IMPORTANT]
+> **Terminology Change**: The *Inference Scheduler* has been renamed to **llm-d Router**; see [Terminology](#terminology).
+
+> [!IMPORTANT]
+> **API & Code Consolidation**: Core Endpoint Picker (EPP) code and the `InferenceObjective` and `InferenceModelRewrite` APIs have been merged into this repository from [Gateway API Inference Extension (GIE)]. The GIE repository now exclusively hosts the `InferencePool` API—an extension of the [Kubernetes Gateway API]—and defines the Endpoint Picker Protocol.
 
 [Kubernetes]:https://kubernetes.io
 [Kubernetes Gateway API]:https://gateway-api.sigs.k8s.io/
@@ -69,6 +102,12 @@ To ensure clarity across the project, we use the following standard terminology:
 [Gateway API]:https://github.com/kubernetes-sigs/gateway-api
 [Envoy]:https://github.com/envoyproxy/envoy
 [ext-proc]:https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter
+[Make]:https://www.gnu.org/software/make/
+[Go]:https://go.dev/
+[Docker]:https://www.docker.com/
+[Podman]:https://podman.io/
+[KIND]:https://github.com/kubernetes-sigs/kind
+[kubectl]:https://kubectl.docs.kubernetes.io/installation/kubectl/
 
 ## Contributing
 
