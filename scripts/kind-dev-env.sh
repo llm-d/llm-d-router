@@ -405,7 +405,7 @@ TEMP_FILE=$(mktemp)
 trap "rm -f \"${TEMP_FILE}\"" EXIT
 
 kubectl --context ${KUBE_CONTEXT} delete configmap epp-config --ignore-not-found
-envsubst '$MODEL_NAME' < ${EPP_CONFIG} > ${TEMP_FILE}
+envsubst '${MODEL_NAME} ${VLLM_RENDER_URL}' < ${EPP_CONFIG} > ${TEMP_FILE}
 kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-config.yaml=${TEMP_FILE}
 
 # The replica count is changed in some end to end tests
