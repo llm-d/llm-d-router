@@ -93,7 +93,7 @@ spec:
             - "/etc/epp/epp-config.yaml"
             - --metrics-endpoint-auth=false
             - --ha-enable-leader-election=false
-            - "--tracing=${TRACING}"
+            - "--tracing=${TRACING_EPP}"
           ports:
             - containerPort: 5557
             - containerPort: 9002

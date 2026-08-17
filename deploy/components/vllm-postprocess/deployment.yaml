@@ -29,7 +29,7 @@ spec:
             - "--port=${TARGET_PORT}"
             - "--vllm-port=${POST_TARGET_PORT}"
             - "--secure-proxy=false"
-            - "--tracing=${TRACING}"
+            - "--tracing=${TRACING_SIDECAR}"
           ports:
             - name: sidecar-http
               containerPort: ${TARGET_PORT}
