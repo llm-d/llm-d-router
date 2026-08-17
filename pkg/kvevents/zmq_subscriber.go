@@ -17,9 +17,11 @@ package kvevents
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -27,33 +29,16 @@ import (
 )
 
 const (
-	retryInterval       = 5 * time.Second
-	replayTimeout       = 2 * time.Minute
-	replaySocketTimeout = 2 * time.Second
-	replayCooldown      = 30 * time.Second
-	maxConcurrentReplay = 8
+	retryInterval               = 5 * time.Second
+	replayTimeout               = 2 * time.Minute
+	replayAttemptIdleTimeout    = 2 * time.Second
+	replayRetryBackoff          = 100 * time.Millisecond
+	replayCooldown              = 30 * time.Second
+	maxConcurrentReplay         = 8
+	maxReplayNoProgressAttempts = 3
 )
 
-type replayLimiter chan struct{}
-
-func newReplayLimiter(limit int) replayLimiter {
-	return make(replayLimiter, limit)
-}
-
-func (l replayLimiter) acquire(ctx context.Context) bool {
-	select {
-	case l <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (l replayLimiter) release() {
-	<-l
-}
-
-var processReplayLimiter = newReplayLimiter(maxConcurrentReplay)
+var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
@@ -272,18 +257,17 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 	return z.lastReplayFailure.IsZero() || time.Since(z.lastReplayFailure) >= replayCooldown
 }
 
+func (z *zmqSubscriber) invalidateReplay(topic string) {
+	z.pool.resetForSource(topic, z.sourceEndpoint)
+	z.lastSeq = 0
+	z.hasLastSeq = false
+	z.lastReplayFailure = time.Now()
+}
+
 // requestReplay requests buffered events starting from startSeq.
 func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool {
 	logger := log.FromContext(ctx).WithName("zmq-replay")
-	waitStarted := time.Now()
-	if !processReplayLimiter.acquire(ctx) {
-		return false
-	}
-	defer processReplayLimiter.release()
-	if waitDuration := time.Since(waitStarted); waitDuration >= time.Second {
-		logger.Info("Replay admitted after waiting for process capacity",
-			"waitDuration", waitDuration, "replayEndpoint", z.replayEndpoint)
-	}
+	debugLogger := logger.V(logging.DEBUG)
 
 	replayCtx, cancel := context.WithTimeout(ctx, replayTimeout)
 	defer cancel()
@@ -291,9 +275,10 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 	replayed := 0
 	nextSeq := startSeq
 	attempt := 0
+	noProgressAttempts := 0
 	for {
 		if replayCtx.Err() != nil {
-			z.lastReplayFailure = time.Now()
+			z.invalidateReplay(z.topicFilter)
 			logger.Info("Replay timed out",
 				"replayed", replayed, "attempts", attempt,
 				"replayEndpoint", z.replayEndpoint)
@@ -301,14 +286,35 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		}
 		attempt++
 
-		attemptCtx, attemptCancel := context.WithTimeout(replayCtx, replaySocketTimeout)
-		dealer := zmq4.NewDealer(attemptCtx, zmq4.WithTimeout(replaySocketTimeout))
+		attemptCtx, attemptCancel := context.WithCancel(replayCtx)
+		dealer := zmq4.NewDealer(attemptCtx, zmq4.WithTimeout(replayAttemptIdleTimeout))
 		if err := dealer.Dial(z.replayEndpoint); err != nil {
 			attemptCancel()
-			z.lastReplayFailure = time.Now()
+			z.invalidateReplay(z.topicFilter)
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-connect").Inc()
 			logger.Error(err, "Failed to connect replay socket",
 				"replayEndpoint", z.replayEndpoint)
 			return false
+		}
+		if replayCtx.Err() != nil {
+			dealer.Close()
+			attemptCancel()
+			continue
+		}
+		waitStarted := time.Now()
+		if err := processReplayLimiter.Acquire(replayCtx, 1); err != nil {
+			dealer.Close()
+			attemptCancel()
+			z.invalidateReplay(z.topicFilter)
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-capacity").Inc()
+			logger.Info("Replay timed out waiting for process capacity",
+				"waitDuration", time.Since(waitStarted),
+				"replayEndpoint", z.replayEndpoint)
+			return false
+		}
+		if waitDuration := time.Since(waitStarted); waitDuration >= time.Second {
+			logger.Info("Replay admitted after waiting for process capacity",
+				"waitDuration", waitDuration, "replayEndpoint", z.replayEndpoint)
 		}
 
 		seqBytes := make([]byte, 8)
@@ -316,19 +322,27 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		if err := dealer.SendMulti(zmq4.NewMsgFrom([]byte{}, seqBytes)); err != nil {
 			dealer.Close()
 			attemptCancel()
-			z.lastReplayFailure = time.Now()
+			processReplayLimiter.Release(1)
+			z.invalidateReplay(z.topicFilter)
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-send").Inc()
 			logger.Error(err, "Failed to send replay request",
-				"startSeq", nextSeq, "replayEndpoint", z.replayEndpoint)
+				"nextSeq", nextSeq, "replayEndpoint", z.replayEndpoint)
 			return false
 		}
 
+		idleTimer := time.AfterFunc(replayAttemptIdleTimeout, attemptCancel)
 		attemptReplayed := 0
 		complete := false
+		expectedSeq := nextSeq
+		var receiveErr error
+		var terminalErr error
 		for {
 			msg, err := dealer.Recv()
 			if err != nil {
+				receiveErr = err
 				break
 			}
+			idleTimer.Reset(replayAttemptIdleTimeout)
 
 			frames := msg.Frames
 			if len(frames) > 0 && len(frames[0]) == 0 {
@@ -341,15 +355,12 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 
 			topic, seq, payload, ok := parseEventFrame(frames)
 			if !ok {
-				dealer.Close()
-				attemptCancel()
-				z.lastReplayFailure = time.Now()
-				logger.Error(nil, "Malformed replay frame",
-					"frameCount", len(frames), "replayed", replayed)
-				return false
+				terminalErr = fmt.Errorf("malformed replay frame with %d frames", len(frames))
+				break
 			}
-			if z.hasLastSeq && seq <= z.lastSeq {
-				continue
+			if seq != expectedSeq {
+				terminalErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
+				break
 			}
 
 			z.addTask(topic, seq, payload)
@@ -357,11 +368,31 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			z.hasLastSeq = true
 			replayed++
 			attemptReplayed++
+			expectedSeq++
 		}
 
+		idleTimer.Stop()
 		dealer.Close()
 		attemptCancel()
+		processReplayLimiter.Release(1)
+		if terminalErr != nil {
+			z.invalidateReplay(z.topicFilter)
+			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-incomplete").Inc()
+			logger.Error(terminalErr, "Replay response is incomplete",
+				"attempt", attempt, "replayed", replayed,
+				"nextSeq", nextSeq, "replayEndpoint", z.replayEndpoint)
+			return false
+		}
 		if complete {
+			if replayed == 0 && startSeq > 0 {
+				err := fmt.Errorf("incomplete replay: sequence %d was not available", startSeq)
+				z.invalidateReplay(z.topicFilter)
+				metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-incomplete").Inc()
+				logger.Error(err, "Replay response is incomplete",
+					"attempt", attempt, "replayed", replayed,
+					"nextSeq", nextSeq, "replayEndpoint", z.replayEndpoint)
+				return false
+			}
 			z.lastReplayFailure = time.Time{}
 			logger.Info("Replay complete", "replayed", replayed,
 				"attempts", attempt, "startSeq", startSeq,
@@ -372,12 +403,31 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			continue
 		}
 
-		if z.hasLastSeq {
-			nextSeq = z.lastSeq + 1
+		if attemptReplayed == 0 {
+			noProgressAttempts++
+			if noProgressAttempts >= maxReplayNoProgressAttempts {
+				if receiveErr == nil {
+					receiveErr = fmt.Errorf("replay response ended without progress")
+				}
+				z.invalidateReplay(z.topicFilter)
+				metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-no-progress").Inc()
+				logger.Error(receiveErr, "Replay stopped after no progress",
+					"attempts", attempt, "replayed", replayed,
+					"nextSeq", nextSeq, "replayEndpoint", z.replayEndpoint)
+				return false
+			}
+		} else {
+			noProgressAttempts = 0
+			nextSeq = expectedSeq
 		}
-		logger.Info("Replay response interrupted, resuming",
+		debugLogger.Info("Replay response interrupted, resuming",
 			"attempt", attempt, "attemptReplayed", attemptReplayed,
-			"replayed", replayed, "nextSeq", nextSeq,
+			"replayed", replayed, "nextSeq", nextSeq, "error", receiveErr,
 			"replayEndpoint", z.replayEndpoint)
+
+		select {
+		case <-time.After(replayRetryBackoff):
+		case <-replayCtx.Done():
+		}
 	}
 }
