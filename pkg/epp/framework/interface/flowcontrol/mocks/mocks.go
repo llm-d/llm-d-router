@@ -19,6 +19,8 @@ package mocks
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -215,6 +217,77 @@ func (m *MockOrderingPolicy) Less(a, b flowcontrol.QueueItemAccessor) bool {
 }
 
 var _ flowcontrol.OrderingPolicy = &MockOrderingPolicy{}
+
+// MockScoringOrderingPolicy is a behavioral mock for the ScoringOrderingPolicy interface.
+//
+// Scores are held in a map keyed by request ID so a test can mutate the score of an item that is already
+// queued, which is the situation the interface exists to handle. Generation is a plain counter the test
+// advances explicitly via Bump, standing in for a real policy's throttled latch: mutating a score without
+// bumping models drift the queue has not been told about yet.
+//
+// ScoreCalls counts Score invocations so a test can assert the queue recomputes exactly once per item per
+// generation change, and not at all without one.
+type MockScoringOrderingPolicy struct {
+	TypedNameV plugin.TypedName
+
+	// mu guards scores and generation. The queue calls Score and Generation from any goroutine that peeks,
+	// so an unguarded map here would be a data race in every concurrent test.
+	mu         sync.Mutex
+	scores     map[string]float64
+	generation uint64
+
+	scoreCalls atomic.Int64
+}
+
+// NewMockScoringOrderingPolicy creates a scoring policy mock whose scores all start at zero.
+func NewMockScoringOrderingPolicy(name string) *MockScoringOrderingPolicy {
+	return &MockScoringOrderingPolicy{
+		TypedNameV: plugin.TypedName{Type: "mock-scoring-ordering-policy", Name: name},
+		scores:     make(map[string]float64),
+	}
+}
+
+func (m *MockScoringOrderingPolicy) TypedName() plugin.TypedName { return m.TypedNameV }
+
+// SetScore records the score this policy will report for the given request ID. It deliberately does not
+// bump the generation: a test that wants the queue to observe the change must call Bump.
+func (m *MockScoringOrderingPolicy) SetScore(requestID string, score float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scores[requestID] = score
+}
+
+// Bump advances the generation, signalling to every queue ordered by this instance that its cached scores
+// are stale.
+func (m *MockScoringOrderingPolicy) Bump() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.generation++
+}
+
+// ScoreCalls returns the number of times Score has been called since construction.
+func (m *MockScoringOrderingPolicy) ScoreCalls() int64 { return m.scoreCalls.Load() }
+
+func (m *MockScoringOrderingPolicy) Score(item flowcontrol.QueueItemAccessor) float64 {
+	m.scoreCalls.Add(1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.scores[item.OriginalRequest().ID()]
+}
+
+func (m *MockScoringOrderingPolicy) Generation() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.generation
+}
+
+// Less delegates to CompareByScore, as every conforming scoring policy must, so that tests exercise the
+// same relationship between the live and cached comparison paths that a real policy has.
+func (m *MockScoringOrderingPolicy) Less(a, b flowcontrol.QueueItemAccessor) bool {
+	return flowcontrol.CompareByScore(m, a, b)
+}
+
+var _ flowcontrol.ScoringOrderingPolicy = &MockScoringOrderingPolicy{}
 
 // MockFairnessPolicy is a behavioral mock for the FairnessPolicy interface.
 // Simple accessors are configured with public value fields (e.g., NameV).

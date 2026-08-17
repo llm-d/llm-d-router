@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"context"
 	"errors"
+	"math"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -90,10 +91,12 @@ type FairnessPolicy interface {
 //
 // Architecture (Flyweight Pattern):
 // Ordering policies are Singletons. A single instance handles the logic for all queues in a Priority Band.
-// The policy is purely functional.
+// The comparator is a pure function of the items it is given.
 //
 //   - Logic: Defined here as a Comparator-centric interface.
 //   - State: Ordering policies are generally stateless, operating on the intrinsic properties of the items.
+//     A policy whose ordering key is revised while an item waits in the queue MUST NOT read that key from
+//     Less; it implements ScoringOrderingPolicy instead, and the queue caches and refreshes on its behalf.
 //
 // Conformance: Implementations MUST ensure all methods are goroutine-safe.
 type OrderingPolicy interface {
@@ -105,6 +108,88 @@ type OrderingPolicy interface {
 	//
 	// Invariant: returning true means 'a' has higher priority than 'b'.
 	Less(a, b QueueItemAccessor) bool
+}
+
+// ScoringOrderingPolicy is an optional extension of OrderingPolicy for policies whose ordering key is
+// revised in place while an item waits -- for example one keyed on KV-cache prefix affinity, which moves
+// as the cache warms and evicts. Reading such a key from Less breaks the heap: the queue re-sorts only on
+// Add and Remove so it never reflects the new key, and two comparisons within one sift can observe
+// different states, so Less is not transitive.
+//
+// A policy implementing this interface delegates both problems to the queue, which caches each item's
+// Score, compares only cached values, and rebuilds when Generation changes. The queue detects the
+// interface via a checked type assertion at construction; a policy that does not implement it is driven
+// through Less alone and pays no overhead.
+//
+// Conformance: implementations MUST satisfy all of the following.
+//
+//   - All methods MUST be goroutine-safe. The instance is a singleton shared by every queue in every band
+//     that references it.
+//   - Less MUST be implemented as CompareByScore(p, a, b). The fairness tier compares heads across queues
+//     through Less with no access to the queue's cache; any other implementation makes that cross-queue
+//     comparison silently inconsistent with the queue's own ordering.
+//   - Score MUST NOT return NaN, which compares false against everything and breaks the heap's strict weak
+//     ordering. NormalizeScore is a backstop, not a license to rely on it.
+//   - Score MUST be cheap and MUST NOT call back into the queue. It runs once per item per rebuild under
+//     the queue's write lock: a callback deadlocks, and an expensive Score blocks the flow's mutation path.
+//   - Generation MUST be monotonically non-decreasing and throttled. Every observed change triggers an
+//     O(n) rebuild in each queue ordered by this instance, so a generation tracking an underlying revision
+//     one-to-one rebuilds on nearly every Peek. Latch a value and re-latch at most once per interval.
+//   - A decorator wrapping an OrderingPolicy MUST forward Score and Generation, or it hides this interface
+//     from the type assertion and the wrapped policy degrades silently to static ordering on Less alone.
+//
+// Ordering is approximate: an item added after the current generation's rebuild is scored against fresher
+// state than its neighbors and is reconciled only at the next generation's rebuild, so worst-case staleness
+// spans up to two refresh intervals. Because Add scores against a warmer key than the incumbents' cached
+// scores, this consistently favors newly-arriving requests over waiting ones within an interval -- a
+// directional bias, not symmetric noise.
+type ScoringOrderingPolicy interface {
+	OrderingPolicy
+
+	// Score returns the item's current priority key. Higher scores dispatch first.
+	Score(item QueueItemAccessor) float64
+
+	// Generation identifies the epoch of the state underlying Score. A change tells the queue that any
+	// cached score may be stale and that it must recompute before its next read.
+	Generation() uint64
+}
+
+// CompareByScore reports whether a dispatches before b under p: higher Score first, ties broken by earlier
+// EnqueueTime, NaN normalized to negative infinity.
+//
+// A scoring policy MUST implement Less by calling this helper. The fairness tier compares heads across
+// queues through OrderingPolicy.Less and has no access to any queue's cache, so this is what makes the
+// band-level comparison apply the same rule as the queue's cached ordering. The two differ only in
+// freshness: this helper reads Score live, the queue reads its cache.
+//
+// nil handling matches the static ordering policies: a nil item is lowest priority, and two nils compare
+// equal.
+func CompareByScore(p ScoringOrderingPolicy, a, b QueueItemAccessor) bool {
+	if a == nil {
+		return false
+	}
+	if b == nil {
+		return true
+	}
+	scoreA, scoreB := NormalizeScore(p.Score(a)), NormalizeScore(p.Score(b))
+	if scoreA != scoreB {
+		return scoreA > scoreB
+	}
+	return a.EnqueueTime().Before(b.EnqueueTime())
+}
+
+// NormalizeScore maps NaN to negative infinity, leaving every other float64 -- including both infinities --
+// unchanged. A NaN score compares false against everything, which breaks the strict weak ordering a heap
+// requires.
+//
+// ScoringOrderingPolicy forbids returning NaN. This is the backstop for a non-conforming policy, exported so
+// that its two consumers share one definition of the rule: CompareByScore when comparing live scores, and
+// the queue when caching them.
+func NormalizeScore(score float64) float64 {
+	if math.IsNaN(score) {
+		return math.Inf(-1)
+	}
+	return score
 }
 
 // SaturationDetector provides real-time load signals.

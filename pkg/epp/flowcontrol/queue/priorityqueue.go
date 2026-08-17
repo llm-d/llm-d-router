@@ -49,7 +49,11 @@ type heapItem struct {
 	// byteSize is the item's byte size as reported at Add time. Removal paths debit this booked
 	// value rather than re-reading the request, so the queue's byte accounting stays exact even if
 	// a caller-implemented FlowControlRequest.ByteSize() is not stable across calls.
-	byteSize      uint64
+	byteSize uint64
+	// score is the item's cached ordering key, used only in scoring mode. The comparator reads this rather
+	// than calling the policy, so a heap operation sees values fixed before it began and stays transitive
+	// while the policy's state moves. Booked at Add, rewritten for every item on refresh.
+	score         float64
 	index         int // position in itemHeap.items; set to -1 once removed.
 	isInvalidated bool
 }
@@ -65,20 +69,37 @@ func (h *heapItem) IsInvalidated() bool { return h.isInvalidated }
 
 var _ flowcontrol.QueueItemHandle = &heapItem{}
 
-// itemHeap implements container/heap.Interface. It is NOT goroutine-safe; the owning
-// priorityQueue guards all access with its mutex.
+// itemHeap implements container/heap.Interface. Its methods and items slice are guarded by the owning
+// priorityQueue's mutex; the policy fields are immutable after construction and cachedGeneration is atomic,
+// so the owner reads both without the mutex.
 type itemHeap struct {
-	items  []*heapItem
-	policy flowcontrol.OrderingPolicy
+	items []*heapItem
+	// Exactly one of policy and scoringPolicy is populated: the nil one's counterpart is the queue's mode.
+	// scoringPolicy suffices for scoring mode because ScoringOrderingPolicy embeds OrderingPolicy.
+	policy        flowcontrol.OrderingPolicy        // static mode
+	scoringPolicy flowcontrol.ScoringOrderingPolicy // scoring mode; owner calls Score/Generation through it
+	// cachedGeneration is the generation every score in items was computed at. refreshIfStale reads it
+	// unlocked on the fast path and writes it under the lock after a rebuild. Meaningless in static mode.
+	cachedGeneration atomic.Uint64
 }
 
 func (h *itemHeap) Len() int { return len(h.items) }
 
-// Less orders the heap so that the highest-priority item (per the policy) sits at the root.
-// policy.Less(a, b) reports that 'a' has higher priority than 'b', which is exactly the order
-// container/heap uses to select the root.
+// Less orders the heap so the highest-priority item sits at the root: policy.Less in static mode.
+//
+// In scoring mode it reads cached scores, never live policy state -- what keeps it transitive for a drifting
+// key: higher score first, ties by earlier EnqueueTime. The tie-break MUST match flowcontrol.CompareByScore,
+// which the fairness tier uses to compare heads across queues; divergence lets a band-level pick disagree
+// with the queue's own head for equal-scored items.
 func (h *itemHeap) Less(i, j int) bool {
-	return h.policy.Less(h.items[i].item, h.items[j].item)
+	if h.scoringPolicy == nil {
+		return h.policy.Less(h.items[i].item, h.items[j].item)
+	}
+	a, b := h.items[i], h.items[j]
+	if a.score != b.score {
+		return a.score > b.score
+	}
+	return a.item.EnqueueTime().Before(b.item.EnqueueTime())
 }
 
 func (h *itemHeap) Swap(i, j int) {
@@ -103,14 +124,9 @@ func (h *itemHeap) Pop() any {
 	return hi
 }
 
-// priorityQueue implements the SafeQueue interface using a container/heap.
-// The heap is ordered by the provided policy, with higher priority considered closer to the head.
-// This implementation is concurrent-safe.
-//
-// The queue owns its statistics. len and byteSize are published snapshots of the heap's state,
-// assigned in the same critical section as every mutation: len is stored from len(heap.items) and
-// byteSize credits/debits each item's booked size exactly once. Neither can drift from the heap's
-// actual contents, so both are non-negative by construction.
+// priorityQueue is a concurrent-safe SafeQueue over a container/heap, ordered by the configured policy with
+// the highest-priority item at the head. len and byteSize are atomic snapshots maintained inside the same
+// critical section as every mutation, so they cannot drift from the heap's contents.
 type priorityQueue struct {
 	heap     *itemHeap
 	len      atomic.Int64
@@ -118,14 +134,21 @@ type priorityQueue struct {
 	mu       sync.RWMutex
 }
 
-// newPriorityQueue creates a new priority queue with the given policy.
+// newPriorityQueue creates a new priority queue with the given policy. The optional ScoringOrderingPolicy
+// upgrade is checked once here; a policy implementing it goes to scoringPolicy (scoring mode), any other to
+// policy (the unchanged static path).
+//
+// cachedGeneration is left at zero rather than seeded: the cache is empty so no generation is honest, the
+// first Peek's rebuild iterates zero items, and seeding would call plugin code while the registry holds its
+// lock (FlowRegistry.buildFlowComponents).
 func newPriorityQueue(policy flowcontrol.OrderingPolicy) *priorityQueue {
-	return &priorityQueue{
-		heap: &itemHeap{
-			items:  make([]*heapItem, 0),
-			policy: policy,
-		},
+	h := &itemHeap{items: make([]*heapItem, 0)}
+	if scoringPolicy, ok := policy.(flowcontrol.ScoringOrderingPolicy); ok {
+		h.scoringPolicy = scoringPolicy
+	} else {
+		h.policy = policy
 	}
+	return &priorityQueue{heap: h}
 }
 
 // --- SafeQueue Interface Implementation ---
@@ -141,8 +164,15 @@ func (pq *priorityQueue) ByteSize() uint64 {
 }
 
 // Peek returns the highest-priority item without removing it.
-// Time complexity: O(1).
+// Time complexity: O(1) in static mode, amortized O(1) in scoring mode.
+//
+// In scoring mode Peek is the refresh point: it is the last read before the value is used, so refreshing
+// here (rather than on a ticker) bounds how stale a head can be at comparison time.
 func (pq *priorityQueue) Peek() flowcontrol.QueueItemAccessor {
+	if pq.heap.scoringPolicy != nil {
+		pq.refreshIfStale()
+	}
+
 	pq.mu.RLock()
 	defer pq.mu.RUnlock()
 
@@ -152,10 +182,46 @@ func (pq *priorityQueue) Peek() flowcontrol.QueueItemAccessor {
 	return pq.heap.items[0].item
 }
 
+// refreshIfStale rebuilds every cached score and re-heapifies if the policy's generation has moved. The
+// unlocked pre-check makes the common no-op case one atomic load; the re-check under the lock is
+// double-checked locking, since sync.RWMutex cannot upgrade.
+//
+// The caller must have established that the queue is in scoring mode.
+func (pq *priorityQueue) refreshIfStale() {
+	// Capture gen once. Stamping cachedGeneration with a value re-read after the rebuild could mark scores
+	// current at an epoch they were not read at and skip the next real change. Capturing before the Score
+	// pass instead keeps the stamp <= the state the scores came from: if the policy advanced meanwhile, the
+	// stamp is stale-low and the next Peek simply rebuilds again -- never a skipped rebuild.
+	gen := pq.heap.scoringPolicy.Generation()
+	if gen == pq.heap.cachedGeneration.Load() {
+		return
+	}
+
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	if gen == pq.heap.cachedGeneration.Load() {
+		return
+	}
+
+	for _, hi := range pq.heap.items {
+		hi.score = pq.computeScore(hi.item)
+	}
+	heap.Init(pq.heap)
+	pq.heap.cachedGeneration.Store(gen)
+}
+
 // Add adds an item to the queue.
 // Time complexity: O(log n).
+//
+// In scoring mode the score is computed before the lock, so Score never runs in the critical section. It
+// reflects state at Add time, which may be newer than the incumbents' cached scores; see
+// ScoringOrderingPolicy for the resulting bounded skew.
 func (pq *priorityQueue) Add(item flowcontrol.QueueItemAccessor) {
 	hi := &heapItem{item: item, byteSize: item.OriginalRequest().ByteSize()}
+	if pq.heap.scoringPolicy != nil {
+		hi.score = pq.computeScore(item)
+	}
 	item.SetHandle(hi)
 
 	pq.mu.Lock()
@@ -254,4 +320,12 @@ func (pq *priorityQueue) Drain() []flowcontrol.QueueItemAccessor {
 	pq.byteSize.Store(0)
 
 	return drainedItems
+}
+
+// --- Scoring mode ---
+
+// computeScore reads the policy's score and normalizes NaN, the queue's backstop against a non-conforming
+// policy. The caller must have established that the queue is in scoring mode.
+func (pq *priorityQueue) computeScore(item flowcontrol.QueueItemAccessor) float64 {
+	return flowcontrol.NormalizeScore(pq.heap.scoringPolicy.Score(item))
 }
