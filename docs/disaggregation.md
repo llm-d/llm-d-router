@@ -396,12 +396,12 @@ PD deciders determine whether prefill should be offloaded to a separate worker, 
 
 #### Prefix-Based PD Decider
 
-The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. It fills two roles, sharing the same `nonCachedTokens` / `promptTokens` parameters:
+The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. Which role the plugin fills depends on the deployment topology:
 
-- Disaggregation decider inside `disagg-profile-handler` — routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)).
-- Conditional-decode gate — rejects `Prefer: if-available` requests with HTTP 412 when the same threshold would trigger remote prefill.
+- **Sidecar-based P/D deployments** wire the plugin as a `disagg-profile-handler` decider — it routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)). Sidecar deployments do not emit `Prefer: if-available`, so the conditional-decode gate is dormant here.
+- **Coordinator-based deployments** use the default profile handler and declare the plugin at the top level. Only its `PreRequest` hook runs, enforcing the conditional-decode gate — `Prefer: if-available` requests are rejected with HTTP 412 when the same threshold would trigger remote prefill.
 
-A deployment can declare the plugin for either role independently, or both.
+Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declaring **two named instances** of this plugin in the same config (e.g., one wired as a decider, another as a standalone gate) with different parameters is not supported: the plugin memoizes its per-request decision keyed by plugin type, so the first instance to evaluate a given request populates the cache and the second reads that cached decision — its own parameters silently do not apply.
 
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
