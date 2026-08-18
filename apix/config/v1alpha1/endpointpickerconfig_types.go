@@ -403,8 +403,9 @@ type FlowControlConfig struct {
 	// within it is shed with a retryable backpressure error rather than served late, and with no
 	// client or gateway deadline it is the only bound on waiting against a pool that has endpoints.
 	// Where such deadlines exist and fire sooner, they evict the request first (client disconnect).
-	// An explicit "0s" disables eviction while the pool has endpoints: such requests then wait until
-	// client disconnect or controller shutdown.
+	// An explicit "0s" disables eviction while the pool has endpoints, and, unless NoEndpointRequestTTL
+	// overrides it, while the pool is empty as well: such requests then wait until client disconnect or
+	// controller shutdown.
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
 
 	// +optional
@@ -419,9 +420,10 @@ type FlowControlConfig struct {
 	// Total queue wait stays bounded by the longer of the two budgets, plus a short expiry-sweep margin;
 	// a regime change grants a fresh budget but does not extend that bound, so a request that changes
 	// regime near the bound may be evicted before the fresh budget elapses.
-	// If omitted, it defaults to 60s. An explicit "0s" disables eviction while the pool is empty:
-	// requests then wait until an endpoint appears, the client disconnects, or the controller shuts
-	// down.
+	// If omitted, it follows DefaultRequestTTL, so splitting the regimes is opt-in and a configuration that
+	// sets only DefaultRequestTTL keeps that bound in both; it defaults to 60s when neither is set. An
+	// explicit "0s" disables eviction while the pool is empty: requests then wait until an endpoint
+	// appears, the client disconnects, or the controller shuts down.
 	NoEndpointRequestTTL *metav1.Duration `json:"noEndpointRequestTTL,omitempty"`
 
 	// +optional

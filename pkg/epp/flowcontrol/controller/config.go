@@ -31,8 +31,8 @@ const (
 	// request timeout) it is the only bound on waiting against a pool that has endpoints; where such
 	// deadlines exist and fire sooner, context cancellation evicts the request first.
 	defaultRequestTTL = 60 * time.Second
-	// defaultNoEndpointRequestTTL is the default queue-wait budget applied while the candidate pool has
-	// no endpoints. It is deliberately equal to `defaultRequestTTL`, so splitting the budget is opt-in:
+	// defaultNoEndpointRequestTTL is the queue-wait budget applied while the candidate pool has no endpoints when
+	// neither budget is configured. It is deliberately equal to `defaultRequestTTL`, so splitting the budget is opt-in:
 	// sizing the two regimes apart (a cold start is minutes, a time-to-first-token SLO is seconds) is a
 	// deployment-specific decision, not one a default can make.
 	defaultNoEndpointRequestTTL = 60 * time.Second
@@ -58,16 +58,18 @@ type Config struct {
 	// TTL hint. Because the admission adapter does not currently plumb a per-request hint, this value
 	// governs every request entering flow control while the candidate pool has endpoints.
 	// Optional: Defaults to `defaultRequestTTL` (60s). An explicit zero disables eviction in that
-	// regime, in which case such requests are bounded only by request context cancellation (client
-	// disconnect or gateway timeout).
+	// regime, and, unless `NoEndpointRequestTTL` overrides it, in the empty-pool regime as well; such
+	// requests are then bounded only by request context cancellation (client disconnect or gateway
+	// timeout).
 	DefaultRequestTTL time.Duration
 
 	// NoEndpointRequestTTL is the queue-wait budget that replaces `DefaultRequestTTL` while the candidate
 	// pool has no endpoints. Which budget is in force is re-evaluated as the request waits, and each
 	// change of regime starts a fresh budget, so a request queued against an empty pool is not shed the
 	// instant an endpoint appears and makes it dispatchable.
-	// Optional: Defaults to `defaultNoEndpointRequestTTL` (60s). An explicit zero disables eviction while
-	// the pool is empty, in which case such requests are bounded only by request context cancellation.
+	// Optional: Follows `DefaultRequestTTL` when the configuration sets that alone, and defaults to
+	// `defaultNoEndpointRequestTTL` (60s) when it sets neither. An explicit zero disables eviction while the pool is
+	// empty, in which case such requests are bounded only by request context cancellation.
 	NoEndpointRequestTTL time.Duration
 
 	// ExpiryCleanupInterval is the interval at which each processor scans its queues for expired items.
@@ -129,8 +131,14 @@ func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
 		if apiConfig.DefaultRequestTTL != nil {
 			opts = append(opts, WithDefaultRequestTTL(apiConfig.DefaultRequestTTL.Duration))
 		}
-		if apiConfig.NoEndpointRequestTTL != nil {
+		switch {
+		case apiConfig.NoEndpointRequestTTL != nil:
 			opts = append(opts, WithNoEndpointRequestTTL(apiConfig.NoEndpointRequestTTL.Duration))
+		case apiConfig.DefaultRequestTTL != nil:
+			// Left unset, the no-endpoint budget follows `DefaultRequestTTL`, so splitting the regimes is opt-in: a
+			// deployment that bounded queue wait with the single field it had keeps that bound in both regimes, and an
+			// explicit "0s" still disables eviction outright.
+			opts = append(opts, WithNoEndpointRequestTTL(apiConfig.DefaultRequestTTL.Duration))
 		}
 		if apiConfig.EnableEviction {
 			opts = append(opts, WithEnableEviction(true))
