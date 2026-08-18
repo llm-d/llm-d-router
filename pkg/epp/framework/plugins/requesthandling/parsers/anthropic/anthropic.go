@@ -209,6 +209,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
 		if !ok || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
