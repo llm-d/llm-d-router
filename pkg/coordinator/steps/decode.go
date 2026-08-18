@@ -78,11 +78,15 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	proxy := newDecodeProxy(logger, s.gwClient.Transport(), nil)
 	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamDecode)
-	callStart := time.Now()
+	transport := &timedRoundTripper{
+		inner: s.gwClient.Transport(),
+		record: func(d time.Duration) {
+			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamDecode, d)
+		},
+	}
+	proxy := newDecodeProxy(logger, transport, nil)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
-	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamDecode, time.Since(callStart))
 	return nil
 }
 

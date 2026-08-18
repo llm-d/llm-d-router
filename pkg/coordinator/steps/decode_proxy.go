@@ -27,6 +27,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -127,4 +128,23 @@ type proxyErrorLogWriter struct {
 func (w *proxyErrorLogWriter) Write(p []byte) (int, error) {
 	w.logger.Error(errors.New(strings.TrimSpace(string(p))), "decode proxy streaming error: client received a partial response")
 	return len(p), nil
+}
+
+// timedRoundTripper wraps an http.RoundTripper and reports the wall-clock time
+// spent inside inner.RoundTrip. RoundTrip returns as soon as response headers
+// arrive (or a transport-level error occurs), so this measures the same
+// "single outbound call" the non-streaming steps time by wrapping gwClient.Post
+// and keeps upstream_request_duration_seconds comparable across upstreams; the
+// decode-path ReverseProxy would otherwise fold streaming body-copy duration
+// into the same histogram.
+type timedRoundTripper struct {
+	inner  http.RoundTripper
+	record func(time.Duration)
+}
+
+func (t *timedRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	start := time.Now()
+	resp, err := t.inner.RoundTrip(r)
+	t.record(time.Since(start))
+	return resp, err
 }

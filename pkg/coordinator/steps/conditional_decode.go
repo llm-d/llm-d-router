@@ -70,7 +70,14 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	var cacheMiss bool
-	proxy := newDecodeProxy(logger, s.gwClient.Transport(), func(resp *http.Response) error {
+	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamConditionalDecode)
+	transport := &timedRoundTripper{
+		inner: s.gwClient.Transport(),
+		record: func(d time.Duration) {
+			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamConditionalDecode, d)
+		},
+	}
+	proxy := newDecodeProxy(logger, transport, func(resp *http.Response) error {
 		if resp.StatusCode == http.StatusPreconditionFailed {
 			cacheMiss = true
 			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
@@ -79,10 +86,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
 		return nil
 	})
-	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamConditionalDecode)
-	callStart := time.Now()
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
-	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamConditionalDecode, time.Since(callStart))
 
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
