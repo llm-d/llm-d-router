@@ -27,11 +27,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/require"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -261,4 +266,146 @@ func TestRoutesRegistered(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newMetricsRegistry wires the coordinator's metric vectors onto a fresh
+// registry so a test can inspect their state end-to-end via the same package-
+// level vectors the handler mutates. Reset clears the vectors' state so
+// concurrent tests do not see each other's increments.
+func newMetricsRegistry(t *testing.T) *prometheus.Registry {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	return reg
+}
+
+func TestHandleInference_SuccessRecordsRequestFamily(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	rec := postInference(t, newTestServer(nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"), "no errors expected on the success path")
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_duration_seconds", map[string]string{"model_name": "m"}); hc != 1 {
+		t.Fatalf("expected 1 request_duration_seconds observation, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": "m"}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation, got %d", hc)
+	}
+}
+
+func TestHandleInference_UpstreamErrorRecordsErrorCode(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	stepErr := fmt.Errorf("wrapped: %w", &pipeline.UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable, Body: "down"})
+	rec := postInference(t, newTestServer(stepErr))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeUpstream5xx})),
+		1e-9,
+	)
+}
+
+func TestHandleInference_MalformedBodyRecordsBadRequestWithUnknownModel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not-json"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed body, got %d", rec.Code)
+	}
+
+	// Malformed pre-parse: model attributes to "unknown".
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9,
+	)
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": coordmetrics.ModelUnknown, "error_code": coordmetrics.ErrorCodeBadRequest})),
+		1e-9,
+	)
+}
+
+// mustCounter looks up the counter series matching all of labels from reg. The
+// series must exist; a missing series is a test failure so promtestutil.ToFloat64
+// cannot silently see zero from an absent series.
+func mustCounter(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) prometheus.Counter {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if !labelsMatch(m.GetLabel(), labels) {
+				continue
+			}
+			c := prometheus.NewCounter(prometheus.CounterOpts{Name: "shadow"})
+			c.Add(m.GetCounter().GetValue())
+			return c
+		}
+	}
+	t.Fatalf("counter %s%v not present", name, labels)
+	return nil
+}
+
+func histogramCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	t.Fatalf("histogram %s%v not present", name, labels)
+	return 0
+}
+
+// seriesCount returns the number of series (label-set combinations) that the
+// metric family with the given name currently carries. Zero means the vector
+// has never been observed under any label combination.
+func seriesCount(t *testing.T, reg *prometheus.Registry, name string) int {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == name {
+			return len(mf.GetMetric())
+		}
+	}
+	return 0
+}
+
+func labelsMatch(actual []*dto.LabelPair, want map[string]string) bool {
+	if want == nil {
+		return true
+	}
+	got := map[string]string{}
+	for _, l := range actual {
+		got[l.GetName()] = l.GetValue()
+	}
+	for k, v := range want {
+		if got[k] != v {
+			return false
+		}
+	}
+	return true
 }

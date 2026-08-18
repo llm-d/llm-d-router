@@ -33,6 +33,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -44,30 +45,52 @@ import (
 var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
+	// model starts as unknown so pre-parse failures still emit a value; it
+	// is upgraded after JSON parse and finalized at defer time.
+	model := coordmetrics.ModelUnknown
+	inflight := false
+	defer func() {
+		coordmetrics.IncRequestTotal(model)
+		coordmetrics.RecordRequestDuration(model, time.Since(receivedAt))
+		if inflight {
+			coordmetrics.DecRequestRunning(model)
+		}
+	}()
+
 	parseStart := time.Now()
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 	if int64(len(body)) > s.maxRequestBodySize*config.BytesPerMB {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	if parsed == nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	parseDuration := time.Since(parseStart)
 
 	stream, _ := parsed[reqcommon.FieldStream].(bool)
-	model, _ := parsed["model"].(string)
+	if m, ok := parsed["model"].(string); ok && m != "" {
+		model = m
+	}
+	coordmetrics.RecordRequestSize(model, len(body))
+	coordmetrics.IncRequestRunning(model)
+	inflight = true
 
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
@@ -113,6 +136,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		logger.Error(err, "pipeline execution failed")
 		status, msg := classifyPipelineError(err, reqCtx.RequestID)
+		coordmetrics.IncRequestErrorTotal(model, classifyErrorCode(err))
 		http.Error(w, msg, status)
 	}
 }
@@ -131,6 +155,26 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
 	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
+}
+
+// classifyErrorCode maps a pipeline error to the error_code label emitted on
+// request_error_total. The mapping mirrors classifyPipelineError's status
+// choices: bad-request errors are bad_request, forwarded upstream 4xx and 5xx
+// each get their own bucket, and anything else is internal.
+func classifyErrorCode(err error) string {
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		return coordmetrics.ErrorCodeBadRequest
+	}
+	var upstream *pipeline.UpstreamError
+	if errors.As(err, &upstream) {
+		switch {
+		case upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError:
+			return coordmetrics.ErrorCodeUpstream4xx
+		case upstream.StatusCode >= http.StatusInternalServerError:
+			return coordmetrics.ErrorCodeUpstream5xx
+		}
+	}
+	return coordmetrics.ErrorCodeInternal
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

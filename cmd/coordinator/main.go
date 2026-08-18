@@ -19,27 +19,36 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/version"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline/builder"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/server"
 )
 
+// metricsShutdownTimeout bounds the Prometheus /metrics server's shutdown.
+// Scrapes are short; a small budget is enough and keeps process exit prompt.
+const metricsShutdownTimeout = 5 * time.Second
+
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
+	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint (overrides server.metrics_port)")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)
@@ -60,6 +69,10 @@ func main() {
 	// CLI -v wins over config log_level.
 	if vFlag := pflag.CommandLine.Lookup("v"); vFlag != nil && !vFlag.Changed {
 		logOpts.LogVerbosity = cfg.LogLevel
+	}
+	// CLI --metrics-port wins over config server.metrics_port.
+	if f := pflag.CommandLine.Lookup("metrics-port"); f != nil && f.Changed {
+		cfg.Server.MetricsPort = *metricsPort
 	}
 	if err := logOpts.Validate(); err != nil {
 		log.Error(err, "invalid logging options")
@@ -82,6 +95,11 @@ func main() {
 		"https_proxy_set", os.Getenv("HTTPS_PROXY") != "",
 		"NO_PROXY", os.Getenv("NO_PROXY"))
 
+	if err := coordmetrics.Register(ctrlmetrics.Registry); err != nil {
+		log.Error(err, "failed to register coordinator metrics")
+		os.Exit(1)
+	}
+
 	gwClient := gateway.New(cfg.Gateway)
 
 	steps, err := builder.Build(cfg, gwClient)
@@ -97,36 +115,65 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting coordinator", "addr", cfg.Server.ListenAddr)
+	log.Info("starting coordinator", "addr", cfg.Server.ListenAddr, "metrics_port", cfg.Server.MetricsPort)
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
-	if err := serveUntilSignal(srv, cfg.Server.ShutdownTimeout); err != nil {
+	if err := run(srv, cfg.Server); err != nil {
 		log.Error(err, "server error")
 		os.Exit(1)
 	}
 }
 
-// serveUntilSignal starts srv and blocks until it exits or a signal is received.
-// On SIGTERM/SIGINT it initiates a graceful drain bounded by shutdownTimeout.
-func serveUntilSignal(srv *server.Server, shutdownTimeout time.Duration) error {
+// run starts the inference server and, alongside it, the Prometheus /metrics
+// server. It blocks until either exits or a signal is received; on signal it
+// initiates a graceful drain of both bounded by cfg.ShutdownTimeout.
+func run(srv *server.Server, cfg config.ServerConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServe() }()
 
+	metricsErr := make(chan error, 1)
+	go func() { metricsErr <- serveMetrics(ctx, cfg.MetricsPort) }()
+
 	select {
 	case err := <-srvErr:
 		if !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
-	case <-ctx.Done():
-		stop()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+	case err := <-metricsErr:
+		if !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
+	case <-ctx.Done():
+	}
+	stop()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+// serveMetrics stands up the Prometheus /metrics endpoint on port and blocks
+// until srv exits. Uses the shared controller-runtime registry so any package
+// that registers against it (this coordinator's metrics, controller-runtime's
+// process collectors) is exposed on the same endpoint.
+func serveMetrics(ctx context.Context, port int) error {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("metrics server: %w", err)
 	}
 	return nil
 }
