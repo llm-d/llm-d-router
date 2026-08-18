@@ -66,9 +66,10 @@ Tuning knobs, all under the `flowControl:` config section:
   request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
   budget you are willing to spend waiting on a saturated pool.
 * `noEndpointRequestTTL` — the queue-wait budget that replaces `defaultRequestTTL` while the pool has
-  no endpoints, where the queue acts as a scale-from-zero waiting room. Size it above pod startup
-  (image pull plus weight load) if you want requests to survive a cold start; a request shed here is
-  reported as `EvictedNoEndpoints` and returns 503 rather than 429. Which budget applies is
+  no endpoints, where the queue acts as a scale-from-zero waiting room. Left unset it follows
+  `defaultRequestTTL`, so splitting the regimes is opt-in. Size it above pod startup (image pull plus
+  weight load) if you want requests to survive a cold start; a request shed here is reported as
+  `EvictedNoEndpoints` and returns 503 rather than 429. Which budget applies is
   re-evaluated while a request is queued, so a pool that scales up moves its queued requests onto
   `defaultRequestTTL`. A long budget only helps if the caller waits, so pair it with a gateway request
   timeout at least as long.
