@@ -33,6 +33,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -412,6 +413,74 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 			assert.Equal(t, tc.wantUsage, reqCtx.Usage, "Usage data should match expected accumulation")
 		})
 	}
+}
+
+// The Anthropic streaming format reports prompt tokens in message_start and completion
+// tokens in a message_delta that reaches the EPP in a later chunk.
+func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	chunks := [][]byte{
+		[]byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":800}}}` + "\n\n"),
+		[]byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}` + "\n\n"),
+		[]byte(`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":200}}` + "\n\n"),
+		[]byte(`event: message_stop` + "\n" + `data: {"type":"message_stop"}`),
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Request: &Request{
+			Headers: map[string]string{
+				":path": "/v1/messages",
+			},
+		},
+		Response: &Response{
+			Headers: map[string]string{
+				"content-type": "text/event-stream",
+			},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+	}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	for i, chunk := range chunks {
+		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
+	}
+
+	wantUsage := fwkrh.Usage{
+		PromptTokens:       1000,
+		CompletionTokens:   200,
+		TotalTokens:        1200,
+		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
+	}
+	assert.Equal(t, wantUsage, reqCtx.Usage, "message_delta must not discard the usage reported by message_start")
+
+	labels := map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       metadata.DefaultFairnessID,
+		"priority":          "0",
+	}
+	// Each token count belongs to one request, so accumulating usage across chunks must not
+	// turn into a second observation on the chunk that completes it.
+	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
+	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
+	require.Equal(t, float64(1000), inputTokens.GetSampleSum())
+
+	cachedTokens := findHistogramMetric(t, "llm_d_epp_request_cached_tokens", labels)
+	require.Equal(t, uint64(1), cachedTokens.GetSampleCount())
+	require.Equal(t, float64(800), cachedTokens.GetSampleSum())
+
+	outputTokens := findHistogramMetric(t, "llm_d_epp_request_output_tokens", labels)
+	require.Equal(t, uint64(1), outputTokens.GetSampleCount())
+	require.Equal(t, float64(200), outputTokens.GetSampleSum())
 }
 
 func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
