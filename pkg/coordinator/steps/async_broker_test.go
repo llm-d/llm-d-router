@@ -299,6 +299,73 @@ func TestAsyncBrokerWaitCapFallsBackToPending(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "pending")
 }
 
+func TestAsyncBrokerWaitDeadlineAnswersTimeout(t *testing.T) {
+	step, _ := newAsyncTestStep(t, map[string]any{
+		"timeouts": map[string]any{"wait": map[string]any{"default_seconds": 1}},
+	})
+	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+		map[string]string{"X-AP-Mode": "wait", "X-Team": "team-a"})
+
+	start := time.Now()
+	err := step.Execute(t.Context(), reqCtx)
+	require.True(t, errors.Is(err, pipeline.ErrPipelineDone))
+	assert.GreaterOrEqual(t, time.Since(start), time.Second)
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.Contains(t, rec.Body.String(), api.ErrCodeDeadlineExceeded)
+}
+
+func TestAsyncBrokerDeadlineClamping(t *testing.T) {
+	readDeadline := func(t *testing.T, rdb *redis.Client) int64 {
+		t.Helper()
+		members, err := rdb.ZRange(t.Context(), "team-default-queue", 0, -1).Result()
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		var envelope struct {
+			Data api.RequestMessage `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(members[0]), &envelope))
+		return envelope.Data.Deadline
+	}
+	headers := map[string]string{
+		"X-AP-Mode":                 "enqueue",
+		"X-Team":                    "team-a",
+		"X-Request-Timeout-Seconds": "1000000",
+	}
+
+	t.Run("unclamped when no max configured", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+		require.True(t, errors.Is(step.Execute(t.Context(), reqCtx), pipeline.ErrPipelineDone))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		assert.InDelta(t, time.Now().Add(1000000*time.Second).Unix(), readDeadline(t, rdb), 5)
+	})
+
+	t.Run("clamped when max configured", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{
+			"timeouts": map[string]any{"enqueue": map[string]any{"max_seconds": 300}},
+		})
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+		require.True(t, errors.Is(step.Execute(t.Context(), reqCtx), pipeline.ErrPipelineDone))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		assert.InDelta(t, time.Now().Add(300*time.Second).Unix(), readDeadline(t, rdb), 5)
+	})
+
+	t.Run("partial entry keeps the per-mode default", func(t *testing.T) {
+		// An entry setting only max_seconds must not disturb the enqueue
+		// default of one hour: each bound falls back independently.
+		step, rdb := newAsyncTestStep(t, map[string]any{
+			"timeouts": map[string]any{"enqueue": map[string]any{"max_seconds": 7200}},
+		})
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
+			"X-AP-Mode": "enqueue",
+			"X-Team":    "team-a",
+		})
+		require.True(t, errors.Is(step.Execute(t.Context(), reqCtx), pipeline.ErrPipelineDone))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		assert.InDelta(t, time.Now().Add(3600*time.Second).Unix(), readDeadline(t, rdb), 5)
+	})
+}
+
 func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 	step, _ := newAsyncTestStep(t, nil)
 
@@ -411,4 +478,45 @@ func TestAsyncBrokerRoutes(t *testing.T) {
 	rec = do(http.MethodGet, "/v1/requests/late-id", "team-a")
 	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
 	assert.Contains(t, rec.Body.String(), api.ErrCodeDeadlineExceeded)
+}
+
+func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
+	seed := func(t *testing.T, rdb *redis.Client, id string) string {
+		t.Helper()
+		res, err := json.Marshal(api.ResultMessage{StatusCode: 200, Payload: `{"done":true}`})
+		require.NoError(t, err)
+		key := resultKey("team-a", id)
+		require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+		require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
+		return key
+	}
+	fetch := func(t *testing.T, step *AsyncBrokerStep, id string) {
+		t.Helper()
+		r := chi.NewRouter()
+		step.RegisterRoutes(r)
+		req := httptest.NewRequest(http.MethodGet, "/v1/requests/"+id, nil)
+		req.Header.Set("X-Team", "team-a")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+
+	t.Run("custom grace shrinks the mailbox TTL", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 5})
+		key := seed(t, rdb, "grace-id")
+		fetch(t, step, "grace-id")
+		ttl, err := rdb.TTL(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Greater(t, ttl, time.Duration(0))
+		assert.LessOrEqual(t, ttl, 5*time.Second)
+	})
+
+	t.Run("zero grace deletes on delivery", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 0})
+		key := seed(t, rdb, "eager-id")
+		fetch(t, step, "eager-id")
+		exists, err := rdb.Exists(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), exists)
+	})
 }

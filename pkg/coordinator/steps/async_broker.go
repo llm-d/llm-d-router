@@ -18,6 +18,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -234,7 +235,7 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 			timeoutSecs = parsed
 		}
 	}
-	if timeoutSecs > bounds.MaxSeconds {
+	if bounds.MaxSeconds > 0 && timeoutSecs > bounds.MaxSeconds {
 		timeoutSecs = bounds.MaxSeconds
 	}
 	timeout := time.Duration(timeoutSecs) * time.Second
@@ -288,9 +289,21 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 	w := reqCtx.ResponseWriter
 	id := reqCtx.RequestID
 
-	waitCap := time.Duration(s.cfg.WaitCapSeconds) * time.Second
-	if timeout < waitCap {
-		waitCap = timeout
+	// The hold runs to the request deadline, or the configured wait cap if
+	// that is shorter. holdIsDeadline selects the ending: 504 at the
+	// deadline, 202 fallback at the cap.
+	waitCap := timeout
+	holdIsDeadline := true
+	if s.cfg.WaitCapSeconds > 0 {
+		if capDur := time.Duration(s.cfg.WaitCapSeconds) * time.Second; capDur < waitCap {
+			waitCap = capDur
+			holdIsDeadline = false
+		}
+	}
+	// Held connections must outlive the server WriteTimeout, so clear the
+	// write deadline as the streaming path does.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		logger.V(logutil.DEFAULT).Info("could not clear write deadline for held connection", "error", err)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, waitCap)
 	defer cancel()
@@ -342,8 +355,26 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 				}
 				return
 			}
-			// Wait cap reached with the client still connected: fall back to
-			// the enqueue response. The request stays queued and fetchable.
+			if holdIsDeadline {
+				// Past the deadline the AP refuses the work at gate, pop,
+				// and send, so no result can arrive: answer 504 after a
+				// final mailbox check for a boundary arrival.
+				finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer finalCancel()
+				if state, res, err := lookupResult(finalCtx, s.rdb, tenant, id); err == nil && state == asyncStateReady {
+					if writeResult(w, res) == nil {
+						if err := s.rdb.Del(finalCtx, resultKey(tenant, id)).Err(); err != nil {
+							logger.V(logutil.DEFAULT).Info("failed to delete delivered result", "id", id, "error", err)
+						}
+					}
+					return
+				}
+				writeOpenAIError(w, http.StatusGatewayTimeout, "timeout_error", api.ErrCodeDeadlineExceeded,
+					"request deadline exceeded before a result was produced")
+				return
+			}
+			// Cap reached: fall back to the enqueue response, the request
+			// stays queued and fetchable.
 			writePending(w, id)
 			return
 		case <-wake:

@@ -29,11 +29,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// resultFetchGraceTTL is the mailbox expiry applied after a successful fetch
-// delivery. The full result TTL exists for the completion-to-first-fetch
-// window, which is client paced. After a delivered fetch, retention only
-// covers lost-response retries, which fire within seconds, so the key is
-// shrunk to this grace window instead of lingering for the full TTL.
+// resultFetchGraceTTL is the default mailbox expiry applied after a
+// successful fetch delivery, overridable via fetch_grace_seconds. The full
+// result TTL exists for the completion-to-first-fetch window, which is
+// client paced. After a delivered fetch, retention only covers lost-response
+// retries, which fire within seconds, so the key is shrunk to this grace
+// window instead of lingering for the full TTL.
 const resultFetchGraceTTL = 60 * time.Second
 
 // RegisterRoutes serves the async result lifecycle from the coordinator
@@ -89,8 +90,12 @@ func (s *AsyncBrokerStep) handleFetch(w http.ResponseWriter, r *http.Request) {
 		if writeResult(w, res) == nil {
 			graceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.rdb.Expire(graceCtx, resultKey(tenant, id), resultFetchGraceTTL).Err(); err != nil {
-				s.logger.Info("failed to shrink result ttl after fetch", "id", id, "error", err)
+			if grace := s.cfg.fetchGrace(); grace > 0 {
+				if err := s.rdb.Expire(graceCtx, resultKey(tenant, id), grace).Err(); err != nil {
+					s.logger.Info("failed to shrink result ttl after fetch", "id", id, "error", err)
+				}
+			} else if err := s.rdb.Del(graceCtx, resultKey(tenant, id)).Err(); err != nil {
+				s.logger.Info("failed to delete result after fetch", "id", id, "error", err)
 			}
 		}
 	case asyncStatePending:

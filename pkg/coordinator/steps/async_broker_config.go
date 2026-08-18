@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // asyncMode selects how an opted-in request is served.
@@ -46,10 +47,7 @@ const (
 	resultKeyPrefix = "results:req:"
 
 	defaultAsyncTimeoutSecs   = 60
-	defaultAsyncMaxTimeout    = 600
 	defaultEnqueueTimeoutSecs = 3600
-	defaultEnqueueMaxTimeout  = 86400
-	defaultWaitCapSecs        = 55
 )
 
 // asyncRoute maps a request to a broker queue and tier. Empty Model or Tenant
@@ -105,20 +103,23 @@ type asyncBrokerConfig struct {
 	// TenantHeader names the header carrying the tenant key (default X-Team).
 	TenantHeader string `json:"tenant_header,omitempty"`
 	// TimeoutHeader lets clients request a deadline in seconds for the queued
-	// modes (default X-Request-Timeout-Seconds), capped per mode by Timeouts.
+	// modes (default X-Request-Timeout-Seconds). Clamped per mode only when a
+	// max is configured, unbounded otherwise.
 	TimeoutHeader string `json:"timeout_header,omitempty"`
 
-	// DefaultTimeoutSeconds and MaxTimeoutSeconds are the fallback deadline
-	// bounds for queued modes without an entry in Timeouts.
-	DefaultTimeoutSeconds int64 `json:"default_timeout_seconds,omitempty"`
-	MaxTimeoutSeconds     int64 `json:"max_timeout_seconds,omitempty"`
-	// Timeouts overrides the deadline bounds per queued mode ("enqueue",
-	// "wait"). Enqueue defaults much higher than wait: deferred work
-	// legitimately outlives any connection.
+	// Timeouts holds the deadline bounds per queued mode ("enqueue", "wait").
+	// Each field falls back independently when unset: default_seconds to 60
+	// for wait and 3600 for enqueue (deferred work legitimately outlives any
+	// connection), max_seconds to no clamp.
 	Timeouts map[string]asyncTimeoutBounds `json:"timeouts,omitempty"`
-	// WaitCapSeconds bounds how long wait mode holds a connection. Keep it
-	// below the coordinator server's write_timeout.
+	// WaitCapSeconds, when > 0, bounds how long wait mode holds a connection
+	// before falling back to the enqueue response. Unset, the hold runs to
+	// the request deadline.
 	WaitCapSeconds int64 `json:"wait_cap_seconds,omitempty"`
+	// FetchGraceSeconds is the mailbox TTL applied after a delivered fetch,
+	// covering lost-response retries. Unset defaults to 60. Zero deletes the
+	// result on delivery, matching wait mode's eager delete.
+	FetchGraceSeconds *int64 `json:"fetch_grace_seconds,omitempty"`
 
 	// Routes select the broker queue and tier per request. The queues must
 	// not set result_queue_name in the AP's queue config, so the per-request
@@ -162,27 +163,6 @@ func (c *asyncBrokerConfig) applyDefaults() {
 	if c.TimeoutHeader == "" {
 		c.TimeoutHeader = "X-Request-Timeout-Seconds"
 	}
-	if c.DefaultTimeoutSeconds <= 0 {
-		c.DefaultTimeoutSeconds = defaultAsyncTimeoutSecs
-	}
-	if c.MaxTimeoutSeconds <= 0 {
-		c.MaxTimeoutSeconds = defaultAsyncMaxTimeout
-	}
-	if c.Timeouts == nil {
-		c.Timeouts = map[string]asyncTimeoutBounds{}
-	}
-	// Enqueue mode defaults to hour-scale deadlines: nothing is holding a
-	// connection, and deferred work legitimately takes longer than any
-	// connection-bound request would.
-	if _, ok := c.Timeouts[string(asyncModeEnqueue)]; !ok {
-		c.Timeouts[string(asyncModeEnqueue)] = asyncTimeoutBounds{
-			DefaultSeconds: defaultEnqueueTimeoutSecs,
-			MaxSeconds:     defaultEnqueueMaxTimeout,
-		}
-	}
-	if c.WaitCapSeconds <= 0 {
-		c.WaitCapSeconds = defaultWaitCapSecs
-	}
 	if c.DefaultQueue == "" {
 		c.DefaultQueue = "request-sortedset"
 	}
@@ -220,9 +200,15 @@ func (c *asyncBrokerConfig) validate() error {
 	default:
 		return fmt.Errorf("wakeup_mode must be auto, notify, or poll, got %q", c.WakeupMode)
 	}
-	for mode := range c.Timeouts {
+	if c.FetchGraceSeconds != nil && *c.FetchGraceSeconds < 0 {
+		return fmt.Errorf("fetch_grace_seconds must not be negative, got %d", *c.FetchGraceSeconds)
+	}
+	for mode, b := range c.Timeouts {
 		if mode != string(asyncModeEnqueue) && mode != string(asyncModeWait) {
 			return fmt.Errorf("timeouts keys must be enqueue or wait, got %q", mode)
+		}
+		if b.MaxSeconds > 0 && b.DefaultSeconds > b.MaxSeconds {
+			return fmt.Errorf("timeouts.%s: default_seconds %d exceeds max_seconds %d", mode, b.DefaultSeconds, b.MaxSeconds)
 		}
 	}
 	for _, h := range c.ForwardHeaders {
@@ -239,15 +225,27 @@ func (c *asyncBrokerConfig) validate() error {
 	return nil
 }
 
-// timeoutBounds resolves the deadline bounds for a queued mode, falling back
-// to the flat default_timeout_seconds/max_timeout_seconds settings.
+// fetchGrace resolves the mailbox TTL applied after a delivered fetch. Unset
+// falls back to resultFetchGraceTTL; zero means delete on delivery.
+func (c *asyncBrokerConfig) fetchGrace() time.Duration {
+	if c.FetchGraceSeconds == nil {
+		return resultFetchGraceTTL
+	}
+	return time.Duration(*c.FetchGraceSeconds) * time.Second
+}
+
+// timeoutBounds resolves the deadline bounds for a queued mode. Each field
+// falls back independently, so a partial timeouts entry (say, only
+// max_seconds) never disturbs the other field's default. An unset default is
+// 60s for wait and 3600s for enqueue; an unset max means no clamp.
 func (c *asyncBrokerConfig) timeoutBounds(m asyncMode) asyncTimeoutBounds {
 	b := c.Timeouts[string(m)]
 	if b.DefaultSeconds <= 0 {
-		b.DefaultSeconds = c.DefaultTimeoutSeconds
-	}
-	if b.MaxSeconds <= 0 {
-		b.MaxSeconds = c.MaxTimeoutSeconds
+		if m == asyncModeEnqueue {
+			b.DefaultSeconds = defaultEnqueueTimeoutSecs
+		} else {
+			b.DefaultSeconds = defaultAsyncTimeoutSecs
+		}
 	}
 	return b
 }

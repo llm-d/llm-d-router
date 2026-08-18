@@ -130,9 +130,13 @@ pipeline:
     #     quota:
     #       limits:
     #         team-a: 8
-    #     # wait_cap_seconds bounds held wait connections; keep it below
-    #     # the server write_timeout. Default 55.
+    #     # wait_cap_seconds bounds held wait connections, ending the hold
+    #     # with the 202 response. Holds otherwise run to the request
+    #     # deadline.
     #     # wait_cap_seconds: 55
+    #     # fetch_grace_seconds is the mailbox TTL applied after a delivered
+    #     # fetch (default 60). Zero deletes the result on delivery.
+    #     # fetch_grace_seconds: 60
 
     # -------------------------------------------------------------------
     # replace-media-urls: first step. Downloads any http(s) image_url
