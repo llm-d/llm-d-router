@@ -463,6 +463,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		{"decode", decodePool},
 	} {
 		if len(part.endpoints) == 0 {
+			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
 			continue
 		}
 		stageSat := p.saturationDetector.Saturation(ctx, part.endpoints)

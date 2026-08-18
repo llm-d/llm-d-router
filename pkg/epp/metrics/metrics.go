@@ -957,6 +957,12 @@ func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation flo
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
 }
 
+// DeleteFlowControlPoolSaturation removes the saturation gauge series for a pool/stage pair.
+func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
+	flowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
+	llmdFlowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
+}
+
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
 // detector scored as fully saturated because their metrics were missing or stale.
 func RecordFlowControlStaleEndpoints(detector string, count int) {
