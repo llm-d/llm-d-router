@@ -25,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -313,4 +314,53 @@ func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscri
 
 	ids, _ = p.subscribersManager.GetActiveSubscribers()
 	assert.Empty(t, ids)
+}
+
+// Endpoints whose labels do not satisfy podLabelSelector are neither
+// subscribed to nor torn down, so pool members that publish no KV events
+// (decode-only pods) are never dialed.
+func TestProducer_ExtractEndpoint_HonorsPodLabelSelector(t *testing.T) {
+	ctx := discardCtx(t)
+	p := newExtractorProducer(true)
+	defer p.subscribersManager.Shutdown(ctx)
+	p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
+
+	labeled := func(name, addr, role string) fwkdl.Endpoint {
+		return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Namespace: "ns", Name: name},
+			Address: addr,
+			Port:    "8080",
+			Labels:  map[string]string{"llm-d.ai/role": role},
+		}, nil)
+	}
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: labeled("decode-0", "10.0.0.2", "decode"),
+	}))
+	ids, _ := p.subscribersManager.GetActiveSubscribers()
+	assert.Empty(t, ids, "decode endpoint must not be subscribed")
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: labeled("prefill-0", "10.0.0.1", "prefill"),
+	}))
+	ids, endpoints := p.subscribersManager.GetActiveSubscribers()
+	require.Equal(t, []string{"ns/prefill-0"}, ids)
+	require.Equal(t, []string{"tcp://10.0.0.1:5557"}, endpoints)
+
+	// Unlabeled endpoints (no pod labels at all) do not match a non-empty selector.
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: newEndpoint("unlabeled", "10.0.0.3"),
+	}))
+	ids, _ = p.subscribersManager.GetActiveSubscribers()
+	assert.Equal(t, []string{"ns/prefill-0"}, ids)
+}
+
+func TestNew_RejectsInvalidPodLabelSelector(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.PodLabelSelector = "llm-d.ai/role==="
+	_, err := New(discardCtx(t), PluginType, PluginConfig{KVEventsConfig: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "podLabelSelector")
 }

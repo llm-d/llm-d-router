@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -31,7 +32,9 @@ var _ fwkdl.EndpointExtractor = &Producer{}
 // Extract processes endpoint lifecycle events emitted by the
 // endpoint-notification-source: add/update installs a per-pod ZMQ KV-events
 // subscriber, delete tears one down. No-op unless per-pod discovery is
-// enabled.
+// enabled, and endpoints outside PodDiscoveryConfig.PodLabelSelector are
+// ignored so that pool members that publish no KV events (e.g. decode-only
+// pods) are never dialed.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
@@ -43,6 +46,12 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointKey := meta.ID.String()
+
+	if p.podSelector != nil && !p.podSelector.Matches(labels.Set(meta.Labels)) {
+		logger.V(logging.TRACE).Info("Skipping endpoint outside podLabelSelector",
+			"endpoint", endpointKey, "selector", p.podSelector.String())
+		return nil
+	}
 
 	switch event.Type {
 	case fwkdl.EventAddOrUpdate:
