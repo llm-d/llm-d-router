@@ -460,11 +460,17 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
 			if ev.GroupIdx != nil {
 				g := kvblock.GroupID(*ev.GroupIdx)
-				p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
-					Kind:              string(ev.KVCacheSpecKind),
-					BlockSize:         ev.BlockSize,
-					SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
-				})
+				if ev.KVCacheSpecKind == "" {
+					if meta, found := p.groupCatalog.Get(podIdentifier, g); found {
+						ev.KVCacheSpecKind = KVCacheSpecKind(meta.Kind)
+					}
+				} else {
+					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
+						Kind:              string(ev.KVCacheSpecKind),
+						BlockSize:         ev.BlockSize,
+						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
+					})
+				}
 				podEntries[0].HasGroup = true
 				podEntries[0].GroupIdx = g
 			}
