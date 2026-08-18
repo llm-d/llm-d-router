@@ -86,23 +86,23 @@ func BenchmarkFilteringParser(b *testing.B) {
 	payload := vllmScrapeFixture()
 
 	b.Run("undeclared", func(b *testing.B) {
-		parse, _ := newFilteringParser()
+		parser := newFamilyFilteringParser()
 		b.ReportAllocs()
 		b.SetBytes(int64(len(payload)))
 		for b.Loop() {
-			if _, err := parse(strings.NewReader(payload)); err != nil {
+			if _, err := parser.parse(strings.NewReader(payload)); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 
 	b.Run("declared", func(b *testing.B) {
-		parse, selector := newFilteringParser()
-		selector.observe(namerStub{names: vllmConsumedFamilies})
+		parser := newFamilyFilteringParser()
+		parser.observeExtractor(namerStub{names: vllmConsumedFamilies})
 		b.ReportAllocs()
 		b.SetBytes(int64(len(payload)))
 		for b.Loop() {
-			if _, err := parse(strings.NewReader(payload)); err != nil {
+			if _, err := parser.parse(strings.NewReader(payload)); err != nil {
 				b.Fatal(err)
 			}
 		}

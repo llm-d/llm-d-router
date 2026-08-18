@@ -281,10 +281,10 @@ func TestFamilySelectorPublishesSnapshots(t *testing.T) {
 }
 
 func TestFilteringParserFallsBackWithoutDeclarations(t *testing.T) {
-	parse, selector := newFilteringParser()
+	parser := newFamilyFilteringParser()
 	payload := vllmScrapeFixture()
 
-	families, err := parse(strings.NewReader(payload))
+	families, err := parser.parse(strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -292,9 +292,9 @@ func TestFilteringParserFallsBackWithoutDeclarations(t *testing.T) {
 		t.Fatalf("undeclared parser kept %d families, expected the whole scrape", len(families))
 	}
 
-	selector.observe(namerStub{names: vllmConsumedFamilies})
+	parser.observeExtractor(namerStub{names: vllmConsumedFamilies})
 
-	families, err = parse(strings.NewReader(payload))
+	families, err = parser.parse(strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("parse after declaration: %v", err)
 	}
@@ -307,8 +307,8 @@ func TestFilteringParserFallsBackWithoutDeclarations(t *testing.T) {
 // source serves every endpoint it is configured for, and their collectors poll
 // on independent goroutines.
 func TestFilteringParserIsConcurrencySafe(t *testing.T) {
-	parse, selector := newFilteringParser()
-	selector.observe(namerStub{names: vllmConsumedFamilies})
+	parser := newFamilyFilteringParser()
+	parser.observeExtractor(namerStub{names: vllmConsumedFamilies})
 	payload := vllmScrapeFixture()
 
 	var wg sync.WaitGroup
@@ -318,7 +318,7 @@ func TestFilteringParserIsConcurrencySafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 20 {
-				families, err := parse(strings.NewReader(payload))
+				families, err := parser.parse(strings.NewReader(payload))
 				if err != nil {
 					errs <- err
 					return
