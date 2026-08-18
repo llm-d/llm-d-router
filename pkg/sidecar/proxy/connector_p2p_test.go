@@ -20,6 +20,10 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -38,7 +42,7 @@ var _ = Describe("P2P Connector", func() {
 		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 	})
 
-	It("should send concurrent requests with correct p2p kv_transfer_params", func() {
+	It("should send both legs with correct PD Multi Tier kv_transfer_params", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		body := chatCompletionsRequestBodyWithMaxCompletionTokens
@@ -55,7 +59,7 @@ var _ = Describe("P2P Connector", func() {
 			Fail(string(bp))
 		}
 
-		// Wait for the async prefill request to be recorded.
+		// The prefill leg completes before the response is returned.
 		Eventually(func() int {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
@@ -102,6 +106,90 @@ var _ = Describe("P2P Connector", func() {
 		// Decode preserves the caller's original token limits.
 		Expect(dreq[requestFieldMaxTokens]).To(BeNumerically("==", 50))
 		Expect(dreq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 100)))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should not dispatch the decode leg until the prefill leg has returned", func() {
+		// The decode leg pulls KV from the prefiller's secondary tier. If it is
+		// dispatched first, its fetch arrives before any blocks are stored and
+		// burns the connector's load deadline waiting for KV that does not exist.
+		proxyBaseAddr := testInfo.startProxy()
+
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releasePrefill := func() { releaseOnce.Do(func() { close(release) }) }
+		// Always unblock, so a failed assertion cannot deadlock cleanup.
+		defer releasePrefill()
+
+		var prefillHits atomic.Int32
+		blockingPrefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			prefillHits.Add(1)
+			select {
+			case <-release:
+			case <-time.After(10 * time.Second):
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[]}`))
+		}))
+		defer blockingPrefill.Close()
+
+		body := chatCompletionsRequestBodyWithMaxCompletionTokens
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, blockingPrefill.URL[len("http://"):])
+
+		done := make(chan *http.Response, 1)
+		go func() {
+			defer GinkgoRecover()
+			resp, doErr := http.DefaultClient.Do(req)
+			Expect(doErr).ToNot(HaveOccurred())
+			done <- resp
+		}()
+
+		// Prefill is in flight and blocked; decode must not have been touched.
+		Eventually(func() int32 { return prefillHits.Load() }).Should(Equal(int32(1)))
+		Consistently(func() int32 {
+			return testInfo.decodeHandler.RequestCount.Load()
+		}, 200*time.Millisecond, 20*time.Millisecond).Should(BeZero())
+
+		releasePrefill()
+
+		var resp *http.Response
+		Eventually(done).Should(Receive(&resp))
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should return the prefill error and never dispatch decode when prefill fails", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		failingPrefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInsufficientStorage)
+			_, _ = w.Write([]byte(`{"error":"no room for kv"}`))
+		}))
+		defer failingPrefill.Close()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
+			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionTokens)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, failingPrefill.URL[len("http://"):])
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusInsufficientStorage))
+		respBody, err := io.ReadAll(resp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(respBody)).To(ContainSubstring("no room for kv"))
+
+		Consistently(func() int32 {
+			return testInfo.decodeHandler.RequestCount.Load()
+		}, 200*time.Millisecond, 20*time.Millisecond).Should(BeZero())
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
