@@ -95,6 +95,46 @@ pipeline:
 
   steps:
     # -------------------------------------------------------------------
+    # async-broker: optional, and when enabled it must run first. Bridges
+    # the coordinator to the llm-d-async broker. A request that carries the
+    # mode header (default X-AP-Mode: passthrough | enqueue | wait) opts
+    # into async serving: passthrough labels it (quota classification,
+    # objective and fairness headers) and lets the pipeline continue;
+    # enqueue answers 202 with the request id; wait holds the connection
+    # until the result lands or the wait cap expires. A request without
+    # the mode header is left completely untouched, which also keeps
+    # AP-dispatched requests inert when they re-enter the pipeline. The
+    # step also serves GET/DELETE /v1/requests/{id} and GET /v1/models.
+    # All params and their defaults are documented in
+    # pkg/coordinator/steps/async_broker_config.go.
+    # -------------------------------------------------------------------
+    # - type: async-broker
+    #   params:
+    #     # The Redis holding the async processor's queues. Required.
+    #     redis_url: "redis://redis:6379"
+    #     # Routes select the broker queue and tier per (model, tenant);
+    #     # first match wins, empty fields match anything.
+    #     routes:
+    #       - model: "my-model"
+    #         queue: "team-a-queue"
+    #         tier: "interactive"
+    #     # Objectives stamped on passthrough requests by tier, selected
+    #     # by quota classification (reserved vs overflow).
+    #     objectives:
+    #       interactive:
+    #         reserved: "interactive-reserved"
+    #         overflow: "interactive-overflow"
+    #     # Reserved concurrency per tenant; tenants without an entry are
+    #     # always classified reserved. Counters are shared with the AP's
+    #     # redis-quota gate.
+    #     quota:
+    #       limits:
+    #         team-a: 8
+    #     # wait_cap_seconds bounds held wait connections; keep it below
+    #     # the server write_timeout. Default 55.
+    #     # wait_cap_seconds: 55
+
+    # -------------------------------------------------------------------
     # replace-media-urls: first step. Downloads any http(s) image_url
     # references, base64-inlines them as data: URIs, and seeds
     # MultimodalEntries on the request context.
