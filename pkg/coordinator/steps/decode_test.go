@@ -85,7 +85,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		msg := messages[0].(map[string]any)
 		content := msg["content"].([]any)
 		imgPart := content[0].(map[string]any)
-		if imgPart["uuid"] != "hash-a" {
+		if imgPart["uuid"] != testImageHash {
 			t.Fatalf("expected uuid=hash-a in image_url part, got %v", imgPart["uuid"])
 		}
 		// Verify image_url is preserved alongside the injected uuid
@@ -120,7 +120,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -154,6 +154,93 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 	respBody, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(respBody), "I see a cat.") {
 		t.Fatalf("expected response to contain 'I see a cat.', got: %s", string(respBody))
+	}
+}
+
+func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gateway.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+		if !ok {
+			t.Fatal("expected kv_transfer_params in decode body")
+		}
+		if kvParams["block_id"] != "xyz" {
+			t.Errorf("kv_transfer_params.block_id = %v, want xyz", kvParams["block_id"])
+		}
+
+		tokens, ok := parsed["tokens"].(map[string]any)
+		if !ok {
+			t.Fatal("expected tokens field in responses decode request")
+		}
+		tokenIDs, _ := tokens["token_ids"].([]any)
+		if len(tokenIDs) != 5 {
+			t.Fatalf("expected 5 token_ids in tokens field, got %d", len(tokenIDs))
+		}
+
+		input := parsed["input"].([]any)
+		item := input[0].(map[string]any)
+		content := item["content"].([]any)
+		imgPart := content[0].(map[string]any)
+		if imgPart["uuid"] != testImageHash {
+			t.Fatalf("expected uuid=hash-a in input_image part, got %v", imgPart["uuid"])
+		}
+		if imgPart["image_url"] != "https://example.com/cat.jpg" {
+			t.Fatalf("expected image_url preserved, got %v", imgPart["image_url"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: gateway.PathResponses,
+		Model:        "llama-3",
+		Stream:       false,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		Body: map[string]any{
+			"model": "llama-3",
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "input_image",
+							"image_url": "https://example.com/cat.jpg",
+						},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
 	}
 }
 

@@ -45,6 +45,8 @@ const ReplaceMediaURLsStepName = "replace-media-urls"
 
 const imageURLPartType = "image_url"
 
+const inputImagePartType = "input_image"
+
 const defaultContentType = "application/octet-stream"
 
 // defaultMaxDownloadSize is the default cap for max_download_size, in megabytes.
@@ -134,44 +136,12 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return nil
-	}
-
 	var imageURLs []imageRef
-	for msgIdx, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for partIdx, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] != imageURLPartType {
-				continue
-			}
-			imageURL, ok := partMap[imageURLPartType].(map[string]any)
-			if !ok {
-				continue
-			}
-			url, ok := imageURL["url"].(string)
-			if !ok {
-				continue
-			}
-			imageURLs = append(imageURLs, imageRef{
-				msgIdx:   msgIdx,
-				partIdx:  partIdx,
-				url:      url,
-				imageURL: imageURL,
-			})
-		}
+	if messages, ok := reqCtx.Body["messages"].([]any); ok {
+		imageURLs = append(imageURLs, collectChatCompletionsImageRefs(messages)...)
+	}
+	if input, ok := reqCtx.Body["input"].([]any); ok {
+		imageURLs = append(imageURLs, collectResponsesImageRefs(input)...)
 	}
 
 	if len(imageURLs) == 0 {
@@ -233,13 +203,90 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 	for _, r := range results {
 		if !strings.HasPrefix(r.ref.url, "data:") {
-			r.ref.imageURL["url"] = fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data)
+			r.ref.setURL(fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data))
 		}
 
 		appendMultimodalEntry(reqCtx, r.contentType, r.base64Data)
 	}
 
 	return nil
+}
+
+// collectChatCompletionsImageRefs walks a chat-completions messages array for
+// image_url parts, whose url lives nested at part["image_url"]["url"].
+func collectChatCompletionsImageRefs(messages []any) []imageRef {
+	var refs []imageRef
+	for msgIdx, msg := range messages {
+		msgMap, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msgMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		for partIdx, part := range content {
+			partMap, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if partMap["type"] != imageURLPartType {
+				continue
+			}
+			imageURL, ok := partMap[imageURLPartType].(map[string]any)
+			if !ok {
+				continue
+			}
+			url, ok := imageURL["url"].(string)
+			if !ok {
+				continue
+			}
+			refs = append(refs, imageRef{
+				msgIdx:  msgIdx,
+				partIdx: partIdx,
+				url:     url,
+				setURL:  func(v string) { imageURL["url"] = v },
+			})
+		}
+	}
+	return refs
+}
+
+// collectResponsesImageRefs walks a Responses-API input array for input_image
+// parts. Unlike chat-completions' image_url part, the URL here is a bare
+// string field on the part itself (part["image_url"]), not a nested object.
+func collectResponsesImageRefs(input []any) []imageRef {
+	var refs []imageRef
+	for itemIdx, item := range input {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := itemMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		for partIdx, part := range content {
+			partMap, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if partMap["type"] != inputImagePartType {
+				continue
+			}
+			url, ok := partMap[imageURLPartType].(string)
+			if !ok {
+				continue
+			}
+			refs = append(refs, imageRef{
+				msgIdx:  itemIdx,
+				partIdx: partIdx,
+				url:     url,
+				setURL:  func(v string) { partMap[imageURLPartType] = v },
+			})
+		}
+	}
+	return refs
 }
 
 func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 string) {
@@ -295,10 +342,14 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 }
 
 type imageRef struct {
-	msgIdx   int
-	partIdx  int
-	url      string
-	imageURL map[string]any
+	msgIdx  int
+	partIdx int
+	url     string
+	// setURL writes the rewritten data URI back to wherever this ref's URL
+	// lives in reqCtx.Body, since that location's shape differs by API
+	// format (chat-completions nests it at image_url.url; Responses stores
+	// it as a bare string field on the part itself).
+	setURL func(string)
 }
 
 type downloadResult struct {

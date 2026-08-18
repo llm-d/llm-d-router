@@ -89,7 +89,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any) {
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
-	case gateway.FormatChatCompletions:
+	case gateway.FormatChatCompletions, gateway.FormatResponses:
 		if len(reqCtx.TokenIDs) > 0 {
 			tokens := map[string]any{
 				"token_ids": reqCtx.TokenIDs,
