@@ -145,7 +145,6 @@ func hasJSONValue(data json.RawMessage) bool {
 	return len(data) > 0 && strings.TrimSpace(string(data)) != "null"
 }
 
-
 func parseCacheSalt(data json.RawMessage) (string, error) {
 	if !hasJSONValue(data) {
 		return "", nil
