@@ -81,3 +81,21 @@ func IncUpstreamRequestTotal(upstream string) {
 func RecordUpstreamRequestDuration(upstream string, d time.Duration) {
 	upstreamRequestDuration.WithLabelValues(upstream).Observe(d.Seconds())
 }
+
+// RecordRequestInputTokens observes the render-derived prompt token count for
+// one client request.
+func RecordRequestInputTokens(modelName string, tokens int) {
+	requestInputTokens.WithLabelValues(boundModel(modelName)).Observe(float64(tokens))
+}
+
+// IncExecutionPath increments execution_path_total for the given model and
+// path (decode-only, prefill-decode, or encode-prefill-decode).
+func IncExecutionPath(modelName, path string) {
+	executionPathTotal.WithLabelValues(boundModel(modelName), path).Inc()
+}
+
+// IncConditionalDecodeProbes increments conditional_decode_probes_total for
+// one probe outcome ("served" or "deferred").
+func IncConditionalDecodeProbes(result string) {
+	conditionalDecodeProbesTotal.WithLabelValues(result).Inc()
+}

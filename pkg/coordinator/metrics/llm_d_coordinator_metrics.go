@@ -65,6 +65,16 @@ var (
 		modelLabel,
 	)
 
+	requestInputTokens = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "request_input_tokens",
+			Help:      metricsutil.HelpMsgWithStability("Prompt token count distribution per client request, measured after render.", compbasemetrics.ALPHA),
+			Buckets:   inputTokensBuckets,
+		},
+		modelLabel,
+	)
+
 	requestRunning = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
@@ -131,5 +141,31 @@ var (
 			Buckets:   generalLatencyBuckets,
 		},
 		upstreamLabel,
+	)
+)
+
+// Execution path and conditional-decode probe outcome. execution_path_total
+// records which set of disaggregation phases actually ran for each client
+// request; conditional_decode_probes_total records how the decode worker
+// answered the conditional-decode probe (served the request inline vs
+// deferred to the full pipeline). The coordinator sees only the probe
+// status, not the reason behind it.
+var (
+	executionPathTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "execution_path_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of client requests by the set of disaggregation phases actually executed.", compbasemetrics.ALPHA),
+		},
+		append([]string{}, append(modelLabel, "path")...),
+	)
+
+	conditionalDecodeProbesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "conditional_decode_probes_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of conditional-decode probes by the worker's answer: served inline vs deferred (HTTP 412) to the full pipeline.", compbasemetrics.ALPHA),
+		},
+		[]string{"result"},
 	)
 )

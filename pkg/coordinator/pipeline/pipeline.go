@@ -73,6 +73,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		duration time.Duration
 	}
 	timings := make([]stepTiming, len(p.steps))
+	executed := map[string]bool{}
 	defer func() {
 		stats := make([]any, 0, (len(timings)+1)*2)
 		if reqCtx.ParseDuration > 0 {
@@ -82,6 +83,16 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			stats = append(stats, t.name, t.duration.String())
 		}
 		logger.V(logutil.DEFAULT).Info("pipeline step timings", stats...)
+
+		if path, ok := classifyExecutionPath(executed); ok {
+			coordmetrics.IncExecutionPath(reqCtx.Model, path)
+		}
+		// Render populates TokenIDs on success (chat, completions, and generate
+		// paths); recording only when non-empty keeps failed-before-render
+		// requests out of the histogram.
+		if n := len(reqCtx.TokenIDs); n > 0 {
+			coordmetrics.RecordRequestInputTokens(reqCtx.Model, n)
+		}
 	}()
 
 	for idx, step := range p.steps {
@@ -99,15 +110,39 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		timings[idx] = stepTiming{name: name, duration: duration}
 		if err != nil {
 			if errors.Is(err, ErrPipelineDone) {
-				// Clean early exit (e.g. conditional-decode cache hit); not an error.
+				// Clean early exit (e.g. conditional-decode cache hit); not an
+				// error, and the step's work counts toward the execution path.
+				executed[name] = true
 				return nil
 			}
 			coordmetrics.IncStepErrorTotal(name, classifyStepErrorCode(err))
 			return fmt.Errorf("step %q failed: %w", name, err)
 		}
+		executed[name] = true
 		logger.V(logutil.TRACE).Info("step complete", "step", name)
 	}
 	return nil
+}
+
+// classifyExecutionPath maps the set of successfully-executed steps to the
+// execution_path_total label. Returns false when no decode-ish step ran, so
+// pipelines aborted before decode do not spuriously record a path. Step-name
+// strings are hardcoded here because the pipeline package cannot import the
+// steps package without introducing a dependency cycle. They match each step
+// file's own StepName constant by contract; keep the two in sync.
+func classifyExecutionPath(executed map[string]bool) (string, bool) {
+	decodeIsh := executed["decode"] || executed["conditional-decode"]
+	if !decodeIsh {
+		return "", false
+	}
+	switch {
+	case executed["encode"] && executed["prefill"]:
+		return coordmetrics.PathEncodePrefillDecode, true
+	case executed["prefill"]:
+		return coordmetrics.PathPrefillDecode, true
+	default:
+		return coordmetrics.PathDecodeOnly, true
+	}
 }
 
 // classifyStepErrorCode maps a step error to the error_code label emitted on

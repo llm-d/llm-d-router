@@ -73,8 +73,10 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	proxy := newDecodeProxy(logger, s.gwClient.Transport(), func(resp *http.Response) error {
 		if resp.StatusCode == http.StatusPreconditionFailed {
 			cacheMiss = true
+			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
 			return errCacheMiss
 		}
+		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
 		return nil
 	})
 	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamConditionalDecode)

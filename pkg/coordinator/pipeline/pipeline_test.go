@@ -245,6 +245,127 @@ func TestExecute_ErrPipelineDoneIsNotAnError(t *testing.T) {
 	}
 }
 
+// pathCount reads the execution_path_total counter for a model+path pair.
+func pathCount(t *testing.T, reg *prometheus.Registry, model, path string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_execution_path_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["model_name"] == model && labels["path"] == path {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// inputTokensCount reads the request_input_tokens histogram observation count
+// for the given model. Zero means the histogram never observed a value for
+// that label combination.
+func inputTokensCount(t *testing.T, reg *prometheus.Registry, model string) uint64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_request_input_tokens" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["model_name"] == model {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+func TestExecute_ExecutionPathTable(t *testing.T) {
+	cases := []struct {
+		name      string
+		stepNames []string
+		wantPath  string
+	}{
+		{"decode-only via cache hit", []string{"conditional-decode"}, coordmetrics.PathDecodeOnly},
+		{"prefill-decode without encode", []string{"prefill", "decode"}, coordmetrics.PathPrefillDecode},
+		{"encode-prefill-decode full path", []string{"encode", "prefill", "decode"}, coordmetrics.PathEncodePrefillDecode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			steps := make([]Step, 0, len(tc.stepNames))
+			for _, n := range tc.stepNames {
+				fn := func(_ context.Context, _ *RequestContext) error { return nil }
+				if n == "conditional-decode" {
+					// The cache-hit case returns ErrPipelineDone; the executor
+					// must still count the step toward the path.
+					fn = func(_ context.Context, _ *RequestContext) error { return ErrPipelineDone }
+				}
+				steps = append(steps, &mockStep{name: n, fn: fn})
+			}
+			if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			require.InDelta(t, 1.0, pathCount(t, reg, "m", tc.wantPath), 1e-9)
+		})
+	}
+}
+
+func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	// A pipeline that aborts before decode-ish must not record any path.
+	stepErr := fmt.Errorf("prefill: %w", &UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable})
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error { return stepErr }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+	for _, p := range []string{coordmetrics.PathDecodeOnly, coordmetrics.PathPrefillDecode, coordmetrics.PathEncodePrefillDecode} {
+		require.Zero(t, pathCount(t, reg, "m", p))
+	}
+}
+
+func TestExecute_InputTokensRecordedOnlyWhenPopulated(t *testing.T) {
+	// TokenIDs is populated by render; the executor records after any success
+	// or clean early-exit path.
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.TokenIDs = []int{1, 2, 3, 4}
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), inputTokensCount(t, reg, "m"))
+
+	// A pipeline that never runs render leaves TokenIDs empty, so the
+	// histogram must not observe zero.
+	reg2 := newMetricsRegistry(t)
+	steps2 := []Step{
+		&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error {
+			return fmt.Errorf("prefill: %w", &UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable})
+		}},
+	}
+	_ = New(steps2).Execute(context.Background(), &RequestContext{Model: "m"})
+	require.Equal(t, uint64(0), inputTokensCount(t, reg2, "m"))
+}
+
 // mustGauge finds a gauge series matching all of labels in reg. A missing
 // series is a test failure so promtestutil.ToFloat64 cannot silently see 0
 // when the series was never emitted.

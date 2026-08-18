@@ -133,3 +133,27 @@ func TestUpstreamFamily_Records(t *testing.T) {
 	require.InDelta(t, 2.0, promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamEncode)), 1e-9)
 	require.InDelta(t, 1.0, promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamMediaFetch)), 1e-9)
 }
+
+func TestExecutionPathAndProbes_Records(t *testing.T) {
+	Reset()
+	IncExecutionPath("m", PathEncodePrefillDecode)
+	IncExecutionPath("m", PathEncodePrefillDecode)
+	IncExecutionPath("m", PathDecodeOnly)
+	IncConditionalDecodeProbes(ProbeResultServed)
+	IncConditionalDecodeProbes(ProbeResultDeferred)
+	IncConditionalDecodeProbes(ProbeResultDeferred)
+	RecordRequestInputTokens("m", 512)
+
+	require.InDelta(t, 2.0,
+		promtestutil.ToFloat64(executionPathTotal.WithLabelValues("m", PathEncodePrefillDecode)), 1e-9,
+	)
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(executionPathTotal.WithLabelValues("m", PathDecodeOnly)), 1e-9,
+	)
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(conditionalDecodeProbesTotal.WithLabelValues(ProbeResultServed)), 1e-9,
+	)
+	require.InDelta(t, 2.0,
+		promtestutil.ToFloat64(conditionalDecodeProbesTotal.WithLabelValues(ProbeResultDeferred)), 1e-9,
+	)
+}

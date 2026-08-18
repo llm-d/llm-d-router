@@ -55,6 +55,20 @@ const (
 	UpstreamDecode            = "decode"
 )
 
+// Path label values for execution_path_total. Encode always implies prefill,
+// so encode-decode is not a reachable path.
+const (
+	PathDecodeOnly          = "decode-only"
+	PathPrefillDecode       = "prefill-decode"
+	PathEncodePrefillDecode = "encode-prefill-decode"
+)
+
+// Result label values for conditional_decode_probes_total.
+const (
+	ProbeResultServed   = "served"
+	ProbeResultDeferred = "deferred"
+)
+
 var (
 	modelLabel    = []string{"model_name"}
 	stepLabel     = []string{"step"}
@@ -77,6 +91,13 @@ var (
 		131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608,
 		16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824,
 	}
+
+	// inputTokensBuckets matches the EPP request-input-tokens ladder (1..1M);
+	// most models have input context windows below 1 million tokens.
+	inputTokensBuckets = []float64{
+		1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+		32778, 65536, 131072, 262144, 524288, 1048576,
+	}
 )
 
 // allCollectors returns the ordered list of every metric this package owns.
@@ -87,12 +108,15 @@ func allCollectors() []prometheus.Collector {
 		requestErrorTotal,
 		requestDuration,
 		requestSize,
+		requestInputTokens,
 		requestRunning,
 		stepDuration,
 		stepErrorTotal,
 		stepRunning,
 		upstreamRequestTotal,
 		upstreamRequestDuration,
+		executionPathTotal,
+		conditionalDecodeProbesTotal,
 	}
 }
 
