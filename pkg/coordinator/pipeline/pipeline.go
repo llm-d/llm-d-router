@@ -103,9 +103,14 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		logger.V(logutil.TRACE).Info("step starting", "step", name)
 		coordmetrics.IncStepRunning(name)
 		start := time.Now()
-		err := step.Execute(ctx, reqCtx)
+		var err error
+		func() {
+			// defer so a step panic still decrements the gauge; the panic
+			// continues to unwind into the chi Recoverer at the server edge.
+			defer coordmetrics.DecStepRunning(name)
+			err = step.Execute(ctx, reqCtx)
+		}()
 		duration := time.Since(start)
-		coordmetrics.DecStepRunning(name)
 		coordmetrics.RecordStepDuration(name, duration)
 		timings[idx] = stepTiming{name: name, duration: duration}
 		if err != nil {

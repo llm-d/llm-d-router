@@ -190,6 +190,24 @@ func TestExecute_SuccessRecordsStepDuration(t *testing.T) {
 	require.InDelta(t, 0.0, stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeInternal), 1e-9)
 }
 
+func TestExecute_StepPanicBalancesRunningGauge(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error {
+			panic("boom")
+		}},
+	}
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "step panic must propagate out of Execute so chi Recoverer handles it")
+		require.InDelta(t, 0.0,
+			promtestutil.ToFloat64(mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"})),
+			1e-9, "step_running must be balanced back to 0 after a step panic",
+		)
+	}()
+	_ = New(steps).Execute(context.Background(), &RequestContext{})
+}
+
 func TestExecute_BadRequestErrorClassified(t *testing.T) {
 	reg := newMetricsRegistry(t)
 	stepErr := fmt.Errorf("render: prompt must be a string: %w", ErrBadRequest)
