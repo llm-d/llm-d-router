@@ -1467,9 +1467,12 @@ func TestNoEndpointBudgetOutlastingSaturationShedsAsUnavailability(t *testing.T)
 	h := newHarness(t, harnessOpts{
 		detector: detector,
 		controllerCfg: &controller.Config{
-			DefaultRequestTTL:        saturationTTL,
-			NoEndpointRequestTTL:     6 * saturationTTL,
-			ExpiryCleanupInterval:    10 * time.Millisecond,
+			DefaultRequestTTL:    saturationTTL,
+			NoEndpointRequestTTL: 6 * saturationTTL,
+			// The sweep must win the attribution race against the request context's backstop, which sits one sweep
+			// interval beyond the first tick that can observe the expiry. The interval is therefore the tolerance this
+			// test has for scheduling lateness, not just its resolution.
+			ExpiryCleanupInterval:    50 * time.Millisecond,
 			EnqueueChannelBufferSize: 100,
 		},
 	})
