@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,8 +68,9 @@ type metricsDatasourceParams struct {
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
+	parser, selector := newFilteringParser()
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
-		MetricsDataSourceType, name, parseMetrics)
+		MetricsDataSourceType, name, parser, http.WithExtractorHook(selector.observe))
 }
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
@@ -96,6 +98,9 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
+	parser, selector := newFilteringParser()
+	opts = append(opts, http.WithExtractorHook(selector.observe))
+
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
 			SkipVerify:     cfg.InsecureSkipVerify,
@@ -103,7 +108,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MetricsDataSourceType, name, parseMetrics, opts...)
+		MetricsDataSourceType, name, parser, opts...)
 }
 
 func defaultDataSourceConfigParams() *metricsDatasourceParams {
@@ -112,6 +117,33 @@ func defaultDataSourceConfigParams() *metricsDatasourceParams {
 		Path:               defaultMetricsPath,
 		InsecureSkipVerify: defaultMetricsInsecureSkipVerify,
 	}
+}
+
+// newFilteringParser returns a parser that discards the families no bound
+// extractor declared before handing the scrape to expfmt. A model server
+// exposes far more families than the endpoint picker reads, and parsing the
+// remainder costs CPU and garbage on every scrape of every endpoint.
+//
+// The returned selector must be fed by the data source's extractor hook. Until
+// an extractor declares a family the parser keeps the whole scrape, so a source
+// bound to extractors that do not implement FamilyNamer behaves as before.
+func newFilteringParser() (func(io.Reader) (PrometheusMetricMap, error), *familySelector) {
+	selector := &familySelector{}
+	return func(data io.Reader) (PrometheusMetricMap, error) {
+		want := selector.wanted()
+		if want == nil {
+			return parseMetrics(data)
+		}
+
+		buf, _ := bufferPool.Get().(*bytes.Buffer)
+		buf.Reset()
+		defer bufferPool.Put(buf)
+
+		if err := filterFamilies(buf, data, want); err != nil {
+			return nil, err
+		}
+		return parseMetrics(buf)
+	}, selector
 }
 
 func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {
