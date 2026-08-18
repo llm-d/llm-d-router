@@ -259,7 +259,7 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 
 	msg := &api.RedisRequest{
 		RequestMessage: api.RequestMessage{
-			ID:       reqCtx.RequestID,
+			ID:       envelopeID(tenant, reqCtx.RequestID),
 			Created:  now.Unix(),
 			Deadline: now.Add(timeout).Unix(),
 			Payload:  reqCtx.Body,
@@ -350,7 +350,7 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 				// re-submits cleanly: SubmitRequest clears stale markers.
 				cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancelFn()
-				if err := s.sub.CancelRequests(cancelCtx, []string{id}); err != nil {
+				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
 					logger.V(logutil.DEFAULT).Info("failed to cancel abandoned request", "id", id, "error", err)
 				}
 				return

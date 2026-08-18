@@ -169,8 +169,11 @@ func (c *asyncBrokerConfig) applyDefaults() {
 	if c.Quota.Prefix == "" {
 		c.Quota.Prefix = "quota:"
 	}
+	// Matches the AP's redis-quota gate and fairness stamping defaults, so a
+	// default-configured coordinator and AP share quota counters and stamp
+	// fairness without explicit attribute alignment.
 	if c.Quota.Attribute == "" {
-		c.Quota.Attribute = "team"
+		c.Quota.Attribute = "userid"
 	}
 	if c.Quota.WindowSeconds <= 0 {
 		c.Quota.WindowSeconds = 300

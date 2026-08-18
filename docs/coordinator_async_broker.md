@@ -66,14 +66,16 @@ On a queue named `foo`, step traffic and raw producer traffic share one sorted s
 foo                        request queue: shared, popped destructively in deadline order
 foo-results                belt: raw producers' results, drained by their collector
 results:req:acme:job-4217  mailbox: one step result, read in place, expires via TTL
-request-active:job-4217    in-flight marker: present means fetch answers pending
+request-active:acme:job-4217  in-flight marker: present means fetch answers pending
 ```
 
 A mailbox is the same list structure as a belt, holding exactly one result under a key named by (tenant, id). The in-flight marker holds a random per-request token, and cleanup is a compare-and-delete on that token, so a stale replica finishing an old request cannot clobber newer state.
 
 ## The AP side
 
-The AP protocol is unchanged. Dispatches carry no mode header, so they re-enter the coordinator as ordinary requests and get phased to the EPP like any synchronous call. Results are written to the message's mailbox with the configured TTL, and the list push fires the keyspace notification that completes any held wait. The step depends on three AP-side features from llm-d-async (result TTLs on queue config, per-lane objective and fairness stamping, and DEADLINE_EXCEEDED classification for deadline-aborted sends), see [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394).
+The AP protocol is unchanged. Dispatches carry no mode header, so they re-enter the coordinator as ordinary requests and get phased to the EPP like any synchronous call.
+
+A request keeps one client-visible id for its whole life: the validated `x-request-id` (or a minted UUID) is the fetch id and names the mailbox. The envelope id is that id prefixed with the tenant, so every AP-side key derived from it (the in-flight marker and the cancellation key) is tenant scoped, and one tenant's id choices cannot collide with or probe another's. The dispatch call itself carries no `x-request-id`, so that hop logs under a fresh UUID in the coordinator, and `traceparent` on the envelope metadata is the join key between the two. Results are written to the message's mailbox with the configured TTL, and the list push fires the keyspace notification that completes any held wait. The step depends on three AP-side features from llm-d-async (result TTLs on queue config, per-lane objective and fairness stamping, and DEADLINE_EXCEEDED classification for deadline-aborted sends), see [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394).
 
 ## Configuration
 
@@ -105,8 +107,8 @@ To enable the step, add this block as the first entry under `steps:` in the coor
 | `routes` | none | selects queue and tier per (model, tenant), first match wins, empty fields match anything |
 | `default_queue` | `request-sortedset` | queue for requests matching no route |
 | `objectives` | none | InferenceObjective names stamped per tier, selected by quota classification |
-| `quota` | prefix `quota:`, attribute `team`, window 300s | reserved concurrency limits per tenant, counters shared with the AP's redis-quota gate. Tenants without an entry are always classified reserved |
-| `timeouts` | wait 60s, enqueue 1h | deadline bounds per queued mode. Each field falls back independently, and `max_seconds` caps client requested deadlines |
+| `quota` | prefix `quota:`, attribute `userid`, window 300s | reserved concurrency limits per tenant, counters shared with the AP's redis-quota gate. Tenants without an entry are always classified reserved |
+| `timeouts` | wait 60s, enqueue 1h | deadline bounds per queued mode. `max_seconds` caps client requested deadlines |
 | `wait_cap_seconds` | none | bounds held wait connections, ending the hold with the 202 response |
 | `fetch_grace_seconds` | 60 | mailbox TTL applied after a delivered fetch. Zero deletes the result on delivery |
 | `wakeup_mode` | `auto` | `notify`, `poll`, or `auto` which probes for keyspace notification support |
@@ -119,16 +121,14 @@ All params and their defaults are documented in `pkg/coordinator/steps/async_bro
 | Clock | Runs from → until | Default | Where / Key | When it fires |
 | :---- | :---- | :---- | :---- | :---- |
 | Wait deadline | request accepted → result written to Redis | 60s | step param `timeouts.wait.default_seconds`, `X-Request-Timeout-Seconds` per request | hold answers 504 DEADLINE_EXCEEDED |
-| Enqueue deadline | request accepted (202) → result written to Redis | 1h | step param `timeouts.enqueue.default_seconds`, `X-Request-Timeout-Seconds` per request | fetch returns the DEADLINE_EXCEEDED result as 504 |
+| Enqueue deadline | request accepted (202) → result written to Redis | 1h | step param `timeouts.enqueue.default_seconds`, `X-Request-Timeout-Seconds` per request | fetch returns 504 DEADLINE_EXCEEDED |
 | Deadline clamp | applied once at admission, not a running clock | none | step param `timeouts.<mode>.max_seconds` | silently caps the requested deadline |
-| Wait hold cap | request accepted → result written to Redis (hold runs min(cap, deadline)) | none | step param `wait_cap_seconds` | hold ends with 202 pending, request stays fetchable |
-| Per-dispatch attempt | AP worker sends the request → full response read back | 5m | AP flag `--request-timeout` | attempt fails as DEADLINE_EXCEEDED, not retried |
-| Result TTL | result written to Redis → first delivered fetch or expiry | none, results never expire unless set | AP queue config `result_ttl_seconds` | result deleted, fetch answers 410 Gone |
-| Post-fetch grace | first delivered fetch → grace expiry or DELETE | 60s | step param `fetch_grace_seconds` | re-fetch window closes, fetch answers 410 Gone |
+| Wait hold cap | request accepted → result written to Redis or deadline | none | step param `wait_cap_seconds` | hold ends with 202 pending, still fetchable by id |
+| Per-dispatch attempt | AP worker sends the request → full response read back | 5m | AP flag `--request-timeout` | 504 DEADLINE_EXCEEDED, not retried |
+| Result TTL | result written to Redis → first fetch, expiry, or DELETE | none | AP queue config `result_ttl_seconds` | result deleted + fetch returns 410 Gone |
+| Post-fetch grace | first delivered fetch → grace expiry or DELETE | 60s | step param `fetch_grace_seconds` | result deleted + fetch returns 410 Gone |
 
-The request deadline governs total life (queue wait plus dispatch plus generation) and is enforced by the AP. The three lifecycle clocks hand off without overlap: the deadline ends where the result TTL begins (result written), and the result TTL ends where the grace begins (first delivered fetch). Wait mode deletes the result on delivery, so the TTL and grace rows apply to enqueue results and to wait requests that fell back at the cap. Raw producers supply a deadline per message, and their results go to the shared belt, which is drained destructively, so the TTL and grace rows do not apply there.
-
-Two coordinator level clocks also touch async traffic and are documented with the coordinator itself in `config/coordinator/coordinator.yaml`. The gateway timeout (`gateway.timeout`) bounds the wait for upstream response headers. Queued dispatches are never streaming (queued modes reject `stream` at admission), so headers arrive only when generation completes and this clock is what bounds generation on a dispatch pass. It fires as a 502 that the AP retries while the deadline remains. The coordinator timeout (`server.write_timeout`) bounds every response the coordinator writes except held waits, which clear it. Keep `gateway.timeout` below `server.write_timeout` when raising either. Broken, that ordering turns slow generations into connection resets that the AP records as terminal INFERENCE_ERROR instead of retryable 502s.
+The three lifecycle clocks hand off without overlap: the deadline ends where the result TTL begins (result written), and the result TTL ends where the grace begins (first delivered fetch). Wait mode deletes the result on delivery, so the TTL and grace rows apply to enqueue results and to wait requests that fell back at the cap. Raw producers supply a deadline per message, and their results go to the shared belt, which is drained destructively, so the TTL and grace rows do not apply there.
 
 ## Deployment notes
 

@@ -127,6 +127,14 @@ func resultKey(tenant, id string) string {
 	return resultKeyPrefix + tenant + ":" + id
 }
 
+// envelopeID is the request id written into the AP envelope: the client id
+// prefixed with the tenant. The AP derives its per-request keys (active
+// marker, cancel key) from the envelope id, so prefixing here is what tenant
+// scopes them. The bare client id stays the only externally visible form.
+func envelopeID(tenant, id string) string {
+	return tenant + ":" + id
+}
+
 // asyncRequestState is the outcome of looking up a request id.
 type asyncRequestState int
 
@@ -138,9 +146,8 @@ const (
 
 // lookupResult reads a request's result without consuming it. Pending is
 // detected via the producer-maintained active-token key, which exists from
-// submit until the result is flushed. The result read is tenant-scoped; the
-// pending check is by id only, so a caller with the wrong tenant may learn
-// that an id exists but never its result.
+// submit until the result is flushed. Both reads are tenant-scoped, so a
+// caller with the wrong tenant sees an unknown id.
 func lookupResult(ctx context.Context, rdb *redis.Client, tenant, id string) (asyncRequestState, *api.ResultMessage, error) {
 	vals, err := rdb.LRange(ctx, resultKey(tenant, id), 0, 0).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -154,7 +161,7 @@ func lookupResult(ctx context.Context, rdb *redis.Client, tenant, id string) (as
 		return asyncStateReady, &res, nil
 	}
 
-	exists, err := rdb.Exists(ctx, api.RequestActiveTokenKey(id)).Result()
+	exists, err := rdb.Exists(ctx, api.RequestActiveTokenKey(envelopeID(tenant, id))).Result()
 	if err != nil {
 		return asyncStateUnknown, nil, fmt.Errorf("failed to check request state: %w", err)
 	}

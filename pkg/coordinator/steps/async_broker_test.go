@@ -248,8 +248,9 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(members[0]), &envelope))
 	assert.Equal(t, resultKey("team-a", "req-test-1"), envelope.Internal.ResultQueueName)
+	assert.Equal(t, envelopeID("team-a", "req-test-1"), envelope.Data.ID)
 	assert.Equal(t, "/v1/chat/completions", envelope.Data.Endpoint)
-	assert.Equal(t, "team-a", envelope.Data.Metadata["team"])
+	assert.Equal(t, "team-a", envelope.Data.Metadata["userid"])
 	assert.Equal(t, "00-abc-def-01", envelope.Data.Metadata["traceparent"])
 	assert.Equal(t, "test-model", envelope.Data.Payload["model"])
 	assert.Equal(t, "800", envelope.Data.Headers["x-llm-d-slo-ttft-ms"])
@@ -258,8 +259,8 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	}
 	assert.InDelta(t, time.Now().Add(120*time.Second).Unix(), envelope.Data.Deadline, 5)
 
-	// Pending marker: the producer's active-token key exists.
-	exists, err := rdb.Exists(t.Context(), api.RequestActiveTokenKey("req-test-1")).Result()
+	// Pending marker: the producer's active-token key exists, tenant scoped.
+	exists, err := rdb.Exists(t.Context(), api.RequestActiveTokenKey(envelopeID("team-a", "req-test-1"))).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), exists)
 }
@@ -442,9 +443,14 @@ func TestAsyncBrokerRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusGone, rec.Code)
 
 	// Pending: active token exists, no result yet.
-	require.NoError(t, rdb.Set(t.Context(), api.RequestActiveTokenKey("pending-id"), "1", 0).Err())
+	require.NoError(t, rdb.Set(t.Context(), api.RequestActiveTokenKey(envelopeID("team-a", "pending-id")), "1", 0).Err())
 	rec = do(http.MethodGet, "/v1/requests/pending-id", "team-a")
 	assert.Equal(t, http.StatusAccepted, rec.Code)
+
+	// The pending check is tenant scoped: the wrong tenant cannot learn
+	// that the id exists.
+	rec = do(http.MethodGet, "/v1/requests/pending-id", "team-b")
+	assert.Equal(t, http.StatusGone, rec.Code)
 
 	// Ready: delivered verbatim, and the mailbox TTL shrinks to the grace
 	// window instead of the original TTL.
