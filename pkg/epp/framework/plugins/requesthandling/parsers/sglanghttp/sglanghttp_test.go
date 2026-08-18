@@ -86,21 +86,6 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
-			name:    "batched input_ids populate TokenizedPrompt",
-			headers: map[string]string{":path": "/generate"},
-			body: map[string]any{
-				"input_ids": [][]int{{1, 2}, {3, 4}},
-				"extra_key": "batch-salt",
-			},
-			want: &fwkrh.InferenceRequestBody{
-				Generate: &fwkrh.GenerateRequest{CacheSalt: "batch-salt"},
-				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					PerPromptTokens: [][]uint32{{1, 2}, {3, 4}},
-					CacheSalt:       "batch-salt",
-				},
-			},
-		},
-		{
 			name:    "unrelated fields are left for SGLang to validate",
 			headers: map[string]string{":path": "/generate"},
 			body: map[string]any{
@@ -112,23 +97,6 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
-			name:    "input_embeds are rejected without a scheduling representation",
-			headers: map[string]string{":path": "/generate"},
-			body: map[string]any{
-				"input_embeds": [][]float64{{0.1, 0.2}, {0.3, 0.4}},
-			},
-			wantErr: true,
-		},
-		{
-			name:    "raw multimodal input is rejected without preprocessing",
-			headers: map[string]string{":path": "/generate"},
-			body: map[string]any{
-				"input_ids":  []int{1, 2},
-				"image_data": "data:image/png;base64,abc",
-			},
-			wantErr: true,
-		},
-		{
 			name:    "per-prompt extra_key list is rejected",
 			headers: map[string]string{":path": "/generate"},
 			body: map[string]any{
@@ -136,21 +104,6 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 				"extra_key": []string{"tenant-a", "tenant-b"},
 			},
 			wantErr: true,
-		},
-		{
-			name:    "batched input_ids with sampling params",
-			headers: map[string]string{":path": "/generate"},
-			body: map[string]any{
-				"input_ids":       [][]int{{1}, {2}},
-				"sampling_params": map[string]any{"max_new_tokens": 64},
-			},
-			want: &fwkrh.InferenceRequestBody{
-				Generate: &fwkrh.GenerateRequest{},
-				TokenizedPrompt: &fwkrh.TokenizedPrompt{
-					PerPromptTokens: [][]uint32{{1}, {2}},
-				},
-				MaxOutputTokens: ptr.To(int64(64)),
-			},
 		},
 		{
 			name:    "x-original-path header",
@@ -244,14 +197,9 @@ func TestSGLangHTTPParser_ParseRequest_ErrorPaths(t *testing.T) {
 			errContains: "input_ids must be provided",
 		},
 		{
-			name:        "batched input_ids with empty inner array",
-			body:        `{"input_ids":[[1,2],[]]}`,
-			errContains: "input_ids[1] must be a non-empty array",
-		},
-		{
-			name:        "multimodal preprocessing required",
-			body:        `{"input_ids":[1,2],"image_data":"image.png"}`,
-			errContains: "multimodal inputs are not supported",
+			name:        "batched input_ids are rejected",
+			body:        `{"input_ids":[[1,2],[3,4]]}`,
+			errContains: "input_ids must be an array of uint32 integers",
 		},
 		{
 			name:        "per-prompt cache salt unsupported",
@@ -310,31 +258,24 @@ func TestSGLangHTTPParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "non-streaming batch sums usage",
-			body: `[{"text":"a","meta_info":{"prompt_tokens":4,"completion_tokens":2,"cached_tokens":1}},` +
-				`{"text":"b","meta_info":{"prompt_tokens":6,"completion_tokens":3,"cached_tokens":2}}]`,
-			want: &fwkrh.Usage{
-				PromptTokens:     10,
-				CompletionTokens: 5,
-				TotalTokens:      15,
-				PromptTokenDetails: &fwkrh.PromptTokenDetails{
-					CachedTokens: 3,
-				},
-			},
-		},
-		{
-			name:    "streaming — takes last data chunk",
+			name:    "streaming — only final chunk (finish_reason set) is used",
 			headers: map[string]string{"Content-Type": "text/event-stream"},
 			body: "data: {\"text\":\"he\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n" +
-				"data: {\"text\":\"hello\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n" +
+				"data: {\"text\":\"hello\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"finish_reason\":{\"type\":\"stop\"}}}\n\n" +
 				"data: [DONE]\n\n",
 			want: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+		},
+		{
+			name:    "streaming — intermediate chunk without finish_reason returns nil",
+			headers: map[string]string{"Content-Type": "text/event-stream"},
+			body:    "data: {\"text\":\"he\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n",
+			want:    nil,
 		},
 		{
 			name:    "streaming detected from content type",
 			headers: map[string]string{"Content-Type": "text/event-stream; charset=utf-8"},
 			body: "event: generation\n" +
-				"data: {\"text\":\"hello\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+				"data: {\"text\":\"hello\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"finish_reason\":{\"type\":\"stop\"}}}\n\n",
 			want: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 		},
 		{

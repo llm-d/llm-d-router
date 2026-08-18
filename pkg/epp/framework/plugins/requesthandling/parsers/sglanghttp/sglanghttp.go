@@ -94,9 +94,6 @@ func (p *SGLangHTTPParser) Claims() fwkrh.Claims {
 type sgLangGenerateWire struct {
 	InputIDs       json.RawMessage `json:"input_ids"`
 	ExtraKey       json.RawMessage `json:"extra_key"`
-	ImageData      json.RawMessage `json:"image_data"`
-	VideoData      json.RawMessage `json:"video_data"`
-	AudioData      json.RawMessage `json:"audio_data"`
 	SamplingParams json.RawMessage `json:"sampling_params"`
 	Stream         bool            `json:"stream"`
 }
@@ -123,9 +120,6 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	if hasMultimodalData(wire.ImageData) || hasMultimodalData(wire.VideoData) || hasMultimodalData(wire.AudioData) {
-		return nil, errors.New("unsupported generate request: multimodal inputs are not supported; only pre-tokenized prompts are supported")
-	}
 	if !hasJSONValue(wire.InputIDs) {
 		return nil, errors.New("invalid generate request: input_ids must be provided")
 	}
@@ -134,51 +128,23 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 	if err != nil {
 		return nil, fmt.Errorf("unsupported generate request: %w", err)
 	}
-	batches, err := parseInputIDs(wire.InputIDs)
+	tokenIDs, err := parseInputIDs(wire.InputIDs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
-	// Single prompt: TokenIDs for the producer to copy. Batch: TokenizedPrompt,
-	// because TokenIDs cannot hold [][]uint32 (producer skips if already set).
-	result := &fwkrh.InferenceRequestBody{
-		Generate:        &fwkrh.GenerateRequest{CacheSalt: cacheSalt},
+
+	return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{
+		Generate:        &fwkrh.GenerateRequest{TokenIDs: tokenIDs, CacheSalt: cacheSalt},
 		Payload:         fwkrh.RawPayload(rawBody),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
-	}
-	if len(batches) == 1 {
-		result.Generate.TokenIDs = batches[0]
-	} else {
-		result.TokenizedPrompt = &fwkrh.TokenizedPrompt{
-			PerPromptTokens: batches,
-			CacheSalt:       cacheSalt,
-		}
-	}
-
-	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
+	}, SkipResponseProcessing: false}, nil
 }
 
 func hasJSONValue(data json.RawMessage) bool {
 	return len(data) > 0 && strings.TrimSpace(string(data)) != "null"
 }
 
-func hasMultimodalData(data json.RawMessage) bool {
-	if !hasJSONValue(data) {
-		return false
-	}
-	var value any
-	if err := json.Unmarshal(data, &value); err != nil {
-		return true
-	}
-	switch typed := value.(type) {
-	case string:
-		return typed != ""
-	case []any:
-		return len(typed) > 0
-	default:
-		return value != nil
-	}
-}
 
 func parseCacheSalt(data json.RawMessage) (string, error) {
 	if !hasJSONValue(data) {
@@ -191,28 +157,15 @@ func parseCacheSalt(data json.RawMessage) (string, error) {
 	return value, nil
 }
 
-func parseInputIDs(data json.RawMessage) ([][]uint32, error) {
-	var single []uint32
-	if err := json.Unmarshal(data, &single); err == nil {
-		if len(single) == 0 {
-			return nil, errors.New("input_ids cannot be empty")
-		}
-		return [][]uint32{single}, nil
+func parseInputIDs(data json.RawMessage) ([]uint32, error) {
+	var ids []uint32
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return nil, errors.New("input_ids must be an array of uint32 integers")
 	}
-
-	var batches [][]uint32
-	if err := json.Unmarshal(data, &batches); err != nil {
-		return nil, errors.New("input_ids must be an array of uint32 integers or arrays of uint32 integers")
-	}
-	if len(batches) == 0 {
+	if len(ids) == 0 {
 		return nil, errors.New("input_ids cannot be empty")
 	}
-	for i, row := range batches {
-		if len(row) == 0 {
-			return nil, fmt.Errorf("input_ids[%d] must be a non-empty array of integers", i)
-		}
-	}
-	return batches, nil
+	return ids, nil
 }
 
 func maxOutputTokens(data json.RawMessage) *int64 {
@@ -228,13 +181,16 @@ func maxOutputTokens(data json.RawMessage) *int64 {
 	return single.MaxNewTokens
 }
 
-// sgLangResponse is the /generate response wire format (non-streaming).
+// sgLangResponse is the /generate response wire format.
 // Usage lives under meta_info, not under usage like the OpenAI format.
 type sgLangResponse struct {
 	MetaInfo struct {
-		PromptTokens     *int `json:"prompt_tokens"`
-		CompletionTokens *int `json:"completion_tokens"`
-		CachedTokens     *int `json:"cached_tokens"`
+		// FinishReason is parsed to identify the last meta_info of a finished stream;
+		// null on intermediate chunks, non-null on the final chunk
+		FinishReason     json.RawMessage `json:"finish_reason"`
+		PromptTokens     *int            `json:"prompt_tokens"`
+		CompletionTokens *int            `json:"completion_tokens"`
+		CachedTokens     *int            `json:"cached_tokens"`
 	} `json:"meta_info"`
 }
 
@@ -246,7 +202,7 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 	if isEventStream(headers) {
 		return &fwkrh.ParsedResponse{Usage: extractStreamingUsage(body)}, nil
 	}
-	usage, err := extractNonStreamingUsage(body)
+	usage, err := parseMetaInfoUsage(body)
 	if err != nil {
 		return nil, err
 	}
@@ -264,10 +220,8 @@ func isEventStream(headers map[string]string) bool {
 }
 
 // extractStreamingUsage reads usage from SGLang SSE data lines.
-// Streaming SSE chunks carry cumulative meta_info; the last parseable chunk is used.
 func extractStreamingUsage(body []byte) *fwkrh.Usage {
 	text := strings.TrimSpace(string(body))
-	var last *fwkrh.Usage
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		data, ok := strings.CutPrefix(line, streamingRespPrefix)
@@ -278,45 +232,18 @@ func extractStreamingUsage(body []byte) *fwkrh.Usage {
 		if data == streamingDoneMarker {
 			continue
 		}
-		if usage, err := parseMetaInfoUsage([]byte(data)); err == nil && usage != nil {
-			last = usage
-		}
-	}
-	return last
-}
-
-// extractNonStreamingUsage reads usage from a single SGLang response object or
-// sums usage across a batch response array.
-func extractNonStreamingUsage(body []byte) (*fwkrh.Usage, error) {
-	text := strings.TrimSpace(string(body))
-	if strings.HasPrefix(text, "[") {
-		return extractBatchUsage(body)
-	}
-	return parseMetaInfoUsage(body)
-}
-
-func extractBatchUsage(body []byte) (*fwkrh.Usage, error) {
-	var responses []json.RawMessage
-	if err := json.Unmarshal(body, &responses); err != nil {
-		return nil, err
-	}
-	total := &fwkrh.Usage{}
-	found := false
-	for _, response := range responses {
-		usage, err := parseMetaInfoUsage(response)
-		if err != nil {
-			return nil, err
-		}
-		if usage == nil {
+		var resp sgLangResponse
+		if err := json.Unmarshal([]byte(data), &resp); err != nil {
 			continue
 		}
-		found = true
-		addUsage(total, usage)
+		// skip intermediate chunks; only the final chunk has a non-null finish_reason
+		if !hasJSONValue(resp.MetaInfo.FinishReason) {
+			continue
+		}
+		usage, _ := parseMetaInfoUsage([]byte(data))
+		return usage
 	}
-	if !found {
-		return nil, nil //nolint:nilnil
-	}
-	return total, nil
+	return nil
 }
 
 func parseMetaInfoUsage(data []byte) (*fwkrh.Usage, error) {
@@ -345,17 +272,4 @@ func intValue(value *int) int {
 		return 0
 	}
 	return *value
-}
-
-// addUsage accumulates per-prompt usage into a request-level total.
-func addUsage(total, usage *fwkrh.Usage) {
-	total.PromptTokens += usage.PromptTokens
-	total.CompletionTokens += usage.CompletionTokens
-	total.TotalTokens += usage.TotalTokens
-	if usage.PromptTokenDetails != nil {
-		if total.PromptTokenDetails == nil {
-			total.PromptTokenDetails = &fwkrh.PromptTokenDetails{}
-		}
-		total.PromptTokenDetails.CachedTokens += usage.PromptTokenDetails.CachedTokens
-	}
 }
