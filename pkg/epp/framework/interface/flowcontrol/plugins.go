@@ -111,10 +111,10 @@ type OrderingPolicy interface {
 }
 
 // ScoringOrderingPolicy is an optional extension of OrderingPolicy for policies whose ordering key is
-// revised in place while an item waits -- for example one keyed on KV-cache prefix affinity, which moves
-// as the cache warms and evicts. Reading such a key from Less breaks the heap: the queue re-sorts only on
-// Add and Remove so it never reflects the new key, and two comparisons within one sift can observe
-// different states, so Less is not transitive.
+// revised in place while an item waits -- for example one keyed on live backend state that shifts as
+// requests are served. Reading such a key from Less breaks the heap: the queue re-sorts only on Add and
+// Remove so it never reflects the new key, and two comparisons within one sift can observe different
+// states, so Less is not transitive.
 //
 // A policy implementing this interface delegates both problems to the queue, which caches each item's
 // Score, compares only cached values, and rebuilds when Generation changes. The queue detects the
