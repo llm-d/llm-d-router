@@ -120,7 +120,7 @@ jobs:
       # workflow, per GitHub's guidance for actions that write security data.
       - name: Upload gosec SARIF
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: gosec.sarif
           category: gosec
