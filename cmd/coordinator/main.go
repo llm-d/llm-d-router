@@ -28,6 +28,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
+	"golang.org/x/sync/errgroup"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -125,33 +126,41 @@ func main() {
 }
 
 // run starts the inference server and, alongside it, the Prometheus /metrics
-// server. It blocks until either exits or a signal is received; on signal it
-// initiates a graceful drain of both bounded by cfg.ShutdownTimeout.
+// server. It blocks until a signal is received or either server exits. On any
+// exit condition both servers are drained before run returns: the inference
+// server bounded by cfg.ShutdownTimeout, the metrics server by
+// metricsShutdownTimeout.
 func run(srv *server.Server, cfg config.ServerConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- srv.ListenAndServe() }()
+	g, gctx := errgroup.WithContext(ctx)
 
-	metricsErr := make(chan error, 1)
-	go func() { metricsErr <- serveMetrics(ctx, cfg.MetricsPort) }()
+	g.Go(func() error {
+		errCh := make(chan error, 1)
+		go func() { errCh <- srv.ListenAndServe() }()
+		select {
+		case err := <-errCh:
+			// ListenAndServe returned before shutdown was requested; always a failure.
+			return fmt.Errorf("inference server: %w", err)
+		case <-gctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("inference server shutdown: %w", err)
+			}
+			if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("inference server: %w", err)
+			}
+			return nil
+		}
+	})
 
-	select {
-	case err := <-srvErr:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-	case err := <-metricsErr:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-	case <-ctx.Done():
-	}
-	stop()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	g.Go(func() error {
+		return serveMetrics(gctx, cfg.MetricsPort)
+	})
+
+	return g.Wait()
 }
 
 // serveMetrics stands up the Prometheus /metrics endpoint on port and blocks
