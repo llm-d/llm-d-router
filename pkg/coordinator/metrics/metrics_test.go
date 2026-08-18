@@ -107,3 +107,29 @@ func TestReset_ClearsAllVectors(t *testing.T) {
 	Reset()
 	require.InDelta(t, 0.0, promtestutil.ToFloat64(requestTotal.WithLabelValues("m2")), 1e-9)
 }
+
+func TestStepFamily_Records(t *testing.T) {
+	Reset()
+	IncStepRunning("render")
+	require.InDelta(t, 1.0, promtestutil.ToFloat64(stepRunning.WithLabelValues("render")), 1e-9)
+	DecStepRunning("render")
+	require.InDelta(t, 0.0, promtestutil.ToFloat64(stepRunning.WithLabelValues("render")), 1e-9)
+
+	RecordStepDuration("render", 50*time.Millisecond)
+	IncStepErrorTotal("prefill", ErrorCodeUpstream5xx)
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(stepErrorTotal.WithLabelValues("prefill", ErrorCodeUpstream5xx)), 1e-9,
+	)
+}
+
+func TestUpstreamFamily_Records(t *testing.T) {
+	Reset()
+	IncUpstreamRequestTotal(UpstreamEncode)
+	IncUpstreamRequestTotal(UpstreamEncode)
+	IncUpstreamRequestTotal(UpstreamMediaFetch)
+	RecordUpstreamRequestDuration(UpstreamEncode, 10*time.Millisecond)
+
+	require.InDelta(t, 2.0, promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamEncode)), 1e-9)
+	require.InDelta(t, 1.0, promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamMediaFetch)), 1e-9)
+}

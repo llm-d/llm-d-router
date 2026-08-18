@@ -21,12 +21,14 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -75,7 +77,10 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		}
 		return nil
 	})
+	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamConditionalDecode)
+	callStart := time.Now()
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamConditionalDecode, time.Since(callStart))
 
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")

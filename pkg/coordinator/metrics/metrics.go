@@ -44,8 +44,21 @@ const (
 	ErrorCodeInternal    = "internal"
 )
 
+// Upstream label values for the upstream_request_* metrics. Step names come
+// from each step file's own StepName constant (pkg/coordinator/steps/*.go).
+const (
+	UpstreamRender            = "render"
+	UpstreamMediaFetch        = "media-fetch"
+	UpstreamEncode            = "encode"
+	UpstreamPrefill           = "prefill"
+	UpstreamConditionalDecode = "conditional-decode"
+	UpstreamDecode            = "decode"
+)
+
 var (
-	modelLabel = []string{"model_name"}
+	modelLabel    = []string{"model_name"}
+	stepLabel     = []string{"step"}
+	upstreamLabel = []string{"upstream"}
 
 	// generalLatencyBuckets covers durations from 5ms to 1 hour; identical to
 	// the EPP request-duration ladder so PromQL translates cleanly between the
@@ -75,6 +88,11 @@ func allCollectors() []prometheus.Collector {
 		requestDuration,
 		requestSize,
 		requestRunning,
+		stepDuration,
+		stepErrorTotal,
+		stepRunning,
+		upstreamRequestTotal,
+		upstreamRequestDuration,
 	}
 }
 

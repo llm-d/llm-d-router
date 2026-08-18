@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -28,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -77,7 +79,10 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	proxy := newDecodeProxy(logger, s.gwClient.Transport(), nil)
+	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamDecode)
+	callStart := time.Now()
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamDecode, time.Since(callStart))
 	return nil
 }
 

@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 )
 
 // ErrPipelineDone is returned by a step to signal successful early exit.
@@ -86,17 +88,44 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("pipeline cancelled: %w", err)
 		}
-		logger.V(logutil.TRACE).Info("step starting", "step", step.Name())
+		name := step.Name()
+		logger.V(logutil.TRACE).Info("step starting", "step", name)
+		coordmetrics.IncStepRunning(name)
 		start := time.Now()
 		err := step.Execute(ctx, reqCtx)
-		timings[idx] = stepTiming{name: step.Name(), duration: time.Since(start)}
+		duration := time.Since(start)
+		coordmetrics.DecStepRunning(name)
+		coordmetrics.RecordStepDuration(name, duration)
+		timings[idx] = stepTiming{name: name, duration: duration}
 		if err != nil {
 			if errors.Is(err, ErrPipelineDone) {
+				// Clean early exit (e.g. conditional-decode cache hit); not an error.
 				return nil
 			}
-			return fmt.Errorf("step %q failed: %w", step.Name(), err)
+			coordmetrics.IncStepErrorTotal(name, classifyStepErrorCode(err))
+			return fmt.Errorf("step %q failed: %w", name, err)
 		}
-		logger.V(logutil.TRACE).Info("step complete", "step", step.Name())
+		logger.V(logutil.TRACE).Info("step complete", "step", name)
 	}
 	return nil
+}
+
+// classifyStepErrorCode maps a step error to the error_code label emitted on
+// step_errors_total. Its mapping mirrors the server handler's request-error
+// classification so the two families report consistent codes for the same
+// failure.
+func classifyStepErrorCode(err error) string {
+	if errors.Is(err, ErrBadRequest) {
+		return coordmetrics.ErrorCodeBadRequest
+	}
+	var upstream *UpstreamError
+	if errors.As(err, &upstream) {
+		switch {
+		case upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError:
+			return coordmetrics.ErrorCodeUpstream4xx
+		case upstream.StatusCode >= http.StatusInternalServerError:
+			return coordmetrics.ErrorCodeUpstream5xx
+		}
+	}
+	return coordmetrics.ErrorCodeInternal
 }

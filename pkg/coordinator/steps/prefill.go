@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -105,7 +107,10 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 	}
 
+	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamPrefill)
+	callStart := time.Now()
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
+	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamPrefill, time.Since(callStart))
 	if err != nil {
 		return fmt.Errorf("prefill: request: %w", err)
 	}

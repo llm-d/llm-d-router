@@ -49,3 +49,35 @@ func IncRequestRunning(modelName string) {
 func DecRequestRunning(modelName string) {
 	requestRunning.WithLabelValues(boundModel(modelName)).Dec()
 }
+
+// RecordStepDuration observes the wall-time latency of one pipeline step.
+func RecordStepDuration(step string, d time.Duration) {
+	stepDuration.WithLabelValues(step).Observe(d.Seconds())
+}
+
+// IncStepErrorTotal increments step_errors_total for the given step and
+// classified error code.
+func IncStepErrorTotal(step, errorCode string) {
+	stepErrorTotal.WithLabelValues(step, errorCode).Inc()
+}
+
+// IncStepRunning increments the per-step in-flight gauge.
+func IncStepRunning(step string) {
+	stepRunning.WithLabelValues(step).Inc()
+}
+
+// DecStepRunning decrements the per-step in-flight gauge. Balance with
+// IncStepRunning.
+func DecStepRunning(step string) {
+	stepRunning.WithLabelValues(step).Dec()
+}
+
+// IncUpstreamRequestTotal increments upstream_request_total for one call.
+func IncUpstreamRequestTotal(upstream string) {
+	upstreamRequestTotal.WithLabelValues(upstream).Inc()
+}
+
+// RecordUpstreamRequestDuration observes the latency of one outbound call.
+func RecordUpstreamRequestDuration(upstream string, d time.Duration) {
+	upstreamRequestDuration.WithLabelValues(upstream).Observe(d.Seconds())
+}
