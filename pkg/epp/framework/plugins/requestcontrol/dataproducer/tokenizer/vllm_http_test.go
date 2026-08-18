@@ -24,17 +24,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -335,5 +339,104 @@ func TestVLLMHTTPRenderer_RenderPropagatesTraceContext(t *testing.T) {
 	}
 	if !strings.Contains(gotTraceparent, traceID.String()) {
 		t.Fatalf("expected outbound traceparent to carry trace ID %s, got %q", traceID, gotTraceparent)
+	}
+}
+
+// TestVLLMHTTPRenderer_ChatTimeoutRawMessages asserts that pre-marshaled
+// (Anthropic-rebuilt) messages with array content still select the multimodal
+// timeout.
+func TestVLLMHTTPRenderer_ChatTimeoutRawMessages(t *testing.T) {
+	r := &vllmHTTPRenderer{timeout: 5 * time.Second, mmTimeout: 30 * time.Second}
+
+	textOnly := fwkrh.PayloadMap{"messages": []any{
+		json.RawMessage(`{"role":"user","content":"hi"}`),
+	}}
+	assert.Equal(t, 5*time.Second, r.chatTimeout(textOnly))
+
+	multimodal := fwkrh.PayloadMap{"messages": []any{
+		json.RawMessage(`{"role":"user","content":"hi"}`),
+		json.RawMessage(`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}`),
+	}}
+	assert.Equal(t, 30*time.Second, r.chatTimeout(multimodal))
+}
+
+// TestBuildChatRenderRequest_MessageFields asserts the wire shape of rebuilt
+// messages: tool_calls and reasoning ride along, tool messages carry
+// tool_call_id, and content is omitted when absent.
+func TestBuildChatRenderRequest_MessageFields(t *testing.T) {
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "assistant", Content: nil, Reasoning: "hmm", ToolCalls: []any{map[string]any{
+				"id":   "t1",
+				"type": "function",
+				"function": map[string]any{
+					"name":      "run",
+					"arguments": `{"cmd": "ls"}`,
+				},
+			}}},
+			{Role: "tool", ToolCallID: "t1", Content: &tokenizerTypes.Content{Raw: "out"}},
+		},
+	}
+
+	data, err := json.Marshal(buildChatRenderRequest(req))
+	require.NoError(t, err)
+
+	var msgs []map[string]any
+	require.NoError(t, json.Unmarshal(data, &struct {
+		Messages *[]map[string]any `json:"messages"`
+	}{&msgs}))
+	require.Len(t, msgs, 2)
+
+	assert.NotContains(t, msgs[0], "content", "assistant with only tool_calls omits content")
+	assert.Equal(t, "hmm", msgs[0]["reasoning"])
+	assert.Equal(t, []any{map[string]any{
+		"id":   "t1",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "run",
+			"arguments": `{"cmd": "ls"}`,
+		},
+	}}, msgs[0]["tool_calls"])
+
+	assert.Equal(t, "tool", msgs[1]["role"])
+	assert.Equal(t, "t1", msgs[1]["tool_call_id"])
+	assert.Equal(t, "out", msgs[1]["content"])
+}
+
+// TestVLLMHTTPRenderer_RenderSpanName asserts the outbound render span is
+// named after the render route instead of the transport default "HTTP POST".
+func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		_ = tp.Shutdown(context.Background())
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"token_ids":[1]}]`))
+	}))
+	defer srv.Close()
+
+	// The transport resolves its tracer from the global provider at
+	// construction, so the renderer must be built after the swap above.
+	r := newHTTPRenderer(t, srv)
+
+	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
+	_, _, err := r.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+	span.End()
+	require.NoError(t, err)
+
+	var clientSpans []tracetest.SpanStub
+	for _, s := range exporter.GetSpans() {
+		if s.SpanKind == trace.SpanKindClient {
+			clientSpans = append(clientSpans, s)
+		}
+	}
+	require.NotEmpty(t, clientSpans, "expected a client span for the render call")
+	for _, s := range clientSpans {
+		assert.Equal(t, "tokenize_render /v1/completions/render", s.Name)
 	}
 }
