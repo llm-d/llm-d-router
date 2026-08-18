@@ -46,9 +46,11 @@ var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	receivedAt := time.Now()
-	// model starts as unknown so pre-parse failures still emit a value; it
-	// is upgraded after JSON parse and finalized at defer time.
-	model := coordmetrics.ModelUnknown
+	// model is the raw name from the request body, or "" when the client
+	// omitted it. Metric emitters normalize "" to ModelUnknown via
+	// boundModel; the pipeline sees the raw value so upstream requests
+	// carry what the client actually sent.
+	var model string
 	inflight := false
 	defer func() {
 		coordmetrics.IncRequestTotal(model)
