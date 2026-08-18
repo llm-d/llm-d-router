@@ -258,15 +258,18 @@ Exposed when the `flowControl` feature gate is enabled.
 #### `flow_control_pool_saturation`
 
 *   **Type:** Gauge
-*   **Labels:** `inference_pool`
-*   **Description:** Pool saturation signal gating dispatch. 1.0 is the gating set point; values
-    above 1.0 indicate the magnitude of oversubscription past it (deliberately not clamped). An
-    empty pool reads as 1.0, and with the default utilization detector, endpoints with missing or
-    stale metrics score as fully saturated (fail-closed).
-*   **Usage:** When saturation reaches the usage limit threshold, the dispatch cycle skips
-    dispatching and requests remain queued. A reading pinned at exactly 1.0 can be fail-closed
-    stale-metrics or an empty pool rather than genuine overload (which typically reads above 1.0);
-    check `flow_control_stale_endpoints` to disambiguate.
+*   **Labels:** `inference_pool`, `stage`
+*   **Description:** Pool saturation signal gating dispatch. The `stage` label partitions by
+    pipeline role: `prefill` and `decode` are per-stage signals, `effective` is
+    `max(prefill, decode)` and is the value used for gating. In monolithic deployments (no role
+    labels) all endpoints land in the decode stage. 1.0 is the gating set point; values above 1.0
+    indicate the magnitude of oversubscription past it (deliberately not clamped). An empty pool
+    reads as 1.0, and with the default utilization detector, endpoints with missing or stale
+    metrics score as fully saturated (fail-closed).
+*   **Usage:** When the effective saturation reaches the usage limit threshold, the dispatch cycle
+    skips dispatching and requests remain queued. A reading pinned at exactly 1.0 can be
+    fail-closed stale-metrics or an empty pool rather than genuine overload (which typically reads
+    above 1.0); check `flow_control_stale_endpoints` to disambiguate.
 
 #### `flow_control_stale_endpoints`
 

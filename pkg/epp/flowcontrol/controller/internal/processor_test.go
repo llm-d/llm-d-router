@@ -1214,15 +1214,15 @@ func TestProcessor(t *testing.T) {
 					makeEndpoint(bylabel.RoleDecode),
 				}
 
-				// Prefill is healthy but decode is saturated.
 				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
 					for _, ep := range endpoints {
-						role := ep.GetMetadata().Labels[bylabel.RoleLabel]
-						if role == bylabel.RoleDecode {
-							return 1.0
+						if ep.GetMetadata().Labels[bylabel.RoleLabel] != bylabel.RolePrefill {
+							// Any mixed or decode set reads healthy: the flat average is
+							// diluted by idle decode workers.
+							return 0.3
 						}
 					}
-					return 0.1
+					return 1.5 // homogeneous prefill subset: stage saturated
 				}
 
 				dispatched := h.processor.dispatchCycle(context.Background())
