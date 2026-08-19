@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -184,7 +183,7 @@ func TestExecute_SuccessRecordsStepDuration(t *testing.T) {
 	}
 
 	require.InDelta(t, 0.0,
-		promtestutil.ToFloat64(mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"})),
+		mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"}),
 		1e-9, "step_running must be balanced back to 0 after success",
 	)
 	require.InDelta(t, 0.0, stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeInternal), 1e-9)
@@ -201,7 +200,7 @@ func TestExecute_StepPanicBalancesRunningGauge(t *testing.T) {
 		r := recover()
 		require.NotNil(t, r, "step panic must propagate out of Execute so chi Recoverer handles it")
 		require.InDelta(t, 0.0,
-			promtestutil.ToFloat64(mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"})),
+			mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"}),
 			1e-9, "step_running must be balanced back to 0 after a step panic",
 		)
 	}()
@@ -384,10 +383,10 @@ func TestExecute_InputTokensRecordedOnlyWhenPopulated(t *testing.T) {
 	require.Equal(t, uint64(0), inputTokensCount(t, reg2, "m"))
 }
 
-// mustGauge finds a gauge series matching all of labels in reg. A missing
-// series is a test failure so promtestutil.ToFloat64 cannot silently see 0
-// when the series was never emitted.
-func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) prometheus.Gauge {
+// mustGauge finds a gauge series matching all of labels in reg and returns
+// its value. A missing series is a test failure, so callers cannot silently
+// see 0 when the series was never emitted.
+func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
@@ -408,12 +407,10 @@ func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[s
 				}
 			}
 			if match {
-				g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "shadow"})
-				g.Set(m.GetGauge().GetValue())
-				return g
+				return m.GetGauge().GetValue()
 			}
 		}
 	}
 	t.Fatalf("gauge %s%v not present", name, labels)
-	return nil
+	return 0
 }
