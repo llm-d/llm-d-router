@@ -189,6 +189,53 @@ func (e *ScopedEndpoint) Clone() fwkdl.AttributeMap {
 	return clone
 }
 
+// scopeSpec holds the allowed-key sets derived from a plugin's declarations.
+// The maps are built once per plugin and shared read-only by every ScopedEndpoint
+// wrapper across all subsequent invocations.
+type scopeSpec struct {
+	allowedPut map[fwkplugin.DataKey]struct{}
+	allowedGet map[fwkplugin.DataKey]struct{}
+}
+
+// scopeSpecs caches one scopeSpec per plugin instance, keyed by identity.
+// Produces() and Consumes() are source-level declarations fixed at plugin
+// construction, so the derived sets never change, while Scope runs for every
+// filter, scorer, and DataProducer on every request. Plugin instances live for
+// the process lifetime, so entries are never evicted.
+var scopeSpecs sync.Map // fwkplugin.Plugin -> *scopeSpec
+
+func scopeSpecFor(plugin fwkplugin.Plugin) *scopeSpec {
+	if cached, ok := scopeSpecs.Load(plugin); ok {
+		return cached.(*scopeSpec)
+	}
+
+	produces := map[fwkplugin.DataKey]any{}
+	if producer, ok := plugin.(fwkplugin.ProducerPlugin); ok {
+		produces = producer.Produces()
+	}
+	spec := &scopeSpec{
+		allowedPut: make(map[fwkplugin.DataKey]struct{}, len(produces)),
+		allowedGet: make(map[fwkplugin.DataKey]struct{}, len(produces)),
+	}
+	for key := range produces {
+		spec.allowedPut[key] = struct{}{}
+		// A producer may read back its own output.
+		spec.allowedGet[key] = struct{}{}
+	}
+	if consumer, ok := plugin.(fwkplugin.ConsumerPlugin); ok {
+		deps := consumer.Consumes()
+		for key := range deps.Required {
+			spec.allowedGet[key] = struct{}{}
+		}
+		for key := range deps.Optional {
+			spec.allowedGet[key] = struct{}{}
+		}
+	}
+
+	cached, _ := scopeSpecs.LoadOrStore(plugin, spec)
+	return cached.(*scopeSpec)
+}
+
 // Scope confines endpoints to what plugin declares. extensionPoint labels the
 // violation counter, so a misdeclared plugin is attributable to the point that
 // ran it. The returned Violations accumulates what the plugin did outside its
@@ -196,28 +243,13 @@ func (e *ScopedEndpoint) Clone() fwkdl.AttributeMap {
 //
 // A plugin that declares nothing reaches nothing: an absent declaration is a
 // statement that the plugin exchanges no data, not a request to be exempt.
+//
+// The allowed-key sets are cached per plugin instance on first use, treating
+// Produces() and Consumes() as immutable after construction. Plugins must be
+// usable as map keys; the pointer-shaped plugins the framework's constructors
+// return always are.
 func Scope(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, endpoints []fwksched.Endpoint) ([]fwksched.Endpoint, *Violations) {
-	produces := map[fwkplugin.DataKey]any{}
-	if producer, ok := plugin.(fwkplugin.ProducerPlugin); ok {
-		produces = producer.Produces()
-	}
-
-	allowedPut := make(map[fwkplugin.DataKey]struct{}, len(produces))
-	allowedGet := make(map[fwkplugin.DataKey]struct{}, len(produces))
-	for key := range produces {
-		allowedPut[key] = struct{}{}
-		// A producer may read back its own output.
-		allowedGet[key] = struct{}{}
-	}
-	if consumer, ok := plugin.(fwkplugin.ConsumerPlugin); ok {
-		deps := consumer.Consumes()
-		for key := range deps.Required {
-			allowedGet[key] = struct{}{}
-		}
-		for key := range deps.Optional {
-			allowedGet[key] = struct{}{}
-		}
-	}
+	spec := scopeSpecFor(plugin)
 
 	violations := &Violations{}
 	typedName := plugin.TypedName()
@@ -228,8 +260,8 @@ func Scope(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, e
 	for i, endpoint := range endpoints {
 		wrappers[i] = ScopedEndpoint{
 			inner:          endpoint,
-			allowedPut:     allowedPut,
-			allowedGet:     allowedGet,
+			allowedPut:     spec.allowedPut,
+			allowedGet:     spec.allowedGet,
 			typedName:      typedName,
 			extensionPoint: extensionPoint,
 			logger:         logger,

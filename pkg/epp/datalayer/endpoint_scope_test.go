@@ -247,3 +247,25 @@ func TestUnscope_LeavesUnwrappedEndpointsAlone(t *testing.T) {
 	endpoints := []fwksched.Endpoint{newEndpoint(t)}
 	assert.Equal(t, endpoints, Unscope(endpoints))
 }
+
+func TestScope_AllowedKeySetsAreCachedPerPluginInstance(t *testing.T) {
+	plugA := &producerConsumerPlugin{}
+	plugA.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	plugA.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
+	assert.Same(t, scopeSpecFor(plugA), scopeSpecFor(plugA), "same plugin instance must share one cached spec")
+
+	plugB := &producerConsumerPlugin{}
+	plugB.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	plugB.consumes = &fwkplugin.DataDependencies{}
+	assert.NotSame(t, scopeSpecFor(plugA), scopeSpecFor(plugB), "distinct instances must not share a spec")
+
+	// Confinement is unchanged when the spec comes from the cache.
+	endpoint := newEndpoint(t)
+	scoped, _ := Scope(testLogger(), "test-extension-point", plugA, []fwksched.Endpoint{endpoint})
+	require.Len(t, scoped, 1)
+	_, ok := scoped[0].Get(undeclaredKey)
+	assert.False(t, ok, "undeclared read must stay rejected on a cached spec")
+	got, ok := scoped[0].Get(consumedKey)
+	assert.True(t, ok)
+	assert.Equal(t, cloneableStr("consumed-value"), got)
+}
