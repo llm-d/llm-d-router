@@ -345,8 +345,11 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 	blockSize := p.config.BlockSizeTokens
 	if p.config.AutoTune && len(endpoints) > 0 {
 		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-			if metric := endpoint.GetMetrics().CacheBlockSize; metric > 0 {
-				blockSize = metric
+			m := endpoint.GetMetrics()
+			if pmu := m.CachePrefixMatchUnit; pmu > 0 {
+				blockSize = pmu
+			} else if bs := m.CacheBlockSize; bs > 0 {
+				blockSize = bs
 			}
 		}
 	}
