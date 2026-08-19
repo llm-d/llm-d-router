@@ -170,10 +170,13 @@ func run(srv *server.Server, cfg config.ServerConfig) error {
 	return g.Wait()
 }
 
-// serveMetrics stands up the Prometheus /metrics endpoint on port and blocks
-// until srv exits. Uses the shared controller-runtime registry so any package
-// that registers against it (this coordinator's metrics, controller-runtime's
-// process collectors) is exposed on the same endpoint.
+// serveMetrics stands up a Prometheus /metrics HTTP server on port and blocks
+// until ctx is cancelled or the underlying ListenAndServe returns
+// unexpectedly. On ctx cancellation the server is drained via Shutdown
+// bounded by metricsShutdownTimeout. Uses the shared controller-runtime
+// registry so every package that registers against it (this coordinator's
+// metrics, controller-runtime's process collectors) is exposed on the same
+// endpoint.
 func serveMetrics(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
