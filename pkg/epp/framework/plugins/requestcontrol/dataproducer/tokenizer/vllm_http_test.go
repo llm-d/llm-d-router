@@ -280,8 +280,8 @@ func TestProduce_MessagesVLLMHTTPFullAgenticTurn(t *testing.T) {
 
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{11, 12, 13}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{11, 12, 13}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 
 	var sent struct {
 		Model    string           `json:"model"`

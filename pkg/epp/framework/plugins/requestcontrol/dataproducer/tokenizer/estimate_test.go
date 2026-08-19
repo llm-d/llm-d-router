@@ -758,7 +758,7 @@ func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
 	thinking := build([]fwkrh.AnthropicContentBlock{{Type: "thinking", Thinking: "deep thought"}})
 	thinkingOut, err := estimateBackend{}.produce(context.Background(), thinking)
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(baseOut.PerPromptTokens[0]), hashTokens(thinkingOut.PerPromptTokens[0]),
+	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(thinkingOut.Prompts[0].TokenIDs),
 		"thinking text was ignored by the prefix estimator")
 
 	toolUse := build([]fwkrh.AnthropicContentBlock{{
@@ -766,7 +766,7 @@ func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
 	}})
 	toolUseOut, err := estimateBackend{}.produce(context.Background(), toolUse)
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(baseOut.PerPromptTokens[0]), hashTokens(toolUseOut.PerPromptTokens[0]),
+	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(toolUseOut.Prompts[0].TokenIDs),
 		"tool_use input was ignored by the prefix estimator")
 
 	toolResult := build([]fwkrh.AnthropicContentBlock{{
@@ -775,6 +775,6 @@ func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
 	}})
 	toolResultOut, err := estimateBackend{}.produce(context.Background(), toolResult)
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(baseOut.PerPromptTokens[0]), hashTokens(toolResultOut.PerPromptTokens[0]),
+	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(toolResultOut.Prompts[0].TokenIDs),
 		"tool_result content was ignored by the prefix estimator")
 }
