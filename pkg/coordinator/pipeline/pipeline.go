@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -120,7 +119,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 				executed[name] = true
 				return nil
 			}
-			coordmetrics.IncStepErrorTotal(name, classifyStepErrorCode(err))
+			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, classifyOpts))
 			return fmt.Errorf("step %q failed: %w", name, err)
 		}
 		executed[name] = true
@@ -150,22 +149,16 @@ func classifyExecutionPath(executed map[string]bool) (string, bool) {
 	}
 }
 
-// classifyStepErrorCode maps a step error to the error_code label emitted on
-// step_errors_total. Its mapping mirrors the server handler's request-error
-// classification so the two families report consistent codes for the same
-// failure.
-func classifyStepErrorCode(err error) string {
-	if errors.Is(err, ErrBadRequest) {
-		return coordmetrics.ErrorCodeBadRequest
-	}
-	var upstream *UpstreamError
-	if errors.As(err, &upstream) {
-		switch {
-		case upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError:
-			return coordmetrics.ErrorCodeUpstream4xx
-		case upstream.StatusCode >= http.StatusInternalServerError:
-			return coordmetrics.ErrorCodeUpstream5xx
+// classifyOpts injects the pipeline's error sentinels into the shared
+// coordmetrics.ClassifyErrorCode so step_errors_total and request_error_total
+// share one mapping and cannot drift.
+var classifyOpts = coordmetrics.ClassifyOptions{
+	BadRequest: ErrBadRequest,
+	IsUpstream: func(err error) (int, bool) {
+		var u *UpstreamError
+		if errors.As(err, &u) {
+			return u.StatusCode, true
 		}
-	}
-	return coordmetrics.ErrorCodeInternal
+		return 0, false
+	},
 }

@@ -145,7 +145,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		logger.Error(err, "pipeline execution failed")
 		status, msg := classifyPipelineError(err, reqCtx.RequestID)
-		coordmetrics.IncRequestErrorTotal(model, classifyErrorCode(err))
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, classifyOpts))
 		http.Error(w, msg, status)
 	}
 }
@@ -166,24 +166,18 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
 }
 
-// classifyErrorCode maps a pipeline error to the error_code label emitted on
-// request_error_total. The mapping mirrors classifyPipelineError's status
-// choices: bad-request errors are bad_request, forwarded upstream 4xx and 5xx
-// each get their own bucket, and anything else is internal.
-func classifyErrorCode(err error) string {
-	if errors.Is(err, pipeline.ErrBadRequest) {
-		return coordmetrics.ErrorCodeBadRequest
-	}
-	var upstream *pipeline.UpstreamError
-	if errors.As(err, &upstream) {
-		switch {
-		case upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError:
-			return coordmetrics.ErrorCodeUpstream4xx
-		case upstream.StatusCode >= http.StatusInternalServerError:
-			return coordmetrics.ErrorCodeUpstream5xx
+// classifyOpts injects the pipeline's error sentinels into the shared
+// coordmetrics.ClassifyErrorCode so request_error_total and step_errors_total
+// share one mapping and cannot drift.
+var classifyOpts = coordmetrics.ClassifyOptions{
+	BadRequest: pipeline.ErrBadRequest,
+	IsUpstream: func(err error) (int, bool) {
+		var u *pipeline.UpstreamError
+		if errors.As(err, &u) {
+			return u.StatusCode, true
 		}
-	}
-	return coordmetrics.ErrorCodeInternal
+		return 0, false
+	},
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
