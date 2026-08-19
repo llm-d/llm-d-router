@@ -62,8 +62,18 @@ type algorithmParameters struct {
 }
 
 type parameters struct {
-	AttributeKey string              `json:"attributeKey"`
-	Algorithm    algorithmParameters `json:"algorithm"`
+	AttributeKey string `json:"attributeKey"`
+	// Producer names the plugin publishing the attribute. Omitted selects the
+	// core metrics extractor, the only producer whose attribute names come
+	// from configuration; set it to read another producer's attribute, e.g.
+	// "dcgm-extractor". Set it to the empty string for a producer-agnostic
+	// attribute, such as "llm-d.ai/multicluster-queue-size".
+	//
+	// A pointer distinguishes an omitted producer from one set to the empty
+	// string, which is what lets an attribute name containing "/" be told
+	// apart from the combined "Attribute/Producer" spelling.
+	Producer  *string             `json:"producer"`
+	Algorithm algorithmParameters `json:"algorithm"`
 }
 
 // EndpointAttributeScorerFactory defines the factory function for EndpointAttributeScorer.
@@ -103,9 +113,14 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 			fixed.Min, fixed.Max)
 	}
 
+	dataKey, err := attrmetrics.ResolveConfiguredKey("endpoint attribute scorer", params.AttributeKey, params.Producer)
+	if err != nil {
+		return nil, err
+	}
+
 	return &EndpointAttributeScorer{
 		typedName:     fwkplugin.TypedName{Type: EndpointAttributeScorerType, Name: name},
-		attributeKey:  params.AttributeKey,
+		dataKey:       dataKey,
 		lowerIsBetter: params.Algorithm.Type == algorithmLinearLowerIsBetter,
 		fixedRange:    normalization.FixedRange,
 	}, nil
@@ -117,7 +132,7 @@ func NewEndpointAttributeScorer(name string, params parameters) (*EndpointAttrib
 // range computed across the candidates.
 type EndpointAttributeScorer struct {
 	typedName     fwkplugin.TypedName
-	attributeKey  string
+	dataKey       fwkplugin.DataKey
 	lowerIsBetter bool
 	// fixedRange selects fixed-range normalization when set; adaptive-range
 	// normalization is used otherwise.
@@ -135,9 +150,11 @@ func (s *EndpointAttributeScorer) Category() fwksched.ScorerCategory {
 }
 
 // Consumes returns the list of data that is consumed by the plugin.
-func (s *EndpointAttributeScorer) Consumes() map[string]any {
-	return map[string]any{
-		s.attributeKey: attrmetrics.ScalarMetricValue(0),
+func (s *EndpointAttributeScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Optional: map[fwkplugin.DataKey]any{
+			s.dataKey: attrmetrics.ScalarMetricValue(0),
+		},
 	}
 }
 
@@ -155,7 +172,7 @@ func (s *EndpointAttributeScorer) Score(_ context.Context, _ *fwksched.Inference
 func (s *EndpointAttributeScorer) scoreFixedRange(endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.attributeKey)
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.dataKey)
 		if !ok {
 			scores[endpoint] = 0.0
 			continue
@@ -180,7 +197,7 @@ func (s *EndpointAttributeScorer) scoreAdaptiveRange(endpoints []fwksched.Endpoi
 	maxValue := math.Inf(-1)
 
 	for _, endpoint := range endpoints {
-		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.attributeKey)
+		value, ok := attrmetrics.ReadScalarMetricValue(endpoint, s.dataKey)
 		if !ok {
 			continue
 		}

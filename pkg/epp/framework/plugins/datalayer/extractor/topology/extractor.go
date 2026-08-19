@@ -139,6 +139,14 @@ func (e *TopologyExtractor) TypedName() fwkplugin.TypedName {
 	return e.typedName
 }
 
+var _ fwkplugin.ProducerPlugin = &TopologyExtractor{}
+
+// Produces declares the Topology attribute both of this extractor's handlers
+// publish.
+func (e *TopologyExtractor) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{e.dk: attrtopology.Topology{}}
+}
+
 // RegisterDependencies wires this extractor to both an endpoint source and a Pod
 // notification source. Both sources are auto-created if absent from user config.
 func (e *TopologyExtractor) RegisterDependencies(r fwkdl.Registrar) error {
@@ -218,7 +226,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" && rack == "" && zone == "" && region == "" {
 		return nil
 	}
-	event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{
+	event.Endpoint.GetAttributes().Put(h.ext.dk, &attrtopology.Topology{
 		Hostname: hn,
 		Rack:     rack,
 		Zone:     zone,
@@ -288,14 +296,14 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 	for _, ep := range eps {
 		// Preserve rack/zone/region already set from the endpoint event.
 		topo := &attrtopology.Topology{Hostname: hostname}
-		if raw, ok := ep.GetAttributes().Get(h.ext.dk.String()); ok {
+		if raw, ok := ep.GetAttributes().Get(h.ext.dk); ok {
 			if existing, ok := raw.(*attrtopology.Topology); ok {
 				topo.Rack = existing.Rack
 				topo.Zone = existing.Zone
 				topo.Region = existing.Region
 			}
 		}
-		ep.GetAttributes().Put(h.ext.dk.String(), topo)
+		ep.GetAttributes().Put(h.ext.dk, topo)
 	}
 	return nil
 }

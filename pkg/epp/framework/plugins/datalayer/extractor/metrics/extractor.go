@@ -86,6 +86,21 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 	return ext.typedName
 }
 
+var _ fwkplugin.ProducerPlugin = &Extractor{}
+
+// Produces declares the custom scalar metric attributes, whose names come from
+// the per-engine mappings in configuration. Core metrics land on the Metrics
+// struct rather than the attribute map and so are not declared here.
+func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
+	produced := map[fwkplugin.DataKey]any{}
+	for _, mapping := range ext.registry.Mappings() {
+		for _, custom := range mapping.CustomMetrics {
+			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+		}
+	}
+	return produced
+}
+
 // Extract transforms the typed metrics payload into endpoint attributes.
 func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
 	families := in.Payload
@@ -178,7 +193,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
 			continue
 		}
-		ep.GetAttributes().Put(custom.AttributeKey, attrmetrics.ScalarMetricValue(extractValue(metric)))
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
 		updated = true
 	}
 

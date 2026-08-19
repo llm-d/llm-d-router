@@ -431,9 +431,9 @@ func TestChatCompletionsToRenderChatRequest(t *testing.T) {
 
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
-	assert.Equal(t, tokenizerTypes.Content{Raw: "You are a helpful assistant."}, result.Conversation[0].Content)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "You are a helpful assistant."}, result.Conversation[0].Content)
 	assert.Equal(t, "assistant", result.Conversation[1].Role)
-	assert.Equal(t, tokenizerTypes.Content{Raw: "Reflection."}, result.Conversation[1].Content)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "Reflection."}, result.Conversation[1].Content)
 	assert.Equal(t, "template", result.ChatTemplate)
 	assert.True(t, result.AddGenerationPrompt)
 	assert.False(t, result.ContinueFinalMessage)
@@ -544,7 +544,7 @@ func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
 				}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "user", Content: tokenizerTypes.Content{
+				{Role: "user", Content: &tokenizerTypes.Content{
 					Structured: []tokenizerTypes.ContentBlock{
 						{Type: "text", Text: "Describe this image"},
 						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,abc123"}},
@@ -565,8 +565,8 @@ func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
 				}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "system", Content: tokenizerTypes.Content{Raw: "You are a visual analyst."}},
-				{Role: "user", Content: tokenizerTypes.Content{
+				{Role: "system", Content: &tokenizerTypes.Content{Raw: "You are a visual analyst."}},
+				{Role: "user", Content: &tokenizerTypes.Content{
 					Structured: []tokenizerTypes.ContentBlock{
 						{Type: "text", Text: "Compare these two images"},
 						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,img1"}},
@@ -588,14 +588,14 @@ func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
 				{Role: "user", Content: fwkrh.Content{Raw: "What breed is it?"}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "user", Content: tokenizerTypes.Content{
+				{Role: "user", Content: &tokenizerTypes.Content{
 					Structured: []tokenizerTypes.ContentBlock{
 						{Type: "text", Text: "What is in this image?"},
 						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "https://example.com/img.jpg"}},
 					},
 				}},
-				{Role: "assistant", Content: tokenizerTypes.Content{Raw: "I see a dog."}},
-				{Role: "user", Content: tokenizerTypes.Content{Raw: "What breed is it?"}},
+				{Role: "assistant", Content: &tokenizerTypes.Content{Raw: "I see a dog."}},
+				{Role: "user", Content: &tokenizerTypes.Content{Raw: "What breed is it?"}},
 			},
 		},
 		{
@@ -604,7 +604,7 @@ func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
 				{Role: "user", Content: fwkrh.Content{Raw: "Hello!"}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "user", Content: tokenizerTypes.Content{Raw: "Hello!"}},
+				{Role: "user", Content: &tokenizerTypes.Content{Raw: "Hello!"}},
 			},
 		},
 	}
@@ -635,13 +635,15 @@ func TestMessagesToRenderChatRequest_RawSystem(t *testing.T) {
 
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
-	assert.Equal(t, tokenizerTypes.Content{Raw: "You are helpful."}, result.Conversation[0].Content)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "You are helpful."}, result.Conversation[0].Content)
 	assert.Equal(t, "user", result.Conversation[1].Role)
-	assert.Equal(t, tokenizerTypes.Content{Raw: "Hello"}, result.Conversation[1].Content)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "Hello"}, result.Conversation[1].Content)
 }
 
 func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
-	tools := []any{map[string]any{"name": "get_weather"}}
+	tools := []fwkrh.AnthropicTool{
+		{Name: "get_weather", Description: "Get the weather", InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)},
+	}
 	msg := &fwkrh.MessagesRequest{
 		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "What is the weather today?"}}},
 		Tools:    tools,
@@ -649,7 +651,46 @@ func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
 
 	result := MessagesToRenderChatRequest(msg)
 
-	assert.Equal(t, tools, result.Tools)
+	require.Len(t, result.Tools, 1)
+	assert.Equal(t, map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "get_weather",
+			"description": "Get the weather",
+			"parameters":  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+		},
+	}, result.Tools[0])
+}
+
+func TestMessagesToRenderChatRequest_ToolDefaults(t *testing.T) {
+	strict, deferLoading := true, false
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+		Tools: []fwkrh.AnthropicTool{
+			{Name: "no_schema"},
+			{Name: "flags", InputSchema: json.RawMessage(`null`), Strict: &strict, DeferLoading: &deferLoading},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Tools, 2)
+	assert.Equal(t, map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":       "no_schema",
+			"parameters": json.RawMessage(`{"type":"object"}`),
+		},
+	}, result.Tools[0])
+	assert.Equal(t, map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":          "flags",
+			"parameters":    json.RawMessage(`{"type":"object"}`),
+			"strict":        true,
+			"defer_loading": false,
+		},
+	}, result.Tools[1])
 }
 
 func TestMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
@@ -667,10 +708,24 @@ func TestMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
 
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
-	require.Len(t, result.Conversation[0].Content.Structured, 2)
-	assert.Equal(t, "text", result.Conversation[0].Content.Structured[0].Type)
-	assert.Equal(t, "System line 1.", result.Conversation[0].Content.Structured[0].Text)
-	assert.Equal(t, "System line 2.", result.Conversation[0].Content.Structured[1].Text)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "System line 1.System line 2."}, result.Conversation[0].Content)
+}
+
+func TestMessagesToRenderChatRequest_SystemBillingHeaderStripped(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System: fwkrh.AnthropicContent{
+			Structured: []fwkrh.AnthropicContentBlock{
+				{Type: "text", Text: "x-anthropic-billing-header: 7b3f2c"},
+				{Type: "text", Text: "Real system prompt."},
+			},
+		},
+		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "Real system prompt."}, result.Conversation[0].Content)
 }
 
 func TestMessagesToRenderChatRequest_NoSystem(t *testing.T) {
@@ -701,7 +756,7 @@ func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "user", Content: tokenizerTypes.Content{
+				{Role: "user", Content: &tokenizerTypes.Content{
 					Structured: []tokenizerTypes.ContentBlock{
 						{Type: "text", Text: "Hello"},
 						{Type: "text", Text: "World"},
@@ -720,7 +775,7 @@ func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "user", Content: tokenizerTypes.Content{
+				{Role: "user", Content: &tokenizerTypes.Content{
 					Structured: []tokenizerTypes.ContentBlock{
 						{Type: "text", Text: "Describe this"},
 						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,abc123"}},
@@ -739,12 +794,43 @@ func TestMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				}},
 			},
 			wantConv: []tokenizerTypes.Conversation{
-				{Role: "user", Content: tokenizerTypes.Content{
+				{Role: "user", Content: &tokenizerTypes.Content{
 					Structured: []tokenizerTypes.ContentBlock{
 						{Type: "text", Text: "Describe this"},
 						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "https://example.com/img.jpg"}},
 					},
 				}},
+			},
+		},
+		{
+			name: "image with no media type defaults to jpeg",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", Data: "abc123"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: &tokenizerTypes.Content{
+					Structured: []tokenizerTypes.ContentBlock{
+						{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/jpeg;base64,abc123"}},
+					},
+				}},
+			},
+		},
+		{
+			name: "image source with neither URL nor data is dropped",
+			messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{
+					Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "text", Text: "Describe this"},
+						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64"}},
+					},
+				}},
+			},
+			wantConv: []tokenizerTypes.Conversation{
+				{Role: "user", Content: &tokenizerTypes.Content{Raw: "Describe this"}},
 			},
 		},
 	}
@@ -800,6 +886,262 @@ func TestProduce_MessagesRequest(t *testing.T) {
 	msgs, ok := pm["messages"].([]any)
 	require.True(t, ok, "payload must carry the /render chat messages array")
 	require.Len(t, msgs, 2)
-	assert.Equal(t, "system", msgs[0].(map[string]any)["role"])
-	assert.Equal(t, "user", msgs[1].(map[string]any)["role"])
+	assertRolesInOrder(t, msgs, "system", "user")
+}
+
+// assertRolesInOrder unmarshals pre-encoded render messages and asserts their
+// roles appear in the given order.
+func assertRolesInOrder(t *testing.T, msgs []any, roles ...string) {
+	t.Helper()
+	require.Len(t, msgs, len(roles))
+	for i, want := range roles {
+		raw, ok := msgs[i].(json.RawMessage)
+		require.True(t, ok, "message %d must be pre-encoded JSON", i)
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m), "message %d must be valid JSON", i)
+		assert.Equal(t, want, m["role"], "message %d role", i)
+	}
+}
+
+// TestPythonDumps pins the CPython json.dumps formatting that vLLM bakes into
+// rendered tool-call arguments: ", "/": " separators, ensure_ascii escapes,
+// and wire key order and number literals preserved.
+func TestPythonDumps(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"object with separators", `{"city":"Zürich","n":5}`, `{"city": "Z\u00fcrich", "n": 5}`},
+		{"nested arrays and objects", `{"z":1,"a":[{"y":1,"b":2},true,null,"x"]}`, `{"z": 1, "a": [{"y": 1, "b": 2}, true, null, "x"]}`},
+		{"empty object", `{}`, `{}`},
+		{"null", `null`, `null`},
+		{"escapes", `{"s":"a\"b\\c\nd e","f":"/"}`, `{"s": "a\"b\\c\nd e", "f": "/"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := pythonDumps(json.RawMessage(tt.in))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPythonDumpsNonASCIIEscaped(t *testing.T) {
+	got, err := pythonDumps(json.RawMessage(`{"e":"Zürich 😀"}`))
+	require.NoError(t, err)
+	assert.Equal(t, `{"e": "Z\u00fcrich \ud83d\ude00"}`, got)
+}
+
+func TestPythonArguments(t *testing.T) {
+	assert.Equal(t, "{}", pythonArguments(nil))
+	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`null`)))
+	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`{}`)))
+	assert.Equal(t, `{"a": 1}`, pythonArguments(json.RawMessage(`{"a":1}`)))
+}
+
+// TestMessagesToRenderChatRequest_ToolUseAndThinking covers an assistant
+// turn replaying thinking and requesting a tool: reasoning joins without a
+// separator, tool_calls carry CPython-formatted arguments, and a message with
+// no content parts omits content entirely.
+func TestMessagesToRenderChatRequest_ToolUseAndThinking(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Book a table"}},
+			{Role: "assistant", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "thinking", Thinking: "The user wants dinner."},
+					{Type: "redacted_thinking"},
+					{Type: "text", Text: "Sure."},
+					{Type: "tool_use", ID: "toolu_01", Name: "book_table", Input: json.RawMessage(`{"guests":2,"time":"19:00"}`)},
+					{Type: "tool_use", ID: "toolu_02", Name: "notify", Input: json.RawMessage(`null`)},
+				},
+			}},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assistant := result.Conversation[1]
+	assert.Equal(t, "assistant", assistant.Role)
+	assert.Equal(t, "The user wants dinner.", assistant.Reasoning)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "Sure."}, assistant.Content)
+	require.Len(t, assistant.ToolCalls, 2)
+	assert.Equal(t, map[string]any{
+		"id":   "toolu_01",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "book_table",
+			"arguments": `{"guests": 2, "time": "19:00"}`,
+		},
+	}, assistant.ToolCalls[0])
+	assert.Equal(t, map[string]any{
+		"id":   "toolu_02",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "notify",
+			"arguments": "{}",
+		},
+	}, assistant.ToolCalls[1])
+}
+
+func TestMessagesToRenderChatRequest_AssistantToolOnlyOmitsContent(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "assistant", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "tool_use", ID: "toolu_01", Name: "run", Input: json.RawMessage(`{"cmd":"ls"}`)},
+				},
+			}},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 1)
+	assert.Nil(t, result.Conversation[0].Content)
+	require.Len(t, result.Conversation[0].ToolCalls, 1)
+}
+
+// TestMessagesToRenderChatRequest_ToolResult covers the user turn answering a
+// tool call: the tool message is emitted before the user message that carried
+// it, block texts join with newlines, and result images become their own user
+// message. A user message reduced to bare tool results disappears.
+func TestMessagesToRenderChatRequest_ToolResult(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "user", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{
+						Structured: []fwkrh.AnthropicContentBlock{
+							{Type: "text", Text: "stdout line 1"},
+							{Type: "text", Text: "stdout line 2"},
+							{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "abc"}},
+						},
+					}},
+					{Type: "text", Text: "What do you see?"},
+				},
+			}},
+			{Role: "user", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "tool_result", ToolUseID: "toolu_02", Content: fwkrh.AnthropicContent{Raw: "plain string result"}},
+				},
+			}},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 4)
+
+	tool1 := result.Conversation[0]
+	assert.Equal(t, "tool", tool1.Role)
+	assert.Equal(t, "toolu_01", tool1.ToolCallID)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "stdout line 1\nstdout line 2"}, tool1.Content)
+
+	images := result.Conversation[1]
+	assert.Equal(t, "user", images.Role)
+	assert.Equal(t, &tokenizerTypes.Content{
+		Structured: []tokenizerTypes.ContentBlock{
+			{Type: "image_url", ImageURL: tokenizerTypes.ImageBlock{URL: "data:image/png;base64,abc"}},
+		},
+	}, images.Content)
+
+	user := result.Conversation[2]
+	assert.Equal(t, "user", user.Role)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "What do you see?"}, user.Content)
+
+	tool2 := result.Conversation[3]
+	assert.Equal(t, "tool", tool2.Role)
+	assert.Equal(t, "toolu_02", tool2.ToolCallID)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "plain string result"}, tool2.Content)
+}
+
+func TestMessagesToRenderChatRequest_ToolResultOnlyUserDropped(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "user", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "result"}},
+				},
+			}},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 1)
+	assert.Equal(t, "tool", result.Conversation[0].Role)
+}
+
+// TestMessagesToRenderChatRequest_FullAgenticTurn exercises a representative
+// tool-use round trip end to end.
+func TestMessagesToRenderChatRequest_FullAgenticTurn(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System: fwkrh.AnthropicContent{Raw: "You can use tools."},
+		Tools: []fwkrh.AnthropicTool{{
+			Name:        "get_weather",
+			Description: "Get the weather",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+		}},
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Weather in Zurich?"}},
+			{Role: "assistant", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "tool_use", ID: "toolu_01", Name: "get_weather", Input: json.RawMessage(`{"city":"Zurich"}`)},
+				},
+			}},
+			{Role: "user", Content: fwkrh.AnthropicContent{
+				Structured: []fwkrh.AnthropicContentBlock{
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"}},
+				},
+			}},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 4)
+	assert.Equal(t, "system", result.Conversation[0].Role)
+	assert.Equal(t, "user", result.Conversation[1].Role)
+	assert.Equal(t, "assistant", result.Conversation[2].Role)
+	assert.Nil(t, result.Conversation[2].Content)
+	assert.Equal(t, "tool", result.Conversation[3].Role)
+	assert.Equal(t, "toolu_01", result.Conversation[3].ToolCallID)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "Sunny, 22C"}, result.Conversation[3].Content)
+	require.Len(t, result.Tools, 1)
+}
+
+// TestProduce_MessagesRequestToolSchemaOrder asserts that tool input_schema
+// key order survives the trip to the render payload: Go maps would
+// alphabetize the keys and desynchronize prefix hashes from the engine's.
+func TestProduce_MessagesRequestToolSchemaOrder(t *testing.T) {
+	var gotPayload fwkrh.RequestPayload
+	tok := &mockTokenizer{
+		renderChatFunc: func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			gotPayload = payload
+			return []uint32{1}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Messages: &fwkrh.MessagesRequest{
+				Tools: []fwkrh.AnthropicTool{{
+					Name:        "get_weather",
+					InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+				}},
+				Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hi"}}},
+			},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+
+	rendered, err := json.Marshal(gotPayload)
+	require.NoError(t, err)
+	assert.Contains(t, string(rendered),
+		`"parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`,
+		"input_schema key order must be preserved verbatim")
 }

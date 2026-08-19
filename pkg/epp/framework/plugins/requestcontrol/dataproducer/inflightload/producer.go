@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -106,6 +107,10 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		syncCrossReplicaState = *cfg.SyncCrossReplicaState
 	}
 
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
@@ -161,6 +166,11 @@ type addedTokensEntry struct {
 	tokenCounter   *atomic.Int64
 	requestCounter *atomic.Int64
 	requests       atomic.Int32
+	endpointName   string
+	namespace      string
+	producerName   string
+	fairnessID     string
+	priority       string
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -176,6 +186,11 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	clone := &addedTokensEntry{
 		tokenCounter:   e.tokenCounter,
 		requestCounter: e.requestCounter,
+		endpointName:   e.endpointName,
+		namespace:      e.namespace,
+		producerName:   e.producerName,
+		fairnessID:     e.fairnessID,
+		priority:       e.priority,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
@@ -185,9 +200,11 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	if t := e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
+		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
 	}
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
+		inflightRequests.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Dec()
 	}
 }
 
@@ -294,7 +311,7 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 	return datalayer.CrossReplicaSpec{
 		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
-		AttributeKey: p.dk.String(),
+		AttributeKey: p.dk,
 		SyncDisabled: !p.syncCrossReplicaState,
 		Supply: func(endpointID string) func() datalayer.Cloneable {
 			return func() datalayer.Cloneable {
@@ -340,7 +357,7 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
 		p.registeredEndpoints.Store(id, event.Endpoint)
-		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
+		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
 					Tokens:   p.GetTokens(id),
@@ -365,7 +382,7 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		}
 		if request != nil {
 			tokens := p.estimateRequestTokens(e, request, inputTokens)
-			e.Put(p.uncachedRequestTokensDk.String(), &attrconcurrency.UncachedRequestTokens{
+			e.Put(p.uncachedRequestTokensDk, &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
 		}
@@ -394,6 +411,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	}
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
+	fairnessID := request.FairnessID
+	priority := strconv.Itoa(request.Objectives.Priority)
 
 	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
@@ -406,6 +425,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			continue
 		}
 		eid := endpoint.GetMetadata().ID.String()
+		name, namespace := splitNamespacedName(eid)
+
 		requestCounter := p.requestTracker.inc(eid)
 
 		// Compute the uncached prompt portion this endpoint must actually compute.
@@ -416,9 +437,17 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
 
+		inflightRequests.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Inc()
+		inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Add(float64(tokens))
+
 		entry := &addedTokensEntry{
 			tokenCounter:   tokenCounter,
 			requestCounter: requestCounter,
+			endpointName:   name,
+			namespace:      namespace,
+			producerName:   p.typedName.Name,
+			fairnessID:     fairnessID,
+			priority:       priority,
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
@@ -443,7 +472,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
-	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
+	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
 		var maxOutputTokens *int64
@@ -557,6 +586,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
+			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
 		}
 	}
 }
@@ -577,7 +607,7 @@ func addedTokensKey(endpointID, profileName string) string {
 // still reflected.
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
-func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey string) int64 {
+func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey fwkplugin.DataKey) int64 {
 	if endpoint == nil {
 		return nonNeg(inputTokens)
 	}

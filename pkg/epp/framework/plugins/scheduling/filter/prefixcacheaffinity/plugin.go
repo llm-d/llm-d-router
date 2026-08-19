@@ -225,7 +225,7 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 }
 
 func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
-	if raw, ok := ep.Get(p.prefixMatchDataKey.String()); ok {
+	if raw, ok := ep.Get(p.prefixMatchDataKey); ok {
 		info := raw.(*attrprefix.PrefixCacheMatchInfo)
 		if info.TotalBlocks() > 0 {
 			score := float64(info.MatchBlocks()) / float64(info.TotalBlocks())
@@ -255,7 +255,7 @@ func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
 // the throughput path (no observed load).
 func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
 	if p.config.usesLatencyPredictor() {
-		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String()); ok {
+		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
 			return info.TTFT()
 		}
@@ -267,7 +267,7 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
 // inFlightTokens returns an endpoint's in-flight token count, or 0 when the
 // attribute is absent (no observed load).
 func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) int64 {
-	if raw, ok := ep.Get(p.inFlightLoadDataKey.String()); ok {
+	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load.Tokens
 		}

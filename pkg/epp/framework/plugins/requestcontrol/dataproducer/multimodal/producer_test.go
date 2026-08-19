@@ -284,7 +284,7 @@ func schedulingResult(target scheduling.Endpoint) *scheduling.SchedulingResult {
 
 func assertMatchInfo(t *testing.T, p *Producer, endpoint scheduling.Endpoint, matchedItems, requestItems []attrmm.MatchItem) {
 	t.Helper()
-	raw, ok := endpoint.Get(p.dk.String())
+	raw, ok := endpoint.Get(p.dk)
 	require.True(t, ok)
 	info, ok := raw.(*attrmm.EncoderCacheMatchInfo)
 	require.True(t, ok)

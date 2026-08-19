@@ -59,7 +59,7 @@ type CrossReplicaSpec struct {
 
 	// AttributeKey is the attribute map key the plugin installs in Extract.
 	// The runtime overwrites this key with a store-reading closure.
-	AttributeKey string
+	AttributeKey fwkplugin.DataKey
 
 	// Supply returns a closure that reads the live local value for the given
 	// endpoint. The runtime calls this closure after Produce to snapshot

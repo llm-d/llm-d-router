@@ -395,7 +395,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
 		}
-		ep.Put(p.dk.String(), info)
+		ep.Put(p.dk, info)
 	}
 
 	if p.speculativeEnabled {

@@ -48,8 +48,7 @@ const (
 
 // Runtime manages data sources, extractors, their mapping, and endpoint lifecycle.
 type Runtime struct {
-	requestedPollingInterval time.Duration // original value from flag, for warning log
-	pollingInterval          time.Duration // effective interval (>= defaultRefreshInterval)
+	pollingInterval time.Duration
 
 	dispatchers  *pollingDispatchers
 	notification *notificationManager
@@ -70,32 +69,26 @@ const (
 )
 
 // NewRuntime creates a new Runtime with the given polling interval.
-// If duration is <= 0 or below defaultRefreshInterval, uses defaultRefreshInterval.
+// If duration is <= defaultRefreshInterval, uses defaultRefreshInterval.
 func NewRuntime(pollingInterval time.Duration) *Runtime {
 	interval := defaultRefreshInterval
 	if pollingInterval > defaultRefreshInterval {
 		interval = pollingInterval
 	}
 	return &Runtime{
-		requestedPollingInterval: pollingInterval,
-		pollingInterval:          interval,
-		dispatchers:              newPollingDispatchers(),
-		notification:             newNotificationManager(),
-		endpoint:                 newEndpointManager(),
-		extractors:               newExtractorMap(),
-		collectors:               newCollectorManager(),
-		logger:                   logr.Discard(),
+		pollingInterval: interval,
+		dispatchers:     newPollingDispatchers(),
+		notification:    newNotificationManager(),
+		endpoint:        newEndpointManager(),
+		extractors:      newExtractorMap(),
+		collectors:      newCollectorManager(),
+		logger:          logr.Discard(),
 	}
 }
 
 // Configure is called to transform the configuration information into the Runtime's
 // internal fields.
 func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
-	if r.requestedPollingInterval > 0 && r.requestedPollingInterval < defaultRefreshInterval {
-		logger.Info("refresh-metrics-interval below minimum, clamped",
-			"requested", r.requestedPollingInterval, "effective", r.pollingInterval)
-	}
-
 	hasPending := len(r.pendingRegistrations) > 0
 	if (cfg == nil || len(cfg.Sources) == 0) && !hasPending {
 		return errors.New("data layer enabled but no data sources configured")

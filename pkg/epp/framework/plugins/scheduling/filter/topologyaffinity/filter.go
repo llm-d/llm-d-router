@@ -99,14 +99,14 @@ func (f *Filter) Consumes() fwkplugin.DataDependencies {
 }
 
 func (f *Filter) Filter(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
-	peer, ok := topoutil.PeerTopology(request, f.dataKey.String())
+	peer, ok := topoutil.PeerTopology(request, f.dataKey)
 	if !ok {
 		return endpoints
 	}
 
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
-		candidate, ok := fwkdl.ReadAttribute[*attrtopology.Topology](endpoint, f.dataKey.String())
+		candidate, ok := fwkdl.ReadAttribute[*attrtopology.Topology](endpoint, f.dataKey)
 		if !ok {
 			continue
 		}

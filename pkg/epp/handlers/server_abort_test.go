@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
 
 // mockProcessServer implements ExternalProcessor_ProcessServer for testing.
@@ -120,4 +121,46 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 	err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
 	require.NoError(t, err)
 	assert.Empty(t, srv.sentResponses, "Should not send any response for normal state without queued responses")
+}
+
+func TestTerminationCause(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		state  StreamRequestState
+		ctxErr error
+		want   fwkrc.TerminationCause
+	}{
+		{
+			name:   "evicted outranks a cancelled context",
+			state:  RequestEvicted,
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseEvicted,
+		},
+		{
+			name:   "a cancelled context is the client going away",
+			state:  ResponseReceived,
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseClientDisconnect,
+		},
+		{
+			name:  "anything else is an error",
+			state: ResponseReceived,
+			want:  fwkrc.TerminationCauseError,
+		},
+		{
+			name:  "skipped response processing never observes completion",
+			state: RequestResponseProcessingSkipped,
+			want:  fwkrc.TerminationCauseError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reqCtx := &RequestContext{RequestState: tt.state}
+			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
+		})
+	}
 }
