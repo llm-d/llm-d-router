@@ -558,7 +558,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -629,7 +629,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
 	if !modelStreaming {
 		// Rewrite the model name in response body back to the original client-facing name.
-		body = rewriteModelName(body, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+		body, _ = rewriteModelName(body, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
@@ -646,20 +646,25 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 // incoming (client-facing) model name in the response body bytes. This ensures clients
 // see the model name they originally requested, not the internal backend model name.
 // It is a no-op when the names are identical or either is empty.
-func rewriteModelName(body []byte, targetModel, incomingModel string) []byte {
+// rewriteModelName replaces the target model name with the client-facing incoming model
+// name in body. It reports whether it mutated body, so callers can skip re-sending a copy
+// when nothing changed.
+func rewriteModelName(body []byte, targetModel, incomingModel string) ([]byte, bool) {
 	if targetModel == "" || incomingModel == "" || targetModel == incomingModel {
-		return body
+		return body, false
 	}
 	old := []byte(`"model":"` + targetModel + `"`)
 	new := []byte(`"model":"` + incomingModel + `"`)
-	result := bytes.ReplaceAll(body, old, new)
-	if !bytes.Equal(result, body) {
-		return result
+	if bytes.Contains(body, old) {
+		return bytes.ReplaceAll(body, old, new), true
 	}
 	// Also handle the case where JSON has spaces after the colon: "model": "..."
 	old = []byte(`"model": "` + targetModel + `"`)
 	new = []byte(`"model": "` + incomingModel + `"`)
-	return bytes.ReplaceAll(body, old, new)
+	if bytes.Contains(body, old) {
+		return bytes.ReplaceAll(body, old, new), true
+	}
+	return body, false
 }
 
 // updateStateAndSendIfNeeded checks state and can send multiple responses in a single pass, but only if ordered properly.

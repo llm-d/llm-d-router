@@ -130,6 +130,25 @@ type InferenceRequestBody struct {
 	// Model is the incoming client-facing model name extracted by the parser, empty
 	// if absent. Not round-tripped; the forwarded model lives in Payload.
 	Model string `json:"-"`
+
+	// Mutated marks that Payload's content has changed since the parser produced it, so
+	// repackage knows it must re-serialize instead of forwarding the original bytes. Callers
+	// that replace or edit Payload after parsing (e.g. a model-name rewrite) must set this to
+	// true themselves; it is not inferred or enforced -- see MutatePayloadMap for the one
+	// in-place-edit case the codebase needs today.
+	Mutated bool
+}
+
+// MutatePayloadMap edits Payload in place via fn when Payload is a PayloadMap, and marks the
+// body Mutated in the same call so the two can't be separated by an omitted follow-up write.
+// No-op (Mutated left untouched) when Payload is not a PayloadMap.
+func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
+	m, ok := b.Payload.(PayloadMap)
+	if !ok {
+		return
+	}
+	fn(m)
+	b.Mutated = true
 }
 
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read

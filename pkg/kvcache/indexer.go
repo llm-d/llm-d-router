@@ -153,8 +153,8 @@ func (k *Indexer) ScoreTokens(
 	podIdentifiers []string,
 	extraFeatures []*kvblock.BlockExtraFeatures,
 ) (map[string]float64, error) {
-	tracer := tracing.Tracer("llm-d-router/pkg/kvcache")
-	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.score_tokens",
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "score_tokens",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

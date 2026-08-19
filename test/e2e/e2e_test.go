@@ -95,6 +95,27 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			testutils.DeleteObjects(testConfig, modelServers, nsName)
 			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
 		})
+
+		ginkgo.It("should rewrite the body model name when x-llm-d-model-name-rewrite is set", func() {
+			infPoolObjects := createInferencePool(1)
+
+			modelServers := createModelServersDecode(1)
+
+			epp := createEndPointPicker(simpleConfig)
+			nsName := getNamespace()
+
+			ginkgo.By("Sending a completion with no rewrite header: body model name is forwarded unchanged")
+			respModel := runCompletionWithModelRewrite(simplePrompt, simModelName, "")
+			gomega.Expect(respModel).Should(gomega.Equal(simModelName))
+
+			ginkgo.By("Sending a completion with the rewrite header: request body is rewritten to the target, response is rewritten back to the client-facing name")
+			respModel = runCompletionWithModelRewrite(simplePrompt, "client-facing-name", simModelName)
+			gomega.Expect(respModel).Should(gomega.Equal("client-facing-name"))
+
+			testutils.DeleteObjects(testConfig, epp, nsName)
+			testutils.DeleteObjects(testConfig, modelServers, nsName)
+			testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+		})
 	}))
 
 	ginkgo.When("Running leader election", ginkgo.Ordered, testWrapper(func() {
