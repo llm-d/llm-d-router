@@ -1242,6 +1242,13 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "Chunk with usage text but no usage object returns nil usage",
+			chunk: []byte(`data: {"choices":[{"delta":{"content":"usage"}}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
+		{
 			name:  "DONE message returns error",
 			chunk: []byte(`data: [DONE]`),
 			want: &fwkrh.ParsedResponse{
@@ -1297,6 +1304,34 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("ParseStreamResponse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func BenchmarkOpenAIParser_ParseResponse_Streaming(b *testing.B) {
+	parser := NewOpenAIParser()
+	tests := []struct {
+		name  string
+		chunk []byte
+	}{
+		{
+			name:  "without_usage",
+			chunk: []byte(`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"}}]}`),
+		},
+		{
+			name:  "with_usage",
+			chunk: []byte(`data: {"usage":{"prompt_tokens":7,"completion_tokens":10,"total_tokens":17}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
