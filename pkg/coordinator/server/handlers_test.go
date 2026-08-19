@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,11 +45,19 @@ import (
 type stubStep struct {
 	name string
 	err  error
+	// fn, when non-nil, takes precedence over err. Tests use it to observe
+	// state (e.g. gauge labels) at pipeline-execution time.
+	fn func(context.Context, *pipeline.RequestContext) error
 }
 
 func (s stubStep) Name() string { return s.name }
 
-func (s stubStep) Execute(context.Context, *pipeline.RequestContext) error { return s.err }
+func (s stubStep) Execute(ctx context.Context, rc *pipeline.RequestContext) error {
+	if s.fn != nil {
+		return s.fn(ctx, rc)
+	}
+	return s.err
+}
 
 func newTestServer(stepErr error) *Server {
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", err: stepErr}})
@@ -335,6 +345,146 @@ func TestHandleInference_MalformedBodyRecordsBadRequestWithUnknownModel(t *testi
 		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": coordmetrics.ModelUnknown, "error_code": coordmetrics.ErrorCodeBadRequest})),
 		1e-9,
 	)
+}
+
+// blockingReader gates the first Read call on unblock, so a test can catch
+// the handler mid-io.ReadAll and inspect the in-flight gauge before the JSON
+// parse has run.
+type blockingReader struct {
+	once    sync.Once
+	started chan struct{}
+	unblock chan struct{}
+	body    io.Reader
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	b.once.Do(func() {
+		close(b.started)
+		<-b.unblock
+	})
+	return b.body.Read(p)
+}
+
+func TestHandleInference_PreparseWorkIsCountedAsInflight(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	br := &blockingReader{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+		body:    strings.NewReader(`{"model":"m"}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", br)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		newTestServer(nil).handleInference(rec, req)
+		close(done)
+	}()
+
+	// Wait until the handler is inside io.ReadAll before observing. The gauge
+	// must already reflect the request under the "unknown" label; the JSON
+	// has not been parsed yet, so no other label is possible.
+	<-br.started
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "gauge must be 1 during pre-parse under the unknown label",
+	)
+
+	close(br.unblock)
+	<-done
+
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "unknown label must balance to 0 after the label was swapped and the handler returned",
+	)
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+		1e-9, "parsed model label must balance to 0 after the handler returned",
+	)
+}
+
+func TestHandleInference_OversizeBodyBalancesGauge(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p)
+	require.NoError(t, err)
+
+	oversize := strings.Repeat("x", config.BytesPerMB+1)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(oversize))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+
+	// mustRequestRunningGauge fails if the series is absent: pre-fix,
+	// IncRequestRunning is never called on the 413 path and the series does
+	// not exist. Post-fix, Inc at entry + Dec in defer touch the series and
+	// leave it at 0.
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "gauge must be back at 0 for the unknown label after 413",
+	)
+}
+
+func TestHandleInference_ParsedModelSwapsLabel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	var (
+		unknownDuring float64
+		parsedDuring  float64
+	)
+	observer := stubStep{
+		name: "observe",
+		fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+			unknownDuring = promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown}))
+			parsedDuring = promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"}))
+			return nil
+		},
+	}
+	p := pipeline.New([]pipeline.Step{observer})
+	srv, err := New(config.ServerConfig{}, p)
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.InDelta(t, 0.0, unknownDuring, 1e-9, "unknown must be 0 during pipeline: the entry Inc was swapped out on parse")
+	require.InDelta(t, 1.0, parsedDuring, 1e-9, "parsed model must be 1 during pipeline: the entry Inc was swapped to this label on parse")
+
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9,
+	)
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+}
+
+// mustRequestRunningGauge finds the request_running gauge series matching all
+// of labels in reg. A missing series is a test failure so promtestutil.ToFloat64
+// cannot silently see 0 when the series was never touched (which is the pre-fix
+// state on the pre-parse paths).
+func mustRequestRunningGauge(t *testing.T, reg *prometheus.Registry, labels map[string]string) prometheus.Gauge {
+	t.Helper()
+	const name = "llm_d_coordinator_request_running"
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "shadow"})
+				g.Set(m.GetGauge().GetValue())
+				return g
+			}
+		}
+	}
+	t.Fatalf("gauge %s%v not present", name, labels)
+	return nil
 }
 
 // mustCounter looks up the counter series matching all of labels from reg. The

@@ -51,13 +51,17 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// boundModel; the pipeline sees the raw value so upstream requests
 	// carry what the client actually sent.
 	var model string
-	inflight := false
+	// inflightModel tracks the request_running label under which this
+	// request currently counts. The gauge is incremented at entry (before
+	// body read) so slow uploads and 413/parse rejections are visible in
+	// "requests being processed"; after JSON parse the label is swapped
+	// from "unknown" to the parsed model when they differ.
+	inflightModel := ""
+	coordmetrics.IncRequestRunning(inflightModel)
 	defer func() {
 		coordmetrics.IncRequestTotal(model)
 		coordmetrics.RecordRequestDuration(model, time.Since(receivedAt))
-		if inflight {
-			coordmetrics.DecRequestRunning(model)
-		}
+		coordmetrics.DecRequestRunning(inflightModel)
 	}()
 
 	parseStart := time.Now()
@@ -91,8 +95,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		model = m
 	}
 	coordmetrics.RecordRequestSize(model, len(body))
-	coordmetrics.IncRequestRunning(model)
-	inflight = true
+	if model != inflightModel {
+		coordmetrics.DecRequestRunning(inflightModel)
+		coordmetrics.IncRequestRunning(model)
+		inflightModel = model
+	}
 
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
