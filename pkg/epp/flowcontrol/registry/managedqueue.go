@@ -51,6 +51,13 @@ type managedQueue struct {
 	// onStatsDelta is the callback used to propagate statistics changes up to the registry.
 	onStatsDelta propagateStatsDeltaFunc
 
+	// onActiveTransition is invoked when the queue transitions between empty and non-empty, so the
+	// owning priority band can maintain its index of active (non-empty) queues. Transitions are
+	// detected under `mu`, which serializes them per queue. The callback must be lock-free or take
+	// only leaf locks (never the registry mutex): it runs inside this queue's critical section.
+	// May be nil (e.g., in isolated unit tests).
+	onActiveTransition func(mq *managedQueue, active bool)
+
 	// --- State Protected by `mu` ---
 
 	// mu protects all mutating operations. It ensures that the mutation of the underlying `queue`
@@ -72,14 +79,16 @@ func newManagedQueue(
 	key flowcontrol.FlowKey,
 	logger logr.Logger,
 	onStatsDelta propagateStatsDeltaFunc,
+	onActiveTransition func(mq *managedQueue, active bool),
 ) *managedQueue {
 	mqLogger := logger.WithName("managed-queue").WithValues("flowKey", key)
 	mq := &managedQueue{
-		queue:        queue,
-		policy:       policy,
-		key:          key,
-		onStatsDelta: onStatsDelta,
-		logger:       mqLogger,
+		queue:              queue,
+		policy:             policy,
+		key:                key,
+		onStatsDelta:       onStatsDelta,
+		onActiveTransition: onActiveTransition,
+		logger:             mqLogger,
 	}
 	mq.flowQueueAccessor = &flowQueueAccessor{mq: mq}
 	return mq
@@ -182,11 +191,23 @@ func (mq *managedQueue) applyAndPropagateLocked(mutate func()) {
 
 	mutate()
 
-	lenDelta := int64(mq.queue.Len() - beforeLen)
+	afterLen := mq.queue.Len()
+	lenDelta := int64(afterLen - beforeLen)
 	byteSizeDelta := int64(mq.queue.ByteSize()) - int64(beforeBytes)
 	if lenDelta == 0 && byteSizeDelta == 0 {
 		return
 	}
+
+	// Maintain the band's active-queue index on empty<->non-empty transitions. `mu` is held, so
+	// transitions are strictly alternating per queue.
+	if mq.onActiveTransition != nil {
+		if beforeLen == 0 && afterLen > 0 {
+			mq.onActiveTransition(mq, true)
+		} else if beforeLen > 0 && afterLen == 0 {
+			mq.onActiveTransition(mq, false)
+		}
+	}
+
 	// Propagate the delta up to the registry. This propagation is lock-free and eventually consistent.
 	mq.onStatsDelta(mq.key.Priority, lenDelta, byteSizeDelta)
 }

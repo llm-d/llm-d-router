@@ -70,7 +70,7 @@ func newMqHarness(t *testing.T, queue contracts.SafeQueue, key flowcontrol.FlowK
 	propagator := &mockStatsPropagator{}
 	mockPolicy := &fwkfcmocks.MockOrderingPolicy{}
 
-	mq := newManagedQueue(queue, mockPolicy, key, logr.Discard(), propagator.propagate)
+	mq := newManagedQueue(queue, mockPolicy, key, logr.Discard(), propagator.propagate, nil)
 	require.NotNil(t, mq, "Test setup: newManagedQueue must return a valid instance")
 
 	return &mqTestHarness{

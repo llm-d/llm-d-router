@@ -716,7 +716,9 @@ func TestTTLExpiryEvictsQueuedRequest(t *testing.T) {
 	t.Parallel()
 
 	detector := newBlockedDetector()
-	h := newHarness(t, harnessOpts{detector: detector})
+	// The pool must be non-empty for this to be the saturation regime: with no endpoints the request would be waiting
+	// for one to appear, which is the no-endpoint budget's case, not this one.
+	h := newHarness(t, harnessOpts{detector: detector, endpointCandidates: nonEmptyCandidates()})
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
@@ -888,10 +890,9 @@ func TestGracefulShutdownDrainsQueuedRequests(t *testing.T) {
 // Production Edge Cases
 // ============================================================================
 
-// TestZombieCapacityStarvation verifies that TTL-expired items still in the
-// queue (zombies) consume capacity until the cleanup sweep runs. If the sweep
-// interval is long, new requests are falsely rejected because capacity is held
-// by dead items.
+// TestZombieCapacityStarvation verifies that finalized items still in the queue (zombies) consume capacity until the
+// cleanup sweep runs. If the sweep interval is long, new requests are falsely rejected because capacity is held by dead
+// items.
 func TestZombieCapacityStarvation(t *testing.T) {
 	t.Parallel()
 
@@ -902,7 +903,11 @@ func TestZombieCapacityStarvation(t *testing.T) {
 		bandMaxRequests:    3,
 		endpointCandidates: nonEmptyCandidates(),
 		controllerCfg: &controller.Config{
-			DefaultRequestTTL:        50 * time.Millisecond,
+			// The sweep finalizes and removes an expired item in the same pass, so queue-wait expiry cannot strand a
+			// zombie. A caller deadline can: it finalizes the item where it sits and leaves the sweep to reclaim it.
+			// The budgets therefore sit beyond the test's horizon and the callers give up instead.
+			DefaultRequestTTL:        1 * time.Minute,
+			NoEndpointRequestTTL:     1 * time.Minute,
 			ExpiryCleanupInterval:    10 * time.Second,
 			EnqueueChannelBufferSize: 100,
 		},
@@ -910,25 +915,29 @@ func TestZombieCapacityStarvation(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	// Fill capacity with 3 requests that will expire via TTL.
+	// Fill capacity with 3 requests whose callers give up while they are queued.
 	expired := make(chan dispatchResult, 3)
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("zombie-%d", i)
 		go func() {
-			req := &testRequest{id: id, key: key, byteSize: 100, ttl: 50 * time.Millisecond}
-			outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+			reqCtx, reqCancel := context.WithTimeout(h.ctx, 50*time.Millisecond)
+			defer reqCancel()
+			req := &testRequest{id: id, key: key, byteSize: 100}
+			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
 			expired <- dispatchResult{id: id, outcome: outcome, err: err}
 		}()
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Wait for all to expire.
+	// Wait for all to be finalized. Each must be evicted rather than rejected: only an item that reached a queue holds
+	// the capacity this test goes on to observe.
 	for i := 0; i < 3; i++ {
 		select {
 		case r := <-expired:
+			require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "zombie must have been queued before it was finalized")
 			require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired)
 		case <-time.After(5 * time.Second):
-			t.Fatalf("zombie %d did not expire", i)
+			t.Fatalf("zombie %d was not finalized", i)
 		}
 	}
 
@@ -1401,5 +1410,158 @@ func TestEndpointChurnUnderLoad(t *testing.T) {
 			"request should dispatch after endpoints are restored")
 	case <-time.After(3 * time.Second):
 		t.Fatal("request did not dispatch after endpoint restoration")
+	}
+}
+
+// TestNoEndpointBudgetShedsAsUnavailability verifies that a request that exhausts its queue-wait budget against an
+// empty pool is shed as genuine unavailability (EvictedNoEndpoints, mapped to 503) rather than as backpressure,
+// independent of the saturation budget.
+func TestNoEndpointBudgetShedsAsUnavailability(t *testing.T) {
+	t.Parallel()
+
+	// Pool intentionally empty (no endpointCandidates set): the queue is a scale-from-zero waiting room.
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector: detector,
+		controllerCfg: &controller.Config{
+			// The saturation budget is long enough that only the no-endpoint budget can shed this request.
+			DefaultRequestTTL:        5 * time.Minute,
+			NoEndpointRequestTTL:     100 * time.Millisecond,
+			ExpiryCleanupInterval:    10 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		req := &testRequest{id: "noep-budget-req", key: key, byteSize: 100, ttl: 5 * time.Minute}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		results <- dispatchResult{id: "noep-budget-req", outcome: outcome, err: err}
+	}()
+
+	select {
+	case r := <-results:
+		require.Equal(t, fcTypes.QueueOutcomeEvictedNoEndpoints, r.outcome,
+			"an expiry against an empty pool should be attributed to unavailability")
+		require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "the request was queued, so it is evicted rather than rejected")
+		require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints, "the error should wrap ErrNoEndpoints")
+		require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired, "the error should wrap ErrTTLExpired")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not return after the no-endpoint budget expired")
+	}
+}
+
+// TestNoEndpointBudgetOutlastingSaturationShedsAsUnavailability covers the configuration this feature targets, where
+// the cold-start budget is the longer of the two. Only the sweep observes the regime, so only the sweep can attribute
+// an empty-pool expiry to unavailability; nothing keyed to the request alone may pre-empt that decision and shed the
+// request as backpressure instead.
+func TestNoEndpointBudgetOutlastingSaturationShedsAsUnavailability(t *testing.T) {
+	t.Parallel()
+
+	const saturationTTL = 100 * time.Millisecond
+
+	// Pool intentionally empty (no endpointCandidates set): the queue is a scale-from-zero waiting room.
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector: detector,
+		controllerCfg: &controller.Config{
+			DefaultRequestTTL:    saturationTTL,
+			NoEndpointRequestTTL: 6 * saturationTTL,
+			// The sweep must win the attribution race against the request context's backstop, which sits one sweep
+			// interval beyond the first tick that can observe the expiry. The interval is therefore the tolerance this
+			// test has for scheduling lateness, not just its resolution.
+			ExpiryCleanupInterval:    50 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		// ttl 0 defers to the controller's saturation budget.
+		req := &testRequest{id: "cold-start-budget-req", key: key, byteSize: 100}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		results <- dispatchResult{id: "cold-start-budget-req", outcome: outcome, err: err}
+	}()
+
+	// The saturation budget does not govern an empty pool, so the request holds well past it.
+	select {
+	case r := <-results:
+		t.Fatalf("request was shed on the saturation budget against an empty pool: outcome=%v err=%v", r.outcome, r.err)
+	case <-time.After(3 * saturationTTL):
+	}
+
+	select {
+	case r := <-results:
+		require.Equal(t, fcTypes.QueueOutcomeEvictedNoEndpoints, r.outcome,
+			"an expiry against an empty pool should be attributed to unavailability, not to backpressure")
+		require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "the request was queued, so it is evicted rather than rejected")
+		require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints, "the error should wrap ErrNoEndpoints")
+		require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired, "the error should wrap ErrTTLExpired")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not return after the no-endpoint budget expired")
+	}
+}
+
+// TestScaleFromZeroOutlivesSaturationBudget verifies the regime is not fixed at admission: a request queued against an
+// empty pool holds past the saturation budget, and once the pool scales up it dispatches on a fresh saturation budget
+// rather than being shed the instant it becomes servable.
+func TestScaleFromZeroOutlivesSaturationBudget(t *testing.T) {
+	t.Parallel()
+
+	const saturationTTL = 150 * time.Millisecond
+
+	// The pool starts empty and scales up mid-flight; the dispatch cycle reads it via Locate().
+	var endpoints atomic.Value
+	endpoints.Store([]datalayer.Endpoint(nil))
+	endpointCandidates := &contractmocks.MockEndpointCandidates{
+		LocateFunc: func(_ context.Context, _ map[string]any) []datalayer.Endpoint {
+			return endpoints.Load().([]datalayer.Endpoint)
+		},
+	}
+
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector:           detector,
+		endpointCandidates: endpointCandidates,
+		controllerCfg: &controller.Config{
+			DefaultRequestTTL:        saturationTTL,
+			NoEndpointRequestTTL:     5 * time.Second,
+			ExpiryCleanupInterval:    10 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		// ttl 0 defers to the controller's saturation budget.
+		req := &testRequest{id: "cold-start-req", key: key, byteSize: 100}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		results <- dispatchResult{id: "cold-start-req", outcome: outcome, err: err}
+	}()
+
+	// Wait well past the saturation budget while the pool is still empty.
+	select {
+	case r := <-results:
+		t.Fatalf("request was shed while waiting for the pool to scale up: outcome=%v err=%v", r.outcome, r.err)
+	case <-time.After(4 * saturationTTL):
+	}
+
+	// Scale from zero. The request only now becomes dispatchable, on a budget that has nominally elapsed.
+	endpoints.Store([]datalayer.Endpoint{datalayer.NewEndpoint(nil, nil)})
+	detector.Unblock(1)
+
+	select {
+	case r := <-results:
+		require.NoError(t, r.err, "a request that becomes dispatchable should not carry an error")
+		require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome,
+			"the request should dispatch once the pool scales up, not be shed against a spent budget")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not dispatch after the pool scaled up")
 	}
 }

@@ -24,43 +24,46 @@ const (
 type lasState struct {
 	mu              sync.Mutex
 	attainedService float64
-	// decayAnchor is the wall-clock anchor for time-based decay; updated on AddService and Decay.
+	// decayAnchor marks the instant up to which time-based decay has been folded into
+	// attainedService. Decay is applied lazily by Service and AddService, so an idle program's
+	// service ages out in wall-clock time without the program ever being visited by Pick, and it
+	// accrues continuously, including while requests are in flight.
 	decayAnchor time.Time
 }
 
-func (s *lasState) Service() float64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.attainedService
-}
-
-func (s *lasState) AddService(cost float64) float64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.attainedService += cost
-	s.decayAnchor = time.Now()
-	return s.attainedService
-}
-
-// Decay applies time-based decay when halfLifeSeconds > 0; otherwise it
-// applies factor once per call.
-func (s *lasState) Decay(now time.Time, halfLifeSeconds, factor float64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if halfLifeSeconds > 0 {
-		if s.decayAnchor.IsZero() {
-			s.decayAnchor = now
-			return
-		}
-		elapsed := now.Sub(s.decayAnchor).Seconds()
-		if elapsed <= 0 {
-			return
-		}
-		s.attainedService *= math.Pow(0.5, elapsed/halfLifeSeconds)
+// decayLocked folds in the decay accrued since decayAnchor and advances the anchor to now.
+// halfLifeSeconds of 0 disables decay. The caller must hold mu.
+func (s *lasState) decayLocked(now time.Time, halfLifeSeconds float64) {
+	if s.decayAnchor.IsZero() {
 		s.decayAnchor = now
 		return
 	}
-	s.attainedService *= factor
+	elapsed := now.Sub(s.decayAnchor).Seconds()
+	if elapsed <= 0 {
+		return
+	}
+	if halfLifeSeconds > 0 {
+		s.attainedService *= math.Exp2(-elapsed / halfLifeSeconds)
+	}
+	s.decayAnchor = now
+}
+
+// Service returns the attained service with decay up to now applied. Folding the decay in writes
+// the decayed value back and advances the anchor, so Service mutates lasState.
+func (s *lasState) Service(now time.Time, halfLifeSeconds float64) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.decayLocked(now, halfLifeSeconds)
+	return s.attainedService
+}
+
+// AddService folds in pending decay, then accumulates cost, and returns the new total.
+func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds float64) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.decayLocked(now, halfLifeSeconds)
+	s.attainedService += cost
+	return s.attainedService
 }
 
 var attainedServiceTokens = prometheus.NewGaugeVec(
@@ -77,7 +80,6 @@ var _ Strategy = &LASStrategy{}
 type LASStrategy struct {
 	weightService   float64
 	weightHeadWait  float64
-	decayFactor     float64
 	halfLifeSeconds float64
 
 	state sync.Map // key: program ID (string), value: *lasState
@@ -113,22 +115,14 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 	now := time.Now()
 
 	for id, qi := range queues {
-		if qi.Metrics == nil {
+		// Empty entries can appear transiently (a queue drained between iteration and scoring); they
+		// carry nothing to score, and skipping them before getOrCreateState avoids resurrecting state
+		// for a program the eviction sweep is concurrently removing.
+		if qi.Metrics == nil || qi.Len == 0 {
 			continue
 		}
 
-		st := s.getOrCreateState(id)
-
-		if qi.Len == 0 {
-			// Skip decay while a request is in flight to preserve the
-			// upcoming OnCompleted accumulation.
-			if qi.Metrics.InFlight() == 0 {
-				st.Decay(now, s.halfLifeSeconds, s.decayFactor)
-			}
-			continue
-		}
-
-		service := st.Service()
+		service := s.getOrCreateState(id).Service(now, s.halfLifeSeconds)
 		var headWaitMs float64
 		if head := qi.Queue.Peek(); head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
@@ -179,7 +173,7 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	completionTokens := int64(response.Usage.CompletionTokens)
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
-	service := s.getOrCreateState(id).AddService(cost)
+	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
 	attainedServiceTokens.WithLabelValues(id).Set(service)
 }
 
