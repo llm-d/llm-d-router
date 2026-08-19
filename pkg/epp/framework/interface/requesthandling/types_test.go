@@ -182,6 +182,11 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 	assert.Equal(t, `""`, string(empty))
 }
 
+func TestTextToSpeechRequest_String(t *testing.T) {
+	assert.Equal(t, "{InputLength: 5}", (&TextToSpeechRequest{Input: "hello"}).String())
+	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
+}
+
 func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name        string
