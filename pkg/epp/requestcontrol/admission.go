@@ -257,6 +257,10 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error, ttlPoolE
 	case types.QueueOutcomeRejectedNoEndpoints:
 		// No serving capacity exists (e.g. pool scaled to zero): signal genuine unavailability rather than backpressure.
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
+	case types.QueueOutcomeEvictedNoEndpoints:
+		// The queue-wait budget was exhausted while the pool had no endpoints, so the regime is already established and
+		// needs no probe: waiting failed because nothing came up to serve the request.
+		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 	case types.QueueOutcomeEvictedTTL:
 		if ttlPoolEmpty {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}

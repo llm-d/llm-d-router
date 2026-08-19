@@ -240,7 +240,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().ID)]
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
 	state := &SchedulingContextState{

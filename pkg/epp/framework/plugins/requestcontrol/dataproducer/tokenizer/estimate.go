@@ -36,8 +36,6 @@ import (
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
 
-const blockTypeText = "text"
-
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
@@ -243,16 +241,8 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			out = append(out, raw...)
 		}
 	}
-	// The system field accepts only text -- a string or an array of text blocks.
-	// See https://docs.anthropic.com/en/api/messages#body-system.
-	if req.System.Raw != "" {
-		out = append(out, []byte(req.System.Raw)...)
-	} else {
-		for _, block := range req.System.Structured {
-			if block.Type == blockTypeText {
-				out = append(out, []byte(block.Text)...)
-			}
-		}
+	if sys := anthropicSystemText(req.System); sys != "" {
+		out = append(out, []byte(sys)...)
 	}
 	for _, msg := range req.Messages {
 		if msg.Role != "" {
@@ -266,9 +256,22 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			switch block.Type {
 			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case "image":
+			case blockTypeImage:
 				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
 					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
+				}
+			case blockTypeThinking:
+				out = append(out, []byte(block.Thinking)...)
+			case blockTypeToolUse:
+				out = append(out, []byte(block.ID)...)
+				out = append(out, []byte(block.Name)...)
+				out = append(out, block.Input...)
+			case blockTypeToolResult:
+				text, imageBlocks := anthropicToolResultContent(block)
+				out = append(out, []byte(text)...)
+				for _, img := range imageBlocks {
+					url := img.ImageURL.URL
+					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
 				}
 			}
 		}

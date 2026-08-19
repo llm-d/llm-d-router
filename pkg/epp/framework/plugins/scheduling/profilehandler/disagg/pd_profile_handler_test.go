@@ -337,7 +337,7 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 			for profileName, profileRes := range tt.profileResults {
 				if profileName == defaultDecodeProfile && profileRes != nil {
 					for _, pod := range profileRes.TargetEndpoints {
-						pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+						pod.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 							attrprefix.NewPrefixCacheMatchInfo(tt.cachedTokens, inputTokens, 1))
 					}
 				}
@@ -439,7 +439,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 				for profileName, profileRes := range profileResults {
 					if profileName == defaultDecodeProfile && profileRes != nil {
 						for _, endpoint := range profileRes.TargetEndpoints {
-							endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+							endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 								attrprefix.NewPrefixCacheMatchInfo(innerTest.cachedTokens, inputTokens, 1))
 						}
 					}

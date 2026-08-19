@@ -607,10 +607,10 @@ func TestEstimateBackend_ChatToolsBeforeSystem(t *testing.T) {
 // TestEstimateBackend_MessagesToolsBeforeSystem is the /v1/messages analog of
 // TestEstimateBackend_ChatToolsBeforeSystem.
 func TestEstimateBackend_MessagesToolsBeforeSystem(t *testing.T) {
-	tools := []any{map[string]any{
-		"name":         "search_for_long_enough_byte_segment_for_this_ordering_test",
-		"description":  "ensures stable byte length",
-		"input_schema": map[string]any{"type": "object"},
+	tools := []fwkrh.AnthropicTool{{
+		Name:        "search_for_long_enough_byte_segment_for_this_ordering_test",
+		Description: "ensures stable byte length",
+		InputSchema: json.RawMessage(`{"type": "object"}`),
 	}}
 	toolsJSON, err := json.Marshal(tools)
 	require.NoError(t, err)
@@ -665,7 +665,7 @@ func TestEstimateBackend_ChatToolsAffectPrefix(t *testing.T) {
 // TestEstimateBackend_MessagesToolsAffectPrefix is the /v1/messages analog of
 // TestEstimateBackend_ChatToolsAffectPrefix.
 func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
-	build := func(tools []any) *fwkrh.InferenceRequestBody {
+	build := func(tools []fwkrh.AnthropicTool) *fwkrh.InferenceRequestBody {
 		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
 			Messages: []fwkrh.AnthropicMessage{
 				{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hello world"}},
@@ -675,20 +675,16 @@ func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
 	}
 	noTools, err := estimateBackend{}.produce(context.Background(), build(nil))
 	require.NoError(t, err)
-	weather := []any{map[string]any{
-		"name":         "get_weather",
-		"description":  "Get the current weather",
-		"input_schema": map[string]any{"type": "object"},
-	}}
-	withTools, err := estimateBackend{}.produce(context.Background(), build(weather))
+	withTools, err := estimateBackend{}.produce(context.Background(), build([]fwkrh.AnthropicTool{{
+		Name:        "get_weather",
+		Description: "Get the current weather",
+	}}))
 	require.NoError(t, err)
 	assert.NotEqual(t, hashTokens(noTools.PerPromptTokens[0]), hashTokens(withTools.PerPromptTokens[0]), "tools list was ignored by the messages prefix estimator")
-	stock := []any{map[string]any{
-		"name":         "get_stock_price",
-		"description":  "Get a stock price",
-		"input_schema": map[string]any{"type": "object"},
-	}}
-	otherTools, err := estimateBackend{}.produce(context.Background(), build(stock))
+	otherTools, err := estimateBackend{}.produce(context.Background(), build([]fwkrh.AnthropicTool{{
+		Name:        "get_stock_price",
+		Description: "Get a stock price",
+	}}))
 	require.NoError(t, err)
 	assert.NotEqual(t, hashTokens(withTools.PerPromptTokens[0]), hashTokens(otherTools.PerPromptTokens[0]), "different tools lists produced identical tokens")
 }
@@ -738,4 +734,43 @@ func TestEstimateBackend_SingleStringCompletionsSetsPerPromptTokens(t *testing.T
 	if len(tp.PerPromptTokens) != 1 {
 		t.Errorf("single-string prompt should set length-1 PerPromptTokens, got %d", len(tp.PerPromptTokens))
 	}
+}
+
+// TestEstimateBackend_MessagesToolBlocksAffectPrefix asserts tool_use,
+// tool_result, and thinking blocks participate in the prefix stream so
+// conversations differing only in tool traffic do not collide on one key.
+func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
+	build := func(blocks []fwkrh.AnthropicContentBlock) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "assistant", Content: fwkrh.AnthropicContent{Structured: blocks}},
+			},
+		}}
+	}
+	base := build([]fwkrh.AnthropicContentBlock{})
+	baseOut, err := estimateBackend{}.produce(context.Background(), base)
+	require.NoError(t, err)
+
+	thinking := build([]fwkrh.AnthropicContentBlock{{Type: "thinking", Thinking: "deep thought"}})
+	thinkingOut, err := estimateBackend{}.produce(context.Background(), thinking)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(baseOut.PerPromptTokens[0]), hashTokens(thinkingOut.PerPromptTokens[0]),
+		"thinking text was ignored by the prefix estimator")
+
+	toolUse := build([]fwkrh.AnthropicContentBlock{{
+		Type: "tool_use", ID: "toolu_01", Name: "get_weather", Input: json.RawMessage(`{"city":"Zurich"}`),
+	}})
+	toolUseOut, err := estimateBackend{}.produce(context.Background(), toolUse)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(baseOut.PerPromptTokens[0]), hashTokens(toolUseOut.PerPromptTokens[0]),
+		"tool_use input was ignored by the prefix estimator")
+
+	toolResult := build([]fwkrh.AnthropicContentBlock{{
+		Type: "tool_result", ToolUseID: "toolu_01",
+		Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"},
+	}})
+	toolResultOut, err := estimateBackend{}.produce(context.Background(), toolResult)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(baseOut.PerPromptTokens[0]), hashTokens(toolResultOut.PerPromptTokens[0]),
+		"tool_result content was ignored by the prefix estimator")
 }

@@ -48,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -136,6 +137,7 @@ type RequestContext struct {
 	RequestSize                int
 	Usage                      fwkrh.Usage
 	ResponseSize               int
+	StreamedEvents             int
 	ResponseBodyStarted        bool
 	ResponseComplete           bool
 	ResponseStatusCode         string
@@ -147,6 +149,9 @@ type RequestContext struct {
 
 	RequestState         StreamRequestState
 	RequestDroppedReason errcommon.RequestDroppedReason
+	// TerminationCause is set only when the stream ends without completing; the end-of-stream
+	// response record defaults an unset cause to a natural completion.
+	TerminationCause     fwkrc.TerminationCause
 	modelServerStreaming bool
 
 	// responseProcessingDuration is the EPP cost of handling the response. For a
@@ -240,6 +245,19 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 		}
 	}
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+}
+
+// terminationCause classifies a stream that ended without completing. ctxErr is the request
+// context's error, which is non-nil once Envoy has torn the stream down under the EPP.
+func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+	switch {
+	case reqCtx.RequestState == RequestEvicted:
+		return fwkrc.TerminationCauseEvicted
+	case ctxErr != nil:
+		return fwkrc.TerminationCauseClientDisconnect
+	default:
+		return fwkrc.TerminationCauseError
+	}
 }
 
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
@@ -372,6 +390,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		// If we scheduled a pod (TargetPod != nil) but never marked the response  as complete (e.g. error, disconnect,
 		// panic), force the completion hooks to run.
 		if reqCtx.TargetPod != nil && !reqCtx.ResponseComplete {
+			reqCtx.TerminationCause = terminationCause(reqCtx, ctx.Err())
 			// Use a fresh context as the request context might be canceled (Client Disconnect).
 			// We only need logging from the original context.
 			cleanupCtx := log.IntoContext(context.Background(), logger)

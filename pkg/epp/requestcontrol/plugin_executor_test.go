@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -388,4 +390,63 @@ func TestProducerTimeout(t *testing.T) {
 			assert.Equal(t, tc.want, producerTimeout(tc.p))
 		})
 	}
+}
+
+// writingProducer writes a fixed key regardless of what it declares, standing
+// in for a producer whose implementation has drifted from its declaration.
+type writingProducer struct {
+	name     string
+	declares map[fwkplugin.DataKey]any
+	writes   fwkplugin.DataKey
+}
+
+func (p *writingProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "writing-producer", Name: p.name}
+}
+
+func (p *writingProducer) Produces() map[fwkplugin.DataKey]any { return p.declares }
+
+func (p *writingProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	for _, endpoint := range endpoints {
+		endpoint.Put(p.writes, testCloneable("value"))
+	}
+	return nil
+}
+
+type testCloneable string
+
+func (c testCloneable) Clone() fwkdl.Cloneable { return c }
+
+func TestExecutePluginsAsDAG_EnforcesProducesDeclaration(t *testing.T) {
+	declared := fwkplugin.NewDataKey("declared", "writing-producer")
+	undeclared := fwkplugin.NewDataKey("undeclared", "other-producer")
+
+	newEndpoint := func() fwksched.Endpoint {
+		return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	}
+
+	t.Run("declared write reaches the endpoint", func(t *testing.T) {
+		endpoint := newEndpoint()
+		producer := &writingProducer{name: "p", declares: map[fwkplugin.DataKey]any{declared: nil}, writes: declared}
+
+		err := executePluginsAsDAG(context.Background(), []fwkrc.DataProducer{producer},
+			&fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
+
+		require.NoError(t, err)
+		_, ok := endpoint.Get(declared)
+		assert.True(t, ok)
+	})
+
+	t.Run("undeclared write fails the producer and leaves the endpoint untouched", func(t *testing.T) {
+		endpoint := newEndpoint()
+		producer := &writingProducer{name: "p", declares: map[fwkplugin.DataKey]any{declared: nil}, writes: undeclared}
+
+		err := executePluginsAsDAG(context.Background(), []fwkrc.DataProducer{producer},
+			&fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
+
+		require.Error(t, err, "a write outside Produces() must fail the producer rather than be dropped silently")
+		assert.Contains(t, err.Error(), "undeclared")
+		_, ok := endpoint.Get(undeclared)
+		assert.False(t, ok)
+	})
 }

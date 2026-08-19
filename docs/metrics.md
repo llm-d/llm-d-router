@@ -1,20 +1,19 @@
 # Metrics
 
 The `llm-d-router` Endpoint Picker (EPP) exposes Prometheus metrics to monitor its behavior and
-performance. These are in addition to the Inference Gateway metrics; for how to view metrics, see the
-Gateway API Inference Extension [metrics and observability guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics-and-observability.md).
+performance. These are in addition to the Inference Gateway metrics. For how to reach the EPP's
+metrics endpoint and what it serves, see [Scrape topology](#scrape-topology) below.
 
 ## Subsystems and naming
 
-A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses two current subsystems:
+A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses the canonical subsystem:
 
 | Prefix | Scope |
 |---|---|
-| `llm_d_epp_` | Canonical, EPP-wide: request/latency, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, and predicted-latency metrics. |
-| `llm_d_router_epp_` | The embedded llm-d-kv-cache metrics only (see [Embedded llm-d-kv-cache metrics](#embedded-llm-d-kv-cache-metrics)). |
+| `llm_d_epp_` | Canonical, EPP-wide: request/latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, predicted latency, and embedded KV-cache metrics. |
 
 Earlier releases emitted metrics under `llm_d_inference_scheduler_`, `inference_objective_`,
-`inference_pool_`, `inference_extension_`, and `kvcache_`. Those prefixes are **deprecated** but
+`inference_pool_`, `inference_extension_`, `llm_d_router_epp_`, and `kvcache_`. Those prefixes are **deprecated** but
 still emitted: each recorder that has a deprecated predecessor writes both the legacy series and its
 current twin (dual emission), so existing dashboards keep working during migration. See [Deprecated series](#deprecated-series).
 
@@ -36,7 +35,7 @@ metrics, distinct from the EPP metrics above; scrape the pods directly to collec
 
 When the precise prefix cache is enabled (`precise-prefix-cache-producer` /
 `precise-prefix-cache-scorer`) with `indexerConfig.kvBlockIndexConfig.enableMetrics: true`, the
-embedded llm-d-kv-cache index registers its `llm_d_router_epp_kv_cache_*` metrics on the **same**
+embedded llm-d-kv-cache index registers its `llm_d_epp_kv_cache_*` metrics on the **same**
 controller-runtime registry the EPP `/metrics` endpoint already serves. No separate kv-cache HTTP
 endpoint or scrape target is required.
 
@@ -47,7 +46,7 @@ operator opts in.
 ## Deprecated series
 
 All deprecated series are still emitted as back-compat aliases alongside their current twins. Prefer
-the current `llm_d_epp_*` (or `llm_d_router_epp_*`) names in new dashboards and alerts.
+the current `llm_d_epp_*` names in new dashboards and alerts.
 
 | Deprecated prefix | Current replacement |
 |---|---|
@@ -55,7 +54,7 @@ the current `llm_d_epp_*` (or `llm_d_router_epp_*`) names in new dashboards and 
 | `inference_objective_*` (request/latency, predicted latency) | `llm_d_epp_*` |
 | `inference_pool_*` (pool averages, queue size) | `llm_d_epp_*` |
 | `inference_extension_*` (scheduler, plugin, info, flow control, prefix indexer) | `llm_d_epp_*` |
-| `kvcache_index_*`, `kvcache_kvevents_*` | `llm_d_router_epp_kv_cache_*` |
+| `kvcache_index_*`, `kvcache_kvevents_*` | `llm_d_epp_kv_cache_*` |
 
 ## Metrics catalog
 
@@ -219,8 +218,8 @@ Exposed when the `flowControl` feature gate is enabled.
 
 *   **Type:** Histogram
 *   **Labels:** `fairness_id`, `priority`, `outcome` (`Dispatched`, `RejectedCapacity`,
-    `RejectedOther`, `EvictedTTL`, `EvictedContextCancelled`, `EvictedOther`), `inference_pool`,
-    `model_name`, `target_model_name`
+    `RejectedOther`, `EvictedTTL`, `EvictedNoEndpoints`, `EvictedContextCancelled`, `EvictedOther`),
+    `inference_pool`, `model_name`, `target_model_name`
 *   **Description:** Total time a request spends in the Flow Control layer, from enqueue to final
     outcome.
 *   **Usage:** Primary latency signal for flow control. Rising p99 indicates backends are saturated
@@ -280,13 +279,64 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
     problem (scrape path, port, TLS, auth) rather than genuine overload.
 
+#### `flow_control_capacity_utilization_requests`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Fraction of a priority band's **effective** request-count capacity currently
+    occupied (0.0-1.0), aggregated over every flow in the band. This is not a per-flow-queue metric:
+    `priority` identifies the band. A band that does not configure `maxRequests` falls back to a
+    default denominator, so every configured band reports a series. The all-bands rollup is a
+    separate metric, `flow_control_global_capacity_utilization_requests`.
+*   **Usage:** Lets operators alert on "the band is at N% of its request limit" without joining
+    configured `maxRequests` values into the query. Sustained values near 1.0 precede
+    `flow_control_requests_total{outcome="RejectedCapacity"}` rising. Note the denominator is always
+    the band's own capacity: when a global cap sits below the sum of the band caps, admission is
+    bounded by the global cap first, so the per-band ratio understates real pressure — read it
+    alongside `flow_control_global_capacity_utilization_requests`. (Making a band's denominator
+    `min(band, global)` would make one band's ratio depend on other bands' configuration, which is
+    worse.)
+
+#### `flow_control_capacity_utilization_bytes`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Byte-size counterpart of `flow_control_capacity_utilization_requests`: the
+    fraction of a priority band's effective byte-size capacity currently occupied (0.0-1.0),
+    aggregated over every flow in the band, with the same default-denominator fallback.
+*   **Usage:** Memory-pressure equivalent of the request-count ratio; a band can hit its `maxBytes`
+    ceiling long before its `maxRequests` one when payloads are large. The same global-cap caveat
+    applies — compare against `flow_control_global_capacity_utilization_bytes`.
+
+#### `flow_control_global_capacity_utilization_requests`
+
+*   **Type:** Gauge
+*   **Labels:** `inference_pool`
+*   **Description:** Fraction of the global request-count capacity currently occupied across all
+    priority bands (0.0-1.0). Global capacity is optional and unset by default, so this series is
+    emitted only when it is configured — absent, not 0.
+*   **Usage:** The rollup companion to the per-band ratio. It lives in its own metric family so that
+    aggregations over the per-band family (`sum`, `max`, `topk`) do not double count or rank against
+    the rollup.
+
+#### `flow_control_global_capacity_utilization_bytes`
+
+*   **Type:** Gauge
+*   **Labels:** `inference_pool`
+*   **Description:** Byte-size counterpart of `flow_control_global_capacity_utilization_requests`,
+    with the same optional-and-omitted-when-unset behaviour.
+*   **Usage:** Shows whether the global byte ceiling, rather than any single band, is what is
+    bounding admission.
+
 #### `flow_control_requests_total`
 
 *   **Type:** Counter
 *   **Labels:**
     *   `outcome`: terminal outcome, one of `Dispatched`, `RejectedCapacity`, `RejectedNoEndpoints`
         (candidate pool had no endpoints at the capacity boundary; surfaces as HTTP 503 rather than
-        429), `RejectedOther`, `EvictedTTL`, `EvictedContextCancelled`, `EvictedOther`
+        429), `RejectedOther`, `EvictedTTL`, `EvictedNoEndpoints` (queue-wait budget expired while the
+        candidate pool had no endpoints; surfaces as HTTP 503 rather than 429), `EvictedContextCancelled`,
+        `EvictedOther`
     *   `priority`, `inference_pool`
 *   **Description:** Total requests processed by the Flow Control layer, incremented once per request
     after its terminal outcome is determined.
@@ -300,6 +350,8 @@ Exposed when the `flowControl` feature gate is enabled.
         - investigate pool health and scaling.
     *   Rising `outcome="EvictedTTL"`: requests waiting longer than their TTL - investigate backend
         throughput or tighten admission.
+    *   Rising `outcome="EvictedNoEndpoints"`: requests waited out `noEndpointRequestTTL` without an
+        endpoint appearing - investigate scaling latency, or raise the budget above pod startup.
     *   `outcome="Dispatched"` is the healthy baseline; compare against total request rate for the
         acceptance ratio.
 
@@ -333,9 +385,41 @@ Three metrics covering the ext_proc gRPC stream lifecycle. Disabled by default; 
     `code="Unknown"` indicates handler errors. `code="Canceled"` is expected on Envoy restarts and
     rolling EPP updates.
 
+### In-flight load
+
+In-flight load, emitted under the `llm_d_epp_` prefix. Present only when an `InFlightLoadProducer` is
+configured: the producer owns these metrics and registers them through the plugin metrics recorder. The
+per-endpoint gauges are updated as requests are admitted and released.
+
+#### `inflight_requests`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `endpoint_name`: string — the target endpoint (pod) name.
+    *   `namespace`: string — the endpoint's namespace.
+    *   `producer_name`: string — the configured `InFlightLoadProducer` instance name, so multiple producers emit distinct series.
+    *   `fairness_id`: string — the flow-control fairness queue identity.
+    *   `priority`: string — the request priority.
+*   **Release Stage:** ALPHA
+*   **Description:** Requests currently in flight on each endpoint (scheduled, not yet completed), as tracked by the in-flight load producer.
+*   **Usage:** Per-replica queue depth for load-aware routing and capacity analysis.
+
+#### `inflight_tokens`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `endpoint_name`: string — the target endpoint (pod) name.
+    *   `namespace`: string — the endpoint's namespace.
+    *   `producer_name`: string — the configured `InFlightLoadProducer` instance name.
+    *   `fairness_id`: string — the flow-control fairness queue identity.
+    *   `priority`: string — the request priority.
+*   **Release Stage:** ALPHA
+*   **Description:** Tokens currently in flight on each endpoint — uncached prompt tokens, optionally plus estimated output tokens when the producer's `addEstimatedOutputTokens` is set.
+*   **Usage:** Per-replica token pressure, a finer load signal than request count when request sizes vary widely.
+
 ### KV-cache index
 
-Prefix `llm_d_router_epp_`. Registered only when the embedded llm-d-kv-cache metrics are enabled (see
+Prefix `llm_d_epp_`. Registered only when the embedded llm-d-kv-cache metrics are enabled (see
 [Embedded llm-d-kv-cache metrics](#embedded-llm-d-kv-cache-metrics)). Unlabeled.
 
 | Name | Type | Notes |

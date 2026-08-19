@@ -86,7 +86,7 @@ type mockScheduler struct {
 
 func (m *mockScheduler) Schedule(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.SchedulingResult, error) {
 	if endpoints != nil && m.dataProduced {
-		data, ok := endpoints[0].Get(mockProducedDataKey.String())
+		data, ok := endpoints[0].Get(mockProducedDataKey)
 		if !ok || data.(mockProducedDataType).value != 42 {
 			return nil, errors.New("expected produced data not found in pod")
 		}
@@ -135,7 +135,7 @@ func (m *mockDataProducerPlugin) Consumes() fwkplugin.DataDependencies {
 }
 
 func (m *mockDataProducerPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	endpoints[0].Put(mockProducedDataKey.String(), mockProducedDataType{value: 42})
+	endpoints[0].Put(mockProducedDataKey, mockProducedDataType{value: 42})
 	return nil
 }
 
@@ -169,7 +169,7 @@ func (m *mockAdmissionPlugin) Admit(ctx context.Context, request *fwksched.Infer
 
 type mockRequestHeaderPlugin struct {
 	name           string
-	attributeKey   string
+	attributeKey   fwkplugin.DataKey
 	attributeValue string
 }
 
@@ -1648,7 +1648,10 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
+	// Each dispatch snapshots the accumulator, so every invocation carries the total at call time.
+	reqCtx.StreamedEvents = 5
 	director.HandleResponseBody(ctx, reqCtx, false)
+	reqCtx.StreamedEvents = 6
 	director.HandleResponseBody(ctx, reqCtx, false)
 
 	// Intermediate chunks (endOfStream=false) run asynchronously, wait for them.
@@ -1659,6 +1662,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "async response body plugins should have been called for intermediate chunks")
 
 	// Final chunk (endOfStream=true) runs synchronously (drains queue first).
+	reqCtx.StreamedEvents = 7
 	director.HandleResponseBody(ctx, reqCtx, true)
 
 	ps1.mu.Lock()
@@ -1674,6 +1678,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		assert.Equal(t, "test-req-id-for-streaming", resp.RequestID)
 		assert.Equal(t, reqCtx.Response.Headers, resp.Headers)
 		assert.Equal(t, "namespace1/test-pod-name", targetPods[i])
+		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
 		if i < 2 {
 			assert.False(t, resp.EndOfStream, "EndOfStream should be false for chunk %d", i)
 		} else {
@@ -1696,7 +1701,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const numChunks = 50
-	reqCtx := newResponseBodyTestRequestContext("ordering-test-request", 0)
+	reqCtx := newResponseBodyTestRequestContext("ordering-test-request")
 
 	for i := range numChunks {
 		reqCtx.Usage = fwkrh.Usage{CompletionTokens: i}
@@ -1727,8 +1732,8 @@ func TestDirector_HandleResponseBody_DuplicateRequestIDQueuesAreIndependent(t *t
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const requestID = "duplicate-request-id"
-	firstReqCtx := newResponseBodyTestRequestContext(requestID, 0)
-	secondReqCtx := newResponseBodyTestRequestContext(requestID, 0)
+	firstReqCtx := newResponseBodyTestRequestContext(requestID)
+	secondReqCtx := newResponseBodyTestRequestContext(requestID)
 
 	director.HandleResponseBody(ctx, firstReqCtx, false)
 	require.Eventually(t, func() bool {
@@ -1955,7 +1960,7 @@ func (p *blockingResponseStreamingPlugin) release() {
 	close(p.releaseCh)
 }
 
-func newResponseBodyTestRequestContext(requestID string, completionTokens int) *handlers.RequestContext {
+func newResponseBodyTestRequestContext(requestID string) *handlers.RequestContext {
 	return &handlers.RequestContext{
 		Request: &handlers.Request{
 			Headers: map[string]string{
@@ -1966,7 +1971,6 @@ func newResponseBodyTestRequestContext(requestID string, completionTokens int) *
 			Headers: map[string]string{},
 		},
 		TargetPod: &fwkdl.EndpointMetadata{},
-		Usage:     fwkrh.Usage{CompletionTokens: completionTokens},
 	}
 }
 
@@ -1981,7 +1985,7 @@ func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
 func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 	endpointWith := func(matched, total int) fwksched.Endpoint {
 		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
 		return fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
@@ -1996,7 +2000,7 @@ func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
 	}
 	endpointWithWrongType := func() fwksched.Endpoint {
 		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
+		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey, wrongTypeAttr{})
 		return fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
 			nil, attrs,
@@ -2084,7 +2088,7 @@ func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
 	scheduleResultWith := func(matched, total int) *fwksched.SchedulingResult {
 		attrs := fwkdl.NewAttributes()
 		if matched >= 0 {
-			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 				attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
 		}
 		return &fwksched.SchedulingResult{
@@ -2216,4 +2220,64 @@ func TestRunPreRequestPlugins_AggregatesErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), `PreRequest "third/mock" failed`)
 	assert.Equal(t, []string{"first", "second", "third"}, invoked,
 		"every plugin must run; a failure in one must not short-circuit the rest")
+}
+
+func TestDirector_HandleResponseBody_TerminationCause(t *testing.T) {
+	testCases := []struct {
+		name     string
+		recorded fwkrc.TerminationCause
+		want     fwkrc.TerminationCause
+	}{
+		{
+			name: "a stream that reached its end completed naturally",
+			want: fwkrc.TerminationCauseNatural,
+		},
+		{
+			name:     "a recorded cause survives to the record",
+			recorded: fwkrc.TerminationCauseEvicted,
+			want:     fwkrc.TerminationCauseEvicted,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := newTestResponseStreaming("ps")
+			ctx := logutil.NewTestLoggerIntoContext(context.Background())
+			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+				NewConfig().WithResponseStreamingPlugins(ps))
+
+			reqCtx := newResponseBodyTestRequestContext("test-req-id")
+			reqCtx.TerminationCause = tc.recorded
+
+			director.HandleResponseBody(ctx, reqCtx, true)
+
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+			require.Len(t, ps.respsOnStreaming, 1)
+			assert.Equal(t, tc.want, ps.respsOnStreaming[0].TerminationCause)
+		})
+	}
+}
+
+func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps))
+
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	reqCtx.TerminationCause = fwkrc.TerminationCauseClientDisconnect
+
+	director.HandleResponseBody(ctx, reqCtx, false)
+
+	require.Eventually(t, func() bool {
+		ps.mu.Lock()
+		defer ps.mu.Unlock()
+		return len(ps.respsOnStreaming) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	assert.Empty(t, ps.respsOnStreaming[0].TerminationCause,
+		"mid-stream chunks carry no cause: the stream has not ended")
 }

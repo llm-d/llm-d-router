@@ -25,7 +25,7 @@ import (
 
 const (
 	// LLMDRouterEndpointPickerSubsystem is the subsystem for llm-d router endpoint picker metrics.
-	LLMDRouterEndpointPickerSubsystem = "llm_d_epp"
+	LLMDRouterEndpointPickerSubsystem = metricsutil.LLMDRouterEndpointPickerSubsystem
 )
 
 var (
@@ -280,6 +280,18 @@ var (
 		[]string{"extension_point", "plugin_type", "plugin_name"},
 	)
 
+	llmdPluginDataScopeViolations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "plugin_data_scope_violations_total",
+			Help: metricsutil.HelpMsgWithStability("Total number of endpoint attribute accesses rejected because the "+
+				"plugin did not declare the DataKey in Produces() or Consumes(), by extension point, plugin type, "+
+				"plugin name and access kind (read or write). A non-zero value means a plugin's implementation has "+
+				"drifted from its declaration; rejected reads resolve as absent and rejected writes are dropped.", compbasemetrics.ALPHA),
+		},
+		[]string{"extension_point", "plugin_type", "plugin_name", "access"},
+	)
+
 	llmdRequestProcessingLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
@@ -399,6 +411,62 @@ var (
 		[]string{"detector"},
 	)
 
+	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_capacity_utilization_requests",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of a priority band's effective request-count capacity currently occupied, aggregated over "+
+					"every flow in the band (0.0-1.0). The denominator falls back to a default when the band does not "+
+					"configure one, so every configured band reports a series. The all-bands rollup is a separate "+
+					"metric, flow_control_global_capacity_utilization_requests.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
+	llmdFlowControlCapacityUtilizationBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_capacity_utilization_bytes",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of a priority band's effective byte-size capacity currently occupied, aggregated over every "+
+					"flow in the band (0.0-1.0). The denominator falls back to a default when the band does not "+
+					"configure one, so every configured band reports a series. The all-bands rollup is a separate "+
+					"metric, flow_control_global_capacity_utilization_bytes.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
+	llmdFlowControlGlobalCapacityUtilizationRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_global_capacity_utilization_requests",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of the global request-count capacity currently occupied across all priority bands (0.0-1.0). "+
+					"Global capacity is optional and unset by default; this series is emitted only when it is "+
+					"configured. Kept separate from flow_control_capacity_utilization_requests so aggregations over "+
+					"the per-band family do not double count the rollup.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlGlobalCapacityUtilizationBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_global_capacity_utilization_bytes",
+			Help: metricsutil.HelpMsgWithStability(
+				"Fraction of the global byte-size capacity currently occupied across all priority bands (0.0-1.0). "+
+					"Global capacity is optional and unset by default; this series is emitted only when it is "+
+					"configured. Kept separate from flow_control_capacity_utilization_bytes so aggregations over the "+
+					"per-band family do not double count the rollup.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
 	llmdFlowControlRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
@@ -406,6 +474,52 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Total number of requests processed by the Flow Control layer.", compbasemetrics.ALPHA),
 		},
 		[]string{"outcome", "priority", "inference_pool"},
+	)
+
+	llmdFlowControlRevocationsIssuedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_revocations_issued_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of in-flight eviction revocations issued, labeled by the demand band's priority.", compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
+	llmdFlowControlRevocationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_revocations_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of in-flight eviction revocations by terminal outcome (confirmed, timed_out). Every issued revocation eventually increments exactly one outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"outcome", "inference_pool"},
+	)
+
+	llmdFlowControlReclaimTarget = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_reclaim_target",
+			Help:      metricsutil.HelpMsgWithStability("Last computed reclamation deficit, in saturation-gauge units.", compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlPendingReclaim = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_pending_reclaim",
+			Help:      metricsutil.HelpMsgWithStability("Sum of outstanding and cooling pending-reclaim debits, in saturation-gauge units.", compbasemetrics.ALPHA),
+		},
+		[]string{"inference_pool"},
+	)
+
+	llmdFlowControlRevocationConfirmationDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_revocation_confirmation_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Time from revocation issue to confirmed stream termination.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"inference_pool"},
 	)
 )
 

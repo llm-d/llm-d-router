@@ -36,7 +36,7 @@ func makeEndpoint(t *testing.T, name string, topo *attrtopology.Topology) fwksch
 	meta := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "default"}}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if topo != nil {
-		ep.Put(attrtopology.TopologyAttributeKey.String(), topo)
+		ep.Put(attrtopology.TopologyAttributeKey, topo)
 	}
 	return ep
 }
@@ -46,7 +46,7 @@ func requestWithPeer(topo *attrtopology.Topology) *fwksched.InferenceRequest {
 	meta := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "peer", Namespace: "default"}}
 	peer := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if topo != nil {
-		peer.Put(attrtopology.TopologyAttributeKey.String(), topo)
+		peer.Put(attrtopology.TopologyAttributeKey, topo)
 	}
 	req.PutAttribute(disagg.PeerEndpointAttributeKey, peer)
 	return req
