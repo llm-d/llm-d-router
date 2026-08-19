@@ -8,5 +8,5 @@ A change can span multiple areas. Apply every label that fits rather than pickin
 
 ## Applying a label
 
-- Manually: add an `/area <name>` line to a PR or issue body (see ` github/workflows/pr-kind-label.yaml` and `.github/workflows/issue-kind-label.yaml`)
+- Manually: add an `/area <name>` line to a PR or issue body (see `.github/workflows/pr-kind-label.yaml` and `.github/workflows/issue-kind-label.yaml`)
 - Automatically: `.github/labeler.yml` applies the matching `area/*` label(s) on every PR
