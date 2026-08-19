@@ -172,6 +172,7 @@ cmd_fix() {
         continue
         ;;
     esac
+    chmod --reference="${f}" "${tmp}"
     mv "${tmp}" "${f}"
     echo "fixed: ${f}"
     fixed=$((fixed + 1))
