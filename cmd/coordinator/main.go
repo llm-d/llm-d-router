@@ -49,7 +49,7 @@ const metricsShutdownTimeout = 5 * time.Second
 
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
-	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint (overrides server.metrics_port)")
+	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port.")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)
@@ -117,6 +117,9 @@ func main() {
 	}
 
 	log.Info("starting coordinator", "addr", cfg.Server.ListenAddr, "metrics_port", cfg.Server.MetricsPort)
+	if cfg.Server.MetricsPort <= 0 {
+		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
+	}
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
 	if err := run(srv, cfg.Server); err != nil {
@@ -125,11 +128,13 @@ func main() {
 	}
 }
 
-// run starts the inference server and, alongside it, the Prometheus /metrics
-// server. It blocks until a signal is received or either server exits. On any
-// exit condition both servers are drained before run returns: the inference
-// server bounded by cfg.ShutdownTimeout, the metrics server by
-// metricsShutdownTimeout.
+// run starts the inference server and, when cfg.MetricsPort > 0, the
+// Prometheus /metrics server alongside it. It blocks until a signal is
+// received or either server exits. On any exit condition both servers are
+// drained before run returns: the inference server bounded by
+// cfg.ShutdownTimeout, the metrics server by metricsShutdownTimeout. A
+// non-positive MetricsPort disables the metrics endpoint entirely, matching
+// pkg/sidecar/proxy semantics.
 func run(srv *server.Server, cfg config.ServerConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -156,9 +161,11 @@ func run(srv *server.Server, cfg config.ServerConfig) error {
 		}
 	})
 
-	g.Go(func() error {
-		return serveMetrics(gctx, cfg.MetricsPort)
-	})
+	if cfg.MetricsPort > 0 {
+		g.Go(func() error {
+			return serveMetrics(gctx, cfg.MetricsPort)
+		})
+	}
 
 	return g.Wait()
 }
