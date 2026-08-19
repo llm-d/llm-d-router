@@ -243,7 +243,7 @@ func getProfilesFromResult(result map[string]scheduling.SchedulerProfile) []stri
 
 func TestPdProfileHandler_Pick(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	request := createRequest("hello world hello world hello world")
+	const prompt = "hello world hello world hello world"
 
 	profiles := map[string]scheduling.SchedulerProfile{
 		"decode":  newMockSchedulerProfile(),
@@ -331,6 +331,10 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 			)
 			assert.NoError(t, err)
 
+			// Fresh request per subtest: the decider memoizes its decision on
+			// the request attribute store, and sharing one request across cases
+			// would let an earlier subtest's memo leak into a later one.
+			request := createRequest(prompt)
 			// set prefix to the given cached tokens number for pod "pod1" in decode profile results
 			inputTokens := len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 
@@ -350,10 +354,11 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 
 func TestPdProfileHandler_PickSeries(t *testing.T) {
 	ctx := context.Background()
-	prompt := "hello world, hello world, hello world, hello world, hello world, hello world, hello world!"
-	request := createRequest(prompt)
-	longerRequest := createRequest(prompt + "123")
-	longRequest := createRequest(prompt + prompt)
+	const (
+		basePrompt   = "hello world, hello world, hello world, hello world, hello world, hello world, hello world!"
+		longerPrompt = basePrompt + "123"
+		longPrompt   = basePrompt + basePrompt
+	)
 
 	profiles := map[string]scheduling.SchedulerProfile{
 		defaultDecodeProfile:  newMockSchedulerProfile(),
@@ -364,7 +369,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 	}
 
 	type testData struct {
-		request          *scheduling.InferenceRequest
+		prompt           string
 		cachedTokens     int
 		expectedProfiles []string
 	}
@@ -377,12 +382,12 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			name:                 "same request twice",
 			nonCachedTokensLimit: 2,
 			tests: []testData{{
-				request:          request,
+				prompt:           basePrompt,
 				cachedTokens:     0,
 				expectedProfiles: []string{defaultPrefillProfile},
 			}, {
-				request:          request,
-				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken,
+				prompt:           basePrompt,
+				cachedTokens:     len(basePrompt) / averageCharactersPerToken,
 				expectedProfiles: []string{},
 			}},
 		}, {
@@ -391,12 +396,12 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			// In this case: longer request is longer in 4 chars than the request -> no disaggregated prefill
 			nonCachedTokensLimit: 2,
 			tests: []testData{{
-				request:          request,
+				prompt:           basePrompt,
 				cachedTokens:     0,
 				expectedProfiles: []string{defaultPrefillProfile},
 			}, {
-				request:          longerRequest,
-				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken,
+				prompt:           longerPrompt,
+				cachedTokens:     len(basePrompt) / averageCharactersPerToken,
 				expectedProfiles: []string{},
 			}},
 		}, {
@@ -405,12 +410,12 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 			// In this case: long request is longer enough than the request -> should have disaggregated prefill
 			nonCachedTokensLimit: 2,
 			tests: []testData{{
-				request:          request,
+				prompt:           basePrompt,
 				cachedTokens:     0,
 				expectedProfiles: []string{defaultPrefillProfile},
 			}, {
-				request:          longRequest,
-				cachedTokens:     len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken,
+				prompt:           longPrompt,
+				cachedTokens:     len(basePrompt) / averageCharactersPerToken,
 				expectedProfiles: []string{defaultPrefillProfile},
 			}},
 		},
@@ -433,8 +438,12 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 
 			// run sequences of request
 			for _, innerTest := range tt.tests {
+				// Fresh request per step: production models each call as its own
+				// *InferenceRequest, and the decider's per-request memoization
+				// would otherwise return the previous step's decision.
+				request := createRequest(innerTest.prompt)
 				// set prefix to the given cached tokens number for pod "pod1" in decode profile results
-				inputTokens := len(innerTest.request.Body.Completions.Prompt.Raw) / averageCharactersPerToken
+				inputTokens := len(request.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 
 				for profileName, profileRes := range profileResults {
 					if profileName == defaultDecodeProfile && profileRes != nil {
@@ -445,7 +454,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 					}
 				}
 
-				result := handler.Pick(ctx, innerTest.request, profiles, profileResults)
+				result := handler.Pick(ctx, request, profiles, profileResults)
 				assert.ElementsMatch(t, innerTest.expectedProfiles, getProfilesFromResult(result))
 			}
 		})

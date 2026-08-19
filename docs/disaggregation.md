@@ -396,7 +396,12 @@ PD deciders determine whether prefill should be offloaded to a separate worker, 
 
 #### Prefix-Based PD Decider
 
-The `prefix-based-pd-decider` plugin makes the disaggregation decision according to the length of the non-cached suffix of the prompt relative to tokens already cached on the selected decode pod.
+The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. Which role the plugin fills depends on the deployment topology:
+
+- **Sidecar-based P/D deployments** wire the plugin as a `disagg-profile-handler` decider — it routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)). Sidecar deployments do not emit `Prefer: if-available`, so the conditional-decode gate is dormant here.
+- **Coordinator-based deployments** use the default profile handler and declare the plugin at the top level. Only its `PreRequest` hook runs, enforcing the conditional-decode gate — `Prefer: if-available` requests are rejected with HTTP 412 when the same threshold would trigger remote prefill.
+
+Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declaring **two named instances** of this plugin in the same config (e.g., one wired as a decider, another as a standalone gate) with different parameters is not supported: the plugin memoizes its per-request decision keyed by plugin type, so the first instance to evaluate a given request populates the cache and the second reads that cached decision — its own parameters silently do not apply.
 
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
@@ -417,11 +422,38 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 
 **Parameter:**
 
-- `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
-  - If set to 0, disaggregation never occurs for any request
-- `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
-  - If set to 0, the prompt-length gate is disabled
-  - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
+- `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
+- `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
+
+**Conditional-decode 412 gate**
+
+Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
+
+Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
+
+A minimal coordinator-topology configuration:
+
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+  - type: approx-prefix-cache-producer
+  - type: prefix-cache-scorer
+  - type: max-score-picker
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 8
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: "prefix-cache-scorer"
+      - pluginRef: "max-score-picker"
+```
+
+The plugin declares `PrefixCacheMatchInfo` and `TokenizedPrompt` as required dependencies, so a missing producer surfaces as a startup error rather than a silent per-request forward.
+
+Full P/D and E/P/D configurations that combine the decider and gate roles are in [Configuration Examples](#configuration-examples).
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
