@@ -22,10 +22,15 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
@@ -92,6 +97,11 @@ type Config struct {
 	// EngineType selects the inference engine adapter ("vllm" or "sglang").
 	// Default: "vllm".
 	EngineType string `json:"engineType,omitempty"`
+	// Tracing enables OpenTelemetry spans for the event pipeline (receive,
+	// decode, process). KV events arrive at many times the inference request
+	// rate, so this is opt-in: with a shared head sampler, always-on event
+	// traces would crowd request traces out of the exported volume.
+	Tracing bool `json:"tracing,omitempty"`
 	// DiscoverPods enables the Kubernetes pod reconciler for automatic
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
@@ -161,7 +171,10 @@ type Pool struct {
 	// tier, KV-cache group, DP rank) and a store must be counted only after
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
-	wg    sync.WaitGroup
+	// tracer is resolved once: tracing.Tracer rebuilds its instrumentation
+	// options on every call, which is not free on the per-message event path.
+	tracer trace.Tracer
+	wg     sync.WaitGroup
 	// queueDepth mirrors the number of tasks queued across all shards. It is
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
@@ -190,6 +203,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		adapter:        adapter,
 		groupCatalog:   kvblock.NewGroupCatalog(),
 		dedup:          newEventDedupFilter(),
+		tracer:         newEventTracer(cfg.Tracing),
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -199,6 +213,16 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	metrics.Register()
 
 	return p
+}
+
+// newEventTracer returns the event-pipeline tracer, or a tracer that never
+// records when event tracing is disabled. Resolving it once keeps the
+// per-message path clear of tracing.Tracer's per-call option building.
+func newEventTracer(enabled bool) trace.Tracer {
+	if !enabled {
+		return tracenoop.NewTracerProvider().Tracer(TracerScope)
+	}
+	return tracing.Tracer(TracerScope)
 }
 
 // addQueueDepth adjusts the tracked queue depth by delta and publishes the new
@@ -313,16 +337,73 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		return
 	}
 
-	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
+	// Parent to the receive span while keeping the worker's context for
+	// cancellation, so index operations below land in the message's trace.
+	if msg.SpanContext.IsValid() {
+		ctx = trace.ContextWithRemoteSpanContext(ctx, msg.SpanContext)
+	}
+
+	ctx, span := p.tracer.Start(ctx, "events_process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+	)
+	defer span.End()
+	// On the default (tracing-disabled) path Start returns a non-recording span;
+	// skip attribute construction so the per-message path stays allocation-free.
+	tracingActive := span.IsRecording()
+	if tracingActive {
+		span.SetAttributes(
+			attribute.String("llm_d.kv_cache.events.topic", msg.Topic),
+			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(msg.Payload)),
+		)
+	}
+
+	podID, modelName, batch, err := p.decode(ctx, msg)
 	if err != nil {
+		if tracingActive {
+			span.SetStatus(codes.Error, err.Error())
+		}
 		logger.Error(err, "Failed to parse message")
 		return
 	}
+
 	if msg.SourceEndpoint != "" {
 		podID = msg.SourceEndpoint
 	}
+	if tracingActive {
+		span.SetAttributes(
+			attribute.String("llm_d.kv_cache.events.pod_id", podID),
+			attribute.Int("llm_d.kv_cache.events.event_count", len(batch.Events)),
+		)
+	}
 
 	p.processEventBatch(ctx, &batch, podID, modelName)
+}
+
+// decode spans the adapter's payload decode. It wraps the call rather than the
+// EngineAdapter itself so out-of-tree adapters need no signature change.
+//
+//nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
+func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, EventBatch, error) {
+	_, span := p.tracer.Start(ctx, "events_decode",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
+	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return podID, modelName, batch, err
+	}
+
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("llm_d.kv_cache.events.pod_id", podID),
+			attribute.String("gen_ai.request.model", modelName),
+			attribute.Int("llm_d.kv_cache.events.event_count", len(batch.Events)),
+		)
+	}
+
+	return podID, modelName, batch, nil
 }
 
 func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
