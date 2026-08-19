@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,41 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
+
+func BenchmarkMessagesRenderPreparation240K(b *testing.B) {
+	body := &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+		System: fwkrh.AnthropicContent{Raw: strings.Repeat("shared repository context\n", 10000)},
+		Messages: []fwkrh.AnthropicMessage{{
+			Role:    "user",
+			Content: fwkrh.AnthropicContent{Raw: "Inspect the code."},
+		}},
+		Tools: []fwkrh.AnthropicTool{{Name: "read_file"}},
+	}}
+
+	b.Run("generic-map-round-trip", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			payload := messagesPayload(body)
+			pm, ok := payload.AsMap()
+			if !ok {
+				b.Fatal("expected map payload")
+			}
+			if _, err := json.Marshal(pm); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("typed-single-marshal", func(b *testing.B) {
+		b.ReportAllocs()
+		request := MessagesToRenderChatRequest(body.Messages)
+		for range b.N {
+			if _, err := json.Marshal(buildChatRenderRequest(request)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
 
 type mockTokenizer struct {
 	renderFunc     func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)

@@ -172,6 +172,25 @@ func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.Request
 	return r.postChatRender(ctx, body, r.chatTimeout(pm))
 }
 
+// RenderChatRequest sends an already-converted render request without the
+// marshal-unmarshal-map-marshal cycle required by the generic RequestPayload
+// interface. This is used for Anthropic Messages requests, whose system prompt
+// can be hundreds of kilobytes.
+func (r *vllmHTTPRenderer) RenderChatRequest(
+	ctx context.Context, request *tokenizerTypes.RenderChatRequest,
+) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	body := buildChatRenderRequest(request)
+	body.Model = r.modelName
+	timeout := r.timeout
+	for _, message := range body.Messages {
+		if message.Content != nil && len(message.Content.Parts) > 0 {
+			timeout = r.mmTimeout
+			break
+		}
+	}
+	return r.postChatRender(ctx, body, timeout)
+}
+
 func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout time.Duration) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	var resp renderResponse
 	if err := r.postJSON(ctx, chatRenderPath, body, timeout, &resp); err != nil {
@@ -216,6 +235,7 @@ func (r *vllmHTTPRenderer) produceTimeout() time.Duration {
 // Used by the non-PayloadMap fallback path (gRPC, warmup). The model is
 // stamped in by the renderer, not carried here.
 type chatRenderRequest struct {
+	Model                string         `json:"model,omitempty"`
 	Messages             []chatMessage  `json:"messages"`
 	Tools                []any          `json:"tools,omitempty"`
 	Documents            []any          `json:"documents,omitempty"`
