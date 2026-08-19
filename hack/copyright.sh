@@ -232,6 +232,8 @@ cmd_classify() {
       else
         both=$((both + 1))
         [[ "${has_l}" == 0 ]] && echo "NEEDS-LLMD-NOTICE(modified GAIE import): ${f}"
+        [[ "${has_l}" == 1 && "${has_k}" == 0 ]] && \
+          echo "NEEDS-K8S-NOTICE(modified GAIE import, llm-d-only notice): ${f}"
       fi
     fi
   done < <(in_scope_files | grep '\.go$')
