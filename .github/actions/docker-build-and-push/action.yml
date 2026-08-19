@@ -41,6 +41,10 @@ inputs:
     required: false
     description: Additional image tags to push
     default: ''
+outputs:
+  digest:
+    description: Digest of the pushed image index
+    value: ${{ steps.build.outputs.digest }}
 runs:
   using: "composite"
   steps:
@@ -56,6 +60,7 @@ runs:
         password: ${{ inputs.github-token }}
 
     - name: Build image
+      id: build
       uses: docker/build-push-action@v6
       with:
         file: ${{ inputs.docker-file }}
