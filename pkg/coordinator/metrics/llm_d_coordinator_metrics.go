@@ -42,7 +42,7 @@ var (
 			Name:      "request_error_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of failed client requests.", compbasemetrics.ALPHA),
 		},
-		append([]string{}, append(modelLabel, "error_code")...),
+		withLabel(modelLabel, "error_code"),
 	)
 
 	requestDuration = prometheus.NewHistogramVec(
@@ -105,7 +105,7 @@ var (
 			Name:      "step_errors_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of pipeline-step failures.", compbasemetrics.ALPHA),
 		},
-		append([]string{}, append(stepLabel, "error_code")...),
+		withLabel(stepLabel, "error_code"),
 	)
 
 	stepRunning = prometheus.NewGaugeVec(
@@ -157,7 +157,7 @@ var (
 			Name:      "execution_path_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of client requests by the set of disaggregation phases actually executed.", compbasemetrics.ALPHA),
 		},
-		append([]string{}, append(modelLabel, "path")...),
+		withLabel(modelLabel, "path"),
 	)
 
 	conditionalDecodeProbesTotal = prometheus.NewCounterVec(

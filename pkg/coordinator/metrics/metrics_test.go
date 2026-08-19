@@ -26,6 +26,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestWithLabel_AppendsAndDoesNotAliasBase(t *testing.T) {
+	base := []string{"model_name"}
+	out := withLabel(base, "error_code")
+	require.Equal(t, []string{"model_name", "error_code"}, out)
+	require.Equal(t, []string{"model_name"}, base, "base must not be mutated")
+
+	// Future-proofing: even if base is later declared with extra capacity,
+	// two independent withLabel results must not share the base's backing
+	// array. That is exactly the aliasing hazard the outer defensive copy
+	// used to guard against.
+	baseWithCap := make([]string, 1, 8)
+	baseWithCap[0] = "model_name"
+	o1 := withLabel(baseWithCap, "error_code")
+	o2 := withLabel(baseWithCap, "path")
+	require.Equal(t, "error_code", o1[1])
+	require.Equal(t, "path", o2[1], "o2 must not overwrite o1 via shared backing array")
+}
+
 func TestRegister_Idempotent(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	require.NoError(t, Register(reg))

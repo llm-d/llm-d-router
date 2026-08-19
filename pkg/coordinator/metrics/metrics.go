@@ -73,6 +73,19 @@ var (
 	modelLabel    = []string{"model_name"}
 	stepLabel     = []string{"step"}
 	upstreamLabel = []string{"upstream"}
+)
+
+// withLabel returns a fresh slice of base followed by extra. It allocates a
+// new backing array unconditionally, so metric declarations that share a base
+// label slice (modelLabel, stepLabel, upstreamLabel) cannot alias each other's
+// storage — even if the base slice is later given extra capacity.
+func withLabel(base []string, extra string) []string {
+	out := make([]string, 0, len(base)+1)
+	out = append(out, base...)
+	return append(out, extra)
+}
+
+var (
 
 	// generalLatencyBuckets covers durations from 5ms to 1 hour; identical to
 	// the EPP request-duration ladder so PromQL translates cleanly between the
