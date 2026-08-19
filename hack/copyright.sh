@@ -172,8 +172,7 @@ cmd_fix() {
         continue
         ;;
     esac
-    chmod --reference="${f}" "${tmp}"
-    mv "${tmp}" "${f}"
+    cat "${tmp}" > "${f}" && rm -f "${tmp}"
     echo "fixed: ${f}"
     fixed=$((fixed + 1))
   done < <(in_scope_files)
