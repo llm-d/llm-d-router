@@ -113,10 +113,19 @@ var (
 	}
 )
 
+// resettableCollector is a prometheus.Collector that supports Reset. All
+// vector metrics this package uses (CounterVec, HistogramVec, GaugeVec)
+// satisfy it. Adding a collector that does not implement Reset causes a
+// compile-time failure in allCollectors, not a silent skip in Reset().
+type resettableCollector interface {
+	prometheus.Collector
+	Reset()
+}
+
 // allCollectors returns the ordered list of every metric this package owns.
 // Register and Reset both iterate it so the two stay in sync.
-func allCollectors() []prometheus.Collector {
-	return []prometheus.Collector{
+func allCollectors() []resettableCollector {
+	return []resettableCollector{
 		requestTotal,
 		requestErrorTotal,
 		requestDuration,
@@ -154,11 +163,10 @@ func Register(reg prometheus.Registerer) error {
 }
 
 // Reset clears every metric back to its initial state. For integration tests
-// only.
+// only. Every collector in allCollectors implements Reset by construction of
+// the resettableCollector interface.
 func Reset() {
 	for _, c := range allCollectors() {
-		if r, ok := c.(interface{ Reset() }); ok {
-			r.Reset()
-		}
+		c.Reset()
 	}
 }
