@@ -327,10 +327,9 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 		req.Header.Set(k, v)
 	}
 
-	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamRender)
-	callStart := time.Now()
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamRender)
 	resp, err := s.client.Do(req)
-	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamRender, time.Since(callStart))
+	call.Done()
 	if err != nil {
 		return fmt.Errorf("render request failed: %w", err)
 	}

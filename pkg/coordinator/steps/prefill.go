@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -107,10 +106,9 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 	}
 
-	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamPrefill)
-	callStart := time.Now()
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamPrefill)
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
-	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamPrefill, time.Since(callStart))
+	call.Done()
 	if err != nil {
 		return fmt.Errorf("prefill: request: %w", err)
 	}

@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -136,10 +135,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 			}
 
-			coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamEncode)
-			callStart := time.Now()
+			call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamEncode)
 			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, headers)
-			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamEncode, time.Since(callStart))
+			call.Done()
 			if err != nil {
 				err = fmt.Errorf("encode[%d]: request: %w", i, err)
 				logger.Error(err, "encode fanout request", "index", i, "path", path)

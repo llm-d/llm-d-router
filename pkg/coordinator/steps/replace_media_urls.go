@@ -267,10 +267,9 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 	if err != nil {
 		return nil, "", err
 	}
-	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamMediaFetch)
-	callStart := time.Now()
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamMediaFetch)
 	resp, err := s.client.Do(req)
-	coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamMediaFetch, time.Since(callStart))
+	call.Done()
 	if err != nil {
 		return nil, "", err
 	}
