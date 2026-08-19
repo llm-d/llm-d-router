@@ -150,7 +150,7 @@ var _ = Describe("P2P Connector", func() {
 		}()
 
 		// Prefill is in flight and blocked; decode must not have been touched.
-		Eventually(func() int32 { return prefillHits.Load() }).Should(Equal(int32(1)))
+		Eventually(prefillHits.Load).Should(Equal(int32(1)))
 		Consistently(func() int32 {
 			return testInfo.decodeHandler.RequestCount.Load()
 		}, 200*time.Millisecond, 20*time.Millisecond).Should(BeZero())
