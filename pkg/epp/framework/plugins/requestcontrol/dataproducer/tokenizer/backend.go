@@ -162,8 +162,7 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 			return body.Payload
 		}
 	}
-	rcr := ChatCompletionsToRenderChatRequest(body.ChatCompletions)
-	data, _ := json.Marshal(buildChatRenderRequest("", rcr))
+	data, _ := json.Marshal(buildChatRenderRequest(ChatCompletionsToRenderChatRequest(body.ChatCompletions)))
 	var pm fwkrh.PayloadMap
 	_ = json.Unmarshal(data, &pm)
 	return pm
@@ -173,10 +172,21 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 // body uses the Anthropic Messages schema (top-level system, source-based image
 // blocks), which vLLM /render does not accept, so the payload is always rebuilt
 // from the typed struct into the /render chat schema regardless of body.Payload.
+// Messages and tools are embedded as raw JSON rather than decoded maps: Go maps
+// re-serialize with sorted keys, which would reorder tool schemas and break
+// token parity with what vLLM renders server-side.
 func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	data, _ := json.Marshal(buildChatRenderRequest("", MessagesToRenderChatRequest(body.Messages)))
-	var pm fwkrh.PayloadMap
-	_ = json.Unmarshal(data, &pm)
+	rr := buildChatRenderRequest(MessagesToRenderChatRequest(body.Messages))
+	msgs := make([]any, len(rr.Messages))
+	for i, m := range rr.Messages {
+		data, _ := json.Marshal(m)
+		msgs[i] = json.RawMessage(data)
+	}
+	pm := fwkrh.PayloadMap{"messages": msgs}
+	if len(rr.Tools) > 0 {
+		data, _ := json.Marshal(rr.Tools)
+		pm["tools"] = json.RawMessage(data)
+	}
 	return pm
 }
 

@@ -167,18 +167,18 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	matched := false
 	for _, pod := range pods {
 		matchLen := 0
-		if e.assigned != nil && pod.GetMetadata().NamespacedName == e.assigned.GetMetadata().NamespacedName {
+		if e.assigned != nil && pod.GetMetadata().ID == e.assigned.GetMetadata().ID {
 			matchLen = total
 			matched = true
 		}
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, total, p.config.BlockSizeTokens))
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, total, p.config.BlockSizeTokens))
 	}
 	if e.assigned != nil && !matched {
 		// The endpoint set changed between batching and release (rolling update or
 		// scale event): the assigned replica is not among this request's pods, so
 		// no affinity is produced. Surface it rather than degrading silently.
 		log.FromContext(ctx).V(logutil.DEBUG).Info("assigned replica absent from request pods; producing zero affinity",
-			"assigned", e.assigned.GetMetadata().NamespacedName.String())
+			"assigned", e.assigned.GetMetadata().ID.String())
 	}
 	return nil
 }

@@ -35,12 +35,12 @@ func TestPrefixPluginScore(t *testing.T) {
 	producerName := "approx-prefix-cache-producer"
 	p, _ := New(context.Background(), PrefixCacheScorerPluginType, producerName)
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
 	endpoint1.Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 
-	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), nil)
 	endpoint2.Put(key, attrprefix.NewPrefixCacheMatchInfo(2, 10, 1))
 
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}
@@ -57,20 +57,20 @@ func TestPrefixPluginScoreWithWeights(t *testing.T) {
 	p.matchLengthWeight = 0.5
 	p.matchLengthScaleTokens = 100
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
 
 	// Endpoint 1: match 5, total 10, block size 1
 	// matchRatio = 5/10 = 0.5
 	// matchLengthRatio = min(1.0, 5*1/100) = 0.05 -> squared = 0.0025
 	// score = 0.5 * 0.0025 + 0.5 * 0.5 = 0.25125
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), nil)
 	endpoint1.Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
 
 	// Endpoint 2: match 50, total 100, block size 1
 	// matchRatio = 50/100 = 0.5
 	// matchLengthRatio = min(1.0, 50*1/100) = 0.5 -> squared = 0.25
 	// score = 0.5 * 0.25 + 0.5 * 0.5 = 0.375
-	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, fwkdl.NewMetrics(), nil)
 	endpoint2.Put(key, attrprefix.NewPrefixCacheMatchInfo(50, 100, 1))
 
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}

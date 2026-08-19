@@ -32,7 +32,7 @@ import (
 
 func newEndpoint(name string, queueSize int, kvFraction float64) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{
 			WaitingQueueSize:    queueSize,
 			KVCacheUsagePercent: kvFraction,
@@ -163,7 +163,7 @@ func TestDroppableAdmittedAtZeroSaturation(t *testing.T) {
 
 func TestNilMetricsTreatedAsSaturated(t *testing.T) {
 	pod := fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "stale"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "stale"}},
 		nil,
 		nil,
 	)

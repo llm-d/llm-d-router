@@ -75,14 +75,14 @@ func (c *inferencePoolMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.GaugeValue,
 			float64(pod.GetMetrics().WaitingQueueSize),
 			pool.Name,
-			pod.GetMetadata().NamespacedName.Name,
+			pod.GetMetadata().ID.Name,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			eppmetrics.DescInferencePoolPerEndpointQueueSize,
 			prometheus.GaugeValue,
 			float64(pod.GetMetrics().WaitingQueueSize),
 			pool.Name,
-			pod.GetMetadata().NamespacedName.Name,
+			pod.GetMetadata().ID.Name,
 		)
 	}
 }

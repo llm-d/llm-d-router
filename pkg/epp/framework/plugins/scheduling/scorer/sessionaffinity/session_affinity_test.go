@@ -19,12 +19,14 @@ package sessionaffinity_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionaffinity "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
@@ -33,12 +35,12 @@ import (
 
 func TestSessionAffinity_Score(t *testing.T) {
 	endpointA := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-a"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-a"}},
 		&fwkdl.Metrics{},
 		nil,
 	)
 	endpointB := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-b"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-b"}},
 		&fwkdl.Metrics{},
 		nil,
 	)
@@ -46,7 +48,7 @@ func TestSessionAffinity_Score(t *testing.T) {
 	inputEndpoints := []scheduling.Endpoint{endpointA, endpointB}
 
 	// valid session token for endpointB
-	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().NamespacedName.String()))
+	validSessionTokenForEndpointB := base64.StdEncoding.EncodeToString([]byte(endpointB.GetMetadata().ID.String()))
 
 	sessionAffinityScorer := sessionaffinity.NewSessionAffinity("test-scorer", "", "")
 	customHeaderScorer := sessionaffinity.NewSessionAffinity("test-scorer", "x-custom-session", "")
@@ -143,12 +145,12 @@ func TestSessionAffinity_Score(t *testing.T) {
 
 func TestSessionAffinity_ResponseHeader(t *testing.T) {
 	targetEndpoint := &fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "pod1"},
-		Address:        "1.2.3.4",
+		ID:      k8stypes.NamespacedName{Namespace: "default", Name: "pod1"},
+		Address: "1.2.3.4",
 	}
 
 	// expected token to be set in response header
-	wantToken := base64.StdEncoding.EncodeToString([]byte(targetEndpoint.NamespacedName.String()))
+	wantToken := base64.StdEncoding.EncodeToString([]byte(targetEndpoint.ID.String()))
 
 	tests := []struct {
 		name            string
@@ -202,7 +204,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 						"prefill": {
 							TargetEndpoints: []scheduling.Endpoint{
 								scheduling.NewEndpoint(
-									&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"}},
+									&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"}},
 									&fwkdl.Metrics{},
 									nil,
 								),
@@ -276,6 +278,49 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 
 			if diff := cmp.Diff(test.wantHeaders, test.initialResponse.Headers); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
+			}
+		})
+	}
+}
+
+func TestSessionAffinity_FactoryValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		params    string
+		expectErr bool
+	}{
+		{name: "empty params default to encoded_endpoint_header", params: "", expectErr: false},
+		{name: "explicit encoded_endpoint_header", params: `{"strategy":"encoded_endpoint_header"}`, expectErr: false},
+		{name: "session_id with defaults", params: `{"strategy":"session_id"}`, expectErr: false},
+		{name: "session_id with attribute source", params: `{"strategy":"session_id","sessionIdConfig":{"sources":[{"attribute":"agent-identity"}]}}`, expectErr: false},
+		{name: "session_id header then attribute fallback sources", params: `{"strategy":"session_id","sessionIdConfig":{"sources":[{"header":"x-session-id"},{"attribute":"agent-identity"}]}}`, expectErr: false},
+		{name: "session_id empty sources defaults, valid", params: `{"strategy":"session_id","sessionIdConfig":{"sources":[]}}`, expectErr: false},
+		{name: "session_id zero ttl defaults, valid", params: `{"strategy":"session_id","sessionIdConfig":{"evictionTtlSeconds":0}}`, expectErr: false},
+		{name: "unknown strategy rejected", params: `{"strategy":"bogus"}`, expectErr: true},
+		{name: "session_id source with both header and attribute rejected", params: `{"strategy":"session_id","sessionIdConfig":{"sources":[{"header":"h","attribute":"a"}]}}`, expectErr: true},
+		{name: "session_id negative ttl rejected", params: `{"strategy":"session_id","sessionIdConfig":{"evictionTtlSeconds":-1}}`, expectErr: true},
+		{name: "session_id negative sweep rejected", params: `{"strategy":"session_id","sessionIdConfig":{"evictionSweepSeconds":-1}}`, expectErr: true},
+	}
+
+	handle := utils.NewTestHandle(utils.NewTestContext(t))
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var raw json.RawMessage
+			if test.params != "" {
+				raw = json.RawMessage(test.params)
+			}
+			p, err := sessionaffinity.Factory("test", plugin.StrictDecoder(raw), handle)
+			if test.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got plugin %v", p)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if p == nil {
+				t.Fatal("expected a plugin instance")
 			}
 		})
 	}

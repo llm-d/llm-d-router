@@ -106,15 +106,15 @@ func (f *fakeKVBlockScorer) Score(ctx context.Context, keys []kvblock.BlockHash,
 var testEndpoints = []scheduling.Endpoint{
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-			Address:        "10.0.0.1",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-a"},
+			Address: "10.0.0.1",
+			Port:    "8080",
 		}, nil, nil),
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-			Address:        "10.0.0.2",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-b"},
+			Address: "10.0.0.2",
+			Port:    "8080",
 		}, nil, nil),
 }
 
@@ -124,15 +124,15 @@ func freshEndpoints() []scheduling.Endpoint {
 	return []scheduling.Endpoint{
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-				Address:        "10.0.0.1",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-a"},
+				Address: "10.0.0.1",
+				Port:    "8080",
 			}, nil, nil),
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-				Address:        "10.0.0.2",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-b"},
+				Address: "10.0.0.2",
+				Port:    "8080",
 			}, nil, nil),
 	}
 }
@@ -190,7 +190,7 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
 	require.Equal(t, tokens, capturedTokens)
 
-	raw, ok := testEndpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := testEndpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -199,7 +199,7 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 	assert.Equal(t, 16, info.BlockSizeTokens())
 	assert.Nil(t, info.MM(), "text-only request must leave MM untracked")
 
-	raw2, ok := testEndpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw2, ok := testEndpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info2 := raw2.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 0, info2.MatchBlocks())
@@ -296,7 +296,7 @@ func TestProduce_MultiPromptEmptyBlockKeys_NoOp(t *testing.T) {
 	require.NoError(t, p.Produce(ctx, req, endpoints))
 	require.Equal(t, [][]uint32{promptA, promptB}, computeCalls)
 
-	_, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	_, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	assert.False(t, ok)
 }
 
@@ -355,14 +355,14 @@ func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
 	require.Equal(t, [][]uint32{shortPrompt, fullPrompt}, computeCalls)
 	require.Equal(t, [][]kvblock.BlockHash{{wantKey}}, lookupCalls)
 
-	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 1, info.MatchBlocks())
 	assert.Equal(t, 1, info.TotalBlocks())
 
-	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -426,7 +426,7 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 
 	require.NoError(t, p.Produce(ctx, req, endpoints))
 
-	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -434,7 +434,7 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	// gpu: 2 (prompt A) + 1 (prompt B); cpu: 1 (prompt A) + 1 (prompt B).
 	assert.Equal(t, map[string]int{"gpu": 3, "cpu": 2}, info.CachedBlocksByTier())
 
-	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -494,7 +494,7 @@ func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
 
 	require.NoError(t, p.Produce(ctx, req, endpoints))
 
-	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -717,9 +717,9 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 				tokens[i] = uint32(i + 1)
 			}
 			endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-x"},
-				Address:        "10.0.0.9",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-x"},
+				Address: "10.0.0.9",
+				Port:    "8080",
 			}, nil, nil)
 			req := &scheduling.InferenceRequest{
 				RequestID:   "r",
@@ -730,7 +730,7 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 			}
 			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
 
-			raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name).String())
+			raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name))
 			require.True(t, ok)
 			info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 			require.True(t, ok, "expected *PrefixCacheMatchInfo, got %T", raw)
@@ -740,12 +740,36 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 	}
 }
 
-type fakeSubscriberManager struct {
-	ids       []string
-	endpoints []string
+func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "unsupported"
+
+	_, err = New(ctx, "unsupported-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
 }
 
-func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+type fakeSubscriberManager struct {
+	ids             []string
+	sourceEndpoints []string
+	endpoints       []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(
+	_ context.Context,
+	id, sourceEndpoint, endpoint, _, _ string,
+	_ bool,
+) error {
+	f.ids = append(f.ids, id)
+	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
+	f.endpoints = append(f.endpoints, endpoint)
 	return nil
 }
 func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}

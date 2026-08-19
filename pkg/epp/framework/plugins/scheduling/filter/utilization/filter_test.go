@@ -26,6 +26,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -45,23 +46,23 @@ type stubEndpoint struct {
 
 func newStubEndpoint(name string) *stubEndpoint {
 	return &stubEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
 		metrics:  &datalayer.Metrics{},
 		attr:     datalayer.NewAttributes(),
 	}
 }
 
-func (f *stubEndpoint) GetMetadata() *datalayer.EndpointMetadata   { return f.metadata }
-func (f *stubEndpoint) UpdateMetadata(*datalayer.EndpointMetadata) {}
-func (f *stubEndpoint) GetMetrics() *datalayer.Metrics             { return f.metrics }
-func (f *stubEndpoint) UpdateMetrics(*datalayer.Metrics)           {}
-func (f *stubEndpoint) GetAttributes() datalayer.AttributeMap      { return f.attr }
-func (f *stubEndpoint) String() string                             { return f.metadata.NamespacedName.String() }
-func (f *stubEndpoint) Put(key string, val datalayer.Cloneable)    { f.attr.Put(key, val) }
-func (f *stubEndpoint) Get(key string) (datalayer.Cloneable, bool) {
+func (f *stubEndpoint) GetMetadata() *datalayer.EndpointMetadata           { return f.metadata }
+func (f *stubEndpoint) UpdateMetadata(*datalayer.EndpointMetadata)         {}
+func (f *stubEndpoint) GetMetrics() *datalayer.Metrics                     { return f.metrics }
+func (f *stubEndpoint) UpdateMetrics(*datalayer.Metrics)                   {}
+func (f *stubEndpoint) GetAttributes() datalayer.AttributeMap              { return f.attr }
+func (f *stubEndpoint) String() string                                     { return f.metadata.ID.String() }
+func (f *stubEndpoint) Put(key fwkplugin.DataKey, val datalayer.Cloneable) { f.attr.Put(key, val) }
+func (f *stubEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable, bool) {
 	return f.attr.Get(key)
 }
-func (f *stubEndpoint) Keys() []string                { return f.attr.Keys() }
+func (f *stubEndpoint) Keys() []fwkplugin.DataKey     { return f.attr.Keys() }
 func (f *stubEndpoint) Clone() datalayer.AttributeMap { return f.attr.Clone() }
 
 func newTestEndpoint(name string) scheduling.Endpoint {
@@ -70,7 +71,7 @@ func newTestEndpoint(name string) scheduling.Endpoint {
 
 func newTestEndpointWithLoad(name string, requests int64) scheduling.Endpoint {
 	ep := newStubEndpoint(name)
-	ep.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: requests})
+	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: requests})
 	return ep
 }
 
@@ -83,7 +84,7 @@ func newTestEndpointWithMetrics(name string, metrics datalayer.Metrics) scheduli
 func endpointNames(endpoints []scheduling.Endpoint) []string {
 	names := make([]string, 0, len(endpoints))
 	for _, ep := range endpoints {
-		names = append(names, ep.GetMetadata().NamespacedName.Name)
+		names = append(names, ep.GetMetadata().ID.Name)
 	}
 	return names
 }
@@ -174,7 +175,7 @@ func TestUtilizationFilter_Filter(t *testing.T) {
 			}},
 			endpoints: func() []scheduling.Endpoint {
 				busy := newStubEndpoint("pod-b")
-				busy.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: 11})
+				busy.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 11})
 				full := newStubEndpoint("pod-c")
 				full.metrics = &datalayer.Metrics{KVCacheUsagePercent: 0.9}
 				return []scheduling.Endpoint{

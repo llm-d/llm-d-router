@@ -22,14 +22,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -239,6 +248,80 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	assert.Equal(t, testHTTPModel, sent["model"])
 }
 
+// TestProduce_MessagesVLLMHTTPFullAgenticTurn covers the complete production
+// path from a parsed Anthropic request through the rebuilt OpenAI-shaped
+// payload sent to vLLM's chat render endpoint.
+func TestProduce_MessagesVLLMHTTPFullAgenticTurn(t *testing.T) {
+	srv, captured := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{11, 12, 13}})
+	defer srv.Close()
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Messages: &fwkrh.MessagesRequest{
+				System: fwkrh.AnthropicContent{Raw: "You can use tools."},
+				Tools: []fwkrh.AnthropicTool{{
+					Name:        "get_weather",
+					Description: "Get the weather",
+					InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+				}},
+				Messages: []fwkrh.AnthropicMessage{
+					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Weather in Zurich?"}},
+					{Role: "assistant", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "thinking", Thinking: "I should check."},
+						{Type: "tool_use", ID: "toolu_01", Name: "get_weather", Input: json.RawMessage(`{"city":"Zurich"}`)},
+					}}},
+					{Role: "user", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"}},
+					}}},
+				},
+			},
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedPrompt)
+	assert.Equal(t, []uint32{11, 12, 13}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+
+	var sent struct {
+		Model    string           `json:"model"`
+		Messages []map[string]any `json:"messages"`
+		Tools    []map[string]any `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(captured.chat, &sent))
+	assert.Equal(t, testHTTPModel, sent.Model)
+	require.Len(t, sent.Tools, 1)
+	assert.Equal(t, "function", sent.Tools[0]["type"])
+	function, ok := sent.Tools[0]["function"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "get_weather", function["name"])
+	parameters, ok := function["parameters"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", parameters["type"])
+
+	require.Len(t, sent.Messages, 4)
+	assert.Equal(t, "system", sent.Messages[0]["role"])
+	assert.Equal(t, "user", sent.Messages[1]["role"])
+	assistant := sent.Messages[2]
+	assert.Equal(t, "assistant", assistant["role"])
+	assert.NotContains(t, assistant, "content")
+	assert.Equal(t, "I should check.", assistant["reasoning"])
+	toolCalls, ok := assistant["tool_calls"].([]any)
+	require.True(t, ok)
+	require.Len(t, toolCalls, 1)
+	toolCall, ok := toolCalls[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "toolu_01", toolCall["id"])
+	toolFunction, ok := toolCall["function"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, `{"city": "Zurich"}`, toolFunction["arguments"])
+
+	toolResult := sent.Messages[3]
+	assert.Equal(t, "tool", toolResult["role"])
+	assert.Equal(t, "toolu_01", toolResult["tool_call_id"])
+	assert.Equal(t, "Sunny, 22C", toolResult["content"])
+}
+
 func TestVLLMHTTPRenderer_RenderMultiPrompt(t *testing.T) {
 	srv, _ := httpFixture(t,
 		[]renderResponse{
@@ -289,4 +372,145 @@ func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "invalid 'timeout'")
+}
+
+// The render transport must inject W3C trace context so the vLLM pod shares
+// the same trace id as the EPP request.
+func TestVLLMHTTPRenderer_RenderPropagatesTraceContext(t *testing.T) {
+	prevProp := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	t.Cleanup(func() { otel.SetTextMapPropagator(prevProp) })
+
+	var gotTraceparent string
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		close(done)
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{1}}})
+	}))
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	require.NoError(t, err)
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	require.NoError(t, err)
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	_, _, err = r.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	<-done
+
+	if gotTraceparent == "" {
+		t.Fatal("expected traceparent header to be injected into outbound render request, got none")
+	}
+	if !strings.Contains(gotTraceparent, traceID.String()) {
+		t.Fatalf("expected outbound traceparent to carry trace ID %s, got %q", traceID, gotTraceparent)
+	}
+}
+
+// TestVLLMHTTPRenderer_ChatTimeoutRawMessages asserts that pre-marshaled
+// (Anthropic-rebuilt) messages with array content still select the multimodal
+// timeout.
+func TestVLLMHTTPRenderer_ChatTimeoutRawMessages(t *testing.T) {
+	r := &vllmHTTPRenderer{timeout: 5 * time.Second, mmTimeout: 30 * time.Second}
+
+	textOnly := fwkrh.PayloadMap{"messages": []any{
+		json.RawMessage(`{"role":"user","content":"hi"}`),
+	}}
+	assert.Equal(t, 5*time.Second, r.chatTimeout(textOnly))
+
+	multimodal := fwkrh.PayloadMap{"messages": []any{
+		json.RawMessage(`{"role":"user","content":"hi"}`),
+		json.RawMessage(`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}`),
+	}}
+	assert.Equal(t, 30*time.Second, r.chatTimeout(multimodal))
+}
+
+// TestBuildChatRenderRequest_MessageFields asserts the wire shape of rebuilt
+// messages: tool_calls and reasoning ride along, tool messages carry
+// tool_call_id, and content is omitted when absent.
+func TestBuildChatRenderRequest_MessageFields(t *testing.T) {
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "assistant", Content: nil, Reasoning: "hmm", ToolCalls: []any{map[string]any{
+				"id":   "t1",
+				"type": "function",
+				"function": map[string]any{
+					"name":      "run",
+					"arguments": `{"cmd": "ls"}`,
+				},
+			}}},
+			{Role: "tool", ToolCallID: "t1", Content: &tokenizerTypes.Content{Raw: "out"}},
+		},
+	}
+
+	data, err := json.Marshal(buildChatRenderRequest(req))
+	require.NoError(t, err)
+
+	var msgs []map[string]any
+	require.NoError(t, json.Unmarshal(data, &struct {
+		Messages *[]map[string]any `json:"messages"`
+	}{&msgs}))
+	require.Len(t, msgs, 2)
+
+	assert.NotContains(t, msgs[0], "content", "assistant with only tool_calls omits content")
+	assert.Equal(t, "hmm", msgs[0]["reasoning"])
+	assert.Equal(t, []any{map[string]any{
+		"id":   "t1",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "run",
+			"arguments": `{"cmd": "ls"}`,
+		},
+	}}, msgs[0]["tool_calls"])
+
+	assert.Equal(t, "tool", msgs[1]["role"])
+	assert.Equal(t, "t1", msgs[1]["tool_call_id"])
+	assert.Equal(t, "out", msgs[1]["content"])
+}
+
+// TestVLLMHTTPRenderer_RenderSpanName asserts the outbound render span is
+// named after the render route instead of the transport default "HTTP POST".
+func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		_ = tp.Shutdown(context.Background())
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"token_ids":[1]}]`))
+	}))
+	defer srv.Close()
+
+	// The transport resolves its tracer from the global provider at
+	// construction, so the renderer must be built after the swap above.
+	r := newHTTPRenderer(t, srv)
+
+	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
+	_, _, err := r.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+	span.End()
+	require.NoError(t, err)
+
+	var clientSpans []tracetest.SpanStub
+	for _, s := range exporter.GetSpans() {
+		if s.SpanKind == trace.SpanKindClient {
+			clientSpans = append(clientSpans, s)
+		}
+	}
+	require.NotEmpty(t, clientSpans, "expected a client span for the render call")
+	for _, s := range clientSpans {
+		assert.Equal(t, "tokenize_render /v1/completions/render", s.Name)
+	}
 }

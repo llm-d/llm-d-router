@@ -9,6 +9,9 @@ on:
       sidecar-image-name:
         required: true
         type: string
+      coordinator-image-name:
+        required: true
+        type: string
       tag:
         required: true
         type: string
@@ -24,6 +27,10 @@ on:
         type: string
         default: ''
       sidecar-additional-tags:
+        required: false
+        type: string
+        default: ''
+      coordinator-additional-tags:
         required: false
         type: string
         default: ''
@@ -104,8 +111,42 @@ jobs:
           push: 'true'
           additional-tags: ${{ inputs.sidecar-additional-tags }}
 
+  build-coordinator:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Build coordinator AMD64 image (no push)
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: Dockerfile.coordinator
+          tag: ${{ inputs.tag }}
+          image-name: ${{ inputs.coordinator-image-name }}
+          registry: ghcr.io/llm-d
+          push: 'false'
+          buildx-outputs: type=docker,dest=/tmp/coordinator-image.tar
+
+      - name: Run Trivy scan on coordinator image on AMD64
+        uses: ./.github/actions/trivy-scan
+        with:
+          tarball: /tmp/coordinator-image.tar
+
+      - name: Push coordinator image for both AMD64 and ARM64
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: Dockerfile.coordinator
+          tag: ${{ inputs.tag }}
+          image-name: ${{ inputs.coordinator-image-name }}
+          registry: ghcr.io/llm-d
+          github-token: ${{ github.token }}
+          prerelease: ${{ inputs.prerelease }}
+          commit-sha: ${{ github.sha }}
+          push: 'true'
+          additional-tags: ${{ inputs.coordinator-additional-tags }}
+
   push-helm-charts:
-    needs: [build-epp, build-sidecar]
+    needs: [build-epp, build-sidecar, build-coordinator]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo

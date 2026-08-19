@@ -12,7 +12,7 @@ jobs:
       pull-requests: write
     steps:
       - name: 'Mark stale issues and PRs'
-        uses: actions/stale@v10
+        uses: actions/stale@v11
         with:
           days-before-issue-stale: 90
           days-before-pr-stale: 21
@@ -25,7 +25,7 @@ jobs:
           stale-pr-message: 'This PR is marked as stale after 21d of inactivity. After an additional 14d of inactivity (7d to become rotten, then 7d more), it will be closed. To prevent this PR from being closed, add a comment or remove the `lifecycle/stale` label.'
 
       - name: 'Mark items rotten'
-        uses: actions/stale@v10
+        uses: actions/stale@v11
         with:
           days-before-issue-stale: 15
           days-before-pr-stale: 7
@@ -36,7 +36,7 @@ jobs:
           labels-to-remove-when-stale: 'lifecycle/stale'
 
       - name: 'Close rotten items'
-        uses: actions/stale@v10
+        uses: actions/stale@v11
         with:
           days-before-stale: -1
           days-before-issue-close: 15

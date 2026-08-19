@@ -12,7 +12,7 @@ the generic `endpoint-attribute-filter` and `endpoint-attribute-scorer`
 1. Receives the parsed Prometheus metric families forwarded by `dcgm-data-source`.
 2. Looks up the `DCGM_FI_DEV_GPU_UTIL` metric family.
 3. Keeps samples that belong to this endpoint:
-   - If a sample has a `pod` label and the endpoint has a `PodName`, only
+   - If a sample has a `pod` label and the endpoint has a `Name`, only
      matching samples are kept (DaemonSet multi-pod payloads).
    - If the sample has no `pod` label, it is kept (sidecar / unlabeled payloads).
 4. Aggregates matching samples using `max` (highest-utilized GPU for the pod).
@@ -22,7 +22,8 @@ the generic `endpoint-attribute-filter` and `endpoint-attribute-scorer`
 ## Attributes produced
 
 - **Type:** `ScalarMetricValue` (from `attribute/metrics`)
-- **Key string:** `GPUUtilization/dcgm-extractor`
+- **Attribute:** `GPUUtilization`
+- **Producer:** `dcgm-extractor`
 
 ## Configuration
 
@@ -37,8 +38,9 @@ No configuration parameters.
 ## EPP config example
 
 Use the generic `endpoint-attribute-filter` and `endpoint-attribute-scorer`
-to consume the produced attribute. The `attribute`/`attributeKey` parameter
-must match the key string above.
+to consume the produced attribute. Their `attribute`/`attributeKey` and
+`producer` parameters must match the pair above; `producer` defaults to the
+core metrics extractor, so it must be set explicitly here.
 
 ```yaml
 apiVersion: llm-d.ai/v1alpha1
@@ -53,7 +55,8 @@ plugins:
 - type: endpoint-attribute-filter
   name: gpu-utilization-filter
   parameters:
-    attribute: "GPUUtilization/dcgm-extractor"
+    attribute: "GPUUtilization"
+    producer: "dcgm-extractor"
     onMissing: "Pass"
     fallbackOnEmpty: true
     algorithm:
@@ -64,7 +67,8 @@ plugins:
 - type: endpoint-attribute-scorer
   name: gpu-utilization-scorer
   parameters:
-    attributeKey: "GPUUtilization/dcgm-extractor"
+    attributeKey: "GPUUtilization"
+    producer: "dcgm-extractor"
     algorithm:
       type: "linear_lower_is_better"
       normalization:

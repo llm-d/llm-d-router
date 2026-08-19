@@ -46,6 +46,41 @@ func normalizeDeviceTier(deviceTier string) string {
 	return strings.ToLower(deviceTier)
 }
 
+func isPrefixIndexableSpecKind(kind KVCacheSpecKind) bool {
+	switch kind {
+	case KVCacheSpecKindFullAttention, KVCacheSpecKindMlaAttention, KVCacheSpecKindSinkFull:
+		return true
+	default:
+		return false
+	}
+}
+
+func cacheKindLabel(kind KVCacheSpecKind) string {
+	if kind == "" {
+		return string(KVCacheSpecKindUnknown)
+	}
+	return string(kind)
+}
+
+func blockStoredEventDigestible(ev *BlockStoredEvent) (bool, string) {
+	if ev.GroupIdx == nil {
+		return true, ""
+	}
+	if !isPrefixIndexableSpecKind(ev.KVCacheSpecKind) {
+		return false, "unsupported_cache_kind"
+	}
+	if len(ev.Tokens) == 0 {
+		return true, ""
+	}
+	if ev.BlockSize <= 0 {
+		return false, "invalid_block_size"
+	}
+	if len(ev.Tokens)%ev.BlockSize != 0 || len(ev.Tokens)/ev.BlockSize != len(ev.BlockHashes) {
+		return false, "non_dense_block_span"
+	}
+	return true, ""
+}
+
 // Config holds the configuration for the event processing pool.
 type Config struct {
 	// ZMQEndpoint is the ZMQ address to connect to (e.g., "tcp://indexer:5557").
@@ -78,6 +113,18 @@ type PodDiscoveryConfig struct {
 	// The reconciler will connect to tcp://<PodIP>:<SocketPort>
 	// Default: 5557
 	SocketPort int `json:"socketPort"`
+	// ReplaySocketPort is the port where vLLM pods expose their ZMQ ROUTER
+	// socket for replay requests. Disabled when not set (0 or negative).
+	ReplaySocketPort int `json:"replaySocketPort,omitempty"`
+}
+
+// EffectiveReplayPort returns the replay socket port.
+// Returns -1 (disabled) when not explicitly configured.
+func (c *PodDiscoveryConfig) EffectiveReplayPort() int {
+	if c.ReplaySocketPort <= 0 {
+		return -1
+	}
+	return c.ReplaySocketPort
 }
 
 // DefaultPodReconcilerConfig returns a default configuration for the pod reconciler.
@@ -201,9 +248,12 @@ func (p *Pool) Shutdown(ctx context.Context) {
 
 // AddTask is called by the subscriber to add a message to the processing queue.
 // It hashes the sharding key to select a queue, ensuring messages for the
-// same pod always go to the same worker (ordered queue).
+// same source endpoint always go to the same worker (ordered queue).
 func (p *Pool) AddTask(task *RawMessage) {
-	key := p.adapter.ShardingKey(task)
+	key := task.SourceEndpoint
+	if key == "" {
+		key = p.adapter.ShardingKey(task)
+	}
 	// Use an FNV-1a hash to deterministically select a queue.
 	h := fnv.New32a()
 	_, err := h.Write([]byte(key))
@@ -215,6 +265,11 @@ func (p *Pool) AddTask(task *RawMessage) {
 	queueIndex := h.Sum32() % uint32(p.concurrency)
 	p.queues[queueIndex].Add(task)
 	p.addQueueDepth(1)
+}
+
+// resetForSource queues a pod reset on the same shard as its event stream.
+func (p *Pool) resetForSource(topic, sourceEndpoint string) {
+	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
 }
 
 // worker is the main processing loop for a single worker goroutine.
@@ -249,14 +304,34 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 // processRawMessage decodes the raw message payload using the adapter and processes the resulting event batch.
 func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	logger := log.FromContext(ctx)
+	if msg.reset {
+		podID := msg.SourceEndpoint
+		if podID == "" {
+			podID = p.adapter.ShardingKey(msg)
+		}
+		p.clearPod(ctx, podID)
+		return
+	}
 
 	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
 	if err != nil {
 		logger.Error(err, "Failed to parse message")
 		return
 	}
+	if msg.SourceEndpoint != "" {
+		podID = msg.SourceEndpoint
+	}
 
 	p.processEventBatch(ctx, &batch, podID, modelName)
+}
+
+func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
+	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
+	if err := p.index.Clear(ctx, podIdentifier); err != nil {
+		debugLogger.Error(err, "Failed to clear pod from index",
+			"podIdentifier", podIdentifier)
+	}
+	p.dedup.clear(podIdentifier)
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -385,13 +460,32 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
 			if ev.GroupIdx != nil {
 				g := kvblock.GroupID(*ev.GroupIdx)
-				p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
-					Kind:              string(ev.KVCacheSpecKind),
-					BlockSize:         ev.BlockSize,
-					SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
-				})
+				if ev.KVCacheSpecKind == "" {
+					if meta, found := p.groupCatalog.Get(podIdentifier, g); found {
+						ev.KVCacheSpecKind = KVCacheSpecKind(meta.Kind)
+					}
+				} else {
+					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
+						Kind:              string(ev.KVCacheSpecKind),
+						BlockSize:         ev.BlockSize,
+						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
+					})
+				}
 				podEntries[0].HasGroup = true
 				podEntries[0].GroupIdx = g
+			}
+
+			if digestible, reason := blockStoredEventDigestible(ev); !digestible {
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+					"podIdentifier", podIdentifier,
+					"groupIdx", ev.GroupIdx,
+					"cacheKind", ev.KVCacheSpecKind,
+					"reason", reason,
+					"numTokens", len(ev.Tokens),
+					"numBlockHashes", len(ev.BlockHashes),
+					"blockSize", ev.BlockSize)
+				continue
 			}
 
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
@@ -405,7 +499,13 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
 				if err != nil {
 					debugLogger.Error(err, "Failed to get request key for parent block",
-						"parentEngineKey", parentEngineKey, "effectiveModelName", effectiveModelName)
+						"parentEngineKey", parentEngineKey,
+						"effectiveModelName", effectiveModelName,
+						"groupIdx", ev.GroupIdx,
+						"cacheKind", ev.KVCacheSpecKind,
+						"numTokens", len(ev.Tokens),
+						"numBlockHashes", len(ev.BlockHashes),
+						"blockSize", ev.BlockSize)
 					continue
 				}
 				parentRequestKey = key
@@ -488,6 +588,24 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			if ev.GroupIdx != nil {
+				groupIdx := kvblock.GroupID(*ev.GroupIdx)
+				meta, found := p.groupCatalog.Get(podIdentifier, groupIdx)
+				if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
+					reason := "unsupported_cache_kind"
+					if !found {
+						reason = "unknown_group"
+					}
+					metrics.KVEventRemovalsSkipped.WithLabelValues(
+						cacheKindLabel(KVCacheSpecKind(meta.Kind)), reason).Inc()
+					log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache remove event",
+						"podIdentifier", podIdentifier,
+						"groupIdx", groupIdx,
+						"cacheKind", meta.Kind,
+						"groupKnown", found)
+					continue
+				}
+			}
 
 			// Create PodEntry for this specific event's device tier.
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
@@ -549,13 +667,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"anyway (tier-scoped clear is not supported)",
 					"podIdentifier", podIdentifier, "deviceTier", ev.DeviceTier)
 			}
-			if err := p.index.Clear(ctx, podIdentifier); err != nil {
-				debugLogger.Error(err, "Failed to clear pod from index",
-					"podIdentifier", podIdentifier)
-			}
-			// Reset reference counts for this pod in lockstep with the index's
-			// pod-wide eager clear, so no stale references survive the reset.
-			p.dedup.clear(podIdentifier)
+			p.clearPod(ctx, podIdentifier)
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)

@@ -48,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -82,6 +83,12 @@ func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
 }
 
+// SetEmitEndpointScores controls whether the per-endpoint scheduler scores are emitted in the
+// request-path dynamic metadata under metadata.DestinationEndpointScoresKey. Off by default.
+func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
+	s.emitEndpointScores = enabled
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -102,6 +109,9 @@ type StreamingServer struct {
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
+	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
+	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
+	emitEndpointScores bool
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -110,8 +120,12 @@ type StreamingServer struct {
 // Refactor this monolithic struct. Fields related to the Envoy ext-proc protocol should be decoupled from the internal
 // request lifecycle state.
 type RequestContext struct {
-	TargetPod                  *fwkdl.EndpointMetadata
-	TargetEndpoint             string
+	TargetPod      *fwkdl.EndpointMetadata
+	TargetEndpoint string
+	// TargetEndpointScores maps endpoint address to the scheduler's score for it, covering
+	// every endpoint the primary profile scored rather than only those in TargetEndpoint.
+	// Nil when the primary profile ran no scorers.
+	TargetEndpointScores       map[string]float64
 	IncomingModelName          string
 	TargetModelName            string
 	ObjectiveKey               string
@@ -123,6 +137,7 @@ type RequestContext struct {
 	RequestSize                int
 	Usage                      fwkrh.Usage
 	ResponseSize               int
+	StreamedEvents             int
 	ResponseBodyStarted        bool
 	ResponseComplete           bool
 	ResponseStatusCode         string
@@ -134,6 +149,9 @@ type RequestContext struct {
 
 	RequestState         StreamRequestState
 	RequestDroppedReason errcommon.RequestDroppedReason
+	// TerminationCause is set only when the stream ends without completing; the end-of-stream
+	// response record defaults an unset cause to a natural completion.
+	TerminationCause     fwkrc.TerminationCause
 	modelServerStreaming bool
 
 	// responseProcessingDuration is the EPP cost of handling the response. For a
@@ -227,6 +245,19 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 		}
 	}
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+}
+
+// terminationCause classifies a stream that ended without completing. ctxErr is the request
+// context's error, which is non-nil once Envoy has torn the stream down under the EPP.
+func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+	switch {
+	case reqCtx.RequestState == RequestEvicted:
+		return fwkrc.TerminationCauseEvicted
+	case ctxErr != nil:
+		return fwkrc.TerminationCauseClientDisconnect
+	default:
+		return fwkrc.TerminationCauseError
+	}
 }
 
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
@@ -359,6 +390,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		// If we scheduled a pod (TargetPod != nil) but never marked the response  as complete (e.g. error, disconnect,
 		// panic), force the completion hooks to run.
 		if reqCtx.TargetPod != nil && !reqCtx.ResponseComplete {
+			reqCtx.TerminationCause = terminationCause(reqCtx, ctx.Err())
 			// Use a fresh context as the request context might be canceled (Client Disconnect).
 			// We only need logging from the original context.
 			cleanupCtx := log.IntoContext(context.Background(), logger)
@@ -406,8 +438,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", recvErr)
 		}
 
-		reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
-
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
 			requestID := envoy.ExtractHeaderValue(v, reqcommon.RequestIDHeaderKey)
@@ -439,6 +469,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// Message is buffered, we can read and decode.
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
+				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 				reqCtx.Request.RawBody = make([]byte, buf.Len())
 				copy(reqCtx.Request.RawBody, buf.Bytes())
 
@@ -494,6 +525,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
+			// Overwrites the request-phase value on purpose. Response-received plugins
+			// read this through Response.ReqMetadata to learn which endpoint actually
+			// served the request, and Envoy only reports that at the response phase.
+			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				value := string(header.RawValue)

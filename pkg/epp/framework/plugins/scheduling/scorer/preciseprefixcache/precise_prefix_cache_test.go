@@ -39,9 +39,9 @@ import (
 
 func TestAnyMMHit(t *testing.T) {
 	const producerName = "test-producer"
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName).String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
 	makeEndpoint := func(name string, info *attrprefix.PrefixCacheMatchInfo) scheduling.Endpoint {
-		ep := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}}, fwkdl.NewMetrics(), nil)
+		ep := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, fwkdl.NewMetrics(), nil)
 		if info != nil {
 			ep.Put(key, info)
 		}
@@ -278,14 +278,14 @@ func TestLegacyProducer_TokensFlowToEndpointAttribute(t *testing.T) {
 		},
 	}
 	endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: k8stypes.NamespacedName{Name: "pod1"},
-		Address:        "10.0.0.1",
-		Port:           "8000",
+		ID:      k8stypes.NamespacedName{Name: "pod1"},
+		Address: "10.0.0.1",
+		Port:    "8000",
 	}, nil, nil)
 
 	require.NoError(t, lp.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
 
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner").String()
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner")
 	raw, ok := endpoint.Get(key)
 	require.True(t, ok, "endpoint should have PrefixCacheMatchInfo set")
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)

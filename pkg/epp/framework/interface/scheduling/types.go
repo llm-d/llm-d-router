@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -79,9 +80,9 @@ type Endpoint interface {
 	GetMetadata() *fwkdl.EndpointMetadata
 	GetMetrics() *fwkdl.Metrics
 	String() string
-	Get(string) (fwkdl.Cloneable, bool)
-	Put(string, fwkdl.Cloneable)
-	Keys() []string
+	Get(fwkplugin.DataKey) (fwkdl.Cloneable, bool)
+	Put(fwkplugin.DataKey, fwkdl.Cloneable)
+	Keys() []fwkplugin.DataKey
 	Clone() fwkdl.AttributeMap
 }
 
@@ -164,6 +165,11 @@ type ScoredEndpoint struct {
 // ProfileRunResult captures the profile run result.
 type ProfileRunResult struct {
 	TargetEndpoints []Endpoint
+	// ScoredCandidates carries the weighted score of every endpoint the profile
+	// scored, including candidates the picker did not select. TargetEndpoints is
+	// a subset of these, so the two are not parallel. Ordering is unspecified;
+	// consumers key by endpoint.
+	ScoredCandidates []ScoredEndpoint
 }
 
 // SchedulingResult captures the result of the scheduling cycle.

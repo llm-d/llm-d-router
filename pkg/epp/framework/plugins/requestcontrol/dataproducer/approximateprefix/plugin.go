@@ -239,8 +239,8 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	for _, pod := range pods {
-		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().NamespacedName)]
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().ID)]
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
 	state := &SchedulingContextState{
@@ -255,12 +255,12 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
-func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) {
+func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	// Delete the state to avoid memory leak.
 	defer p.pluginState.Delete(request.RequestID)
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
-		return
+		return nil
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
@@ -275,7 +275,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
-		return
+		return nil
 	}
 
 	// Update indexer asynchronously to avoid blocking the request path.
@@ -292,10 +292,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	for _, hashes := range state.PerPromptHashes {
 		total += len(hashes)
 	}
-	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
+	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().ID)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	return nil
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
@@ -306,7 +307,7 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 		gpuBlocks = p.config.LRUCapacityPerServer
 	}
 	return server{
-		ServerID:       ServerID(targetEndpoint.GetMetadata().NamespacedName),
+		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
 		NumOfGPUBlocks: gpuBlocks,
 	}
 }

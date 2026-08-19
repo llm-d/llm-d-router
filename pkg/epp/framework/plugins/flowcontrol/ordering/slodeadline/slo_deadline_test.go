@@ -17,6 +17,8 @@ limitations under the License.
 package slodeadline
 
 import (
+	"math"
+	"strconv"
 	"testing"
 	"time"
 
@@ -72,6 +74,8 @@ func TestSLODeadline_Less(t *testing.T) {
 	itemD := &mocks.MockQueueItemAccessor{EffectiveTTLV: 0, OriginalRequestV: reqD}
 	// E: same deadline as B (received 1s earlier + 1050ms SLO = now+50ms), earlier ReceivedTimestamp → wins tie-breaker
 	itemE := makeSLOItem("e", now.Add(-time.Second), "1050")
+	// F: TTFT large enough to overflow time.Duration → far-future deadline, sorts after SLO-bound requests
+	itemF := makeSLOItem("f", now, strconv.FormatInt(math.MaxInt64, 10))
 
 	testCases := []struct {
 		name     string
@@ -86,6 +90,8 @@ func TestSLODeadline_Less(t *testing.T) {
 		{"no-header after SLO-bound (D after A)", itemD, itemA, false},
 		{"same deadline: earlier ReceivedTimestamp first (E before B)", itemE, itemB, true},
 		{"same deadline: later ReceivedTimestamp after (B after E)", itemB, itemE, false},
+		{"SLO-bound before overflowing TTFT (A before F)", itemA, itemF, true},
+		{"overflowing TTFT after SLO-bound (F after A)", itemF, itemA, false},
 		{"a is nil → b wins", nil, itemA, false},
 		{"b is nil → a wins", itemA, nil, true},
 		{"both nil → false", nil, nil, false},
@@ -144,6 +150,16 @@ func TestCalculateSLODeadline(t *testing.T) {
 	reqInvalid.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{sloTtftHeader: "x"}}
 	accInvalid := &mocks.MockQueueItemAccessor{OriginalRequestV: reqInvalid}
 	assert.Equal(t, sloMaxDeadlineTime, calculateSLODeadline(accInvalid))
+
+	// Out-of-range value: a TTFT large enough to overflow time.Duration must be
+	// treated as invalid (far-future deadline), not wrapped into a past deadline.
+	reqOverflow := mocks.NewMockFlowControlRequest(5, "overflow", testFlowKey)
+	reqOverflow.ReceivedTimestampV = now
+	reqOverflow.InferenceRequestV = &scheduling.InferenceRequest{Headers: map[string]string{
+		sloTtftHeader: strconv.FormatInt(math.MaxInt64, 10),
+	}}
+	accOverflow := &mocks.MockQueueItemAccessor{OriginalRequestV: reqOverflow}
+	assert.Equal(t, sloMaxDeadlineTime, calculateSLODeadline(accOverflow))
 
 	// Nil OriginalRequest
 	accNilReq := &mocks.MockQueueItemAccessor{OriginalRequestV: nil}

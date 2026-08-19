@@ -117,3 +117,62 @@ schedulingProfiles:
     weight: 1
   - pluginRef: max-score-picker
 `
+
+// The 3-EPP topology (E2E_EPP_TOPOLOGY=3epp) runs one role-scoped EPP per phase,
+// each backing its own role-scoped InferencePool. Because a role-scoped EPP only
+// ever sees its own role's pods, it needs no role filter and no profile-selection
+// plugin: single-profile-handler picks the one "default" profile, and the Envoy
+// route (envoy-3-epp.yaml) is what dispatches each EPP-Profile value to the right
+// EPP. The openai-parser/vllmhttp-parser request handler matches the single-EPP
+// config so the generate path (vllm-http wire format) is parsed the same way.
+
+// eppConfigLeastBusy backs both the encode and decode EPPs: both pick the
+// least-busy endpoint (active-request-scorer). Encode has no prefix-cache
+// affinity to exploit, and decode is bound by concurrent in-flight requests,
+// not prefill throughput, so neither needs the prefill config's cache-affinity
+// filter or token-load scorer.
+const eppConfigLeastBusy = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: openai-parser
+- type: vllmhttp-parser
+- type: inflight-load-producer
+- type: active-request-scorer
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: active-request-scorer
+  - pluginRef: max-score-picker
+`
+
+// eppConfigPrefill keeps prefix groups on cache-warm pods
+// (prefix-cache-affinity-filter), then picks by queued prefill token load
+// (token-load-scorer).
+const eppConfigPrefill = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: openai-parser
+- type: vllmhttp-parser
+- type: approx-prefix-cache-producer
+- type: inflight-load-producer
+- type: prefix-cache-affinity-filter
+- type: token-load-scorer
+- type: max-score-picker
+- type: single-profile-handler
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: vllmhttp-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefix-cache-affinity-filter
+  - pluginRef: token-load-scorer
+  - pluginRef: max-score-picker
+`

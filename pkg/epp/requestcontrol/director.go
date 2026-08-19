@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -89,7 +91,7 @@ func primaryEndpointHasCachedPrefix(logger logr.Logger, result *fwksched.Schedul
 		debug.Info("conditional-decode: primary endpoint is nil")
 		return false
 	}
-	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.String())
+	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
 	if !ok || raw == nil {
 		debug.Info("conditional-decode: endpoint has no prefix-cache match attribute (no scorer attached?)")
 		return false
@@ -210,6 +212,10 @@ type Director struct {
 	// streaming response path. The request context key avoids coupling independent streams that reuse the same
 	// x-request-id header.
 	responseBodyQueues sync.Map
+
+	// requestEvictor, when set, tracks dispatched requests for demand-driven in-flight eviction.
+	// See docs/flow-control-eviction.md.
+	requestEvictor *eviction.RequestEvictor
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
@@ -305,6 +311,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
+	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	if len(snapshotOfCandidatePods) == 0 {
+		return reqCtx, errcommon.Error{
+			Code: errcommon.ServiceUnavailable,
+			Msg:  "screeners eliminated all endpoint candidates",
+		}
+	}
 	// Prepare per request data by running DataProducer plugins.
 	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if err != nil {
@@ -465,10 +478,11 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "results must be greater than zero"}
 	}
 	// primary profile is used to set destination
+	primaryResult := result.ProfileResults[result.PrimaryProfileName]
 	targetMetadatas := []*fwkdl.EndpointMetadata{}
 	targetEndpoints := []string{}
 
-	for _, pod := range result.ProfileResults[result.PrimaryProfileName].TargetEndpoints {
+	for _, pod := range primaryResult.TargetEndpoints {
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
@@ -481,9 +495,47 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	reqCtx.TargetPod = targetMetadatas[0]
 	reqCtx.TargetEndpoint = multiEndpointString
 
-	d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result)
+	if len(primaryResult.ScoredCandidates) > 0 {
+		scores := make(map[string]float64, len(primaryResult.ScoredCandidates))
+		for _, scoredEndpoint := range primaryResult.ScoredCandidates {
+			curMetadata := scoredEndpoint.GetMetadata()
+			scores[net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())] = scoredEndpoint.Score
+		}
+		reqCtx.TargetEndpointScores = scores
+	}
+
+	if err := d.runPreRequestPlugins(ctx, reqCtx.SchedulingRequest, result); err != nil {
+		// Preserve a typed errcommon.Error from a single failing plugin so its
+		// status code (e.g. PreconditionFailed) reaches Envoy intact, even
+		// after the wrapping applied by runPreRequestPlugins (fmt.Errorf +
+		// errors.Join). Multiple failures collapse to Internal so all their
+		// messages reach the client via the joined error text; picking one
+		// typed code arbitrarily would drop the others. Untyped failures also
+		// collapse to Internal so response building does not fall through to
+		// Unknown in BuildErrResponse.
+		if u, ok := err.(interface{ Unwrap() []error }); ok && len(u.Unwrap()) == 1 {
+			var e errcommon.Error
+			if errors.As(err, &e) {
+				return reqCtx, e
+			}
+		}
+		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: err.Error()}
+	}
+
+	if d.requestEvictor != nil {
+		// A tracking failure only costs evictability, so the request still proceeds.
+		if err := d.requestEvictor.PreRequest(ctx, reqCtx.SchedulingRequest, result); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to track request for in-flight eviction")
+		}
+	}
 
 	return reqCtx, nil
+}
+
+// SetRequestEvictor wires the in-flight eviction tracker into the request lifecycle.
+// Must be called before the Director serves traffic.
+func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
+	d.requestEvictor = re
 }
 
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
@@ -520,25 +572,42 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 // plugins run synchronously because they may produce DynamicMetadata that must be attached
 // to the ext_proc response sent back to Envoy.
 func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.RequestContext, endOfStream bool) *handlers.RequestContext {
-	logger := log.FromContext(ctx).WithValues("stage", "bodyChunk")
-	logger.V(logutil.TRACE).Info("Entering HandleResponseBodyChunk")
+	// Resolved once so every end-of-stream Response carries the same cause.
+	var cause fwkrc.TerminationCause
+	if endOfStream {
+		cause = reqCtx.TerminationCause
+		if cause == "" {
+			cause = fwkrc.TerminationCauseNatural
+		}
+	}
+
+	// The eviction tracker must observe stream termination even when no streaming plugins are
+	// registered, so this runs before the early return below.
+	if endOfStream && d.requestEvictor != nil {
+		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrc.Response{
+			RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+			EndOfStream:      true,
+			TerminationCause: cause,
+		}, reqCtx.TargetPod)
+	}
+
 	if len(d.requestControlPlugins.responseStreamingPlugins) == 0 {
-		logger.V(logutil.TRACE).Info("Exiting HandleResponseBodyChunk")
 		return reqCtx
 	}
 
 	startOfStream := !reqCtx.ResponseBodyStarted
 	reqCtx.ResponseBodyStarted = true
 	response := &fwkrc.Response{
-		RequestID:     reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
-		Headers:       reqCtx.Response.Headers,
-		StartOfStream: startOfStream,
-		EndOfStream:   endOfStream,
-		Usage:         reqCtx.Usage,
+		RequestID:      reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		Headers:        reqCtx.Response.Headers,
+		StartOfStream:  startOfStream,
+		EndOfStream:    endOfStream,
+		Usage:          reqCtx.Usage,
+		StreamedEvents: reqCtx.StreamedEvents,
 	}
-	requestID := reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey]
 
 	if endOfStream {
+		response.TerminationCause = cause
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
@@ -558,10 +627,12 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 		}
 		q := d.loadOrCreateResponseBodyQueue(reqCtx)
 		if !q.enqueue(work) {
-			logger.V(logutil.DEBUG).Info("Skipping response body chunk because the async queue is closed", "requestID", requestID)
+			// Built here rather than at function entry: this path is per-chunk, and
+			// deriving a logger allocates whether or not anything is emitted.
+			log.FromContext(ctx).V(logutil.DEBUG).Info("Skipping response body chunk because the async queue is closed",
+				"stage", "bodyChunk", "requestID", reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey])
 		}
 	}
-	logger.V(logutil.TRACE).Info("Exiting HandleResponseBodyChunk")
 	return reqCtx
 }
 
@@ -588,16 +659,27 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return pod.GetMetadata()
 }
 
+// runPreRequestPlugins invokes every registered PreRequest plugin, wraps each non-nil
+// error with the plugin's typed name, and returns the joined result. Plugins are not
+// short-circuited: a failure in one does not skip the rest, so every plugin still runs
+// its side effects and the caller sees all failures.
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.InferenceRequest,
-	schedulingResult *fwksched.SchedulingResult) {
+	schedulingResult *fwksched.SchedulingResult) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	var errs []error
 	for _, plugin := range d.requestControlPlugins.preRequestPlugins {
 		loggerDebug.Info("Running PreRequest plugin", "plugin", plugin.TypedName())
 		before := time.Now()
-		plugin.PreRequest(ctx, request, schedulingResult)
+		err := plugin.PreRequest(ctx, request, schedulingResult)
 		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		if err != nil {
+			loggerDebug.Info("PreRequest plugin failed", "plugin", plugin.TypedName(), "error", err.Error())
+			errs = append(errs, fmt.Errorf("PreRequest %q failed: %w", plugin.TypedName().String(), err))
+			continue
+		}
 		loggerDebug.Info("Completed running PreRequest plugin successfully", "plugin", plugin.TypedName())
 	}
+	return errors.Join(errs...)
 }
 
 func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwksched.InferenceRequest) error {
@@ -633,6 +715,33 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	return nil
 }
 
+func (d *Director) runScreeners(ctx context.Context,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	filteredEndpoints := endpoints
+	for _, plugin := range d.requestControlPlugins.screeners {
+		loggerDebug.Info("Running Screener plugin", "plugin", plugin.TypedName())
+		before := time.Now()
+		pluginEndpoints := plugin.Screen(ctx, request, slices.Clone(endpoints))
+		metrics.RecordPluginProcessingLatency(fwkrc.ScreenerExtensionPoint,
+			plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		allowed := make(map[fwksched.Endpoint]struct{}, len(pluginEndpoints))
+		for _, endpoint := range pluginEndpoints {
+			allowed[endpoint] = struct{}{}
+		}
+		intersection := make([]fwksched.Endpoint, 0, min(len(filteredEndpoints), len(allowed)))
+		for _, endpoint := range filteredEndpoints {
+			if _, ok := allowed[endpoint]; ok {
+				intersection = append(intersection, endpoint)
+			}
+		}
+		filteredEndpoints = intersection
+		loggerDebug.Info("Completed running Screener plugin successfully",
+			"plugin", plugin.TypedName(), "remainingEndpoints", len(filteredEndpoints))
+	}
+	return filteredEndpoints
+}
+
 func (d *Director) runAdmissionPlugins(ctx context.Context,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
@@ -664,11 +773,19 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 func (d *Director) runResponseBodyPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 	for _, plugin := range d.requestControlPlugins.responseStreamingPlugins {
-		loggerTrace.Info("Running ResponseStreaming plugin", "plugin", plugin.TypedName())
+		// This loop runs per response chunk, so unlike the other plugin runners it
+		// caches TypedName and guards the log calls: passing arguments to a
+		// disabled logger still boxes them into a heap-allocated slice.
+		name := plugin.TypedName()
+		if loggerTrace.Enabled() {
+			loggerTrace.Info("Running ResponseStreaming plugin", "plugin", name)
+		}
 		before := time.Now()
 		plugin.ResponseBody(ctx, request, response, targetEndpoint)
-		metrics.RecordPluginProcessingLatency(fwkrc.ResponseStreamingExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
-		loggerTrace.Info("Completed running ResponseStreaming plugin successfully", "plugin", plugin.TypedName())
+		metrics.RecordPluginProcessingLatency(fwkrc.ResponseStreamingExtensionPoint, name.Type, name.Name, time.Since(before))
+		if loggerTrace.Enabled() {
+			loggerTrace.Info("Completed running ResponseStreaming plugin successfully", "plugin", name)
+		}
 	}
 }
 

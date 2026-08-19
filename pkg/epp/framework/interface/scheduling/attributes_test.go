@@ -22,48 +22,52 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
+
+func testKey(name string) fwkplugin.DataKey { return fwkplugin.NewDataKey(name, "test-producer") }
 
 func TestRequestAttributes_PutThenGet(t *testing.T) {
 	r := &InferenceRequest{}
 
-	r.PutAttribute("session", "abc")
-	v, ok := r.GetAttribute("session")
+	r.PutAttribute(testKey("session"), "abc")
+	v, ok := r.GetAttribute(testKey("session"))
 	assert.True(t, ok)
 	assert.Equal(t, "abc", v)
 
-	_, ok = r.GetAttribute("missing")
+	_, ok = r.GetAttribute(testKey("missing"))
 	assert.False(t, ok)
 }
 
 func TestRequestAttributes_KeysAfterPuts(t *testing.T) {
 	r := &InferenceRequest{}
 
-	r.PutAttribute("a", 1)
-	r.PutAttribute("b", "two")
-	r.PutAttribute("a", 11) // overwrite
+	r.PutAttribute(testKey("a"), 1)
+	r.PutAttribute(testKey("b"), "two")
+	r.PutAttribute(testKey("a"), 11) // overwrite
 
-	assert.ElementsMatch(t, []string{"a", "b"}, r.AttributeKeys())
+	assert.ElementsMatch(t, []fwkplugin.DataKey{testKey("a"), testKey("b")}, r.AttributeKeys())
 }
 
 func TestReadRequestAttribute(t *testing.T) {
 	r := &InferenceRequest{}
-	r.PutAttribute("count", 42)
-	r.PutAttribute("name", "alpha")
+	r.PutAttribute(testKey("count"), 42)
+	r.PutAttribute(testKey("name"), "alpha")
 
-	count, ok := ReadRequestAttribute[int](r, "count")
+	count, ok := ReadRequestAttribute[int](r, testKey("count"))
 	assert.True(t, ok)
 	assert.Equal(t, 42, count)
 
-	name, ok := ReadRequestAttribute[string](r, "name")
+	name, ok := ReadRequestAttribute[string](r, testKey("name"))
 	assert.True(t, ok)
 	assert.Equal(t, "alpha", name)
 
-	missing, ok := ReadRequestAttribute[int](r, "absent")
+	missing, ok := ReadRequestAttribute[int](r, testKey("absent"))
 	assert.False(t, ok)
 	assert.Equal(t, 0, missing)
 
-	mismatch, ok := ReadRequestAttribute[string](r, "count")
+	mismatch, ok := ReadRequestAttribute[string](r, testKey("count"))
 	assert.False(t, ok)
 	assert.Equal(t, "", mismatch)
 }
@@ -71,15 +75,15 @@ func TestReadRequestAttribute(t *testing.T) {
 func TestRequestAttributes_ZeroValueRequestIsUsable(t *testing.T) {
 	var r InferenceRequest
 
-	r.PutAttribute("k", "v")
-	v, ok := r.GetAttribute("k")
+	r.PutAttribute(testKey("k"), "v")
+	v, ok := r.GetAttribute(testKey("k"))
 	assert.True(t, ok)
 	assert.Equal(t, "v", v)
 }
 
 func TestRequestAttributes_ConcurrentAfterInit(t *testing.T) {
 	r := &InferenceRequest{}
-	r.PutAttribute("seed", 0) // ensure the store is allocated before concurrent writers start
+	r.PutAttribute(testKey("seed"), 0) // ensure the store is allocated before concurrent writers start
 
 	const writers = 8
 	const writes = 200
@@ -90,7 +94,7 @@ func TestRequestAttributes_ConcurrentAfterInit(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < writes; i++ {
-				key := strconv.Itoa(id) + ":" + strconv.Itoa(i)
+				key := testKey(strconv.Itoa(id) + ":" + strconv.Itoa(i))
 				r.PutAttribute(key, i)
 				if v, ok := ReadRequestAttribute[int](r, key); !ok || v != i {
 					t.Errorf("round-trip failed for %s: ok=%v v=%v", key, ok, v)

@@ -1220,6 +1220,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 10,
 					TotalTokens:      17,
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1232,13 +1233,23 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 10,
 					},
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "Chunk without usage returns ParsedResponse with nil usage",
 			chunk: []byte(`data: {"choices":[{"text":"hello"}]}`),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
+			},
+		},
+		{
+			name:  "Chunk with usage text but no usage object returns nil usage",
+			chunk: []byte(`data: {"choices":[{"delta":{"content":"usage"}}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1249,10 +1260,43 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "CRLF terminator is not counted",
+			chunk: []byte("data: {\"choices\":[{\"text\":\"a\"}]}\r\ndata: [DONE]\r\n"),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+			},
+		},
+		{
+			name:  "Event cut after the prefix is counted with the prefix half",
+			chunk: []byte("data: {\"choices\":[{\"text\":\"a\"}]}\ndata: {\"cho"),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name:  "Event cut inside the prefix is dropped",
+			chunk: []byte(`ta: {"choices":[{"text":"b"}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 0,
+			},
+		},
+		{
+			name:  "Terminator cut mid-token is counted as an event",
+			chunk: []byte(`data: [DO`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+			},
+		},
+		{
 			name:  "Malformed JSON in stream (skipped)",
 			chunk: []byte(`data: {bad-json}\ndata: {\"usage\":{\"total_tokens\":5}}`),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1267,13 +1311,15 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 16,
 					},
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "ResponsesAPI without response.completed type returns nil",
 			chunk: []byte("event: response.in_progress\ndata: {\"response\":{\"usage\":{\"input_tokens\":31,\"output_tokens\":3}},\"type\":\"response.in_progress\"}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1285,6 +1331,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 10,
 					TotalTokens:      49,
 				},
+				StreamedEvents: 2,
 			},
 		},
 	}
@@ -1297,6 +1344,34 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("ParseStreamResponse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func BenchmarkOpenAIParser_ParseResponse_Streaming(b *testing.B) {
+	parser := NewOpenAIParser()
+	tests := []struct {
+		name  string
+		chunk []byte
+	}{
+		{
+			name:  "without_usage",
+			chunk: []byte(`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"}}]}`),
+		},
+		{
+			name:  "with_usage",
+			chunk: []byte(`data: {"usage":{"prompt_tokens":7,"completion_tokens":10,"total_tokens":17}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
