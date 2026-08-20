@@ -51,6 +51,7 @@ func newExtractorProducer(discoverPods bool) *Producer {
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: &fakeKVBlockIndex{}},
 		subscriberCtx:      context.Background(),
+		healthMonitor:      NewKVEventsHealthMonitor(discoverPods),
 	}
 }
 
@@ -267,6 +268,7 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     fakeIndexer,
 		subscriberCtx:      context.Background(),
+		healthMonitor:      NewKVEventsHealthMonitor(true),
 	}
 	defer p.subscribersManager.Shutdown(ctx)
 
@@ -313,4 +315,25 @@ func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscri
 
 	ids, _ = p.subscribersManager.GetActiveSubscribers()
 	assert.Empty(t, ids)
+}
+
+// Health state must be dropped on endpoint deletion in global-socket mode, where
+// the per-pod discovery branch is not taken.
+func TestProducer_ExtractEndpoint_DeleteRemovesHealthStateWithoutPodDiscovery(t *testing.T) {
+	ctx := discardCtx(t)
+	p := newExtractorProducer(false)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	ep := newEndpoint("pod-health", "10.0.0.5")
+	p.healthMonitor.RecordRouting("10.0.0.5:8080")
+	_, _, known := p.healthMonitor.GetHealthStatus("10.0.0.5:8080")
+	require.True(t, known)
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: ep,
+	}))
+
+	_, _, known = p.healthMonitor.GetHealthStatus("10.0.0.5:8080")
+	assert.False(t, known, "health state leaks after the endpoint is gone")
 }

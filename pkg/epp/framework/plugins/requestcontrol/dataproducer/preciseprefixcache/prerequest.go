@@ -119,6 +119,11 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
+	// Last-routed time is what separates a broken KV-events pipeline from an
+	// idle endpoint, so it is recorded for every routing decision, including
+	// the ones that skip speculative indexing below.
+	p.recordRouting(schedulingResult)
+
 	if !p.speculativeEnabled {
 		return nil
 	}
@@ -155,7 +160,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 	speculativePod := kvblock.PodEntry{
-		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
+		PodIdentifier: endpointIdentifier(targetMeta.Address, targetMeta.Port),
 		Speculative:   true,
 	}
 

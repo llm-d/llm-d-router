@@ -27,14 +27,20 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
-// extractEndpointSet builds the "address:port" identifier set used to filter
-// kvblock.Index lookups to candidate endpoints. Endpoints without metadata
-// are skipped.
+// endpointIdentifier is the "address:port" form used as the endpoint's identity
+// in kvblock index entries, lookup filters and KV-events health state. All of
+// those must agree, so they share this one construction.
+func endpointIdentifier(address, port string) string {
+	return fmt.Sprintf("%s:%s", address, port)
+}
+
+// extractEndpointSet builds the identifier set used to filter kvblock.Index
+// lookups to candidate endpoints. Endpoints without metadata are skipped.
 func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	endpointSet := sets.New[string]()
 	for _, ep := range endpoints {
 		if m := ep.GetMetadata(); m != nil {
-			endpointSet.Insert(fmt.Sprintf("%s:%s", m.Address, m.Port))
+			endpointSet.Insert(endpointIdentifier(m.Address, m.Port))
 		}
 	}
 	return endpointSet
