@@ -16,6 +16,7 @@ package kvblock
 
 import (
 	"context"
+	"errors"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -102,17 +103,58 @@ func (t *tracedIndex) Lookup(
 		return nil, err
 	}
 
-	// Calculate cache hit metrics
-	blocksFound := 0
-	for _, pods := range result {
-		if len(pods) > 0 {
-			blocksFound++
-		}
-	}
-	cacheHit := blocksFound > 0
+	// Same ordered fold as the fused path, so blocks_found means the longest
+	// contiguous per-pod prefix chain on both.
+	blocksFound := maxContiguousPodHits(requestKeys, result)
 
 	span.SetAttributes(
-		attribute.Bool("llm_d.kv_cache.lookup.cache_hit", cacheHit),
+		attribute.Bool("llm_d.kv_cache.lookup.cache_hit", blocksFound > 0),
+		attribute.Int("llm_d.kv_cache.lookup.blocks_found", blocksFound),
+	)
+
+	return result, nil
+}
+
+// ScoredLookup forwards the fused lookup capability with the same span
+// attribute schema as Lookup. Returns ErrScoredLookupUnsupported when the
+// wrapped backend lacks the capability.
+func (t *tracedIndex) ScoredLookup(ctx context.Context, requestKeys []BlockHash,
+	podIdentifierSet sets.Set[string], tierWeights map[string]float64,
+) (map[string]PodMatchStats, error) {
+	inner, ok := t.next.(ScoredLookupIndex)
+	if !ok {
+		return nil, ErrScoredLookupUnsupported
+	}
+
+	tracer := tracing.Tracer("llm-d-router/pkg/kvcache/kvblock")
+	ctx, span := tracer.Start(ctx, "llm_d.kv_cache.index",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.Int("llm_d.kv_cache.index.lookup.block_count", len(requestKeys)),
+		attribute.Int("llm_d.kv_cache.lookup.pod_filter_count", podIdentifierSet.Len()),
+	)
+
+	result, err := inner.ScoredLookup(ctx, requestKeys, podIdentifierSet, tierWeights)
+	if err != nil {
+		// The unsupported sentinel is an expected signal that callers answer
+		// with the legacy Lookup path, not a failure.
+		if !errors.Is(err, ErrScoredLookupUnsupported) {
+			span.SetStatus(codes.Error, err.Error())
+		}
+		return nil, err
+	}
+
+	blocksFound := 0
+	for _, stats := range result {
+		if stats.MatchedBlocks > blocksFound {
+			blocksFound = stats.MatchedBlocks
+		}
+	}
+	span.SetAttributes(
+		attribute.Bool("llm_d.kv_cache.lookup.cache_hit", blocksFound > 0),
 		attribute.Int("llm_d.kv_cache.lookup.blocks_found", blocksFound),
 	)
 

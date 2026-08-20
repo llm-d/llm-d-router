@@ -23,9 +23,14 @@ import (
 // NewIndexerForTest constructs an Indexer with injected dependencies.
 // Exported only for testing via the export_test.go pattern.
 func NewIndexerForTest(tp kvblock.TokenProcessor, idx kvblock.Index, scorer KVBlockScorer) *Indexer {
+	tierWeights := map[string]float64{}
+	if lps, ok := scorer.(*LongestPrefixScorer); ok {
+		tierWeights = lps.MediumWeights
+	}
 	return &Indexer{
 		tokenProcessor: tp,
 		kvBlockIndex:   idx,
 		kvBlockScorer:  scorer,
+		tierWeights:    tierWeights,
 	}
 }

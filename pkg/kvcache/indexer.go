@@ -18,7 +18,9 @@ package kvcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -65,6 +67,10 @@ type Indexer struct {
 	tokenProcessor kvblock.TokenProcessor // turns tokens to kv block keys
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
 	kvBlockScorer  KVBlockScorer          // scores pods based on block hits
+	tierWeights    map[string]float64     // device tier -> scoring weight, for the fused lookup path
+	// scoredLookupOff latches after the index reports the fused path
+	// unsupported, so later requests skip the probe and its span.
+	scoredLookupOff atomic.Bool
 }
 
 // NewKVCacheIndexer creates a KVCacheIndex given a Config. Callers tokenize
@@ -97,11 +103,17 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 	// When tracing is not configured, the tracer is a no-op implementation.
 	scorer = NewTracedScorer(scorer)
 
+	tierWeights := make(map[string]float64)
+	for _, medium := range config.KVBlockScorerConfig.BackendConfigs {
+		tierWeights[medium.Name] = medium.Weight
+	}
+
 	indexer := &Indexer{
 		config:         config,
 		tokenProcessor: tokenProcessor,
 		kvBlockIndex:   kvBlockIndex,
 		kvBlockScorer:  scorer,
+		tierWeights:    tierWeights,
 	}
 
 	return indexer, nil
@@ -180,13 +192,42 @@ func (k *Indexer) ScoreTokens(
 	}
 	traceLogger.Info("found tokens", "tokens", tokens, "block-keys", blockKeys)
 
+	// Fused fast path: score during the index walk, without materializing the
+	// per-key pod entry map. An unsupported report latches the legacy path.
+	if scoredIndex, ok := k.kvBlockIndex.(kvblock.ScoredLookupIndex); ok && !k.scoredLookupOff.Load() {
+		stats, err := scoredIndex.ScoredLookup(ctx, blockKeys, sets.New(podIdentifiers...), k.tierWeights)
+		switch {
+		case err == nil:
+			podScores := make(map[string]float64, len(stats))
+			blocksFound := 0
+			for pod, s := range stats {
+				podScores[pod] = s.WeightedScore
+				if s.MatchedBlocks > blocksFound {
+					blocksFound = s.MatchedBlocks
+				}
+			}
+			span.SetAttributes(
+				attribute.Float64("llm_d.kv_cache.block_hit_ratio", float64(blocksFound)/float64(len(blockKeys))),
+				attribute.Int("llm_d.kv_cache.blocks_found", blocksFound),
+			)
+			return podScores, nil
+		case errors.Is(err, kvblock.ErrScoredLookupUnsupported):
+			k.scoredLookupOff.Store(true)
+		default:
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("failed to query kvblock indexer: %w", err)
+		}
+	}
+
 	keyToPods, err := k.kvBlockIndex.Lookup(ctx, blockKeys, sets.New(podIdentifiers...))
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("failed to query kvblock indexer: %w", err)
 	}
-	traceLogger.Info("found block keys", "block-keys", blockKeys,
-		"pods", podsPerKeyPrintHelper(keyToPods))
+	if traceLogger.Enabled() {
+		traceLogger.Info("found block keys", "block-keys", blockKeys,
+			"pods", podsPerKeyPrintHelper(keyToPods))
+	}
 
 	// Calculate block-level hit ratio (blocks found / blocks requested).
 	blocksFound := 0
