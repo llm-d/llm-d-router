@@ -223,6 +223,13 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		attribute.Bool("llm_d.pd_proxy.concurrent_pd", false),
 	)
 }
+
+// p2pPullAvailable reports whether this deployment can pull cached prefix over
+// the OffloadingConnector P2P tier. That tier is the PD connector itself when
+// KVConnector is offloading, or is composed alongside NIXL via MultiConnector
+// (declared with --enable-p2p-pull) when the PD connector is NIXLv2. On any
+// other connector --enable-p2p-pull has no effect, since no MultiConnector
+// routes the remote_kv_source params to an OffloadingConnector.
 func (s *Server) p2pPullAvailable() bool {
 	return s.config.KVConnector == KVConnectorOffloading ||
 		(s.config.EnableP2PPull && s.config.KVConnector == KVConnectorNIXLV2)
