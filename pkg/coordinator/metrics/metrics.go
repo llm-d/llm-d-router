@@ -109,11 +109,11 @@ var (
 		16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824,
 	}
 
-	// inputTokensBuckets matches the EPP request-input-tokens ladder (1..1M);
+	// inputTokensBuckets is a power-of-two ladder from 1 to 1M input tokens;
 	// most models have input context windows below 1 million tokens.
 	inputTokensBuckets = []float64{
 		1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-		32778, 65536, 131072, 262144, 524288, 1048576,
+		32768, 65536, 131072, 262144, 524288, 1048576,
 	}
 )
 
