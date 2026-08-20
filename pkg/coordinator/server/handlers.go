@@ -154,7 +154,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		logger.Error(err, "pipeline execution failed")
-		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, classifyOpts))
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 		var streamed *pipeline.UpstreamStreamedError
 		if errors.As(err, &streamed) {
 			// Response bytes were already streamed to the client (or 502
@@ -180,24 +180,6 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
 	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
-}
-
-// classifyOpts injects the pipeline's error sentinels into the shared
-// coordmetrics.ClassifyErrorCode so request_error_total and step_errors_total
-// share one mapping and cannot drift.
-var classifyOpts = coordmetrics.ClassifyOptions{
-	BadRequest: pipeline.ErrBadRequest,
-	IsUpstream: func(err error) (int, bool) {
-		var u *pipeline.UpstreamError
-		if errors.As(err, &u) {
-			return u.StatusCode, true
-		}
-		var s *pipeline.UpstreamStreamedError
-		if errors.As(err, &s) {
-			return s.StatusCode, true
-		}
-		return 0, false
-	},
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

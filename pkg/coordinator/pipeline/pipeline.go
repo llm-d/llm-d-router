@@ -151,7 +151,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 				executed[name] = true
 				return nil
 			}
-			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, classifyOpts))
+			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
 			return fmt.Errorf("step %q failed: %w", name, err)
 		}
 		executed[name] = true
@@ -181,10 +181,10 @@ func classifyExecutionPath(executed map[string]bool) (string, bool) {
 	}
 }
 
-// classifyOpts injects the pipeline's error sentinels into the shared
-// coordmetrics.ClassifyErrorCode so step_errors_total and request_error_total
-// share one mapping and cannot drift.
-var classifyOpts = coordmetrics.ClassifyOptions{
+// ClassifyOpts injects the pipeline's error sentinels into the shared
+// coordmetrics.ClassifyErrorCode. Exported so step_errors_total (pipeline)
+// and request_error_total (server) share one mapping. Treat as immutable.
+var ClassifyOpts = coordmetrics.ClassifyOptions{
 	BadRequest: ErrBadRequest,
 	IsUpstream: func(err error) (int, bool) {
 		var u *UpstreamError
