@@ -50,14 +50,30 @@ type Connector interface {
 	PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any
 }
 
-// Build returns the KV connector for name. An empty name selects DefaultKVConnectorName.
-func Build(name string) (Connector, error) {
+// RankHeaderer is implemented by connectors whose wire protocol needs to pin
+// a request to a specific vLLM data-parallel rank via an HTTP header, in
+// addition to whatever Prepare*KVParams returns. PrefillStep and DecodeStep
+// type-assert for this; a connector that does not implement it is unaffected.
+type RankHeaderer interface {
+	// PrefillHeaders returns headers to set on the prefill request, or nil.
+	PrefillHeaders(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]string
+	// DecodeHeaders returns headers to set on the decode request, or nil.
+	DecodeHeaders(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]string
+}
+
+// Build returns the KV connector for name. An empty name selects
+// DefaultKVConnectorName. dpSize is the model server's data-parallel world
+// size (1 disables DP-rank pinning); only the nixl connector uses it.
+func Build(name string, dpSize int) (Connector, error) {
+	if dpSize < 1 {
+		return nil, fmt.Errorf("kv connector: dp_size must be a positive integer, got %d", dpSize)
+	}
 	if name == "" {
 		name = DefaultKVConnectorName
 	}
 	switch name {
 	case NIXL:
-		return nixlKV{}, nil
+		return nixlKV{dpSize: dpSize}, nil
 	case SharedStorage:
 		return sharedStorageKV{}, nil
 	case SGLang:

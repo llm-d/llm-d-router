@@ -18,11 +18,13 @@ package kv
 
 import (
 	"context"
+	"strconv"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -30,7 +32,11 @@ import (
 // declares the request will be remote-decoded; the decode request forwards
 // the prefill response's kv_transfer_params verbatim plus do_remote_prefill
 // so the decode pod can pull KV blocks from the prefill pod.
-type nixlKV struct{}
+type nixlKV struct {
+	// dpSize is the model server's data-parallel world size. 1 disables
+	// DP-rank pinning (PrefillHeaders/DecodeHeaders return nil).
+	dpSize int
+}
 
 func (nixlKV) Name() string { return NIXL }
 
@@ -56,4 +62,28 @@ func (nixlKV) PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.Reques
 	out[reqcommon.FieldDoRemotePrefill] = true
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
+}
+
+// PrefillHeaders pins the prefill request to a deterministic DP rank hashed
+// from the request ID, so a DP>1 backend that shares its HTTP port across
+// ranks serves both legs of this disaggregated pair from the same rank.
+// Returns nil when DP is disabled (dpSize<=1).
+func (n nixlKV) PrefillHeaders(_ context.Context, reqCtx *pipeline.RequestContext) map[string]string {
+	if n.dpSize <= 1 {
+		return nil
+	}
+	rank := pickDPRank(reqCtx.RequestID, n.dpSize)
+	return map[string]string{routing.DataParallelRankHeader: strconv.Itoa(rank)}
+}
+
+// DecodeHeaders pins the decode request to the same DP rank as the prefill
+// leg: the rank the prefill response reported (if valid), else the same
+// deterministic hash PrefillHeaders used. Returns nil when DP is disabled
+// (dpSize<=1).
+func (n nixlKV) DecodeHeaders(_ context.Context, reqCtx *pipeline.RequestContext) map[string]string {
+	if n.dpSize <= 1 {
+		return nil
+	}
+	rank, _ := resolveDecodeDPRank(reqCtx.KVTransferParams, reqCtx.RequestID, n.dpSize)
+	return map[string]string{routing.DataParallelRankHeader: strconv.Itoa(rank)}
 }

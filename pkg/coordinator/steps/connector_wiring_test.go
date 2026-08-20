@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -204,6 +205,148 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 				if _, ok := captured[f]; ok {
 					t.Errorf("unexpected field %q; got %v", f, captured)
 				}
+			}
+		})
+	}
+}
+
+// TestPrefillStep_DPRankHeader verifies the x-data-parallel-rank header is
+// set on the outgoing prefill request only when dp_size>1 and only for the
+// kv-nixl connector (the only one implementing kv.RankHeaderer).
+func TestPrefillStep_DPRankHeader(t *testing.T) {
+	cases := []struct {
+		name       string
+		connector  string
+		dpSize     int
+		wantHeader bool
+	}{
+		{name: "nixl with dp enabled sets header", connector: kv.NIXL, dpSize: 4, wantHeader: true},
+		{name: "nixl with dp disabled omits header", connector: kv.NIXL, dpSize: 1, wantHeader: false},
+		{name: "nixl with no dp_size param omits header", connector: kv.NIXL, dpSize: 0, wantHeader: false},
+		{name: "shared-storage never sets header", connector: kv.SharedStorage, dpSize: 4, wantHeader: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotHeader string
+			var sawHeader bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = r.Header.Get(routing.DataParallelRankHeader)
+				sawHeader = gotHeader != ""
+				_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+			}))
+			defer srv.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+			params := map[string]any{"use_openai_format": false, ParamKVConnector: tc.connector}
+			if tc.dpSize > 0 {
+				params[ParamDPSize] = tc.dpSize
+			}
+			step, err := NewPrefillStep(gwClient, params)
+			if err != nil {
+				t.Fatalf("NewPrefillStep: %v", err)
+			}
+
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-dp",
+				Model:            "m",
+				TokenIDs:         []int{1, 2},
+				KVTransferParams: make(map[string]any),
+			}
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			if sawHeader != tc.wantHeader {
+				t.Errorf("saw x-data-parallel-rank header = %v (value %q), want %v", sawHeader, gotHeader, tc.wantHeader)
+			}
+		})
+	}
+}
+
+// TestDecodeStep_DPRankHeader mirrors TestPrefillStep_DPRankHeader for the
+// decode leg, and additionally checks that a rank the prefill leg reported
+// back in KVTransferParams is propagated verbatim.
+func TestDecodeStep_DPRankHeader(t *testing.T) {
+	cases := []struct {
+		name            string
+		connector       string
+		dpSize          int
+		prefillKV       map[string]any
+		wantHeader      bool
+		wantHeaderValue string
+	}{
+		{
+			name:       "nixl with dp enabled sets header",
+			connector:  kv.NIXL,
+			dpSize:     4,
+			prefillKV:  map[string]any{},
+			wantHeader: true,
+		},
+		{
+			name:            "nixl propagates returned rank",
+			connector:       kv.NIXL,
+			dpSize:          4,
+			prefillKV:       map[string]any{"remote_dp_rank": float64(2)},
+			wantHeader:      true,
+			wantHeaderValue: "2",
+		},
+		{
+			name:       "nixl with dp disabled omits header",
+			connector:  kv.NIXL,
+			dpSize:     1,
+			prefillKV:  map[string]any{},
+			wantHeader: false,
+		},
+		{
+			name:       "shared-storage never sets header",
+			connector:  kv.SharedStorage,
+			dpSize:     4,
+			prefillKV:  map[string]any{},
+			wantHeader: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotHeader string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = r.Header.Get(routing.DataParallelRankHeader)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+				})
+			}))
+			defer srv.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+			params := map[string]any{ParamKVConnector: tc.connector}
+			if tc.dpSize > 0 {
+				params[ParamDPSize] = tc.dpSize
+			}
+			step, err := NewDecodeStep(gwClient, params)
+			if err != nil {
+				t.Fatalf("NewDecodeStep: %v", err)
+			}
+
+			recorder := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-dp",
+				OriginalPath:     gateway.PathChatCompletions,
+				Model:            "m",
+				KVTransferParams: tc.prefillKV,
+				Body:             map[string]any{"model": "m"},
+				ResponseWriter:   recorder,
+			}
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			sawHeader := gotHeader != ""
+			if sawHeader != tc.wantHeader {
+				t.Errorf("saw x-data-parallel-rank header = %v (value %q), want %v", sawHeader, gotHeader, tc.wantHeader)
+			}
+			if tc.wantHeaderValue != "" && gotHeader != tc.wantHeaderValue {
+				t.Errorf("x-data-parallel-rank = %q, want %q", gotHeader, tc.wantHeaderValue)
 			}
 		})
 	}

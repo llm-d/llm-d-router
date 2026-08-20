@@ -17,6 +17,7 @@ limitations under the License.
 package builder
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -54,6 +55,42 @@ func TestValidatePipeline(t *testing.T) {
 			err := validatePipeline(tt.cfg)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validatePipeline() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestMergeConnectorDefaults_DPSize(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+		dpSize int
+		want   map[string]any
+	}{
+		{
+			name:   "injected when absent",
+			params: map[string]any{},
+			dpSize: 4,
+			want:   map[string]any{steps.ParamDPSize: 4},
+		},
+		{
+			name:   "step override wins",
+			params: map[string]any{steps.ParamDPSize: 2},
+			dpSize: 4,
+			want:   map[string]any{steps.ParamDPSize: 2},
+		},
+		{
+			name:   "zero pipeline default is not injected",
+			params: map[string]any{},
+			dpSize: 0,
+			want:   map[string]any{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeConnectorDefaults(tt.params, "", "", tt.dpSize)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("mergeConnectorDefaults() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -61,7 +61,11 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	kvConn, err := kv.Build(kvName)
+	dpSize, err := paramDPSize(params)
+	if err != nil {
+		return nil, fmt.Errorf("prefill: %w", err)
+	}
+	kvConn, err := kv.Build(kvName, dpSize)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
@@ -100,6 +104,9 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	headers := reqCtx.ForwardedHeaders()
 	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
 	headers[gateway.EPPProfileHeader] = gateway.PhasePrefill
+	if rh, ok := s.kv.(kv.RankHeaderer); ok {
+		maps.Copy(headers, rh.PrefillHeaders(ctx, reqCtx))
+	}
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
