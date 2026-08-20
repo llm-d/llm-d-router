@@ -38,10 +38,10 @@ func StartUpstreamCall(upstream string) UpstreamCall {
 	return UpstreamCall{upstream: upstream, start: time.Now()}
 }
 
-// Done records time.Since(start) on upstream_request_duration_seconds. Safe
-// to call on the zero value (a zero start time observes a negative-elapsed
-// value that Prometheus histograms treat as +Inf overflow), but callers
-// should always pair Done with StartUpstreamCall.
+// Done records time.Since(start) on upstream_request_duration_seconds. On
+// the zero value it does not crash but records a very large positive
+// duration (time.Since clamps at math.MaxInt64, ~292 years) that lands in
+// the histogram's +Inf bucket. Always pair Done with StartUpstreamCall.
 func (c UpstreamCall) Done() {
 	RecordUpstreamRequestDuration(c.upstream, time.Since(c.start))
 }
