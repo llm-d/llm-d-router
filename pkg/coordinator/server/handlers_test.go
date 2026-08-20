@@ -298,3 +298,16 @@ func TestRoutesRegistered(t *testing.T) {
 		})
 	}
 }
+
+func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
+	// A registered route with the wrong method must return 405, not fall
+	// through to the passthrough. Chi's default MethodNotAllowed handler
+	// produces this; the coordinator does not override it.
+	srv := newTestServer(nil)
+	req := httptest.NewRequest(http.MethodGet, gateway.PathChatCompletions, nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET on POST-only %s, got %d", gateway.PathChatCompletions, rec.Code)
+	}
+}
