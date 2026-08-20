@@ -34,6 +34,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 )
 
@@ -44,14 +45,17 @@ import (
 // X-Request-Id is validated and replaced with a UUID if malformed, matching
 // handleInference's sanitization.
 type passthroughHandler struct {
-	gatewayURL *url.URL
-	transport  http.RoundTripper
+	gatewayURL         *url.URL
+	transport          http.RoundTripper
+	maxRequestBodySize int64
 }
 
 // newPassthroughHandler resolves and validates the gateway target once, at
 // server construction, so a misconfigured gateway URL fails startup rather
-// than the first passthrough request.
-func newPassthroughHandler(gwClient *gateway.Client) (*passthroughHandler, error) {
+// than the first passthrough request. maxRequestBodySize is the same MB
+// bound New() applies to /v1/chat/completions et al; the passthrough enforces
+// it via http.MaxBytesReader so unregistered paths cannot bypass the cap.
+func newPassthroughHandler(gwClient *gateway.Client, maxRequestBodySize int64) (*passthroughHandler, error) {
 	if gwClient == nil {
 		return nil, errors.New("server: gateway client is required")
 	}
@@ -62,7 +66,11 @@ func newPassthroughHandler(gwClient *gateway.Client) (*passthroughHandler, error
 	if gatewayURL.Host == "" {
 		return nil, fmt.Errorf("server: gateway URL %q is missing a host", gwClient.BaseURL())
 	}
-	return &passthroughHandler{gatewayURL: gatewayURL, transport: gwClient.Transport()}, nil
+	return &passthroughHandler{
+		gatewayURL:         gatewayURL,
+		transport:          gwClient.Transport(),
+		maxRequestBodySize: maxRequestBodySize,
+	}, nil
 }
 
 func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +96,8 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		logger.V(logutil.DEFAULT).Info("could not clear write deadline", "error", err)
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBodySize*config.BytesPerMB)
+
 	proxy := newPassthroughProxy(logger, h.gatewayURL, h.transport, requestID)
 	proxy.ServeHTTP(w, r)
 }
@@ -110,6 +120,12 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 		Transport:     transport,
 		ErrorLog:      log.New(&passthroughErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				logger.V(logutil.DEFAULT).Info("passthrough proxy: request body exceeds cap", "capBytes", maxBytesErr.Limit)
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				return
+			}
 			// Client cancellation and request-context deadlines are routine events on
 			// public routes, not backend faults; keep them out of error dashboards.
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

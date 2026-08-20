@@ -86,10 +86,6 @@ type Server struct {
 }
 
 func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
-	passthrough, err := newPassthroughHandler(gwClient)
-	if err != nil {
-		return nil, err
-	}
 	maxBodySize := cfg.MaxRequestBodySize
 	if maxBodySize == 0 {
 		// Zero means unset; Viper fills this from the config default in
@@ -105,6 +101,10 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 		// an MB value that overflows int64 when converted to bytes would cause
 		// LimitReader to receive a negative limit and return immediate EOF.
 		return nil, fmt.Errorf("server: MaxRequestBodySize must be at most %d MB, got %d", int64((math.MaxInt64-1)/config.BytesPerMB), maxBodySize)
+	}
+	passthrough, err := newPassthroughHandler(gwClient, maxBodySize)
+	if err != nil {
+		return nil, err
 	}
 	s := &Server{
 		pipeline:           p,

@@ -31,7 +31,9 @@ import (
 	"github.com/go-logr/logr"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 // captured records what an upstream test gateway saw so tests can assert on
@@ -285,6 +287,35 @@ func TestPassthrough_ClientCancelNotLoggedAsError(t *testing.T) {
 				t.Fatalf("Error-level logs: got %d (%v), want %d", got, sink.errors, tt.wantErrorLogs)
 			}
 		})
+	}
+}
+
+func TestPassthrough_BodyOverConfiguredCapMapsTo413(t *testing.T) {
+	// A body larger than server.max_request_body_size (in MB) must be rejected
+	// on the passthrough path with 413, matching the cap the inference path
+	// enforces. Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The passthrough will tear the outbound body mid-stream when the cap
+		// trips; discard whatever fragment arrives without asserting on the
+		// read error.
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	gw := gateway.NewWithTransport(&http.Transport{}, upstream.URL)
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p, gw)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	oversize := strings.Repeat("x", config.BytesPerMB+1)
+	req := httptest.NewRequest(http.MethodPost, "/v1/models", strings.NewReader(oversize))
+	rec := doPassthrough(t, srv, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversize passthrough body, got %d", rec.Code)
 	}
 }
 
