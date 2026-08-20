@@ -78,12 +78,18 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		},
 	}
 	proxy := newDecodeProxy(logger, transport, func(resp *http.Response) error {
-		if resp.StatusCode == http.StatusPreconditionFailed {
+		switch {
+		case resp.StatusCode == http.StatusPreconditionFailed:
 			cacheMiss = true
 			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
 			return errCacheMiss
+		case resp.StatusCode >= http.StatusBadRequest:
+			// Worker error (any 4xx/5xx except 412): the response is still
+			// streamed to the client, but the outcome is not a served hit.
+			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultError)
+		default:
+			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
 		}
-		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
 		return nil
 	})
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)

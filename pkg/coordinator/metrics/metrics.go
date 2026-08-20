@@ -63,10 +63,14 @@ const (
 	PathEncodePrefillDecode = "encode-prefill-decode"
 )
 
-// Result label values for conditional_decode_probes_total.
+// Result label values for conditional_decode_probes_total. Served covers 2xx/3xx
+// (the worker answered the request inline). Deferred is exactly HTTP 412 (cache
+// miss, pipeline continues). Error covers any other 4xx/5xx: the worker's
+// response is still streamed to the client, but the outcome is not a hit.
 const (
 	ProbeResultServed   = "served"
 	ProbeResultDeferred = "deferred"
+	ProbeResultError    = "error"
 )
 
 var (

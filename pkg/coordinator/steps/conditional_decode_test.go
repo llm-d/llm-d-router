@@ -27,8 +27,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -202,6 +206,10 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
 	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
 	step, _ := NewConditionalDecodeStep(gwClient, nil)
 
@@ -227,4 +235,36 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	if !strings.Contains(string(respBody), "internal error") {
 		t.Fatalf("expected error body forwarded, got: %s", string(respBody))
 	}
+
+	// A 5xx worker response must attribute to error, not served: the response
+	// was forwarded, but the outcome is not a hit.
+	require.InDelta(t, 1.0,
+		probeCount(t, reg, coordmetrics.ProbeResultError), 1e-9,
+		"probe counter must record the 5xx under result=error",
+	)
+	require.InDelta(t, 0.0,
+		probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9,
+		"served label must not be incremented for a 5xx worker response",
+	)
+}
+
+// probeCount reads conditional_decode_probes_total for the given result label.
+// Absent series is 0.
+func probeCount(t *testing.T, reg *prometheus.Registry, result string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_conditional_decode_probes_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "result" && l.GetValue() == result {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }
