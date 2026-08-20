@@ -16,16 +16,23 @@ limitations under the License.
 
 package gateway
 
-import "strings"
+import (
+	"strings"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+)
 
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathCompletions     = "/v1/completions"
 	DefaultGeneratePath = "/inference/v1/generate"
 
-	EPPProfileHeader  = "EPP-Profile"
-	ContentTypeHeader = "Content-Type"
-	ContentTypeJSON   = "application/json"
+	EPPProfileHeader = "EPP-Profile"
+	// PeerTopologyHeader is reqcommon.PeerTopologyHeaderKey, the single
+	// definition topology-stamp-handler's default headerName must match.
+	PeerTopologyHeader = reqcommon.PeerTopologyHeaderKey
+	ContentTypeHeader  = "Content-Type"
+	ContentTypeJSON    = "application/json"
 
 	PhaseEncode  = "encode"
 	PhasePrefill = "prefill"

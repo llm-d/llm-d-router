@@ -24,8 +24,54 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
+
+// TestNewDecodeProxyRequest_ForwardsPeerTopology verifies that a non-empty
+// reqCtx.PeerTopology, captured by PrefillStep from the prefill response, is
+// set on the outgoing decode request's x-peer-topology header.
+func TestNewDecodeProxyRequest_ForwardsPeerTopology(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: "/inference/v1/generate",
+		PeerTopology: "host=node12,zone=us-east1-a",
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got, want := req.Header.Get(gateway.PeerTopologyHeader), "host=node12,zone=us-east1-a"; got != want {
+		t.Fatalf("x-peer-topology header = %q, want %q", got, want)
+	}
+}
+
+// TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty verifies that no
+// x-peer-topology header is set on the decode request when the prefill
+// response carried none (single-EPP-in-coordinator or no topology-stamp-handler).
+func TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: "/inference/v1/generate",
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got := req.Header.Get(gateway.PeerTopologyHeader); got != "" {
+		t.Fatalf("expected no x-peer-topology header, got %q", got)
+	}
+}
 
 // TestNewDecodeProxy_MidStreamTruncationLogged drives the proxy against an
 // upstream that promises a large Content-Length, writes a few bytes, then drops

@@ -116,6 +116,16 @@ func TestScorer_Category(t *testing.T) {
 	assert.Equal(t, fwksched.Affinity, s.Category())
 }
 
+func TestScorer_ScoresPeerFromHeaderWhenNoAttribute(t *testing.T) {
+	sameHost := makeEndpoint(t, "same-host", &attrtopology.Topology{Hostname: "h1"})
+
+	s := newTestScorer()
+	s.peerTopologyHeader = "x-peer-topology"
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-peer-topology": "host=h1"}}
+	got := s.Score(context.Background(), req, []fwksched.Endpoint{sameHost})
+	assert.Equal(t, 1.00, got[sameHost])
+}
+
 func TestScorer_Consumes(t *testing.T) {
 	s := newTestScorer()
 
@@ -132,4 +142,18 @@ func TestFactory_Defaults(t *testing.T) {
 	s, ok := p.(*Scorer)
 	require.True(t, ok)
 	assert.Equal(t, ScorerType, s.TypedName().Name)
+	assert.Empty(t, s.peerTopologyHeader)
+}
+
+func TestFactory_PeerTopologyHeader(t *testing.T) {
+	p, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"peerTopologyHeader": "x-peer-topology"}`)), nil)
+	require.NoError(t, err)
+	s, ok := p.(*Scorer)
+	require.True(t, ok)
+	assert.Equal(t, "x-peer-topology", s.peerTopologyHeader)
+}
+
+func TestFactory_PeerTopologyHeaderRejectsNonDefault(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"peerTopologyHeader": "x-custom-topology"}`)), nil)
+	require.Error(t, err)
 }

@@ -29,13 +29,13 @@ import (
 )
 
 func TestPeerTopology_NilRequest(t *testing.T) {
-	_, ok := PeerTopology(nil, attrtopology.TopologyAttributeKey)
+	_, ok := PeerTopology(nil, attrtopology.TopologyAttributeKey, "")
 	assert.False(t, ok)
 }
 
-func TestPeerTopology_NoPeerAttribute(t *testing.T) {
+func TestPeerTopology_NoPeerAttributeNoHeader(t *testing.T) {
 	req := &fwksched.InferenceRequest{}
-	_, ok := PeerTopology(req, attrtopology.TopologyAttributeKey)
+	_, ok := PeerTopology(req, attrtopology.TopologyAttributeKey, "")
 	assert.False(t, ok)
 }
 
@@ -48,7 +48,7 @@ func TestPeerTopology_FromPeerEndpointAttribute(t *testing.T) {
 	req := &fwksched.InferenceRequest{}
 	req.PutAttribute(disagg.PeerEndpointAttributeKey, peerEndpoint)
 
-	got, ok := PeerTopology(req, attrtopology.TopologyAttributeKey)
+	got, ok := PeerTopology(req, attrtopology.TopologyAttributeKey, "")
 	assert.True(t, ok)
 	assert.Equal(t, topo, got)
 }
@@ -60,6 +60,34 @@ func TestPeerTopology_PeerEndpointMissingTopologyAttribute(t *testing.T) {
 	req := &fwksched.InferenceRequest{}
 	req.PutAttribute(disagg.PeerEndpointAttributeKey, peerEndpoint)
 
-	_, ok := PeerTopology(req, attrtopology.TopologyAttributeKey)
+	_, ok := PeerTopology(req, attrtopology.TopologyAttributeKey, "")
 	assert.False(t, ok)
+}
+
+func TestPeerTopology_FromHeaderWhenNoAttribute(t *testing.T) {
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-peer-topology": "host=node12,rack=r7"}}
+
+	got, ok := PeerTopology(req, attrtopology.TopologyAttributeKey, "x-peer-topology")
+	assert.True(t, ok)
+	assert.Equal(t, &attrtopology.Topology{Hostname: "node12", Rack: "r7"}, got)
+}
+
+func TestPeerTopology_NoHeaderAndNoAttribute(t *testing.T) {
+	req := &fwksched.InferenceRequest{}
+	_, ok := PeerTopology(req, attrtopology.TopologyAttributeKey, "x-peer-topology")
+	assert.False(t, ok)
+}
+
+func TestPeerTopology_AttributePreferredOverHeader(t *testing.T) {
+	meta := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "peer", Namespace: "default"}}
+	peerEndpoint := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	topo := &attrtopology.Topology{Hostname: "attr-host"}
+	peerEndpoint.Put(attrtopology.TopologyAttributeKey, topo)
+
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-peer-topology": "host=header-host"}}
+	req.PutAttribute(disagg.PeerEndpointAttributeKey, peerEndpoint)
+
+	got, ok := PeerTopology(req, attrtopology.TopologyAttributeKey, "x-peer-topology")
+	assert.True(t, ok)
+	assert.Equal(t, topo, got)
 }

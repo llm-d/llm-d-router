@@ -76,10 +76,13 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 	}
 
+	headers := r.Header.Clone()
+	pipeline.StripInternalHeaders(headers)
+
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        requestID,
 		OriginalPath:     r.URL.Path,
-		OriginalHeaders:  r.Header.Clone(),
+		OriginalHeaders:  headers,
 		OriginalBody:     body,
 		Body:             parsed,
 		Model:            model,
