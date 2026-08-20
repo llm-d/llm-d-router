@@ -299,16 +299,46 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	return nil
 }
 
+// makeserver resolves the per-pod LRU capacity, preferring (in order) the
+// model server's total token capacity across KV cache tiers, the GPU block
+// count, the configured lruCapacityPerServer, and finally the built-in
+// default. The chosen capacity and its source are logged by the indexer when
+// the pod's LRU is created or resized.
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
-	gpuBlocks := defaultLRUCapacityPerServer
-	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
-	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
+	capacity := defaultLRUCapacityPerServer
+	source := capacitySourceDefault
+
+	autoTuned := false
+	if m := targetEndpoint.GetMetrics(); p.config.AutoTune && m != nil {
+		switch {
+		case m.KvCacheMaxTokenCapacity > 0:
+			// Convert tokens to model-server-native blocks, matching the units
+			// of CacheNumBlocks used by the paths below.
+			blockSize := m.CacheBlockSize
+			if blockSize <= 0 {
+				blockSize = p.config.BlockSizeTokens
+			}
+			if blockSize <= 0 {
+				blockSize = defaultBlockSizeTokens
+			}
+			if blocks := m.KvCacheMaxTokenCapacity / blockSize; blocks > 0 {
+				capacity, source, autoTuned = blocks, capacitySourceTotalTokens, true
+			}
+		case m.CacheNumBlocks > 0:
+			capacity, source, autoTuned = m.CacheNumBlocks, capacitySourceGPUBlocks, true
+			if m.KvCacheOffloadDetected {
+				source = capacitySourceGPUBlocksUndercount
+			}
+		}
 	}
+	if !autoTuned && p.config.LRUCapacityPerServer > 0 {
+		capacity, source = p.config.LRUCapacityPerServer, capacitySourceConfigured
+	}
+
 	return server{
-		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
-		NumOfGPUBlocks: gpuBlocks,
+		ServerID:          ServerID(targetEndpoint.GetMetadata().ID),
+		LRUCapacityBlocks: capacity,
+		CapacitySource:    source,
 	}
 }
 
