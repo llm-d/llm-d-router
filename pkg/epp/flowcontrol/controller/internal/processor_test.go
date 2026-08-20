@@ -1122,7 +1122,7 @@ func TestProcessor(t *testing.T) {
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefill}),
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleDecode}),
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode}),
-					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleBoth}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleBoth}), //nolint:staticcheck // testing backward compat
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefillDecode}),
 				}
 
@@ -1135,10 +1135,10 @@ func TestProcessor(t *testing.T) {
 			t.Run("should default unlabeled endpoints to decode", func(t *testing.T) {
 				t.Parallel()
 				endpoints := []fwkdl.Endpoint{
-					makeEndpoint(nil),                                   // no labels map
-					makeEndpoint(map[string]string{}),                   // empty labels
-					makeEndpoint(map[string]string{"other": "value"}),   // unrelated label
-					fwkdl.NewEndpoint(nil, nil),                         // nil metadata gets defaulted by NewEndpoint
+					makeEndpoint(nil),                                 // no labels map
+					makeEndpoint(map[string]string{}),                 // empty labels
+					makeEndpoint(map[string]string{"other": "value"}), // unrelated label
+					fwkdl.NewEndpoint(nil, nil),                       // nil metadata gets defaulted by NewEndpoint
 				}
 
 				prefill, decode, interleaved := partitionEndpoints(endpoints)
@@ -1289,7 +1289,7 @@ func TestProcessor(t *testing.T) {
 				// Track which endpoints each Saturation call receives.
 				var calls [][]string
 				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
-					var roles []string
+					roles := make([]string, 0, len(endpoints))
 					for _, ep := range endpoints {
 						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
 					}

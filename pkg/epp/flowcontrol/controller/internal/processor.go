@@ -447,20 +447,20 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
 
-	prefillOnly, decodeOnly, interleaved := partitionEndpoints(pool)
+	prefill, decode, interleaved := partitionEndpoints(pool)
 
 	// Interleaved pods serve both stages, so they contribute capacity to both pools,
 	// mirroring how the scheduling filters route requests.
-	prefillPool := append(prefillOnly, interleaved...)
-	decodePool := append(decodeOnly, interleaved...)
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
 
 	saturation := -1.0
 	for _, part := range []struct {
 		name      string
 		endpoints []fwkdl.Endpoint
 	}{
-		{"prefill", prefillPool},
-		{"decode", decodePool},
+		{"prefill", prefill},
+		{"decode", decode},
 	} {
 		if len(part.endpoints) == 0 {
 			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
@@ -563,7 +563,7 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 			prefill = append(prefill, ep)
 		case bylabel.RoleDecode, "":
 			decode = append(decode, ep)
-		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode:
+		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode: //nolint:staticcheck // RoleBoth is deprecated but must be matched for backward compatibility
 			interleaved = append(interleaved, ep)
 		case bylabel.RoleEncode:
 			// Encode-only pods receive no prefill or decode traffic; excluding them
