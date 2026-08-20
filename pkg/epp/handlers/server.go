@@ -20,7 +20,6 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -91,6 +90,12 @@ func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
 	s.emitEndpointScores = enabled
 }
 
+// SetResponders sets the plugins that may answer a request instead of routing it. They are
+// asked in the given order.
+func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
+	s.responders = responders
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -100,10 +105,7 @@ type Director interface {
 
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
-	// AggregateModels returns the combined, deduplicated, alphabetically sorted model list across
-	// all endpoints as a pre-serialized JSON body, and the count of endpoints that have reported
-	// their model list. A count of zero means no endpoint has been scraped yet.
-	AggregateModels() (json.RawMessage, int)
+	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 }
 
 // Server implements the Envoy external processing server.
@@ -118,6 +120,8 @@ type StreamingServer struct {
 	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores bool
+	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
+	responders []fwkrc.Responder
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -214,9 +218,9 @@ const (
 	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
 	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
 	requestResponseProcessingSkipped
-	// requestAnsweredLocal indicates EPP answered the request itself with an ImmediateResponse
-	// (e.g. GET /v1/models aggregated across endpoints) rather than routing to a backend model server.
-	// The state machine sends the stored response and gracefully closes the stream.
+	// requestAnsweredLocal indicates a Responder answered the request itself with an
+	// ImmediateResponse rather than routing it to a model server. The state machine sends the
+	// stored response and gracefully closes the stream.
 	requestAnsweredLocal
 )
 
@@ -667,10 +671,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		if reqCtx.requestState == requestAnsweredLocal {
 			// Request fully answered locally (e.g. GET /v1/models); close the gRPC stream without routing.
-			// The request never carries a model name, so model_name=""
-			fairnessID, priority := extractFairnessAndPriority(reqCtx)
-			metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, reqCtx.Priority)
-			metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestSize)
+			// The inference request counter and size histogram are not recorded: the request
+			// carries no model name or body, so the samples would not describe inference traffic.
 			recordRequestProcessing()
 			return nil
 		}

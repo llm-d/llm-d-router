@@ -45,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
@@ -81,6 +82,11 @@ type ExtProcServerRunner struct {
 	// EvictChannelLookup, when set, enables the ext_proc server to terminate in-flight requests
 	// selected for eviction by flow control. See docs/flow-control-eviction.md.
 	EvictChannelLookup handlers.EvictChannelLookup
+
+	// Responders, when set, let EPP answer a request itself instead of routing it to a model
+	// server. Each is asked in turn before an endpoint is selected, and the first one to
+	// return a response ends the exchange.
+	Responders []fwkrc.Responder
 }
 
 // NewExtProcServerRunner builds a runner from the runtime options plus the dependencies the
@@ -270,6 +276,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
+		extProcServer.SetResponders(r.Responders)
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
 		}
