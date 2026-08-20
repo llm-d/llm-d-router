@@ -30,11 +30,6 @@ func (in *DataLayerConfig) DeepCopyInto(out *DataLayerConfig) {
 		*out = new(DiscoveryConfig)
 		**out = **in
 	}
-	if in.PeerDiscovery != nil {
-		in, out := &in.PeerDiscovery, &out.PeerDiscovery
-		*out = new(PeerDiscoveryConfig)
-		**out = **in
-	}
 	if in.CrossReplicaSyncInterval != nil {
 		in, out := &in.CrossReplicaSyncInterval, &out.CrossReplicaSyncInterval
 		*out = new(v1.Duration)

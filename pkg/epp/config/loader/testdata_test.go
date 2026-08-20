@@ -931,25 +931,6 @@ dataLayer:
     pluginRef: my-disc
 `
 
-// successDeprecatedPeerDiscoveryText tests that the deprecated
-// dataLayer.peerDiscovery is migrated to dataLayer.discovery.peers.
-const successDeprecatedPeerDiscoveryText = `
-apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- name: maxScore
-  type: max-score-picker
-- name: my-peer-disc
-  type: file-discovery
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: maxScore
-dataLayer:
-  peerDiscovery:
-    pluginRef: my-peer-disc
-`
-
 // successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,
 // copied to nested location, and handled.
 const successDeprecatedTopLevelSaturationDetectorText = `

@@ -145,10 +145,10 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	return rawConfig, featureConfig, nil
 }
 
-// migrateDiscoveryConfig lifts deprecated discovery fields into the consolidated
-// discovery section. It handles two deprecated forms:
-//   - dataLayer.discovery.pluginRef (bare) -> dataLayer.discovery.endpoints.pluginRef
-//   - dataLayer.peerDiscovery              -> dataLayer.discovery.peers
+// migrateDiscoveryConfig lifts the deprecated bare pluginRef into the
+// consolidated discovery section:
+//
+//	dataLayer.discovery.pluginRef -> dataLayer.discovery.endpoints.pluginRef
 func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPickerConfig) {
 	if rawConfig.DataLayer == nil {
 		return
@@ -160,18 +160,6 @@ func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPic
 		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead.")
 		if dl.Discovery.Endpoints == nil {
 			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
-		}
-	}
-
-	//nolint:staticcheck // SA1019: dl.PeerDiscovery is deprecated: use discovery.peers instead.
-	if dl.PeerDiscovery != nil {
-		logger.Info("DEPRECATION: dataLayer.peerDiscovery is deprecated, use dataLayer.discovery.peers instead. If both are set, the new field is used.")
-		if dl.Discovery == nil {
-			dl.Discovery = &configapi.DiscoveryConfig{}
-		}
-		if dl.Discovery.Peers == nil {
-			//nolint:staticcheck // SA1019: dl.PeerDiscovery is deprecated: use discovery.peers instead.
-			dl.Discovery.Peers = &configapi.PeerDiscoveryConfig{PluginRef: dl.PeerDiscovery.PluginRef}
 		}
 	}
 }
