@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
@@ -166,6 +168,29 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldRemoteBlockIDs:  nil,
 			requestFieldRemoteHost:      nil,
 			requestFieldRemotePort:      nil,
+		}
+	}
+
+	// Inject cached decode kv_transfer_params from the previous turn when
+	// bidirectional KV transfer is enabled and EPP has provided a session ID.
+	sessionID := s.bidirectionalSessionID(r)
+	if sessionID != "" && s.conversationCache != nil {
+		if cached, ok := s.conversationCache.Get(sessionID); ok {
+			// Apply threshold check: only inject if remote_num_tokens >= threshold.
+			// Below the threshold, prefill recomputes locally to amortize transfer latency.
+			remoteTokens := 0
+			if tokens, ok := cached["remote_num_tokens"].(float64); ok {
+				remoteTokens = int(tokens)
+			}
+			if remoteTokens >= s.config.BidirectionalRecomputeThreshold {
+				kvParams := completionRequest[requestFieldKVTransferParams].(map[string]any)
+				for k, v := range cached {
+					kvParams[k] = v
+				}
+				s.logger.V(logging.DEBUG).Info("injected cached kv_transfer_params", "session", sessionID, "remote_tokens", remoteTokens)
+			} else {
+				s.logger.V(logging.DEBUG).Info("skipped D→P transfer (below threshold)", "session", sessionID, "remote_tokens", remoteTokens, "threshold", s.config.BidirectionalRecomputeThreshold)
+			}
 		}
 	}
 
@@ -417,7 +442,12 @@ retryLoop:
 	// 2. Forward to local decoder.
 
 	s.logger.V(5).Info("sending request to decoder", "body", string(dbody))
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	cachedTokensWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	decodeWriter := cachedTokensWriter
+	var finalizeKVCapture func() map[string]any
+	if sessionID != "" && s.conversationCache != nil {
+		decodeWriter, finalizeKVCapture = newKVTransferParamsCaptureWriter(cachedTokensWriter)
+	}
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
@@ -425,6 +455,12 @@ retryLoop:
 		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
 		s.dispatchDecode(decodeWriter, dreq, completionRequest)
+	}
+	if finalizeKVCapture != nil {
+		if params := finalizeKVCapture(); params != nil {
+			s.conversationCache.Add(sessionID, params)
+			s.logger.V(logging.DEBUG).Info("cached kv_transfer_params from decode response", "session", sessionID)
+		}
 	}
 	if err := finalizeDecodeWriter(); err != nil {
 		s.logger.Error(err, "failed to flush cached token response writer")
@@ -796,4 +832,14 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// bidirectionalSessionID returns the session identifier EPP injected into the
+// request header when bidirectional KV transfer is enabled, or "" if the
+// feature is disabled or the header is absent.
+func (s *Server) bidirectionalSessionID(r *http.Request) string {
+	if !s.config.BidirectionalKVXfer {
+		return ""
+	}
+	return strings.TrimSpace(r.Header.Get(s.config.BidirectionalSessionHeader))
 }

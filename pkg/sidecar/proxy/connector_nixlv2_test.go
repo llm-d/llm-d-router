@@ -1268,3 +1268,180 @@ func dpRankHeader(h *mock.ChatCompletionHandler, i int) string { //nolint:unpara
 	ExpectWithOffset(1, len(hdrs)).To(BeNumerically(">", i))
 	return hdrs[i].Get(requestHeaderDataParallelRank)
 }
+
+// bidiKVProxyEnv bundles a running bidirectional-KV-xfer proxy with its mock
+// prefill/decode backends for Approach C integration tests.
+type bidiKVProxyEnv struct {
+	proxy          *Server
+	prefillHandler *mock.ChatCompletionHandler
+	decodeHandler  *mock.ChatCompletionHandler
+	prefillBackend *httptest.Server
+	decodeBackend  *httptest.Server
+	baseAddr       string
+}
+
+// startBidiKVProxy spins up prefill + decode mocks and a proxy with
+// BidirectionalKVXfer enabled. The prefill mock uses KVConnectorSharedStorage
+// so it skips NIXLv2's remote_engine_id=nil check; Approach C injects non-nil
+// params from the cache on turn 2, which would otherwise fail that check.
+func startBidiKVProxy() *bidiKVProxyEnv {
+	ctx, cancelFn := context.WithCancel(newTestContext())
+	stoppedCh := make(chan struct{})
+	env := &bidiKVProxyEnv{}
+
+	env.decodeHandler = &mock.ChatCompletionHandler{
+		Connector: KVConnectorNIXLV2,
+		Role:      mock.RoleDecode,
+	}
+	env.decodeBackend = httptest.NewServer(env.decodeHandler)
+	DeferCleanup(env.decodeBackend.Close)
+
+	env.prefillHandler = &mock.ChatCompletionHandler{
+		Connector:   KVConnectorSharedStorage,
+		Role:        mock.RolePrefill,
+		RawResponse: `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"prefill-engine","remote_host":"prefill-host","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`,
+	}
+	env.prefillBackend = httptest.NewServer(env.prefillHandler)
+	DeferCleanup(env.prefillBackend.Close)
+
+	decodeURL, err := url.Parse(env.decodeBackend.URL)
+	Expect(err).ToNot(HaveOccurred())
+
+	cfg := Config{
+		Port:                       "0",
+		DecoderURL:                 decodeURL,
+		KVConnector:                KVConnectorNIXLV2,
+		BidirectionalKVXfer:        true,
+		BidirectionalCacheSize:     128,
+		BidirectionalCacheTTL:      30 * time.Second,
+		BidirectionalSessionHeader: "x-session-token",
+	}
+	env.proxy = NewProxy(cfg)
+
+	go func() {
+		defer GinkgoRecover()
+		env.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+		err := env.proxy.Start(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		stoppedCh <- struct{}{}
+	}()
+
+	<-env.proxy.readyCh
+	env.baseAddr = "http://" + env.proxy.addr.String()
+	DeferCleanup(func() {
+		cancelFn()
+		<-stoppedCh
+	})
+	return env
+}
+
+// sendWithSession sends a /v1/chat/completions request with the given session
+// ID header (empty string means omit the header).
+func (env *bidiKVProxyEnv) sendWithSession(sessionID string) {
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+	Expect(err).ToNot(HaveOccurred())
+	req.Header.Add(routing.PrefillEndpointHeader, env.prefillBackend.URL[len("http://"):])
+	if sessionID != "" {
+		req.Header.Add("x-session-token", sessionID)
+	}
+
+	rp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred())
+	defer rp.Body.Close()
+	body, _ := io.ReadAll(rp.Body) //nolint:errcheck
+	Expect(rp.StatusCode).To(Equal(http.StatusOK), string(body))
+}
+
+var _ = Describe("NIXL Connector (v2) Bidirectional KV Transfer (Approach C)", func() {
+
+	It("should cache decode kv_transfer_params on turn 1 and inject into prefill on turn 2", func() {
+		env := startBidiKVProxy()
+
+		// Decode response includes kv_transfer_params so the sidecar has
+		// something to cache after turn 1.
+		env.decodeHandler.RawResponse = `{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"kv_transfer_params":{"remote_block_ids":[10,20],"remote_engine_id":"engine-abc","remote_host":"decode-host","remote_port":8080}}`
+
+		By("turn 1: sending request with session ID")
+		env.sendWithSession("sess-1")
+
+		By("verifying turn 1 prefill received nil remote_engine_id (cache empty)")
+		prq1 := env.prefillHandler.GetCompletionRequests()[0]
+		kv1, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kv1).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+		Expect(kv1).To(HaveKeyWithValue(requestFieldRemoteBlockIDs, BeNil()))
+
+		By("turn 2: sending request with the same session ID")
+		env.sendWithSession("sess-1")
+
+		By("verifying turn 2 prefill received cached kv_transfer_params from the decode response")
+		prq2 := env.prefillHandler.GetCompletionRequests()[1]
+		kv2, ok := prq2[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kv2).To(HaveKeyWithValue("remote_engine_id", "engine-abc"))
+		Expect(kv2["remote_block_ids"]).To(HaveLen(2))
+		Expect(kv2).To(HaveKeyWithValue("remote_host", "decode-host"))
+
+		By("verifying do_remote_decode/do_remote_prefill flags are preserved")
+		Expect(kv2).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kv2).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+	})
+
+	It("should not inject when no session ID header is present", func() {
+		env := startBidiKVProxy()
+		env.decodeHandler.RawResponse = `{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"kv_transfer_params":{"remote_block_ids":[10,20],"remote_engine_id":"engine-abc"}}`
+
+		By("sending request without session ID header")
+		env.sendWithSession("")
+
+		By("verifying prefill received nil remote_engine_id (no cache injection)")
+		prq := env.prefillHandler.GetCompletionRequests()[0]
+		kv, ok := prq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+
+		By("sending a second request without session ID to confirm nothing was cached")
+		env.sendWithSession("")
+		prq2 := env.prefillHandler.GetCompletionRequests()[1]
+		kv2, ok := prq2[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kv2).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+	})
+
+	It("should not inject across different session IDs", func() {
+		env := startBidiKVProxy()
+		env.decodeHandler.RawResponse = `{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"kv_transfer_params":{"remote_block_ids":[10,20],"remote_engine_id":"engine-sess1"}}`
+
+		By("turn 1 with sess-1 populates the cache for sess-1")
+		env.sendWithSession("sess-1")
+
+		By("turn 2 with sess-2 should not receive sess-1 cached params")
+		env.sendWithSession("sess-2")
+
+		prq2 := env.prefillHandler.GetCompletionRequests()[1]
+		kv2, ok := prq2[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kv2).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+	})
+
+	It("should update cached params when decode returns new kv_transfer_params on a subsequent turn", func() {
+		env := startBidiKVProxy()
+
+		By("turn 1: decode returns params for engine-v1")
+		env.decodeHandler.RawResponse = `{"id":"chatcmpl-1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"kv_transfer_params":{"remote_block_ids":[1],"remote_engine_id":"engine-v1"}}`
+		env.sendWithSession("sess-update")
+
+		By("turn 2: decode returns params for engine-v2 (replaces engine-v1 in cache)")
+		env.decodeHandler.RawResponse = `{"id":"chatcmpl-2","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"kv_transfer_params":{"remote_block_ids":[2,3],"remote_engine_id":"engine-v2"}}`
+		env.sendWithSession("sess-update")
+
+		By("turn 3: prefill should receive engine-v2 (the most recent decode params)")
+		env.sendWithSession("sess-update")
+
+		prq3 := env.prefillHandler.GetCompletionRequests()[2]
+		kv3, ok := prq3[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(kv3).To(HaveKeyWithValue("remote_engine_id", "engine-v2"))
+		Expect(kv3["remote_block_ids"]).To(HaveLen(2))
+	})
+})

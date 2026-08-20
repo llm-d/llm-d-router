@@ -55,31 +55,36 @@ const (
 	MoRIIOFeatureEnabled = true
 
 	// Flags
-	port                      = "port"
-	modelServerPort           = "model-server-port"
-	vllmPort                  = "vllm-port"
-	dataParallelSize          = "data-parallel-size"
-	kvConnector               = "kv-connector"
-	ecConnector               = "ec-connector"
-	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
-	p2pConnectorPortFlag      = "p2p-connector-port"
-	enableP2PPull             = "enable-p2p-pull"
-	enableSSRFProtection      = "enable-ssrf-protection"
-	enablePrefillerSampling   = "enable-prefiller-sampling"
-	enableTLS                 = "enable-tls"
-	tlsInsecureSkipVerify     = "tls-insecure-skip-verify"
-	secureServing             = "secure-proxy"
-	certPath                  = "cert-path"
-	inferencePool             = "inference-pool"
-	poolGroup                 = "pool-group"
-	maxIdleConnsPerHost       = "max-idle-conns-per-host"
-	prefillMaxRetries         = "prefill-max-retries"
-	prefillRetryBackoff       = "prefill-retry-backoff"
-	decodeChunkSize           = "decode-chunk-size"
-	inlineConfiguration       = "configuration"
-	configurationFile         = "configuration-file"
-	tracingFlag               = "tracing"
-	metricsPort               = "metrics-port"
+	port                            = "port"
+	modelServerPort                 = "model-server-port"
+	vllmPort                        = "vllm-port"
+	dataParallelSize                = "data-parallel-size"
+	kvConnector                     = "kv-connector"
+	ecConnector                     = "ec-connector"
+	mooncakeBootstrapPortFlag       = "mooncake-bootstrap-port"
+	p2pConnectorPortFlag            = "p2p-connector-port"
+	enableP2PPull                   = "enable-p2p-pull"
+	enableBidirectionalKVXfer       = "enable-bidirectional-kv-xfer"
+	bidirectionalCacheSize          = "bidirectional-cache-size"
+	bidirectionalCacheTTL           = "bidirectional-cache-ttl"
+	bidirectionalSessionHeader      = "bidirectional-session-header"
+	bidirectionalRecomputeThreshold = "bidirectional-recompute-threshold"
+	enableSSRFProtection            = "enable-ssrf-protection"
+	enablePrefillerSampling         = "enable-prefiller-sampling"
+	enableTLS                       = "enable-tls"
+	tlsInsecureSkipVerify           = "tls-insecure-skip-verify"
+	secureServing                   = "secure-proxy"
+	certPath                        = "cert-path"
+	inferencePool                   = "inference-pool"
+	poolGroup                       = "pool-group"
+	maxIdleConnsPerHost             = "max-idle-conns-per-host"
+	prefillMaxRetries               = "prefill-max-retries"
+	prefillRetryBackoff             = "prefill-retry-backoff"
+	decodeChunkSize                 = "decode-chunk-size"
+	inlineConfiguration             = "configuration"
+	configurationFile               = "configuration-file"
+	tracingFlag                     = "tracing"
+	metricsPort                     = "metrics-port"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
@@ -109,29 +114,34 @@ const (
 
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
-	Port                    int      `json:"port,omitempty"`
-	ModelServerPort         int      `json:"model-server-port,omitempty"`
-	VLLMPort                int      `json:"vllm-port,omitempty"`
-	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
-	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
-	DataParallelSize        int      `json:"data-parallel-size,omitempty"`
-	KVConnector             string   `json:"kv-connector,omitempty"`
-	ECConnector             string   `json:"ec-connector,omitempty"`
-	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
-	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
-	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
-	SecureServing           *bool    `json:"secure-proxy,omitempty"`
-	CertPath                string   `json:"cert-path,omitempty"`
-	EnableTLS               []string `json:"enable-tls,omitempty"`
-	TLSInsecureSkipVerify   []string `json:"tls-insecure-skip-verify,omitempty"`
-	InferencePool           string   `json:"inference-pool,omitempty"`
-	PoolGroup               string   `json:"pool-group,omitempty"`
-	MaxIdleConnsPerHost     int      `json:"max-idle-conns-per-host,omitempty"`
-	PrefillMaxRetries       *int     `json:"prefill-max-retries,omitempty"`
-	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
-	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
-	Tracing                 *bool    `json:"tracing,omitempty"`
-	MetricsPort             int      `json:"metrics-port,omitempty"`
+	Port                            int      `json:"port,omitempty"`
+	ModelServerPort                 int      `json:"model-server-port,omitempty"`
+	VLLMPort                        int      `json:"vllm-port,omitempty"`
+	MooncakeBootstrapPort           int      `json:"mooncake-bootstrap-port,omitempty"`
+	P2PConnectorPort                int      `json:"p2p-connector-port,omitempty"`
+	DataParallelSize                int      `json:"data-parallel-size,omitempty"`
+	KVConnector                     string   `json:"kv-connector,omitempty"`
+	ECConnector                     string   `json:"ec-connector,omitempty"`
+	EnableSSRFProtection            *bool    `json:"enable-ssrf-protection,omitempty"`
+	EnablePrefillerSampling         *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableP2PPull                   *bool    `json:"enable-p2p-pull,omitempty"`
+	EnableBidirectionalKVXfer       *bool    `json:"enable-bidirectional-kv-xfer,omitempty"`
+	BidirectionalCacheSize          int      `json:"bidirectional-cache-size,omitempty"`
+	BidirectionalCacheTTL           string   `json:"bidirectional-cache-ttl,omitempty"`
+	BidirectionalSessionHeader      string   `json:"bidirectional-session-header,omitempty"`
+	BidirectionalRecomputeThreshold int      `json:"bidirectional-recompute-threshold,omitempty"`
+	SecureServing                   *bool    `json:"secure-proxy,omitempty"`
+	CertPath                        string   `json:"cert-path,omitempty"`
+	EnableTLS                       []string `json:"enable-tls,omitempty"`
+	TLSInsecureSkipVerify           []string `json:"tls-insecure-skip-verify,omitempty"`
+	InferencePool                   string   `json:"inference-pool,omitempty"`
+	PoolGroup                       string   `json:"pool-group,omitempty"`
+	MaxIdleConnsPerHost             int      `json:"max-idle-conns-per-host,omitempty"`
+	PrefillMaxRetries               *int     `json:"prefill-max-retries,omitempty"`
+	PrefillRetryBackoff             string   `json:"prefill-retry-backoff,omitempty"`
+	DecodeChunkSize                 int      `json:"decode-chunk-size,omitempty"`
+	Tracing                         *bool    `json:"tracing,omitempty"`
+	MetricsPort                     int      `json:"metrics-port,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -242,6 +252,12 @@ func NewOptions() *Options {
 			MoRIIORemoteHosts: nil,
 			MoRIIODPSizeLocal: 0,
 			MoRIIODecodeHosts: nil,
+
+			BidirectionalKVXfer:             false,
+			BidirectionalCacheSize:          4096,
+			BidirectionalCacheTTL:           480 * time.Second,
+			BidirectionalSessionHeader:      "x-session-token",
+			BidirectionalRecomputeThreshold: 64,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -275,6 +291,16 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
+	fs.BoolVar(&opts.BidirectionalKVXfer, enableBidirectionalKVXfer, opts.BidirectionalKVXfer,
+		"enable bidirectional KV cache transfer for multi-turn agentic workloads. The sidecar caches kv_transfer_params from each decode response, keyed by the EPP-injected session ID header, and injects them into subsequent prefill requests. Requires --kv-connector=nixlv2.")
+	fs.IntVar(&opts.BidirectionalCacheSize, bidirectionalCacheSize, opts.BidirectionalCacheSize,
+		"maximum number of sessions in the per-sidecar kv_transfer_params cache.")
+	fs.DurationVar(&opts.BidirectionalCacheTTL, bidirectionalCacheTTL, opts.BidirectionalCacheTTL,
+		"TTL for kv_transfer_params cache entries. Should match the vLLM engine's decoder_kv_blocks_ttl.")
+	fs.StringVar(&opts.BidirectionalSessionHeader, bidirectionalSessionHeader, opts.BidirectionalSessionHeader,
+		"request header carrying the session identifier EPP injects, used as the cache key.")
+	fs.IntVar(&opts.BidirectionalRecomputeThreshold, bidirectionalRecomputeThreshold, opts.BidirectionalRecomputeThreshold,
+		"minimum number of remote tokens required to trigger a D→P pull. Below this threshold, prefill recomputes locally instead of pulling to amortize transfer latency.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "The path to the certificate for secure proxy. The certificate and private key files are assumed to be named tls.crt and tls.key, respectively. If not set, and secureProxy is enabled, then a self-signed certificate is used (for testing).")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
@@ -664,6 +690,21 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--enable-p2p-pull requires --kv-connector=%s (got %q)", KVConnectorNIXLV2, opts.KVConnector)
 	}
 
+	if opts.BidirectionalKVXfer {
+		if opts.KVConnector != KVConnectorNIXLV2 {
+			return fmt.Errorf("--enable-bidirectional-kv-xfer requires --kv-connector=%s (got %q)", KVConnectorNIXLV2, opts.KVConnector)
+		}
+		if opts.BidirectionalCacheSize <= 0 {
+			return fmt.Errorf("--bidirectional-cache-size must be > 0 (got %d)", opts.BidirectionalCacheSize)
+		}
+		if opts.BidirectionalCacheTTL <= 0 {
+			return fmt.Errorf("--bidirectional-cache-ttl must be > 0 (got %s)", opts.BidirectionalCacheTTL)
+		}
+		if opts.BidirectionalRecomputeThreshold < 0 {
+			return fmt.Errorf("--bidirectional-recompute-threshold must be >= 0 (got %d)", opts.BidirectionalRecomputeThreshold)
+		}
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
@@ -803,6 +844,23 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull
+	}
+	if cfg.EnableBidirectionalKVXfer != nil && !opts.isFlagSet(enableBidirectionalKVXfer) {
+		opts.BidirectionalKVXfer = *cfg.EnableBidirectionalKVXfer
+	}
+	if cfg.BidirectionalCacheSize != 0 && !opts.isFlagSet(bidirectionalCacheSize) {
+		opts.BidirectionalCacheSize = cfg.BidirectionalCacheSize
+	}
+	if cfg.BidirectionalCacheTTL != "" && !opts.isFlagSet(bidirectionalCacheTTL) {
+		if d, err := time.ParseDuration(cfg.BidirectionalCacheTTL); err == nil {
+			opts.BidirectionalCacheTTL = d
+		}
+	}
+	if cfg.BidirectionalSessionHeader != "" && !opts.isFlagSet(bidirectionalSessionHeader) {
+		opts.BidirectionalSessionHeader = cfg.BidirectionalSessionHeader
+	}
+	if cfg.BidirectionalRecomputeThreshold != 0 && !opts.isFlagSet(bidirectionalRecomputeThreshold) {
+		opts.BidirectionalRecomputeThreshold = cfg.BidirectionalRecomputeThreshold
 	}
 
 	if cfg.SecureServing != nil && !opts.isFlagSet(secureServing) {

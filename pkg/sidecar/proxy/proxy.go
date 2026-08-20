@@ -33,6 +33,7 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -230,6 +231,26 @@ type Config struct {
 	// no effect with --kv-connector=offloading, where the tier is always present.
 	EnableP2PPull bool
 
+	// BidirectionalKVXfer enables bidirectional KV cache transfer for multi-turn
+	// agentic workloads. On each turn the decode response's kv_transfer_params are
+	// captured and cached; on the next turn they are injected into the prefill
+	// request so the prefill engine can pull cached KV from the decode pod via NIXL
+	// instead of recomputing the full conversation history. Requires nixlv2.
+	BidirectionalKVXfer bool
+	// BidirectionalCacheSize is the maximum number of sessions held in the
+	// per-sidecar kv_transfer_params cache.
+	BidirectionalCacheSize int
+	// BidirectionalCacheTTL is the TTL for cache entries. Should match the
+	// vLLM engine's decoder_kv_blocks_ttl (default 480s).
+	BidirectionalCacheTTL time.Duration
+	// BidirectionalSessionHeader is the request header EPP injects carrying the
+	// session identifier used as the cache key. Defaults to x-session-token.
+	BidirectionalSessionHeader string
+	// BidirectionalRecomputeThreshold is the minimum number of remote tokens
+	// required to trigger a D→P pull. Below this threshold, prefill recomputes
+	// locally instead of pulling to amortize transfer latency.
+	BidirectionalRecomputeThreshold int
+
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
@@ -352,12 +373,13 @@ type Server struct {
 	prefillerURLPrefix string
 	encoderURLPrefix   string
 
-	decoderProxy        http.Handler                          // decoder proxy handler
-	prefillerProxies    *lru.Cache[string, http.Handler]      // cached prefiller proxy handlers
-	encoderProxies      *lru.Cache[string, http.Handler]      // cached encoder proxy handlers
-	mooncakeEngineIDs   *lru.Cache[string, map[string]string] // cached mooncake dp_rank->engine_id per prefill host:port
-	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
-	forwardDataParallel bool                                  // Use special Data Parallel work around
+	decoderProxy        http.Handler                           // decoder proxy handler
+	prefillerProxies    *lru.Cache[string, http.Handler]       // cached prefiller proxy handlers
+	encoderProxies      *lru.Cache[string, http.Handler]       // cached encoder proxy handlers
+	mooncakeEngineIDs   *lru.Cache[string, map[string]string]  // cached mooncake dp_rank->engine_id per prefill host:port
+	conversationCache   *expirable.LRU[string, map[string]any] // session-id -> kv_transfer_params from decode response
+	dataParallelProxies map[string]http.Handler                // Proxies to other vLLM servers
+	forwardDataParallel bool                                   // Use special Data Parallel work around
 
 	prefillSamplerFn func(n int) int // allow test override
 
@@ -458,6 +480,11 @@ func NewProxy(config Config) *Server {
 		server.dpBasePort = basePort
 	}
 
+	if config.BidirectionalKVXfer {
+		server.conversationCache = expirable.NewLRU[string, map[string]any](
+			config.BidirectionalCacheSize, nil, config.BidirectionalCacheTTL,
+		)
+	}
 	server.setKVConnector()
 	if config.UseTLSForPrefiller {
 		server.prefillerURLPrefix = "https://"
@@ -525,6 +552,7 @@ func (s *Server) Clone() *Server {
 		prefillerProxies:    s.prefillerProxies,
 		encoderProxies:      s.encoderProxies,
 		mooncakeEngineIDs:   s.mooncakeEngineIDs,
+		conversationCache:   s.conversationCache,
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
