@@ -1293,3 +1293,118 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// newStubSchedulingEndpointWithRole creates a stub endpoint carrying the given
+// pod-role label (values: "prefill", "decode", "encode-prefill", etc.).
+func newStubSchedulingEndpointWithRole(name, role string) *stubSchedulingEndpoint {
+	ep := newStubSchedulingEndpoint(name)
+	ep.metadata.Labels = map[string]string{podRoleLabel: role}
+	return ep
+}
+
+// TestInFlightLoadProducer_PDRoleAwareLoad verifies that estimateRequestTokens
+// applies a role-based load split in P/D deployments:
+//   - prefill-only endpoint: ISL only   (output is the decode pod's cost)
+//   - decode-only endpoint:  OSL_est only (ISL was handled by the prefill pod)
+//   - no-role / combined:    ISL + OSL_est  (existing monolithic behavior)
+func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
+	t.Parallel()
+
+	// 4 input tokens; DefaultOutputRatio=1.5 -> output = round(4*1.5) = 6.
+	const inputTok = 4
+	const outputTok = 6 // round(4 * DefaultOutputRatio)
+
+	makeReq := func() *fwksched.InferenceRequest { return makeTokenRequest("r", inputTok) }
+
+	t.Run("prefill-only role -> ISL only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok), got)
+	})
+
+	t.Run("encode-prefill role -> ISL only", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("enc-prefill-pod", podRoleEncodePrefill)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok), got)
+	})
+
+	t.Run("decode-only role -> OSL_est only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(outputTok), got)
+	})
+
+	t.Run("decode-only role -> ISL only when addEstimatedOutputTokens=false", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		producer.addEstimatedOutputTokens = false
+		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok), got, "without output estimation there is no OSL signal; ISL is the only proxy")
+	})
+
+	t.Run("no role label -> ISL + OSL_est (monolithic)", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpoint("mono-pod") // no role label
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok+outputTok), got)
+	})
+
+	t.Run("combined role (prefill-decode) -> ISL + OSL_est", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("combined-pod", "prefill-decode")
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok+outputTok), got)
+	})
+}
+
+// TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest verifies the end-to-end
+// token-tracking path: a P/D request with role-labeled endpoints records ISL on
+// the prefill pod and OSL_est on the decode pod.
+func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	// 4 input tokens; DefaultOutputRatio=1.5 -> output = round(4*1.5) = 6.
+	req := makeTokenRequest("req-pd-role", 4)
+	prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
+	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefillEP}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decodeEP}},
+		},
+	}
+
+	_ = producer.PreRequest(ctx, req, res)
+
+	prefillID := fullEndpointName("prefill-pod")
+	decodeID := fullEndpointName("decode-pod")
+
+	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID),
+		"prefill pod: ISL only (it processes the input)")
+	require.Equal(t, int64(6), producer.tokenTracker.get(decodeID),
+		"decode pod: OSL_est only (it generates the output)")
+
+	// Drive lifecycle: StartOfStream releases prefill in full;
+	// EndOfStream releases decode.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID), "prefill released at StartOfStream")
+	require.Equal(t, int64(6), producer.tokenTracker.get(decodeID), "decode still holds OSL_est during generation")
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode released at EndOfStream")
+}
