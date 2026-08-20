@@ -253,8 +253,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// Record the client-facing model for every request, including forwarded-unchanged ones.
 	reqCtx.IncomingModelName = inferenceRequestBody.Model
 
-	err = d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody)
-	if err != nil {
+	if err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
 
@@ -376,6 +375,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
+// modelRewriteIfNeeded rewrites the model name in the payload when the resolved target
+// differs from the model the parser read out of the body, marking the body Mutated so
+// repackage can skip re-marshaling when nothing changed.
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
 	logger := log.FromContext(ctx)
 	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
@@ -395,16 +397,26 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 	if reqCtx.TargetModelName == "" {
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
-	mutated, err := rewriter.RewriteModelName(payload, reqCtx.TargetModelName)
+	if reqCtx.TargetModelName == inferenceRequestBody.Model {
+		return nil
+	}
+	rewritten, err := rewriter.RewriteModelName(payload, reqCtx.TargetModelName)
 	if err != nil {
 		return err
 	}
-	// Store the result back so repackage serializes the mutated payload.
-	inferenceRequestBody.Payload = mutated
+	inferenceRequestBody.Payload = rewritten
+	inferenceRequestBody.Mutated = true
 	return nil
 }
 
+// repackage re-serializes the request body when inferenceRequestBody was mutated since
+// parsing (see InferenceRequestBody.Mutated), skipping the marshal otherwise so the
+// originally received bytes are forwarded unchanged.
 func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	if !inferenceRequestBody.Mutated {
+		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
+		return nil
+	}
 	marshaler, ok := inferenceRequestBody.Payload.(fwkrh.Marshaler)
 	if !ok {
 		// Payload forwarded unchanged (raw or proto).
@@ -598,11 +610,12 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	startOfStream := !reqCtx.ResponseBodyStarted
 	reqCtx.ResponseBodyStarted = true
 	response := &fwkrc.Response{
-		RequestID:     reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
-		Headers:       reqCtx.Response.Headers,
-		StartOfStream: startOfStream,
-		EndOfStream:   endOfStream,
-		Usage:         reqCtx.Usage,
+		RequestID:      reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		Headers:        reqCtx.Response.Headers,
+		StartOfStream:  startOfStream,
+		EndOfStream:    endOfStream,
+		Usage:          reqCtx.Usage,
+		StreamedEvents: reqCtx.StreamedEvents,
 	}
 
 	if endOfStream {

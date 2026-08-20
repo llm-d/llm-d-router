@@ -33,34 +33,28 @@ type kvCacheIndexer interface {
 	KVBlockIndex() kvblock.Index
 }
 
-// computeBlockKeys hashes the request's TokenizedPrompt into per-prompt
+// computeBlockKeys hashes the request's TokenizedRequest into per-prompt
 // KV-block keys, folding CacheSalt into each prompt's first block. MM features
-// apply only to single-prompt requests; mmBlockIndices (block indices spanned
-// by MM content) is populated only in that case for hit attribution.
+// are carried per-prompt; mmBlockIndices (block indices spanned by MM content)
+// is populated only for single-prompt requests for hit attribution.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
 ) ([][]kvblock.BlockHash, []int, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil, nil
 	}
-	tp := request.Body.TokenizedPrompt
-	if tp == nil || len(tp.PerPromptTokens) == 0 {
+	tp := request.Body.TokenizedRequest
+	if tp == nil || len(tp.Prompts) == 0 {
 		return nil, nil, nil
 	}
 
 	var result [][]kvblock.BlockHash
 	var mmBlockIndices []int
-	for _, tokens := range tp.PerPromptTokens {
-		if len(tokens) == 0 {
+	for _, p := range tp.Prompts {
+		if len(p.TokenIDs) == 0 {
 			continue
 		}
-		// MM features apply only to single-prompt requests (chat); multi-prompt
-		// completions never carry multimodal content.
-		var mmf []fwkrh.MultiModalFeature
-		if len(tp.PerPromptTokens) == 1 {
-			mmf = tp.MultiModalFeatures
-		}
-		keys, mmIdx, err := computeBlockKeysForTokens(ctx, idx, tokens, mmf, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+		keys, mmIdx, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, blockSizeTokens)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -68,7 +62,7 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 			continue
 		}
 		result = append(result, keys)
-		if len(tp.PerPromptTokens) == 1 {
+		if len(tp.Prompts) == 1 {
 			mmBlockIndices = mmIdx
 		}
 	}

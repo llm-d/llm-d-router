@@ -191,8 +191,29 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
 	return &fwkrh.ParsedResponse{
-		Usage: usage,
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(chunk),
 	}, nil
+}
+
+// countStreamEvents counts the SSE data events in a chunk, excluding the terminator. An event
+// split across two chunks is counted with the half that carries the prefix; a split inside the
+// prefix drops the event and a split inside the terminator counts it, both a one-event error.
+func countStreamEvents(chunk []byte) int {
+	count := 0
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		if ok && !isStreamTerminator(content) {
+			count++
+		}
+	}
+	return count
+}
+
+// isStreamTerminator reports whether an SSE data payload is the [DONE] terminator, tolerating a
+// trailing \r left by CRLF line splitting.
+func isStreamTerminator(content []byte) bool {
+	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte("[DONE]"))
 }
 
 // determineAPITypeFromPath determines the API type based on the request path.
@@ -386,7 +407,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 			continue
 		}
 		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if bytes.Equal(content, []byte("[DONE]")) || !bytes.Contains(content, []byte("usage")) {
+		if isStreamTerminator(content) || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
 		if err := json.Unmarshal(content, &streamResponse); err != nil {

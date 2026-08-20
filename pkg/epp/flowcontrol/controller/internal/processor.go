@@ -383,6 +383,39 @@ func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contra
 	return true, stats
 }
 
+// recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
+// flow in the band, never per flow queue), plus the all-bands rollup in its own metric family when a global capacity
+// is configured. It reads a single Stats() snapshot; the data source is expected to move with the engine-merge
+// refactor, but the metric contract (names, labels, semantics) stays stable (#2102).
+//
+// Band capacities always resolve to a value (applyDefaults supplies a fallback), so every configured band reports.
+// Global capacity is optional, so its series is omitted when unset rather than reported as a misleading 0.
+func (p *Processor) recordCapacityUtilization() {
+	stats := p.registry.Stats()
+
+	for priority, band := range stats.PerPriorityBandStats {
+		priorityStr := strconv.Itoa(priority)
+		if band.CapacityRequests > 0 {
+			metrics.RecordFlowControlCapacityUtilizationRequests(priorityStr, p.poolName,
+				float64(band.Len)/float64(band.CapacityRequests))
+		}
+		if band.CapacityBytes > 0 {
+			metrics.RecordFlowControlCapacityUtilizationBytes(priorityStr, p.poolName,
+				float64(band.ByteSize)/float64(band.CapacityBytes))
+		}
+	}
+
+	// All-bands rollup, only when a global capacity is configured.
+	if stats.TotalCapacityRequests > 0 {
+		metrics.RecordFlowControlGlobalCapacityUtilizationRequests(p.poolName,
+			float64(stats.TotalLen)/float64(stats.TotalCapacityRequests))
+	}
+	if stats.TotalCapacityBytes > 0 {
+		metrics.RecordFlowControlGlobalCapacityUtilizationBytes(p.poolName,
+			float64(stats.TotalByteSize)/float64(stats.TotalCapacityBytes))
+	}
+}
+
 // dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
 // It applies the configured policies for each band to select an item and then attempts to dispatch it.
 // It returns true if an item was successfully dispatched, and false otherwise.
@@ -409,6 +442,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 
 	// Record pool saturation metric
 	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
+
+	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
+	p.recordCapacityUtilization()
 
 	priorities := p.registry.AllOrderedPriorityLevels()
 	ceilings := p.ceilingsBuffer(len(priorities))

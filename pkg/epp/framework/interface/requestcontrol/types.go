@@ -63,6 +63,12 @@ type Response struct {
 	ReqMetadata map[string]any
 	// Token usage counts parsed from the response body.
 	Usage requesthandling.Usage
+	// StreamedEvents is the running count of stream data events observed so far. It is the only
+	// length signal this record carries for a truncated stream, since a stream that never
+	// completes carries no usage block. Consumers must not treat zero as evidence that nothing
+	// was generated; requesthandling.ParsedResponse documents which parsers count and how the
+	// count deviates from the token count.
+	StreamedEvents int
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
 	// DynamicMetadata is a map of metadata that can be passed to the Envoy. It is populated into the dynamic

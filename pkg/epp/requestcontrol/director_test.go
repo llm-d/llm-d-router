@@ -422,6 +422,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
@@ -452,6 +453,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"model":  model,
 				"prompt": "critical prompt",
 			},
+			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -582,9 +584,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 			preRequestPlugins: []*mockPreRequestPlugin{{
 				name: "test-pre-request-plugin",
 				modifyFn: func(request *fwksched.InferenceRequest) {
-					if payloadMap, ok := request.Body.Payload.(fwkrh.PayloadMap); ok {
-						payloadMap["new_key"] = "new_value"
-					}
+					request.Body.MutatePayloadMap(func(m fwkrh.PayloadMap) {
+						m["new_key"] = "new_value"
+					})
 				},
 			}},
 		},
@@ -927,6 +929,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			inferenceObjectiveName:  "food-review-1",
+			wantRawBodyUnchanged:    true,
 		},
 		{
 			name: "request rejected by admission controller",
@@ -1110,6 +1113,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Error parsing the reqBodyMap, err is %v", err)
 				}
+				originalRawBody := append([]byte(nil), reqCtx.Request.RawBody...)
 
 				// Add appropriate path header based on request body content for path-based API detection
 				if _, hasPrompt := test.reqBodyMap["prompt"]; hasPrompt {
@@ -1167,6 +1171,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
 					}
+				}
+				if test.wantRawBodyUnchanged {
+					assert.Equal(t, originalRawBody, returnedReqCtx.Request.RawBody,
+						"reqCtx.Request.RawBody should be byte-identical to the input when no rewrite applies")
 				}
 				assert.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 			})
@@ -1648,7 +1656,10 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
+	// Each dispatch snapshots the accumulator, so every invocation carries the total at call time.
+	reqCtx.StreamedEvents = 5
 	director.HandleResponseBody(ctx, reqCtx, false)
+	reqCtx.StreamedEvents = 6
 	director.HandleResponseBody(ctx, reqCtx, false)
 
 	// Intermediate chunks (endOfStream=false) run asynchronously, wait for them.
@@ -1659,6 +1670,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "async response body plugins should have been called for intermediate chunks")
 
 	// Final chunk (endOfStream=true) runs synchronously (drains queue first).
+	reqCtx.StreamedEvents = 7
 	director.HandleResponseBody(ctx, reqCtx, true)
 
 	ps1.mu.Lock()
@@ -1674,6 +1686,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		assert.Equal(t, "test-req-id-for-streaming", resp.RequestID)
 		assert.Equal(t, reqCtx.Response.Headers, resp.Headers)
 		assert.Equal(t, "namespace1/test-pod-name", targetPods[i])
+		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
 		if i < 2 {
 			assert.False(t, resp.EndOfStream, "EndOfStream should be false for chunk %d", i)
 		} else {
