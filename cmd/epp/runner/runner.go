@@ -664,6 +664,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityBeta, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)
 	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadDataKey)
+	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, attrconcurrency.UncachedRequestTokensDataKey)
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, fwkplugin.StabilityBeta, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
 	fwkplugin.RegisterDeprecated(tokenizer.LegacyPluginType, fwkplugin.StabilityBeta, tokenizer.LegacyPluginFactory, "v0.9.0", "v0.11.0", tokenizer.PluginType) //nolint:staticcheck // deprecated in v0.9.0 (#863)
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, fwkplugin.StabilityBeta, mmproducer.Factory, mmproducer.ProducedKey)
