@@ -19,6 +19,7 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -253,7 +254,13 @@ func translateFlowControlOutcome(outcome types.QueueOutcome, err error, ttlPoolE
 	case types.QueueOutcomeDispatched:
 		return nil
 	case types.QueueOutcomeRejectedCapacity:
-		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+		headers := map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}
+		// The hint arrives pre-rounded to whole seconds; zero means the controller had no estimate.
+		var capErr *types.QueueCapacityError
+		if errors.As(err, &capErr) && capErr.RetryAfterHint > 0 {
+			headers[errcommon.RetryAfterHeaderKey] = strconv.FormatInt(int64(capErr.RetryAfterHint/time.Second), 10)
+		}
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: headers}
 	case types.QueueOutcomeRejectedNoEndpoints:
 		// No serving capacity exists (e.g. pool scaled to zero): signal genuine unavailability rather than backpressure.
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}

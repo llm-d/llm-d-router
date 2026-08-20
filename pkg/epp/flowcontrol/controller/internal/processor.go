@@ -99,6 +99,10 @@ type Processor struct {
 	// synchronization.
 	ceilings []float64
 
+	// drain tracks dispatch completion rates for the Retry-After hint attached to capacity rejections.
+	// Only accessed from the Run goroutine, so it needs no synchronization.
+	drain *drainEstimator
+
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
@@ -149,6 +153,7 @@ func NewProcessor(
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
 		reclamation:          reclamation,
+		drain:                newDrainEstimator(clock.Now()),
 	}
 	// Seeded so readers never handle a nil sample. The pool reads as non-empty until the first dispatch cycle observes
 	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
@@ -342,8 +347,10 @@ func (p *Processor) enqueue(item *FlowItem) {
 			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
 			"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
 			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
-			types.ErrRejected, types.ErrQueueAtCapacity))
+		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w", types.ErrRejected,
+			&types.QueueCapacityError{
+				RetryAfterHint: p.drain.retryAfterHint(stats, key.Priority, req.ByteSize(), p.clock.Now()),
+			}))
 		p.recordDrop(types.QueueOutcomeRejectedCapacity)
 		return
 	}
@@ -443,6 +450,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	if empty := len(pool) == 0; empty != p.regime.Load().empty {
 		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
+	p.drain.maybeFold(p.clock.Now())
 	saturation := p.saturationDetector.Saturation(ctx, pool)
 
 	// Record pool saturation metric
@@ -559,6 +567,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 	}
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+	p.drain.recordDispatch(key.Priority)
 	return nil
 }
 

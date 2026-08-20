@@ -342,6 +342,53 @@ func TestProcessor(t *testing.T) {
 			assert.Equal(t, types.QueueOutcomeRejectedCapacity, outcome, "The final outcome should be RejectedCapacity")
 			require.Error(t, err, "A capacity rejection should produce an error")
 			assert.ErrorIs(t, err, types.ErrQueueAtCapacity, "The error should be of type ErrQueueAtCapacity")
+			var capErr *types.QueueCapacityError
+			require.ErrorAs(t, err, &capErr, "The error should carry the typed capacity cause")
+			assert.Zero(t, capErr.RetryAfterHint, "No dispatches have been observed, so the rejection carries no hint")
+		})
+
+		t.Run("should attach a Retry-After hint to a capacity rejection after observed drain", func(t *testing.T) {
+			t.Parallel()
+			// --- ARRANGE ---
+			h := newTestHarness(t, testCleanupTick)
+			h.addQueue(testFlow)
+
+			// --- ACT ---
+			h.Start()
+			h.Go()
+			// Dispatch six items, then advance the fake clock so the next dispatch cycle folds them into the drain
+			// estimate: rate = 0.3 * (6 / 2s) = 0.9/s.
+			for i := range 6 {
+				item := h.newTestItem(fmt.Sprintf("req-drain-%d", i), testFlow, testTTL)
+				require.NoError(t, h.processor.Submit(item), "precondition: Submit should not fail")
+				outcome, err := h.waitForFinalization(item)
+				require.Equal(t, types.QueueOutcomeDispatched, outcome, "precondition: item should dispatch")
+				require.NoError(t, err)
+			}
+			h.clock.Step(2 * time.Second)
+			// A dispatch cycle at the stepped time performs the fold before this item dispatches, whether triggered by
+			// the ticker or by the item's own arrival.
+			foldItem := h.newTestItem("req-drain-fold", testFlow, testTTL)
+			require.NoError(t, h.processor.Submit(foldItem), "precondition: Submit should not fail")
+			outcome, err := h.waitForFinalization(foldItem)
+			require.Equal(t, types.QueueOutcomeDispatched, outcome, "precondition: item should dispatch")
+			require.NoError(t, err)
+
+			h.StatsFunc = func() contracts.AggregateStats {
+				return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
+				}}
+			}
+			rejected := h.newTestItem("req-drain-reject", testFlow, testTTL)
+			require.NoError(t, h.processor.Submit(rejected), "precondition: Submit should not fail")
+
+			// --- ASSERT ---
+			outcome, err = h.waitForFinalization(rejected)
+			assert.Equal(t, types.QueueOutcomeRejectedCapacity, outcome, "The final outcome should be RejectedCapacity")
+			var capErr *types.QueueCapacityError
+			require.ErrorAs(t, err, &capErr, "The error should carry the typed capacity cause")
+			assert.Equal(t, 2*time.Second, capErr.RetryAfterHint,
+				"A 0.9/s band drain projects a 1.11s wait for one slot, rounded up to 2s")
 		})
 
 		t.Run("should reject item on registry lookup failure", func(t *testing.T) {

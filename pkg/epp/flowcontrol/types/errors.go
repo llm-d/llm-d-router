@@ -18,6 +18,8 @@ package types
 
 import (
 	"errors"
+	"fmt"
+	"time"
 )
 
 // --- High-Level Outcome Errors ---
@@ -51,6 +53,24 @@ var (
 	// rejection reflects genuine unavailability rather than backpressure against a contended pool.
 	ErrNoEndpoints = errors.New("no endpoints available")
 )
+
+// QueueCapacityError is the cause carried by a QueueOutcomeRejectedCapacity finalization. It unwraps to
+// ErrQueueAtCapacity, so sentinel matching via `errors.Is` is unaffected, and additionally carries the controller's
+// advisory estimate of when the rejecting scope next has a free slot, for use as an HTTP Retry-After value.
+type QueueCapacityError struct {
+	// RetryAfterHint is the projected wait until one slot frees in the scope whose capacity check failed, in whole
+	// seconds. Zero means no estimate is available and no hint should be emitted.
+	RetryAfterHint time.Duration
+}
+
+func (e *QueueCapacityError) Error() string {
+	if e.RetryAfterHint > 0 {
+		return fmt.Sprintf("%s (projected wait %s)", ErrQueueAtCapacity.Error(), e.RetryAfterHint)
+	}
+	return ErrQueueAtCapacity.Error()
+}
+
+func (e *QueueCapacityError) Unwrap() error { return ErrQueueAtCapacity }
 
 // --- Post-Enqueue Eviction Errors ---
 

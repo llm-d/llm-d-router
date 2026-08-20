@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -352,13 +353,14 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		outcome      fctypes.QueueOutcome
-		err          error
-		ttlPoolEmpty bool
-		wantCode     string
-		wantReason   string
-		wantNil      bool
+		name           string
+		outcome        fctypes.QueueOutcome
+		err            error
+		ttlPoolEmpty   bool
+		wantCode       string
+		wantReason     string
+		wantRetryAfter string
+		wantNil        bool
 	}{
 		{
 			name:    "dispatched returns nil",
@@ -370,6 +372,21 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 			name:       "capacity rejection returns 429",
 			outcome:    fctypes.QueueOutcomeRejectedCapacity,
 			err:        fctypes.ErrQueueAtCapacity,
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonSaturated),
+		},
+		{
+			name:           "capacity rejection with a drain hint adds Retry-After",
+			outcome:        fctypes.QueueOutcomeRejectedCapacity,
+			err:            fmt.Errorf("%w: %w", fctypes.ErrRejected, &fctypes.QueueCapacityError{RetryAfterHint: 7 * time.Second}),
+			wantCode:       errcommon.ResourceExhausted,
+			wantReason:     string(errcommon.RequestDroppedReasonSaturated),
+			wantRetryAfter: "7",
+		},
+		{
+			name:       "capacity rejection with a zero hint omits Retry-After",
+			outcome:    fctypes.QueueOutcomeRejectedCapacity,
+			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, &fctypes.QueueCapacityError{}),
 			wantCode:   errcommon.ResourceExhausted,
 			wantReason: string(errcommon.RequestDroppedReasonSaturated),
 		},
@@ -483,6 +500,13 @@ func TestTranslateFlowControlOutcome(t *testing.T) {
 			if tt.wantReason != "" {
 				assert.Equal(t, tt.wantReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey],
 					"drop reason header should match")
+			}
+			if tt.wantRetryAfter == "" {
+				assert.NotContains(t, e.Headers, errcommon.RetryAfterHeaderKey,
+					"retry-after header should be absent without a capacity drain hint")
+			} else {
+				assert.Equal(t, tt.wantRetryAfter, e.Headers[errcommon.RetryAfterHeaderKey],
+					"retry-after header should carry the hint in delta-seconds")
 			}
 		})
 	}

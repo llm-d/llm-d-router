@@ -29,6 +29,10 @@ import (
 // reason a request was dropped by flow control.
 const RequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
 
+// RetryAfterHeaderKey is the HTTP response header carrying the advisory retry delay on capacity
+// rejections, in RFC 9110 delta-seconds.
+const RetryAfterHeaderKey = "retry-after"
+
 // RequestDroppedReason is the reason a request was rejected before dispatch or evicted after dispatch.
 type RequestDroppedReason string
 
