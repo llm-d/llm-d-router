@@ -407,7 +407,10 @@ var (
 				"Number of candidate endpoints whose metrics are missing or older than the staleness threshold, as of "+
 					"the most recent saturation evaluation. Recorded by the utilization saturation detector, which scores "+
 					"these endpoints as fully saturated in flow_control_pool_saturation (fail-closed): a nonzero value "+
-					"during a dispatch stall indicates a metrics collection problem rather than genuine overload.",
+					"during a dispatch stall indicates a metrics collection problem rather than genuine overload. "+
+					"This gauge carries no stage label and is written on every detector call, so it reflects the most "+
+					"recently evaluated stage; a reading of 0 does not rule out stale metrics in another stage. "+
+					"Per-stage stale accounting is tracked in #2475.",
 				compbasemetrics.ALPHA),
 		},
 		[]string{"detector"},

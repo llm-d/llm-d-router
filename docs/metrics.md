@@ -278,7 +278,10 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Description:** Number of candidate endpoints whose metrics are missing or older than the
     staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
     saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
-    `inference_extension_*` twin).
+    `inference_extension_*` twin). This gauge carries no `stage` label and is written on every
+    detector call, so it reflects the most recently evaluated stage. A reading of 0 does not rule
+    out stale metrics in another stage; per-stage stale accounting is tracked in
+    [#2475](https://github.com/llm-d/llm-d-router/issues/2475).
 *   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
     problem (scrape path, port, TLS, auth) rather than genuine overload.
 
