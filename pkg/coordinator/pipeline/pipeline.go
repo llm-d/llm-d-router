@@ -104,14 +104,23 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		start := time.Now()
 		var err error
 		func() {
-			// defer so a step panic still decrements the gauge; the panic
-			// continues to unwind into the chi Recoverer at the server edge.
-			defer coordmetrics.DecStepRunning(name)
+			// defer covers all three step-observability signals on every exit
+			// path (normal return, error return, panic). On panic recovery,
+			// step_errors_total records the failure under error_code=internal
+			// and the panic re-propagates into the chi Recoverer at the
+			// server edge.
+			defer func() {
+				d := time.Since(start)
+				coordmetrics.RecordStepDuration(name, d)
+				coordmetrics.DecStepRunning(name)
+				timings[idx] = stepTiming{name: name, duration: d}
+				if r := recover(); r != nil {
+					coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)
+					panic(r)
+				}
+			}()
 			err = step.Execute(ctx, reqCtx)
 		}()
-		duration := time.Since(start)
-		coordmetrics.RecordStepDuration(name, duration)
-		timings[idx] = stepTiming{name: name, duration: duration}
 		if err != nil {
 			if errors.Is(err, ErrPipelineDone) {
 				// Clean early exit (e.g. conditional-decode cache hit); not an

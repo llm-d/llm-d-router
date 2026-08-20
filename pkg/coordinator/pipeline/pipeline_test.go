@@ -189,7 +189,7 @@ func TestExecute_SuccessRecordsStepDuration(t *testing.T) {
 	require.InDelta(t, 0.0, stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeInternal), 1e-9)
 }
 
-func TestExecute_StepPanicBalancesRunningGauge(t *testing.T) {
+func TestExecute_StepPanicRecordsErrorAndBalancesGauge(t *testing.T) {
 	reg := newMetricsRegistry(t)
 	steps := []Step{
 		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error {
@@ -202,6 +202,10 @@ func TestExecute_StepPanicBalancesRunningGauge(t *testing.T) {
 		require.InDelta(t, 0.0,
 			mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"}),
 			1e-9, "step_running must be balanced back to 0 after a step panic",
+		)
+		require.InDelta(t, 1.0,
+			stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeInternal),
+			1e-9, "step_errors_total must record the panic under error_code=internal",
 		)
 	}()
 	_ = New(steps).Execute(context.Background(), &RequestContext{})
