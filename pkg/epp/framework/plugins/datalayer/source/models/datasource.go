@@ -39,11 +39,11 @@ type modelsDatasourceParams struct {
 	Interval string `json:"interval"`
 }
 
-// NewHTTPModelsDataSource constructs a ModelsDataSource with the given scheme and path.
-// InsecureSkipVerify defaults to true (matching the factory default).
-// Use this function directly in tests to bypass JSON parameter marshaling.
-func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*attrmodels.ModelResponse], error) {
-	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
+// NewHTTPModelsDataSource constructs a ModelsDataSource carrying the same defaults the factory
+// applies to an unconfigured models-data-source, for plugins that auto-create one.
+func NewHTTPModelsDataSource(name string) (*http.HTTPDataSource[*attrmodels.ModelResponse], error) {
+	return http.NewHTTPDataSource(defaultModelsScheme, defaultModelsPath,
+		http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
 		ModelsDataSourceType, name, parseModels)
 }
 

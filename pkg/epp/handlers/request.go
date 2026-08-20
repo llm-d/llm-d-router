@@ -38,10 +38,9 @@ import (
 func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *RequestContext, req *extProcPb.ProcessingRequest_RequestHeaders) error {
 	reqCtx.RequestReceivedTimestamp = time.Now()
 
-	// GET /v1/models is answered from the aggregated datalayer model list. It must not fall through
-	// to backend routing, which would answer from a single pod and miss models loaded elsewhere
-	// (e.g. LoRA adapters).
-	if handled, err := s.tryServeModelList(ctx, reqCtx, req); handled {
+	// Responders run before the EndOfStream fallback so they can intercept bodyless
+	// GETs (e.g. /v1/models) that would otherwise be routed to a random endpoint.
+	if handled, err := s.tryRespondLocally(ctx, reqCtx, req); handled {
 		return err
 	}
 

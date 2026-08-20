@@ -227,8 +227,7 @@ func (sdc *SaturationDetectorConfig) String() string {
 // DataLayerConfig contains the configuration of the DataLayer feature
 type DataLayerConfig struct {
 	// +optional
-	// InjectDefaults controls automatic injection of the default metrics source with its extractor
-	// and the default models source with its extractor.
+	// InjectDefaults controls automatic injection of the default metrics source and extractor.
 	// Defaults to true when omitted. Set to false to disable all default source injection.
 	InjectDefaults *bool `json:"injectDefaults,omitempty"`
 	// +optional

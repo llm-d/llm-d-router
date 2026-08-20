@@ -25,6 +25,7 @@ import (
 func NewConfig() *Config {
 	return &Config{
 		requestHeaderPlugins:     []fwkrc.RequestHeaderProcessor{},
+		responders:               []fwkrc.Responder{},
 		screeners:                []fwkrc.Screener{},
 		admissionPlugins:         []fwkrc.Admitter{},
 		dataProducerPlugins:      []fwkrc.DataProducer{},
@@ -37,6 +38,7 @@ func NewConfig() *Config {
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
 	requestHeaderPlugins     []fwkrc.RequestHeaderProcessor
+	responders               []fwkrc.Responder
 	screeners                []fwkrc.Screener
 	admissionPlugins         []fwkrc.Admitter
 	dataProducerPlugins      []fwkrc.DataProducer
@@ -48,6 +50,18 @@ type Config struct {
 // WithRequestHeaderPlugins sets the given plugins as the RequestHeaderProcessor plugins.
 func (c *Config) WithRequestHeaderPlugins(plugins ...fwkrc.RequestHeaderProcessor) *Config {
 	c.requestHeaderPlugins = plugins
+	return c
+}
+
+// Responders returns the plugins that may answer a request instead of routing it. The
+// ext-proc server offers each request to them before endpoint selection.
+func (c *Config) Responders() []fwkrc.Responder {
+	return c.responders
+}
+
+// WithResponders sets the given plugins as the Responder plugins.
+func (c *Config) WithResponders(plugins ...fwkrc.Responder) *Config {
+	c.responders = plugins
 	return c
 }
 
@@ -98,6 +112,9 @@ func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	for _, plugin := range pluginObjects {
 		if requestHeaderProcessor, ok := plugin.(fwkrc.RequestHeaderProcessor); ok {
 			c.requestHeaderPlugins = append(c.requestHeaderPlugins, requestHeaderProcessor)
+		}
+		if responder, ok := plugin.(fwkrc.Responder); ok {
+			c.responders = append(c.responders, responder)
 		}
 		if screener, ok := plugin.(fwkrc.Screener); ok {
 			c.screeners = append(c.screeners, screener)

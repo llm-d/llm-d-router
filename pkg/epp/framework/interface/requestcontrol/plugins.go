@@ -130,3 +130,31 @@ type RequestHeaderProcessor interface {
 	plugin.Plugin
 	RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error
 }
+
+// RequestLine identifies a request before any endpoint has been selected. It carries what
+// the ext-proc request headers phase provides, which is all a Responder can rely on: a
+// request answered here may have no body.
+type RequestLine struct {
+	Method string
+	// Path excludes the query string.
+	Path string
+}
+
+// LocalResponse is a complete HTTP response produced by a Responder.
+type LocalResponse struct {
+	StatusCode int
+	Headers    map[string]string
+	Body       []byte
+}
+
+// Responder answers a request before it is matched to a model server. The first non-nil
+// response wins. The order responders are asked in is unspecified, so two responders that
+// claim the same request produce an arbitrary winner.
+type Responder interface {
+	plugin.Plugin
+	// Respond returns a non-nil LocalResponse to answer the request directly; the request
+	// is never routed and no endpoint is selected. Return nil to decline, deferring to the
+	// remaining Responders and to normal routing once all decline. A non-nil error fails
+	// the request through the standard error path.
+	Respond(ctx context.Context, request *RequestLine, endpoints []datalayer.Endpoint) (*LocalResponse, error)
+}
