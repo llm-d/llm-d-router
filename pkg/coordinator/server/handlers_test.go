@@ -477,10 +477,9 @@ func TestHandleInference_OversizeBodyBalancesGauge(t *testing.T) {
 	srv.handleInference(rec, req)
 	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 
-	// mustRequestRunningGauge fails if the series is absent: pre-fix,
-	// IncRequestRunning is never called on the 413 path and the series does
-	// not exist. Post-fix, Inc at entry + Dec in defer touch the series and
-	// leave it at 0.
+	// The 413 path must touch request_running: mustRequestRunningGauge fails
+	// if the series is absent, so an omitted Inc on the pre-parse path is
+	// caught as a hard failure and cannot be read as a legitimate 0.
 	require.InDelta(t, 0.0,
 		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
 		1e-9, "gauge must be back at 0 for the unknown label after 413",
@@ -523,9 +522,8 @@ func TestHandleInference_ParsedModelSwapsLabel(t *testing.T) {
 }
 
 // mustRequestRunningGauge finds the request_running gauge series matching all
-// of labels in reg. A missing series is a test failure so promtestutil.ToFloat64
-// cannot silently see 0 when the series was never touched (which is the pre-fix
-// state on the pre-parse paths).
+// of labels in reg. A missing series fails the test, so an untouched series
+// cannot be mistaken for a legitimate 0 by promtestutil.ToFloat64.
 func mustRequestRunningGauge(t *testing.T, reg *prometheus.Registry, labels map[string]string) prometheus.Gauge {
 	t.Helper()
 	const name = "llm_d_coordinator_request_running"

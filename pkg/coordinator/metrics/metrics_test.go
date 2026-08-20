@@ -32,10 +32,9 @@ func TestWithLabel_AppendsAndDoesNotAliasBase(t *testing.T) {
 	require.Equal(t, []string{"model_name", "error_code"}, out)
 	require.Equal(t, []string{"model_name"}, base, "base must not be mutated")
 
-	// Future-proofing: even if base is later declared with extra capacity,
-	// two independent withLabel results must not share the base's backing
-	// array. That is exactly the aliasing hazard the outer defensive copy
-	// used to guard against.
+	// Even when base has extra capacity, two withLabel results must own
+	// separate backing arrays. A shared base would let the second call
+	// overwrite the first's extra element.
 	baseWithCap := make([]string, 1, 8)
 	baseWithCap[0] = "model_name"
 	o1 := withLabel(baseWithCap, "error_code")
