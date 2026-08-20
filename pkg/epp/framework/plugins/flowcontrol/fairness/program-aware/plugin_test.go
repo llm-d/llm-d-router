@@ -351,3 +351,54 @@ func TestDumpStateEmpty(t *testing.T) {
 	// With no programs the policy is trivially fair.
 	assert.Equal(t, 1.0, state.FairnessIndex)
 }
+
+func TestNewStrategy_TurnPriority(t *testing.T) {
+	strategy, err := newStrategy(Config{
+		Strategy:                      "turn-priority",
+		TurnPriorityTimeWeight:        0.25,
+		TurnPriorityInactivitySeconds: 120,
+	})
+	require.NoError(t, err)
+
+	tp, ok := strategy.(*turnPriorityStrategy)
+	require.True(t, ok)
+	assert.Equal(t, "turn-priority", tp.Name())
+	assert.Equal(t, 0.25, tp.timeWeight)
+	assert.Equal(t, 120.0, tp.inactivitySeconds)
+}
+
+func TestNewStrategy_UnknownRejected(t *testing.T) {
+	_, err := newStrategy(Config{Strategy: "nope"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "turn-priority")
+}
+
+func TestConfigValidate_TurnPriority(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"defaults", func(*Config) {}, ""},
+		{"weight zero", func(c *Config) { c.TurnPriorityTimeWeight = 0 }, ""},
+		{"weight one", func(c *Config) { c.TurnPriorityTimeWeight = 1 }, ""},
+		{"weight negative", func(c *Config) { c.TurnPriorityTimeWeight = -0.1 }, "turnPriorityTimeWeight"},
+		{"weight above one", func(c *Config) { c.TurnPriorityTimeWeight = 1.5 }, ""},
+		{"inactivity zero", func(c *Config) { c.TurnPriorityInactivitySeconds = 0 }, ""},
+		{"inactivity negative", func(c *Config) { c.TurnPriorityInactivitySeconds = -1 }, "turnPriorityInactivitySeconds"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tc.mutate(&cfg)
+			err := cfg.validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
