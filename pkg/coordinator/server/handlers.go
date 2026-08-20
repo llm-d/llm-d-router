@@ -59,9 +59,19 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	inflightModel := ""
 	coordmetrics.IncRequestRunning(inflightModel)
 	defer func() {
+		// A pipeline panic bypasses the err-branch call to IncRequestErrorTotal
+		// below; recovering here records the panic under error_code=internal
+		// and re-panics so chi Recoverer at the server edge still answers 500.
+		r := recover()
+		if r != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
+		}
 		coordmetrics.IncRequestTotal(model)
 		coordmetrics.RecordRequestDuration(model, time.Since(receivedAt))
 		coordmetrics.DecRequestRunning(inflightModel)
+		if r != nil {
+			panic(r)
+		}
 	}()
 
 	parseStart := time.Now()

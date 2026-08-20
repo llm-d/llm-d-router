@@ -326,6 +326,39 @@ func TestHandleInference_UpstreamErrorRecordsErrorCode(t *testing.T) {
 	)
 }
 
+func TestHandleInference_PipelinePanicRecordsErrorAndPropagates(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	panicky := stubStep{name: "prefill", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+		panic("boom")
+	}}
+	p := pipeline.New([]pipeline.Step{panicky})
+	srv, err := New(config.ServerConfig{}, p)
+	require.NoError(t, err)
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "pipeline panic must propagate out of handleInference so chi Recoverer at the server edge can answer 500")
+
+		require.InDelta(t, 1.0,
+			promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeInternal})),
+			1e-9, "request_error_total must record the panic under error_code=internal",
+		)
+		require.InDelta(t, 1.0,
+			promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+			1e-9, "request_total must still fire on panic so error-rate ratios stay meaningful",
+		)
+		require.InDelta(t, 0.0,
+			promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+			1e-9, "request_running must be balanced back to 0 after a panic",
+		)
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+}
+
 func TestHandleInference_MalformedBodyRecordsBadRequestWithUnknownModel(t *testing.T) {
 	reg := newMetricsRegistry(t)
 
