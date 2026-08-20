@@ -19,6 +19,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -36,13 +37,35 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 )
 
-// handlePassthrough is the chi NotFound catch-all: any path the coordinator
+// passthroughHandler is the chi NotFound catch-all: any path the coordinator
 // does not register (e.g. /v1/models, /v1/messages, /v1/responses, /v1/embeddings)
 // is reverse-proxied to the gateway with EPP-Profile: decode, so EPP dispatches
 // it to a decode pod. Method, body, query, and forwarded headers are preserved;
 // X-Request-Id is validated and replaced with a UUID if malformed, matching
 // handleInference's sanitization.
-func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
+type passthroughHandler struct {
+	gatewayURL *url.URL
+	transport  http.RoundTripper
+}
+
+// newPassthroughHandler resolves and validates the gateway target once, at
+// server construction, so a misconfigured gateway URL fails startup rather
+// than the first passthrough request.
+func newPassthroughHandler(gwClient *gateway.Client) (*passthroughHandler, error) {
+	if gwClient == nil {
+		return nil, errors.New("server: gateway client is required")
+	}
+	gatewayURL, err := url.Parse(gwClient.BaseURL())
+	if err != nil {
+		return nil, fmt.Errorf("server: parse gateway URL %q: %w", gwClient.BaseURL(), err)
+	}
+	if gatewayURL.Host == "" {
+		return nil, fmt.Errorf("server: gateway URL %q is missing a host", gwClient.BaseURL())
+	}
+	return &passthroughHandler{gatewayURL: gatewayURL, transport: gwClient.Transport()}, nil
+}
+
+func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
 	requestIDReplaced := !validRequestID.MatchString(requestID)
@@ -65,7 +88,7 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 		logger.V(logutil.DEFAULT).Info("could not clear write deadline", "error", err)
 	}
 
-	proxy := newPassthroughProxy(logger, s.gatewayURL, s.gwClient.Transport(), requestID)
+	proxy := newPassthroughProxy(logger, h.gatewayURL, h.transport, requestID)
 	proxy.ServeHTTP(w, r)
 }
 

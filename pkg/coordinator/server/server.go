@@ -18,12 +18,10 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
-	"net/url"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -84,20 +82,13 @@ type Server struct {
 	httpServer         *http.Server
 	pipeline           *pipeline.Pipeline
 	maxRequestBodySize int64
-	gwClient           *gateway.Client
-	gatewayURL         *url.URL
+	passthrough        *passthroughHandler
 }
 
 func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
-	if gwClient == nil {
-		return nil, errors.New("server: gateway client is required")
-	}
-	gatewayURL, err := url.Parse(gwClient.BaseURL())
+	passthrough, err := newPassthroughHandler(gwClient)
 	if err != nil {
-		return nil, fmt.Errorf("server: parse gateway URL %q: %w", gwClient.BaseURL(), err)
-	}
-	if gatewayURL.Host == "" {
-		return nil, fmt.Errorf("server: gateway URL %q is missing a host", gwClient.BaseURL())
+		return nil, err
 	}
 	maxBodySize := cfg.MaxRequestBodySize
 	if maxBodySize == 0 {
@@ -118,8 +109,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	s := &Server{
 		pipeline:           p,
 		maxRequestBodySize: maxBodySize,
-		gwClient:           gwClient,
-		gatewayURL:         gatewayURL,
+		passthrough:        passthrough,
 	}
 
 	r := chi.NewRouter()
@@ -133,7 +123,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(gateway.DefaultGeneratePath, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
-	r.NotFound(s.handlePassthrough)
+	r.NotFound(s.passthrough.ServeHTTP)
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,
