@@ -65,7 +65,7 @@ func TestNewDecodeProxy_MidStreamTruncationLogged(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	proxy := newDecodeProxy(logger, http.DefaultTransport, nil)
+	proxy, _ := newDecodeProxy(logger, http.DefaultTransport, nil)
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
 
 	mu.Lock()
@@ -99,7 +99,7 @@ func TestTimedRoundTripper_ExcludesStreamingBody(t *testing.T) {
 		record: func(d time.Duration) { recorded = d },
 	}
 	logger := funcr.New(func(_, _ string) {}, funcr.Options{})
-	proxy := newDecodeProxy(logger, rt, nil)
+	proxy, _ := newDecodeProxy(logger, rt, nil)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, upstream.URL, nil)
 	require.NoError(t, err)

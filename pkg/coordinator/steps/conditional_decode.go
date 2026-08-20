@@ -77,7 +77,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamConditionalDecode, d)
 		},
 	}
-	proxy := newDecodeProxy(logger, transport, func(resp *http.Response) error {
+	proxy, out := newDecodeProxy(logger, transport, func(resp *http.Response) error {
 		switch {
 		case resp.StatusCode == http.StatusPreconditionFailed:
 			cacheMiss = true
@@ -97,6 +97,12 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
 		return nil
+	}
+	if out.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, Cause: out.TransportErr}
+	}
+	if out.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, StatusCode: out.Status}
 	}
 
 	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")

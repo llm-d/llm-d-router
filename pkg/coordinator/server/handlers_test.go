@@ -326,6 +326,33 @@ func TestHandleInference_UpstreamErrorRecordsErrorCode(t *testing.T) {
 	)
 }
 
+func TestHandleInference_StreamedUpstreamErrorClassifiedAndNotOverwritten(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	// stubStep writes a streamed response body first, then returns an
+	// UpstreamStreamedError. The handler must classify it for
+	// request_error_total but must not call http.Error on top of the bytes
+	// already on the wire.
+	const streamedBody = "streamed 500 body from decode worker"
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusInternalServerError)
+		_, _ = rc.ResponseWriter.Write([]byte(streamedBody))
+		return &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p)
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "streamed status must survive: no http.Error overwrite")
+	require.Equal(t, streamedBody, rec.Body.String(), "streamed body must survive: no http.Error overwrite")
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeUpstream5xx})),
+		1e-9, "streamed upstream 5xx must classify as upstream_5xx in request_error_total",
+	)
+}
+
 func TestHandleInference_PipelinePanicRecordsErrorAndPropagates(t *testing.T) {
 	reg := newMetricsRegistry(t)
 

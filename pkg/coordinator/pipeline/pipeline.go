@@ -53,6 +53,29 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("%s: upstream returned HTTP %d", e.Step, e.StatusCode)
 }
 
+// UpstreamStreamedError signals that a streaming step (decode,
+// conditional-decode) saw an upstream failure after the response was already
+// committed to the client. The reverse proxy either streamed a 4xx/5xx body
+// from the worker (StatusCode carries that status) or wrote 502 via its
+// ErrorHandler on a transport failure (StatusCode is 0, Cause carries the
+// transport error). Callers must classify this for request_error_total /
+// step_errors_total but must not write another response body: the client is
+// already committed.
+type UpstreamStreamedError struct {
+	Step       string
+	StatusCode int
+	Cause      error
+}
+
+func (e *UpstreamStreamedError) Error() string {
+	if e.StatusCode == 0 {
+		return fmt.Sprintf("%s: upstream transport error: %v", e.Step, e.Cause)
+	}
+	return fmt.Sprintf("%s: upstream returned HTTP %d (response already streamed to client)", e.Step, e.StatusCode)
+}
+
+func (e *UpstreamStreamedError) Unwrap() error { return e.Cause }
+
 // Pipeline orchestrates the sequential execution of steps.
 type Pipeline struct {
 	steps []Step
@@ -167,6 +190,10 @@ var classifyOpts = coordmetrics.ClassifyOptions{
 		var u *UpstreamError
 		if errors.As(err, &u) {
 			return u.StatusCode, true
+		}
+		var s *UpstreamStreamedError
+		if errors.As(err, &s) {
+			return s.StatusCode, true
 		}
 		return 0, false
 	},

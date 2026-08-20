@@ -90,31 +90,53 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 	return proxyReq, nil
 }
 
-// newDecodeProxy builds the streaming reverse proxy for a decode-phase request.
-// modifyResponse, when non-nil, inspects each upstream response (the conditional
-// cache probe uses it to detect a 412). Transport errors are logged and answered
-// 502, except errCacheMiss, which is swallowed so the miss falls through.
+// decodeOutcome captures the visible result of a decode-phase proxy call.
+// Status is the upstream HTTP status observed via ModifyResponse (0 if the
+// round trip failed before headers). TransportErr carries a round-trip failure
+// (connection refused, timeout, TCP reset) after the ErrorHandler has already
+// answered 502. Both fields let the caller emit error metrics without another
+// write to the client, which is already committed by the proxy.
+type decodeOutcome struct {
+	Status       int
+	TransportErr error
+}
+
+// newDecodeProxy builds the streaming reverse proxy for a decode-phase request
+// and a decodeOutcome the caller reads after ServeHTTP returns. modifyResponse,
+// when non-nil, inspects each upstream response (the conditional cache probe
+// uses it to detect a 412) and runs after the outcome captures the status.
+// Transport errors are logged and answered 502, except errCacheMiss, which is
+// swallowed so the miss falls through.
 //
 // A failure after the upstream response has started streaming cannot become a
 // 502: the 200 status and partial body are already on the wire, so the proxy
 // aborts the connection (the client sees a truncated response). The stdlib only
 // surfaces that case through its ErrorLog, so ErrorLog is wired to the
 // request-scoped logger to make the truncation observable with the request id.
-func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
-		Director:       func(_ *http.Request) {},
-		FlushInterval:  -1,
-		Transport:      transport,
-		ModifyResponse: modifyResponse,
-		ErrorLog:       log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
+func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) (*httputil.ReverseProxy, *decodeOutcome) {
+	out := &decodeOutcome{}
+	proxy := &httputil.ReverseProxy{
+		Director:      func(_ *http.Request) {},
+		FlushInterval: -1,
+		Transport:     transport,
+		ModifyResponse: func(resp *http.Response) error {
+			out.Status = resp.StatusCode
+			if modifyResponse != nil {
+				return modifyResponse(resp)
+			}
+			return nil
+		},
+		ErrorLog: log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
 			if errors.Is(proxyErr, errCacheMiss) {
 				return
 			}
+			out.TransportErr = proxyErr
 			logger.Error(proxyErr, "proxy error")
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
+	return proxy, out
 }
 
 // proxyErrorLogWriter adapts the reverse proxy's *log.Logger sink to the

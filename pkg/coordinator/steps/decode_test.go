@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,8 +353,12 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 	}
 
 	err := step.Execute(context.Background(), reqCtx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	var streamed *pipeline.UpstreamStreamedError
+	if !errors.As(err, &streamed) {
+		t.Fatalf("expected *pipeline.UpstreamStreamedError, got %T (%v)", err, err)
+	}
+	if streamed.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected StatusCode=502 on the streamed error, got %d", streamed.StatusCode)
 	}
 
 	result := recorder.Result()
@@ -364,5 +369,45 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 	respBody, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(respBody), "upstream unavailable") {
 		t.Fatalf("expected error body forwarded, got: %s", string(respBody))
+	}
+}
+
+func TestDecodeStep_TransportError(t *testing.T) {
+	// Start a server, capture its URL, then close it: subsequent connects fail
+	// before any HTTP response arrives. This exercises the ErrorHandler branch
+	// of newDecodeProxy, not the ModifyResponse branch used by TestDecodeStep_GatewayError.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+	serverURL := server.URL
+	server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: serverURL})
+	step, _ := NewDecodeStep(gwClient, map[string]any{})
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		OriginalPath:     testChatCompletionsPath,
+		Model:            "test",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body:             map[string]any{"model": "test", "stream": false},
+		ResponseWriter:   recorder,
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	var streamed *pipeline.UpstreamStreamedError
+	if !errors.As(err, &streamed) {
+		t.Fatalf("expected *pipeline.UpstreamStreamedError, got %T (%v)", err, err)
+	}
+	if streamed.StatusCode != 0 {
+		t.Fatalf("transport error must carry StatusCode=0, got %d", streamed.StatusCode)
+	}
+	if streamed.Cause == nil {
+		t.Fatalf("transport error must carry Cause, got nil")
+	}
+
+	result := recorder.Result()
+	if result.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected ErrorHandler-written 502, got %d", result.StatusCode)
 	}
 }

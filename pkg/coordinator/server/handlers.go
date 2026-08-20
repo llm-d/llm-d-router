@@ -154,8 +154,14 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		logger.Error(err, "pipeline execution failed")
-		status, msg := classifyPipelineError(err, reqCtx.RequestID)
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, classifyOpts))
+		var streamed *pipeline.UpstreamStreamedError
+		if errors.As(err, &streamed) {
+			// Response bytes were already streamed to the client (or 502
+			// written by the reverse proxy's ErrorHandler); do not overwrite.
+			return
+		}
+		status, msg := classifyPipelineError(err, reqCtx.RequestID)
 		http.Error(w, msg, status)
 	}
 }
@@ -185,6 +191,10 @@ var classifyOpts = coordmetrics.ClassifyOptions{
 		var u *pipeline.UpstreamError
 		if errors.As(err, &u) {
 			return u.StatusCode, true
+		}
+		var s *pipeline.UpstreamStreamedError
+		if errors.As(err, &s) {
+			return s.StatusCode, true
 		}
 		return 0, false
 	},

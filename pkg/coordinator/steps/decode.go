@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -85,8 +86,14 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamDecode, d)
 		},
 	}
-	proxy := newDecodeProxy(logger, transport, nil)
+	proxy, out := newDecodeProxy(logger, transport, nil)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	if out.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, Cause: out.TransportErr}
+	}
+	if out.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: out.Status}
+	}
 	return nil
 }
 

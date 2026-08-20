@@ -222,8 +222,12 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	}
 
 	err := step.Execute(context.Background(), reqCtx)
-	if !errors.Is(err, pipeline.ErrPipelineDone) {
-		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	var streamed *pipeline.UpstreamStreamedError
+	if !errors.As(err, &streamed) {
+		t.Fatalf("expected *pipeline.UpstreamStreamedError, got %T (%v)", err, err)
+	}
+	if streamed.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected StatusCode=500 on the streamed error, got %d", streamed.StatusCode)
 	}
 
 	result := recorder.Result()
