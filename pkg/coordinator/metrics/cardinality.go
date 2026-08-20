@@ -31,15 +31,15 @@ const (
 )
 
 type boundedLabel struct {
-	mu   sync.RWMutex
-	seen map[string]struct{}
-	max  int
+	mu    sync.RWMutex
+	seen  map[string]struct{}
+	limit int
 }
 
-func newBoundedLabel(max int) *boundedLabel {
+func newBoundedLabel(limit int) *boundedLabel {
 	return &boundedLabel{
-		seen: make(map[string]struct{}),
-		max:  max,
+		seen:  make(map[string]struct{}),
+		limit: limit,
 	}
 }
 
@@ -50,7 +50,7 @@ func newBoundedLabel(max int) *boundedLabel {
 func (b *boundedLabel) bound(v string) string {
 	b.mu.RLock()
 	_, ok := b.seen[v]
-	full := len(b.seen) >= b.max
+	full := len(b.seen) >= b.limit
 	b.mu.RUnlock()
 	if ok {
 		return v
@@ -64,7 +64,7 @@ func (b *boundedLabel) bound(v string) string {
 	if _, ok := b.seen[v]; ok {
 		return v
 	}
-	if len(b.seen) >= b.max {
+	if len(b.seen) >= b.limit {
 		return overflowValue
 	}
 	b.seen[v] = struct{}{}
