@@ -43,7 +43,7 @@ func validatePipeline(p config.PipelineConfig) error {
 	return fmt.Errorf("pipeline.use_openai_format=false requires a %q step (the tokens-in format sends token IDs that render produces)", steps.RenderStepName)
 }
 
-func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector string) map[string]any {
+func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector string, dpSize int) map[string]any {
 	out := make(map[string]any, len(params))
 	for k, v := range params {
 		out[k] = v
@@ -53,6 +53,9 @@ func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector stri
 	}
 	if _, ok := out[steps.ParamECConnector]; !ok && ecConnector != "" {
 		out[steps.ParamECConnector] = ecConnector
+	}
+	if _, ok := out[steps.ParamDPSize]; !ok && dpSize > 0 {
+		out[steps.ParamDPSize] = dpSize
 	}
 	return out
 }
@@ -65,7 +68,7 @@ func Build(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Step, error
 
 	var pipelineSteps []pipeline.Step
 	for _, stepCfg := range cfg.Pipeline.Steps {
-		params := mergeConnectorDefaults(stepCfg.Params, cfg.Pipeline.KVConnector, cfg.Pipeline.ECConnector)
+		params := mergeConnectorDefaults(stepCfg.Params, cfg.Pipeline.KVConnector, cfg.Pipeline.ECConnector, cfg.Pipeline.DPSize)
 		if _, ok := params["use_openai_format"]; !ok {
 			params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
 		}

@@ -363,6 +363,16 @@ overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. T
 is read once on the first prefill request that uses the connector; a non-integer value is
 rejected in favor of the default and logged at error level.
 
+`kv-nixl` additionally supports `pipeline.dp_size` (default `1`, disabled), the model
+server's data-parallel world size. When set above 1, the prefill and decode step hash the
+request ID into a deterministic rank and set it as the `x-data-parallel-rank` header on
+both requests, propagating a rank the prefill response echoes back in
+`kv_transfer_params.remote_dp_rank` if present. This pins both legs of one disaggregated
+request to the same rank so a DP>1 backend that shares its HTTP port across ranks (for
+example via `SO_REUSEPORT`) does not split them across ranks, mirroring the
+llm-d-router sidecar's `nixlv2` connector. `kv-sglang` and `kv-shared-storage` ignore
+`dp_size`.
+
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
 

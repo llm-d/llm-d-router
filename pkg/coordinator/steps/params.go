@@ -27,7 +27,13 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
+	ParamDPSize      = "dp_size"
 )
+
+// defaultDPSize is the model server's data-parallel world size when dp_size
+// is not configured. 1 disables DP-rank pinning in the kv connectors that
+// support it.
+const defaultDPSize = 1
 
 const ModalityImage = "image"
 
@@ -102,6 +108,19 @@ func paramString(params map[string]any, key string) (string, error) {
 	default:
 		return "", fmt.Errorf("%s: expected string, got %T", key, v)
 	}
+}
+
+// paramDPSize reads the dp_size step parameter, defaulting to defaultDPSize
+// (DP disabled) when absent.
+func paramDPSize(params map[string]any) (int, error) {
+	v, ok, err := paramInt(params, ParamDPSize)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return defaultDPSize, nil
+	}
+	return v, nil
 }
 
 // paramBool reads a boolean step parameter. A missing key returns ok=false so

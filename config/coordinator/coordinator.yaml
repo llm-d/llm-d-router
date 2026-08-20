@@ -93,6 +93,15 @@ pipeline:
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
 
+  # dp_size is the kv-nixl model server's data-parallel world size. Only
+  # kv-nixl uses it: prefill and decode calls for one request are pinned to
+  # the same deterministic rank via the x-data-parallel-rank header, so a
+  # DP>1 backend that shares its HTTP port across ranks (e.g. via
+  # SO_REUSEPORT) serves both legs from the same rank. 1 (default) disables
+  # this and omits the header.
+  # env: COORDINATOR_PIPELINE_DP_SIZE
+  # dp_size: 1
+
   steps:
     # -------------------------------------------------------------------
     # replace-media-urls: first step. Downloads any http(s) image_url

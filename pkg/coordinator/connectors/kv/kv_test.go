@@ -25,7 +25,7 @@ import (
 )
 
 func TestSGLangKV_Params(t *testing.T) {
-	c, err := Build(SGLang)
+	c, err := Build(SGLang, 1)
 	if err != nil {
 		t.Fatalf("Build(%q): %v", SGLang, err)
 	}
@@ -71,18 +71,26 @@ func TestSGLangKV_Params(t *testing.T) {
 }
 
 func TestBuild_UnknownReturnsError(t *testing.T) {
-	if _, err := Build("does-not-exist"); err == nil {
+	if _, err := Build("does-not-exist", 1); err == nil {
 		t.Fatal("expected error for unknown connector")
 	}
 }
 
 func TestBuild_EmptyReturnsDefault(t *testing.T) {
-	c, err := Build("")
+	c, err := Build("", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Name() != DefaultKVConnectorName {
 		t.Fatalf("default = %q, want %q", c.Name(), DefaultKVConnectorName)
+	}
+}
+
+func TestBuild_RejectsInvalidDPSize(t *testing.T) {
+	for _, dpSize := range []int{0, -1} {
+		if _, err := Build(NIXL, dpSize); err == nil {
+			t.Errorf("Build(%q, %d): expected error for non-positive dp_size", NIXL, dpSize)
+		}
 	}
 }
 
@@ -126,7 +134,7 @@ func TestConnectors_KVParams(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := Build(tc.name)
+			c, err := Build(tc.name, 1)
 			if err != nil {
 				t.Fatalf("Build(%q): %v", tc.name, err)
 			}

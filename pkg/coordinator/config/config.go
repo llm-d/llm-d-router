@@ -58,6 +58,7 @@ type PipelineConfig struct {
 	KVConnector     string       `mapstructure:"kv_connector"`
 	ECConnector     string       `mapstructure:"ec_connector"`
 	UseOpenAIFormat bool         `mapstructure:"use_openai_format"`
+	DPSize          int          `mapstructure:"dp_size"`
 	Steps           []StepConfig `mapstructure:"steps"`
 }
 
@@ -83,6 +84,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("gateway.idle_conn_timeout", 90*time.Second)
 	v.SetDefault("gateway.timeout", 60*time.Second)
 	v.SetDefault("pipeline.use_openai_format", true)
+	v.SetDefault("pipeline.dp_size", 1)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)

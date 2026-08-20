@@ -55,7 +55,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	kvConn, err := kv.Build(kvName)
+	dpSize, err := paramDPSize(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	kvConn, err := kv.Build(kvName, dpSize)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
@@ -71,7 +75,12 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
+	var extraHeaders map[string]string
+	if rh, ok := s.kv.(kv.RankHeaderer); ok {
+		extraHeaders = rh.DecodeHeaders(ctx, reqCtx)
+	}
+
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, extraHeaders)
 	if err != nil {
 		return err
 	}

@@ -19,6 +19,12 @@ const (
 	// DataParallelEndpointHeader is the header name used to indicate the worker <ip:port> for Data Parallel
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
 
+	// DataParallelRankHeader pins a request to a specific vLLM data-parallel
+	// rank. Set on both legs of a disaggregated pair so a DP>1 backend that
+	// shares its HTTP port across ranks (e.g. via SO_REUSEPORT) serves both
+	// legs from the same rank instead of splitting them across ranks.
+	DataParallelRankHeader = "x-data-parallel-rank"
+
 	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port> holding
 	// the most cached prefix KV blocks for the request, to pull from over the P2P connector
 	// instead of recomputing them

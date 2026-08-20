@@ -55,6 +55,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
 		{"gateway.timeout", cfg.Gateway.Timeout, 60 * time.Second},
 		{"pipeline.use_openai_format", cfg.Pipeline.UseOpenAIFormat, true},
+		{"pipeline.dp_size", cfg.Pipeline.DPSize, 1},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -85,6 +86,12 @@ func TestLoadEnvOverride(t *testing.T) {
 			envKey: "COORDINATOR_PIPELINE_USE_OPENAI_FORMAT",
 			envVal: "false",
 			check:  func(c *Config) (any, any) { return c.Pipeline.UseOpenAIFormat, false },
+		},
+		{
+			name:   "nested int",
+			envKey: "COORDINATOR_PIPELINE_DP_SIZE",
+			envVal: "4",
+			check:  func(c *Config) (any, any) { return c.Pipeline.DPSize, 4 },
 		},
 	}
 	for _, tt := range tests {
