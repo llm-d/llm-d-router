@@ -117,6 +117,89 @@ func TestServer(t *testing.T) {
 	}
 }
 
+func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
+	model := testutil.MakeInferenceObjective("v1").
+		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
+
+	director := &testDirector{}
+	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
+
+	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
+	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	defer conn.Close()
+
+	headers := testutils.BuildEnvoyGRPCHeaders(map[string]string{
+		":method":      "POST",
+		":path":        "/v1/audio/speech",
+		"x-request-id": "test-request-id",
+	}, true)
+	require.NoError(t, process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: headers,
+		},
+	}))
+
+	requestBody := []byte(`{
+		"model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+		"input": "Stream this response.",
+		"stream": false,
+		"stream_format": "audio",
+		"response_format": "pcm"
+	}`)
+	require.NoError(t, process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestBody{
+			RequestBody: &pb.HttpBody{
+				Body:        requestBody,
+				EndOfStream: true,
+			},
+		},
+	}))
+
+	response, err := process.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, response.GetRequestHeaders())
+	response, err = process.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, response.GetRequestBody())
+	require.NotNil(t, director.lastInferenceRequestBody)
+	require.True(t, director.lastInferenceRequestBody.Stream)
+
+	headers = testutils.BuildEnvoyGRPCHeaders(map[string]string{
+		"content-type": "audio/pcm",
+	}, true)
+	require.NoError(t, process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_ResponseHeaders{
+			ResponseHeaders: headers,
+		},
+	}))
+	response, err = process.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, response.GetResponseHeaders())
+
+	chunks := [][]byte{[]byte("first audio chunk"), []byte("second audio chunk")}
+	for i, chunk := range chunks {
+		endOfStream := i == len(chunks)-1
+		require.NoError(t, sendResponseBody(process, chunk, endOfStream))
+
+		response, err = process.Recv()
+		require.NoError(t, err)
+		bodyResponse := response.GetResponseBody()
+		require.NotNil(t, bodyResponse)
+		streamedResponse := bodyResponse.Response.BodyMutation.GetStreamedResponse()
+		require.NotNil(t, streamedResponse)
+		require.Equal(t, chunk, streamedResponse.Body)
+		require.Equal(t, endOfStream, streamedResponse.EndOfStream)
+	}
+
+	require.Equal(t, 1, director.handleResponseBodyEndStreamCount)
+
+	cancel()
+	<-errChan
+	testListener.Close()
+}
+
 func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool, hasTrailers bool) {
 	t.Helper()
 
@@ -388,10 +471,7 @@ func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.Requ
 
 	// Populate SchedulingRequest for testing request-based streaming detection.
 	reqCtx.SchedulingRequest = &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{},
-	}
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		reqCtx.SchedulingRequest.Body.Stream = true
+		Body: inferenceRequestBody,
 	}
 
 	return reqCtx, nil

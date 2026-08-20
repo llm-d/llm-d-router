@@ -136,10 +136,19 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		extractedBody.Model = model
 	}
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		extractedBody.Stream = true
-	}
+	extractedBody.Stream = isStreamingRequest(apiType, bodyMap)
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
+	if stream, ok := bodyMap["stream"].(bool); ok && stream {
+		return true
+	}
+	if apiType != audioSpeechAPI {
+		return false
+	}
+	streamFormat, _ := bodyMap["stream_format"].(string)
+	return streamFormat == "sse" || streamFormat == "audio"
 }
 
 // RewriteModelName writes the resolved model into the request payload map.

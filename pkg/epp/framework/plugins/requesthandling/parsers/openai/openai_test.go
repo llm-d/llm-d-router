@@ -806,6 +806,78 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "text to speech request with SSE stream format",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":           "Stream this response as SSE.",
+				"stream":          false,
+				"stream_format":   "sse",
+				"response_format": "pcm",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response as SSE.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":           "Stream this response as SSE.",
+					"stream":          false,
+					"stream_format":   "sse",
+					"response_format": "pcm",
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "text to speech request with raw audio stream format",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":           "Stream this response as raw audio.",
+				"stream":          false,
+				"stream_format":   "audio",
+				"response_format": "wav",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response as raw audio.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":           "Stream this response as raw audio.",
+					"stream":          false,
+					"stream_format":   "audio",
+					"response_format": "wav",
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "text to speech request with stream and raw audio stream format",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":           "Stream this response.",
+				"stream":          true,
+				"stream_format":   "audio",
+				"response_format": "pcm",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":           "Stream this response.",
+					"stream":          true,
+					"stream_format":   "audio",
+					"response_format": "pcm",
+				},
+				Stream: true,
+			},
+		},
+		{
 			name:    "text to speech request with empty input",
 			headers: map[string]string{":path": "/v1/audio/speech"},
 			body: map[string]any{
@@ -1460,13 +1532,14 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 		},
 		{
 			name:  "Speech audio done event",
-			chunk: []byte("event: speech.audio.delta\ndata: {\"type\":\"speech.audio.delta\",\"delta\":\"UklGRg==\"}\n\nevent: speech.audio.done\ndata: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":12,\"output_tokens\":24,\"total_tokens\":36}}"),
+			chunk: []byte("event: speech.audio.delta\ndata: {\"type\":\"speech.audio.delta\",\"audio\":\"UklGRg==\",\"response_format\":\"pcm\"}\n\nevent: speech.audio.done\ndata: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":12,\"output_tokens\":24,\"total_tokens\":36}}"),
 			want: &fwkrh.ParsedResponse{
 				Usage: &fwkrh.Usage{
 					PromptTokens:     12,
 					CompletionTokens: 24,
 					TotalTokens:      36,
 				},
+				StreamedEvents: 2,
 			},
 		},
 	}
