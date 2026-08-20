@@ -174,7 +174,12 @@ func (fcac *FlowControlAdmissionController) Admit(
 		modelName:         reqCtx.IncomingModelName,
 	}
 
+	// Measure at the admission boundary: wall time around enqueue-and-wait covers queue residency plus
+	// dispatch handoff. Stamped on reqCtx for emission as the FlowQueueDuration response header.
+	start := time.Now()
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
+	reqCtx.FlowControlQueueDuration = time.Since(start)
+	reqCtx.FlowControlAdmitted = true
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
 	// A TTL expiry signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
