@@ -19,7 +19,6 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -90,6 +89,12 @@ func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
 	s.emitEndpointScores = enabled
 }
 
+// SetResponders sets the plugins that may answer a request instead of routing it. They are
+// asked in the given order.
+func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
+	s.responders = responders
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -99,10 +104,7 @@ type Director interface {
 
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
-	// AggregateModels returns the combined, deduplicated, alphabetically sorted model list across
-	// all endpoints as a pre-serialized JSON body, and the count of endpoints that have reported
-	// their model list. A count of zero means no endpoint has been scraped yet.
-	AggregateModels() (json.RawMessage, int)
+	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 }
 
 // Server implements the Envoy external processing server.
@@ -117,6 +119,8 @@ type StreamingServer struct {
 	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores bool
+	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
+	responders []fwkrc.Responder
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -204,11 +208,11 @@ const (
 	// requestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
 	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
 	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
-	RequestResponseProcessingSkipped
-	// RequestAnsweredLocal indicates EPP answered the request itself with an ImmediateResponse
-	// (e.g. GET /v1/models aggregated across endpoints) rather than routing to a backend model server.
-	// The state machine sends the stored response and gracefully closes the stream.
-	RequestAnsweredLocal
+	requestResponseProcessingSkipped
+	// requestAnsweredLocal indicates a Responder answered the request itself with an
+	// ImmediateResponse rather than routing it to a model server. The state machine sends the
+	// stored response and gracefully closes the stream.
+	requestAnsweredLocal
 )
 
 // recvResult holds the result of a srv.Recv() call from the reader goroutine.
@@ -628,7 +632,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// See: https://github.com/envoyproxy/envoy/blob/0533de0acca281110945e5726bbb306fbb12bde5/api/envoy/service/ext_proc/v3/external_processor.proto#L40-L41
 			return nil
 		}
-		if reqCtx.RequestState == RequestAnsweredLocal {
+		if reqCtx.requestState == requestAnsweredLocal {
 			// Request fully answered locally (e.g. GET /v1/models); close the gRPC stream without routing.
 			// The request never carries a model name, so model_name=""
 			fairnessID, priority := extractFairnessAndPriority(reqCtx)
@@ -746,7 +750,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 	}
 
 	// EPP produced the full response itself (e.g. GET /v1/models).
-	if r.RequestState == RequestAnsweredLocal {
+	if r.requestState == requestAnsweredLocal {
 		if r.localResp == nil {
 			return nil
 		}

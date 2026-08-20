@@ -25,10 +25,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
-	sourcemodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -303,52 +301,37 @@ func ensureSaturationDetector(
 	return nil
 }
 
-// defaultDataLayerSources are the source/extractor pairs injected into every configuration that does
-// not opt out. Metrics back scheduling decisions; models back the aggregated /v1/models response,
-// which the request path serves for every deployment and cannot satisfy without the model list.
-var defaultDataLayerSources = []struct {
-	source    string
-	extractor string
-}{
-	{source: sourcemetrics.MetricsDataSourceType, extractor: extractormetrics.MetricsExtractorType},
-	{source: sourcemodels.ModelsDataSourceType, extractor: attrmodels.ModelsExtractorType},
-}
-
-// ensureDataLayer additively injects the default sources and their extractors unless opted out.
+// ensureDataLayer additively injects the default metrics source and extractor unless opted out.
 // Unlike other ensureXxx functions, it checks for explicit opt-out via InjectDefaults and avoids
-// double-injection when a source is already present in a user-supplied config. Each pair is
-// considered independently, so declaring one default source does not suppress the others.
+// double-injection when the metrics source is already present in a user-supplied config.
 func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}
-
-	for _, def := range defaultDataLayerSources {
-		if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, def.source) {
-			continue
-		}
-
-		if _, ok := allPlugins[def.source]; !ok {
-			if err := registerDefaultPlugin(cfg, handle, def.source); err != nil {
-				return err
-			}
-		}
-		if _, ok := allPlugins[def.extractor]; !ok {
-			if err := registerDefaultPlugin(cfg, handle, def.extractor); err != nil {
-				return err
-			}
-		}
-
-		if cfg.DataLayer == nil {
-			cfg.DataLayer = &configapi.DataLayerConfig{}
-		}
-		cfg.DataLayer.Sources = append(cfg.DataLayer.Sources, configapi.DataLayerSource{
-			PluginRef: def.source,
-			Extractors: []configapi.DataLayerExtractor{{
-				PluginRef: def.extractor,
-			}},
-		})
+	if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, sourcemetrics.MetricsDataSourceType) {
+		return nil
 	}
+
+	if _, ok := allPlugins[sourcemetrics.MetricsDataSourceType]; !ok {
+		if err := registerDefaultPlugin(cfg, handle, sourcemetrics.MetricsDataSourceType); err != nil {
+			return err
+		}
+	}
+	if _, ok := allPlugins[extractormetrics.MetricsExtractorType]; !ok {
+		if err := registerDefaultPlugin(cfg, handle, extractormetrics.MetricsExtractorType); err != nil {
+			return err
+		}
+	}
+
+	if cfg.DataLayer == nil {
+		cfg.DataLayer = &configapi.DataLayerConfig{}
+	}
+	cfg.DataLayer.Sources = append(cfg.DataLayer.Sources, configapi.DataLayerSource{
+		PluginRef: sourcemetrics.MetricsDataSourceType,
+		Extractors: []configapi.DataLayerExtractor{{
+			PluginRef: extractormetrics.MetricsExtractorType,
+		}},
+	})
 
 	return nil
 }
