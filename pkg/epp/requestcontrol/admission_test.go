@@ -378,12 +378,12 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 	t.Run("flow control stamps duration on rejection", func(t *testing.T) {
 		t.Parallel()
 		reqCtx := newReqCtx()
-		fc := &mockFlowController{outcome: fctypes.QueueOutcomeRejectedCapacity}
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeRejectedCapacity, delay: 5 * time.Millisecond}
 		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
 
 		require.Error(t, ac.Admit(ctx, reqCtx, 0))
 		assert.True(t, reqCtx.FlowControlAdmitted)
-		assert.GreaterOrEqual(t, reqCtx.FlowControlQueueDuration, time.Duration(0))
+		assert.GreaterOrEqual(t, reqCtx.FlowControlQueueDuration, 5*time.Millisecond)
 	})
 
 	t.Run("legacy admission does not stamp", func(t *testing.T) {
