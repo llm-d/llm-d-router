@@ -662,6 +662,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		if reqCtx.RequestState == RequestAnsweredLocal {
 			// Request fully answered locally (e.g. GET /v1/models); close the gRPC stream without routing.
+			// The request never carries a model name, so model_name=""
+			fairnessID, priority := extractFairnessAndPriority(reqCtx)
+			metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, reqCtx.Priority)
+			metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestSize)
 			recordRequestProcessing()
 			return nil
 		}
