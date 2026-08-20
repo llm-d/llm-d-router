@@ -169,7 +169,7 @@ func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) 
 		return 0, errors.New("request or request body is nil")
 	}
 
-	if tp := request.Body.TokenizedPrompt; tp != nil {
+	if tp := request.Body.TokenizedRequest; tp != nil {
 		return tp.TokenCount(), nil
 	}
 	return 0, nil

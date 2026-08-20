@@ -48,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -136,6 +137,7 @@ type RequestContext struct {
 	RequestSize                int
 	Usage                      fwkrh.Usage
 	ResponseSize               int
+	StreamedEvents             int
 	ResponseBodyStarted        bool
 	ResponseComplete           bool
 	ResponseStatusCode         string
@@ -147,6 +149,9 @@ type RequestContext struct {
 
 	RequestState         StreamRequestState
 	RequestDroppedReason errcommon.RequestDroppedReason
+	// TerminationCause is set only when the stream ends without completing; the end-of-stream
+	// response record defaults an unset cause to a natural completion.
+	TerminationCause     fwkrc.TerminationCause
 	modelServerStreaming bool
 
 	// responseProcessingDuration is the EPP cost of handling the response. For a
@@ -240,6 +245,19 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 		}
 	}
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+}
+
+// terminationCause classifies a stream that ended without completing. ctxErr is the request
+// context's error, which is non-nil once Envoy has torn the stream down under the EPP.
+func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+	switch {
+	case reqCtx.RequestState == RequestEvicted:
+		return fwkrc.TerminationCauseEvicted
+	case ctxErr != nil:
+		return fwkrc.TerminationCauseClientDisconnect
+	default:
+		return fwkrc.TerminationCauseError
+	}
 }
 
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
@@ -372,6 +390,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		// If we scheduled a pod (TargetPod != nil) but never marked the response  as complete (e.g. error, disconnect,
 		// panic), force the completion hooks to run.
 		if reqCtx.TargetPod != nil && !reqCtx.ResponseComplete {
+			reqCtx.TerminationCause = terminationCause(reqCtx, ctx.Err())
 			// Use a fresh context as the request context might be canceled (Client Disconnect).
 			// We only need logging from the original context.
 			cleanupCtx := log.IntoContext(context.Background(), logger)
@@ -539,7 +558,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -610,7 +629,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
 	if !modelStreaming {
 		// Rewrite the model name in response body back to the original client-facing name.
-		body = rewriteModelName(body, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+		body, _ = rewriteModelName(body, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
@@ -627,20 +646,25 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 // incoming (client-facing) model name in the response body bytes. This ensures clients
 // see the model name they originally requested, not the internal backend model name.
 // It is a no-op when the names are identical or either is empty.
-func rewriteModelName(body []byte, targetModel, incomingModel string) []byte {
+// rewriteModelName replaces the target model name with the client-facing incoming model
+// name in body. It reports whether it mutated body, so callers can skip re-sending a copy
+// when nothing changed.
+func rewriteModelName(body []byte, targetModel, incomingModel string) ([]byte, bool) {
 	if targetModel == "" || incomingModel == "" || targetModel == incomingModel {
-		return body
+		return body, false
 	}
 	old := []byte(`"model":"` + targetModel + `"`)
 	new := []byte(`"model":"` + incomingModel + `"`)
-	result := bytes.ReplaceAll(body, old, new)
-	if !bytes.Equal(result, body) {
-		return result
+	if bytes.Contains(body, old) {
+		return bytes.ReplaceAll(body, old, new), true
 	}
 	// Also handle the case where JSON has spaces after the colon: "model": "..."
 	old = []byte(`"model": "` + targetModel + `"`)
 	new = []byte(`"model": "` + incomingModel + `"`)
-	return bytes.ReplaceAll(body, old, new)
+	if bytes.Contains(body, old) {
+		return bytes.ReplaceAll(body, old, new), true
+	}
+	return body, false
 }
 
 // updateStateAndSendIfNeeded checks state and can send multiple responses in a single pass, but only if ordered properly.
