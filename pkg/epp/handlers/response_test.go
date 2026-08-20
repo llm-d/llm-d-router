@@ -291,7 +291,7 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 		TargetModelName:           "target-model",
 		Priority:                  3,
 		RequestReceivedTimestamp:  timeBaseline,
-		ResponseCompleteTimestamp: timeBaseline.Add(time.Second),
+		responseCompleteTimestamp: timeBaseline.Add(time.Second),
 		Response: &Response{
 			Headers: map[string]string{},
 		},
@@ -642,7 +642,7 @@ func TestResponseSizeAccumulation(t *testing.T) {
 				endOfStream := i == len(tt.chunks)-1
 				server.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 			}
-			assert.Equal(t, tt.wantResponseSize, reqCtx.ResponseSize)
+			assert.Equal(t, tt.wantResponseSize, reqCtx.responseSize)
 		})
 	}
 }
