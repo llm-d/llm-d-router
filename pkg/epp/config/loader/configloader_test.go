@@ -502,6 +502,19 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - Flow Control No-Endpoint TTL Follows Default",
+			configText: successFlowControlInheritedTTLText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, _ *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.FlowControlConfig, "FlowControl config should have been loaded")
+				require.NotNil(t, cfg.FlowControlConfig.Controller, "Controller config should be present")
+				require.Equal(t, time.Duration(0), cfg.FlowControlConfig.Controller.DefaultRequestTTL,
+					"an explicit 0s should disable eviction while the pool has endpoints")
+				require.Equal(t, time.Duration(0), cfg.FlowControlConfig.Controller.NoEndpointRequestTTL,
+					"an unset no-endpoint budget should follow defaultRequestTTL, so 0s disables eviction in both regimes")
+			},
+		},
+		{
 			name:       "Success - Picker Before Scorer",
 			configText: successPickerBeforeScorerText,
 			wantErr:    false,
@@ -526,6 +539,8 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Equal(t, uint64(1024), cfg.FlowControlConfig.Registry.MaxBytes, "MaxBytes should match yaml")
 				require.NotNil(t, cfg.FlowControlConfig.Controller, "Controller config should be present")
 				require.Equal(t, 1*time.Minute, cfg.FlowControlConfig.Controller.DefaultRequestTTL, "DefaultRequestTTL should match yaml")
+				require.Equal(t, 5*time.Minute, cfg.FlowControlConfig.Controller.NoEndpointRequestTTL,
+					"NoEndpointRequestTTL should match yaml")
 				require.Equal(t, 1*time.Second, cfg.FlowControlConfig.Controller.ExpiryCleanupInterval, "ExpiryCleanupInterval should use default")
 
 				// Verify plugins were injected into the Raw Config.

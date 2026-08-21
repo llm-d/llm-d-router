@@ -370,13 +370,15 @@ var (
 			Name:      "flow_control_pool_saturation",
 			Help: metricsutil.HelpMsgWithStability(
 				"[Deprecated: Use llm_d_epp_flow_control_pool_saturation] Pool saturation signal gating Flow Control "+
-					"dispatch. 1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
+					"dispatch. The stage label partitions by pipeline role: 'prefill' and 'decode' are per-stage "+
+					"signals, 'effective' is max(prefill, decode) and is the value used for gating. "+
+					"1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
 					"past it. An empty pool reads as 1.0. With the default utilization detector, endpoints with missing "+
 					"or stale metrics score as fully saturated (fail-closed; see "+
 					"llm_d_epp_flow_control_stale_endpoints).",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"inference_pool", "stage"},
 	)
 )
 
@@ -464,6 +466,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
+		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
 		metrics.Registry.MustRegister(llmdResponseProcessingLatency)
 		metrics.Registry.MustRegister(inferenceExtensionInfo)
@@ -481,9 +484,18 @@ func Register(customCollectors ...prometheus.Collector) {
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
+		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationsIssuedTotal)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationsTotal)
+		metrics.Registry.MustRegister(llmdFlowControlReclaimTarget)
+		metrics.Registry.MustRegister(llmdFlowControlPendingReclaim)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationConfirmationDuration)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
@@ -539,6 +551,7 @@ func Reset() {
 	llmdSchedulerAttemptsTotal.Reset()
 	pluginProcessingLatencies.Reset()
 	llmdPluginProcessingLatencies.Reset()
+	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
 	llmdResponseProcessingLatency.Reset()
 	inferenceExtensionInfo.Reset()
@@ -552,11 +565,20 @@ func Reset() {
 	flowControlPoolSaturation.Reset()
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
+	llmdFlowControlCapacityUtilizationRequests.Reset()
+	llmdFlowControlCapacityUtilizationBytes.Reset()
+	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
+	llmdFlowControlGlobalCapacityUtilizationBytes.Reset()
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
 	llmdFlowControlDispatchCycleDuration.Reset()
 	llmdFlowControlRequestsTotal.Reset()
+	llmdFlowControlRevocationsIssuedTotal.Reset()
+	llmdFlowControlRevocationsTotal.Reset()
+	llmdFlowControlReclaimTarget.Reset()
+	llmdFlowControlPendingReclaim.Reset()
+	llmdFlowControlRevocationConfirmationDuration.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	DataLayerPollErrorsTotal.Reset()
@@ -838,6 +860,18 @@ func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string
 	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
 }
 
+// Access kinds for RecordPluginDataScopeViolation.
+const (
+	DataScopeAccessRead  = "read"
+	DataScopeAccessWrite = "write"
+)
+
+// RecordPluginDataScopeViolation records an endpoint attribute access rejected
+// because the plugin did not declare the DataKey.
+func RecordPluginDataScopeViolation(extensionPoint, pluginType, pluginName, access string) {
+	llmdPluginDataScopeViolations.WithLabelValues(extensionPoint, pluginType, pluginName, access).Inc()
+}
+
 func RecordInferenceExtensionInfo(commitSha, buildRef string) {
 	inferenceExtensionInfo.WithLabelValues(commitSha, buildRef).Set(1)
 	llmdInferenceExtensionInfo.WithLabelValues(commitSha, buildRef).Set(1)
@@ -918,10 +952,17 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 	llmdFlowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Sub(float64(bytes))
 }
 
-// RecordFlowControlPoolSaturation records the current saturation level for an inference pool.
-func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
-	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
-	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+// RecordFlowControlPoolSaturation records the current saturation level for an inference pool
+// partitioned by pipeline stage ("prefill", "decode", or "effective").
+func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation float64) {
+	flowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+}
+
+// DeleteFlowControlPoolSaturation removes the saturation gauge series for a pool/stage pair.
+func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
+	flowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
+	llmdFlowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
 }
 
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
@@ -930,9 +971,70 @@ func RecordFlowControlStaleEndpoints(detector string, count int) {
 	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
 }
 
+// RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
+// (occupancy/effective capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default
+// when unconfigured, so every configured band reports a series.
+func RecordFlowControlCapacityUtilizationRequests(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationRequests.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlCapacityUtilizationBytes sets the byte-size capacity utilization ratio (occupancy/effective
+// capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default when unconfigured, so
+// every configured band reports a series.
+func RecordFlowControlCapacityUtilizationBytes(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationBytes.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlGlobalCapacityUtilizationRequests sets the all-bands request-count capacity utilization ratio
+// (occupancy/global capacity, 0.0-1.0). Global capacity is optional, so callers only invoke this when one is
+// configured; otherwise no series is emitted rather than a misleading 0.
+func RecordFlowControlGlobalCapacityUtilizationRequests(inferencePool string, ratio float64) {
+	llmdFlowControlGlobalCapacityUtilizationRequests.WithLabelValues(inferencePool).Set(ratio)
+}
+
+// RecordFlowControlGlobalCapacityUtilizationBytes sets the all-bands byte-size capacity utilization ratio
+// (occupancy/global capacity, 0.0-1.0). Global capacity is optional, so callers only invoke this when one is
+// configured; otherwise no series is emitted rather than a misleading 0.
+func RecordFlowControlGlobalCapacityUtilizationBytes(inferencePool string, ratio float64) {
+	llmdFlowControlGlobalCapacityUtilizationBytes.WithLabelValues(inferencePool).Set(ratio)
+}
+
 // IncFlowControlRequestsTotal increments the total request counter for a given outcome.
 func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
 	llmdFlowControlRequestsTotal.WithLabelValues(outcome, priority, inferencePool).Inc()
+}
+
+// Terminal revocation outcomes for the flow control revocations counter. Every issued revocation
+// eventually increments exactly one outcome.
+const (
+	RevocationOutcomeConfirmed = "confirmed"
+	RevocationOutcomeTimedOut  = "timed_out"
+)
+
+// RecordFlowControlRevocationsIssued counts revocations at issue time, labeled by the demand
+// band's priority.
+func RecordFlowControlRevocationsIssued(inferencePool, priority string, n int) {
+	llmdFlowControlRevocationsIssuedTotal.WithLabelValues(priority, inferencePool).Add(float64(n))
+}
+
+// RecordFlowControlRevocations increments the revocation counter for a terminal outcome.
+func RecordFlowControlRevocations(inferencePool, outcome string, n int) {
+	llmdFlowControlRevocationsTotal.WithLabelValues(outcome, inferencePool).Add(float64(n))
+}
+
+// RecordFlowControlReclaimTarget records the last computed reclamation deficit.
+func RecordFlowControlReclaimTarget(inferencePool string, target float64) {
+	llmdFlowControlReclaimTarget.WithLabelValues(inferencePool).Set(target)
+}
+
+// RecordFlowControlPendingReclaim records the capacity debited for unconfirmed revocations.
+func RecordFlowControlPendingReclaim(inferencePool string, pending float64) {
+	llmdFlowControlPendingReclaim.WithLabelValues(inferencePool).Set(pending)
+}
+
+// RecordFlowControlRevocationConfirmationDuration records issue-to-confirmation latency.
+func RecordFlowControlRevocationConfirmationDuration(inferencePool string, duration time.Duration) {
+	llmdFlowControlRevocationConfirmationDuration.WithLabelValues(inferencePool).Observe(duration.Seconds())
 }
 
 // DeleteFlowControlFlowSeries removes every flow-control series labeled with the given fairness ID

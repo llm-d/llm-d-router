@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -935,3 +936,54 @@ func findEndpoints(endpoints []fwksched.Endpoint, names ...k8stypes.NamespacedNa
 	}
 	return res
 }
+
+// declaringScorer reads one attribute and declares it, standing in for every
+// real scorer that consumes producer output.
+type declaringScorer struct {
+	key   fwkplugin.DataKey
+	reads map[string]bool
+}
+
+func (s *declaringScorer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "declaring-scorer", Name: "declaring-scorer"}
+}
+
+func (s *declaringScorer) Category() fwksched.ScorerCategory { return fwksched.Distribution }
+
+func (s *declaringScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{s.key: nil}}
+}
+
+func (s *declaringScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
+	for _, endpoint := range endpoints {
+		_, ok := endpoint.Get(s.key)
+		s.reads[endpoint.GetMetadata().ID.Name] = ok
+		scores[endpoint] = 1
+	}
+	return scores
+}
+
+// A scorer's declarations live on the plugin, not on the WeightedScorer that
+// carries its weight; scoping the wrapper would deny every declared read.
+func TestRunScorer_ScopesTheWrappedPluginDeclarations(t *testing.T) {
+	key := fwkplugin.NewDataKey("declared", "some-producer")
+
+	attrs := fwkdl.NewAttributes()
+	attrs.Put(key, testScoreAttr("value"))
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "ep-1"}},
+		&fwkdl.Metrics{}, attrs)
+
+	scorer := &declaringScorer{key: key, reads: map[string]bool{}}
+	scores := runScorer(context.Background(), nil, false,
+		NewWeightedScorer(scorer, 1), &fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
+
+	assert.True(t, scorer.reads["ep-1"], "a weighted scorer must still reach the key it declares")
+	assert.Equal(t, map[fwksched.Endpoint]float64{endpoint: 1}, scores,
+		"scores must come back keyed by the original endpoint")
+}
+
+type testScoreAttr string
+
+func (a testScoreAttr) Clone() fwkdl.Cloneable { return a }

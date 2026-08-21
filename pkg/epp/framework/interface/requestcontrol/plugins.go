@@ -80,10 +80,12 @@ type ResponseHeaderProcessor interface {
 //   - For non-streaming: Invoked once with response.EndOfStream set to true.
 //   - Plugins must treat the call where response.EndOfStream == true as the final lifecycle hook
 //     to perform cleanup or final logging.
+//   - The end-of-stream call carries response.TerminationCause; earlier calls leave it empty.
 //
 // TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2079):
-// Update signature to pass error/termination state. This is a breaking change required for plugins to distinguish
-// between success, errors, and disconnects.
+// Upstream proposes passing error/termination state through the signature. Response.TerminationCause
+// carries the termination state without a signature change; it does not distinguish success from
+// an error response.
 type ResponseBodyProcessor interface {
 	plugin.Plugin
 	ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)

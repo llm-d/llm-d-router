@@ -29,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -38,7 +39,7 @@ const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the oth
 const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id in header to prefill
 
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
-	s.logger.V(4).Info("running Mooncake protocol", "url", prefillPodHostPort)
+	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -73,7 +74,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	}
 
 	transferID := "xfer-" + newUUID()
-	s.logger.V(5).Info("mooncake protocol info",
+	s.logger.V(logging.TRACE).Info("mooncake protocol info",
 		"transfer_id", transferID,
 		"bootstrap_addr", bootstrapAddr,
 		"dp_rank", dpRank,
@@ -100,7 +101,11 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		return
 	}
 
-	s.logger.V(5).Info("Prefill request", "body", string(prefillBody))
+	// Guarded: stringifying the body allocates a copy per request even when
+	// TRACE is disabled.
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("Prefill request", "body", string(prefillBody))
+	}
 
 	// Build decode request body
 	decodeData := make(map[string]any)
@@ -123,7 +128,9 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		return
 	}
 
-	s.logger.V(5).Info("Decode request", "body", string(decodeBody))
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("Decode request", "body", string(decodeBody))
+	}
 
 	s.handleMooncakeConcurrentRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, dpRank)
 }
@@ -229,7 +236,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
-		s.logger.V(5).Info("mooncake prefill request completed", "status", pw.statusCode)
+		s.logger.V(logging.TRACE).Info("mooncake prefill request completed", "status", pw.statusCode)
 	}()
 
 	// Decode Stage

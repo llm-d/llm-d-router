@@ -30,6 +30,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -149,8 +150,14 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 
 	for _, filter := range p.filters {
 		logger.V(logutil.VERBOSE).Info("Running filter plugin", "plugin", filter.TypedName())
+		// The violations are dropped: Filter has no error return, so a rejected
+		// write cannot fail the request here. Scope has already dropped the write,
+		// logged it, and counted it under plugin_data_scope_violations_total, which
+		// is where a misdeclared filter surfaces in production. Producers run under
+		// executePluginsAsDAG, which does fail the request on one.
+		scoped, _ := datalayer.Scope(logger, filterExtensionPoint, filter, filteredEndpoints)
 		before := time.Now()
-		filteredEndpoints = filter.Filter(ctx, request, filteredEndpoints)
+		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, request, scoped))
 		metrics.RecordPluginProcessingLatency(filterExtensionPoint, filter.TypedName().Type, filter.TypedName().Name, time.Since(before))
 		logger.V(logutil.DEBUG).Info("Completed running filter plugin successfully", "plugin", filter.TypedName(), "endpoints", filteredEndpoints)
 		if len(filteredEndpoints) == 0 {
@@ -227,9 +234,15 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, scorer *WeightedScorer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	typedName := scorer.TypedName()
 
+	// Scope against the wrapped plugin, not the WeightedScorer: the wrapper
+	// embeds the Scorer interface, which does not carry Produces/Consumes, so
+	// scoping the wrapper would hide every declaration the scorer makes.
+	logger := log.FromContext(ctx)
+	scoped, _ := datalayer.Scope(logger, scorerExtensionPoint, scorer.Scorer, endpoints) // violations dropped: Score has no error return, see runFilterPlugins
+
 	if !tracingActive {
 		before := time.Now()
-		scores := scorer.Score(ctx, request, endpoints)
+		scores := datalayer.UnscopeScores(scorer.Score(ctx, request, scoped))
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 		return scores
 	}
@@ -244,7 +257,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	)
 
 	before := time.Now()
-	scores := scorer.Score(ctx, request, endpoints)
+	scores := datalayer.UnscopeScores(scorer.Score(ctx, request, scoped))
 	metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 
 	if len(scores) > 0 {

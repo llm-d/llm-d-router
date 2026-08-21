@@ -126,12 +126,12 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
 // is configured.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
 	}
 }
 
@@ -240,7 +240,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().ID)]
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
 	state := &SchedulingContextState{
