@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -215,3 +216,24 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(recorder.Body.String()).To(ContainSubstring(`"cached_tokens":7`))
 	})
 })
+
+// Streamed responses send one SSE frame per token and only the final frame carries
+// usage, so these two benchmarks bracket the per-frame cost of the rewrite.
+var (
+	benchContentFrame = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[{"index":0,"delta":{"content":" the"},"logprobs":null,"finish_reason":null}]}` + "\n")
+	benchUsageFrame   = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[],"usage":{"prompt_tokens":1024,"completion_tokens":256,"total_tokens":1280,"prompt_tokens_details":{"cached_tokens":1024}}}` + "\n")
+)
+
+func BenchmarkReplaceCachedTokensSSELineContentFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchContentFrame, 512)
+	}
+}
+
+func BenchmarkReplaceCachedTokensSSELineUsageFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchUsageFrame, 512)
+	}
+}
