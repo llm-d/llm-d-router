@@ -32,7 +32,9 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -434,14 +436,42 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
+
 	// Run is the sole writer, so the load and the store cannot interleave with another write.
 	if empty := len(pool) == 0; empty != p.regime.Load().empty {
 		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
-	saturation := p.saturationDetector.Saturation(ctx, pool)
 
-	// Record pool saturation metric
-	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
+	prefill, decode, interleaved := partitionEndpoints(pool)
+
+	// Interleaved pods serve both stages, so they contribute capacity to both pools,
+	// mirroring how the scheduling filters route requests.
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
+
+	saturation := -1.0
+	for _, part := range []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+	}{
+		{"prefill", prefill},
+		{"decode", decode},
+	} {
+		if len(part.endpoints) == 0 {
+			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
+			continue
+		}
+		stageSat := p.saturationDetector.Saturation(ctx, part.endpoints)
+		metrics.RecordFlowControlPoolSaturation(p.poolName, part.name, stageSat)
+		if stageSat > saturation {
+			saturation = stageSat
+		}
+	}
+	if saturation < 0 {
+		saturation = p.saturationDetector.Saturation(ctx, pool)
+	}
+
+	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
 
 	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
 	p.recordCapacityUtilization()
@@ -505,6 +535,40 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 		buf[i] = 1.0
 	}
 	return buf
+}
+
+// partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets
+// based on the llm-d.ai/role pod label. Endpoints without a role label or without metadata
+// default to the decode bucket, matching the decode-filter's allowsNoLabel convention for
+// monolithic deployment safety. Encode-only pods and unrecognized role values are excluded
+// from all buckets because they are rejected by every role filter and receive no traffic.
+func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+		meta := ep.GetMetadata()
+		if meta == nil || meta.Labels == nil {
+			decode = append(decode, ep)
+			continue
+		}
+		role := meta.Labels[bylabel.RoleLabel]
+		switch role {
+		case bylabel.RolePrefill, bylabel.RoleEncodePrefill:
+			prefill = append(prefill, ep)
+		case bylabel.RoleDecode, "":
+			decode = append(decode, ep)
+		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode: //nolint:staticcheck // RoleBoth is deprecated but must be matched for backward compatibility
+			interleaved = append(interleaved, ep)
+		case bylabel.RoleEncode:
+			// Encode-only pods receive no prefill or decode traffic; excluding them
+			// keeps both stage signals clean.
+		default:
+			// Unrecognized role values are rejected by every role filter and receive
+			// no traffic; counting them anywhere dilutes the stage signal.
+		}
+	}
+	return
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.

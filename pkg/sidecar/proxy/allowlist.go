@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -35,6 +34,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const (
@@ -183,7 +185,7 @@ func (av *AllowlistValidator) Stop() {
 	// Stop all pod informers first
 	av.podInformersMu.Lock()
 	for poolName, stopCh := range av.podStopChans {
-		av.logger.V(4).Info("stopping pod informer", "pool", poolName)
+		av.logger.V(logging.DEBUG).Info("stopping pod informer", "pool", poolName)
 		close(stopCh)
 	}
 	// Clear the maps
@@ -209,7 +211,7 @@ func (av *AllowlistValidator) IsAllowed(hostPort string) bool {
 	defer av.allowedTargetsMu.RUnlock()
 
 	allowed := av.allowedTargets.Has(hostPort)
-	av.logger.V(4).Info("allowlist check", "hostPort", hostPort, "allowed", allowed)
+	av.logger.V(logging.DEBUG).Info("allowlist check", "hostPort", hostPort, "allowed", allowed)
 	return allowed
 }
 
@@ -337,7 +339,7 @@ func (av *AllowlistValidator) createPodInformer(poolName string, selector labels
 func (av *AllowlistValidator) onPodAdd(obj interface{}) {
 	pod := obj.(*unstructured.Unstructured)
 	podIP, _, _ := unstructured.NestedString(pod.Object, "status", "podIP")
-	av.logger.V(4).Info("Pod added", "name", pod.GetName(), "ip", podIP)
+	av.logger.V(logging.DEBUG).Info("Pod added", "name", pod.GetName(), "ip", podIP)
 	av.rebuildAllowlist()
 }
 
@@ -345,14 +347,14 @@ func (av *AllowlistValidator) onPodAdd(obj interface{}) {
 func (av *AllowlistValidator) onPodUpdate(_, newObj interface{}) {
 	pod := newObj.(*unstructured.Unstructured)
 	podIP, _, _ := unstructured.NestedString(pod.Object, "status", "podIP")
-	av.logger.V(4).Info("Pod updated", "name", pod.GetName(), "ip", podIP)
+	av.logger.V(logging.DEBUG).Info("Pod updated", "name", pod.GetName(), "ip", podIP)
 	av.rebuildAllowlist()
 }
 
 // onPodDelete handles deleted pods
 func (av *AllowlistValidator) onPodDelete(obj interface{}) {
 	pod := obj.(*unstructured.Unstructured)
-	av.logger.V(4).Info("Pod deleted", "name", pod.GetName())
+	av.logger.V(logging.DEBUG).Info("Pod deleted", "name", pod.GetName())
 	av.rebuildAllowlist()
 }
 
@@ -398,5 +400,5 @@ func (av *AllowlistValidator) addPodToAllowlist(pod *unstructured.Unstructured, 
 		av.allowedTargets.Insert(podName)
 	}
 
-	av.logger.V(5).Info("added pod to allowlist", "pod", podName, "ip", podIP, "pool", poolName)
+	av.logger.V(logging.TRACE).Info("added pod to allowlist", "pod", podName, "ip", podIP, "pool", poolName)
 }

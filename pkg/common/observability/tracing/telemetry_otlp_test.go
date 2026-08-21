@@ -80,6 +80,14 @@ func startCollector(t *testing.T, creds credentials.TransportCredentials) (*coll
 		t.Fatalf("listen: %v", err)
 	}
 
+	return serveCollector(t, creds, lis), lis.Addr().String()
+}
+
+// serveCollector runs the OTLP trace service on lis. When creds is nil the
+// listener is plaintext.
+func serveCollector(t *testing.T, creds credentials.TransportCredentials, lis net.Listener) *collector {
+	t.Helper()
+
 	var opts []grpc.ServerOption
 	if creds != nil {
 		opts = append(opts, grpc.Creds(creds))
@@ -91,7 +99,7 @@ func startCollector(t *testing.T, creds credentials.TransportCredentials) (*coll
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	return c, lis.Addr().String()
+	return c
 }
 
 // selfSignedCert returns TLS credentials for the server and the path to the PEM
@@ -158,6 +166,32 @@ func exportOneSpan(ctx context.Context, t *testing.T) error {
 	span.End()
 
 	return exporter.ExportSpans(ctx, recorder.Ended())
+}
+
+// With no transport variables set the exporter must reach a plaintext collector
+// on the loopback default. The SDK's own default endpoint negotiates TLS, so the
+// insecure transport has to be pinned for that case.
+func TestOTLPExporterDefaultsToPlaintextLoopback(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+
+	lis, err := net.Listen("tcp", "localhost:4317")
+	if err != nil {
+		t.Skipf("cannot bind the default OTLP port: %v", err)
+	}
+	c := serveCollector(t, nil, lis)
+
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := exportOneSpan(ctx, t); err != nil {
+		t.Fatalf("ExportSpans() to the loopback default error = %v", err)
+	}
+
+	if spans, _ := c.received(); spans != 1 {
+		t.Errorf("collector received %d spans, want 1", spans)
+	}
 }
 
 // Without a certificate in the environment nothing populates gRPC credentials,
