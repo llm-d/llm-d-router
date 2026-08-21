@@ -153,7 +153,7 @@ func TestSchedule(t *testing.T) {
 			// ScoredCandidates covers the whole candidate set in unspecified order and
 			// is asserted in TestSchedulerProfileScoredCandidates.
 			if diff := cmp.Diff(test.wantRes, got, cmp.Comparer(fwksched.ScoredEndpointComparer),
-				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates", "RoutingScorerCategory")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 		})

@@ -1,0 +1,4 @@
+# HELP llm_d_epp_routing_scorer_category_total [ALPHA] Scheduling decisions by the scorer category that contributed the largest weighted score to the selected endpoint.
+# TYPE llm_d_epp_routing_scorer_category_total counter
+llm_d_epp_routing_scorer_category_total{category="affinity",target_model_name="modelA"} 2
+llm_d_epp_routing_scorer_category_total{category="distribution",target_model_name="modelA"} 1

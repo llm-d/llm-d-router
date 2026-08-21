@@ -1575,3 +1575,20 @@ func TestRecordPluginDataScopeViolation(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestRecordRoutingScorerCategory(t *testing.T) {
+	Reset()
+
+	RecordRoutingScorerCategory("modelA", RoutingCategoryAffinity)
+	RecordRoutingScorerCategory("modelA", RoutingCategoryAffinity)
+	RecordRoutingScorerCategory("modelA", RoutingCategoryDistribution)
+
+	want, err := os.Open("testdata/llm_d_routing_scorer_category_total_metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_routing_scorer_category_total"); err != nil {
+		t.Error(err)
+	}
+}

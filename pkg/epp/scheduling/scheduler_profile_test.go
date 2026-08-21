@@ -34,6 +34,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 func TestSchedulePlugins(t *testing.T) {
@@ -152,7 +153,7 @@ func TestSchedulePlugins(t *testing.T) {
 			// ScoredCandidates covers the whole candidate set in unspecified order and
 			// is asserted in TestSchedulerProfileScoredCandidates.
 			if diff := cmp.Diff(wantRes, got, cmp.Comparer(fwksched.EndpointComparer),
-				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates", "RoutingScorerCategory")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 			// Validate plugin execution counts dynamically
@@ -244,6 +245,7 @@ type testPlugin struct {
 	ScoreCallCount        int
 	NumOfScoredEndpoints  int
 	ScoreRes              float64
+	CategoryRes           fwksched.ScorerCategory
 	FilterCallCount       int
 	FilterRes             []k8stypes.NamespacedName
 	PickCallCount         int
@@ -257,6 +259,9 @@ func (tp *testPlugin) TypedName() fwkplugin.TypedName {
 }
 
 func (tp *testPlugin) Category() fwksched.ScorerCategory {
+	if tp.CategoryRes != "" {
+		return tp.CategoryRes
+	}
 	return fwksched.Distribution
 }
 
@@ -987,3 +992,67 @@ func TestRunScorer_ScopesTheWrappedPluginDeclarations(t *testing.T) {
 type testScoreAttr string
 
 func (a testScoreAttr) Clone() fwkdl.Cloneable { return a }
+
+func TestDominantRoutingCategory(t *testing.T) {
+	tests := []struct {
+		name string
+		sums categoryScores
+		want string
+	}{
+		{"affinity dominates", categoryScores{0.9, 0.1, 0}, metrics.RoutingCategoryAffinity},
+		{"distribution dominates", categoryScores{0.1, 0.9, 0}, metrics.RoutingCategoryDistribution},
+		{"balance dominates", categoryScores{0.1, 0.2, 0.9}, metrics.RoutingCategoryBalance},
+		{"no contribution", categoryScores{0, 0, 0}, metrics.RoutingCategoryNone},
+		{"negative contribution", categoryScores{-1, 0, 0}, metrics.RoutingCategoryNone},
+		{"tie for the top", categoryScores{0.5, 0.5, 0.1}, metrics.RoutingCategoryTie},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, dominantRoutingCategory(test.sums))
+		})
+	}
+}
+
+// The winning endpoint's decision is attributed to the scorer category with the
+// largest weighted contribution to it.
+func TestSchedulerProfileRoutingCategory(t *testing.T) {
+	pods := []k8stypes.NamespacedName{{Name: "pod1"}, {Name: "pod2"}}
+	newInput := func() []fwksched.Endpoint {
+		return []fwksched.Endpoint{
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pods[0]}, nil, nil),
+			fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pods[1]}, nil, nil),
+		}
+	}
+
+	tests := []struct {
+		name          string
+		affinityScore float64
+		distScore     float64
+		want          string
+	}{
+		{"affinity wins", 0.9, 0.1, metrics.RoutingCategoryAffinity},
+		{"distribution wins", 0.1, 0.9, metrics.RoutingCategoryDistribution},
+		{"equal contributions tie", 0.5, 0.5, metrics.RoutingCategoryTie},
+		{"no preference", 0, 0, metrics.RoutingCategoryNone},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			affinity := &testPlugin{TypeRes: "affinity", CategoryRes: fwksched.Affinity, ScoreRes: test.affinityScore}
+			distribution := &testPlugin{TypeRes: "distribution", CategoryRes: fwksched.Distribution, ScoreRes: test.distScore}
+			router := &testPlugin{TypeRes: "router", FilterRes: pods, PickRes: pods[0]}
+
+			profile := NewSchedulerProfile().
+				WithFilters(router).
+				WithScorers(NewWeightedScorer(affinity, 1), NewWeightedScorer(distribution, 1)).
+				WithPicker(router)
+
+			request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
+			got, err := profile.Run(context.Background(), request, newInput())
+			if err != nil {
+				t.Fatalf("Run returned unexpected error: %v", err)
+			}
+			assert.Equal(t, test.want, got.RoutingScorerCategory)
+		})
+	}
+}

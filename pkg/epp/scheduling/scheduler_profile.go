@@ -129,9 +129,16 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 		return nil, errcommon.Error{Code: errcommon.Internal, Msg: "no endpoints available for the given request"}
 	}
 	// if we got here, there is at least one endpoint to score
-	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
+	weightedScorePerEndpoint, categoryScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
 
 	result := p.runPickerPlugin(ctx, request, weightedScorePerEndpoint)
+
+	if result != nil && len(result.TargetEndpoints) > 0 {
+		// Attribute the decision to the scorer category with the largest weighted
+		// contribution to the selected endpoint. The picker selects TargetEndpoints[0]
+		// as the primary target (director.go and RecordSchedulerAttempt use the same).
+		result.RoutingScorerCategory = dominantRoutingCategory(categoryScorePerEndpoint[result.TargetEndpoints[0]])
+	}
 
 	return result, nil
 }
@@ -171,7 +178,11 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	return filteredEndpoints
 }
 
-func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+// runScorerPlugins runs the scorer chain and returns, per endpoint, the total
+// weighted score and the weighted score split by scorer category. The split
+// attributes the routing decision to a category; scorers whose category is not
+// one of Affinity, Distribution, or Balance do not contribute to it.
+func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (map[fwksched.Endpoint]float64, map[fwksched.Endpoint]categoryScores) {
 	logger := log.FromContext(ctx)
 	logger.V(logutil.DEBUG).Info("Before running scorer plugins", "endpoints", endpoints)
 
@@ -196,6 +207,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	}
 
 	weightedScorePerEndpoint := make(map[fwksched.Endpoint]float64, len(endpoints))
+	categoryScorePerEndpoint := make(map[fwksched.Endpoint]categoryScores, len(endpoints))
 	for _, endpoint := range endpoints {
 		weightedScorePerEndpoint[endpoint] = float64(0) // initialize weighted score per endpoint with 0 value
 	}
@@ -212,17 +224,24 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	for _, scorer := range p.scorers {
 		logger.V(logutil.VERBOSE).Info("Running scorer plugin", "plugin", scorer.TypedName())
 		scores := runScorer(ctx, tracer, tracingActive, scorer, request, endpoints)
+		categoryIdx := categoryIndex(scorer.Category())
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {
 				debug.Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().ID, "score", score)
 			}
-			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
+			weighted := enforceScoreRange(score) * scorer.Weight()
+			weightedScorePerEndpoint[endpoint] += weighted
+			if categoryIdx >= 0 {
+				sums := categoryScorePerEndpoint[endpoint]
+				sums[categoryIdx] += weighted
+				categoryScorePerEndpoint[endpoint] = sums
+			}
 		}
 		debug.Info("Completed running scorer plugin successfully", "plugin", scorer.TypedName())
 	}
 	logger.V(logutil.VERBOSE).Info("Completed running scorer plugins successfully")
 
-	return weightedScorePerEndpoint
+	return weightedScorePerEndpoint, categoryScorePerEndpoint
 }
 
 // runScorer invokes a single weighted scorer and records its latency metric.
@@ -382,4 +401,55 @@ func enforceScoreRange(score float64) float64 {
 		return 1
 	}
 	return score
+}
+
+// categoryScores holds the weighted score an endpoint accumulated from each
+// scorer category, indexed by categoryIndex.
+type categoryScores [3]float64
+
+// categoryIndex maps a scorer category to its slot in categoryScores, or -1 for
+// categories that are not attributed.
+func categoryIndex(category fwksched.ScorerCategory) int {
+	switch category {
+	case fwksched.Affinity:
+		return 0
+	case fwksched.Distribution:
+		return 1
+	case fwksched.Balance:
+		return 2
+	default:
+		return -1
+	}
+}
+
+// dominantRoutingCategory returns the metric label for the category with the
+// largest weighted contribution, or a sentinel when none contributed a positive
+// score or several tied for the top.
+func dominantRoutingCategory(sums categoryScores) string {
+	best := -1
+	bestScore := 0.0
+	tied := false
+	for idx, score := range sums {
+		if score <= 0 {
+			continue
+		}
+		switch {
+		case best == -1 || score > bestScore:
+			best, bestScore, tied = idx, score, false
+		case score == bestScore:
+			tied = true
+		}
+	}
+	switch {
+	case best == -1:
+		return metrics.RoutingCategoryNone
+	case tied:
+		return metrics.RoutingCategoryTie
+	case best == 0:
+		return metrics.RoutingCategoryAffinity
+	case best == 1:
+		return metrics.RoutingCategoryDistribution
+	default:
+		return metrics.RoutingCategoryBalance
+	}
 }

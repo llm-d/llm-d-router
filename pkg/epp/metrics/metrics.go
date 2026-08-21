@@ -462,6 +462,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdSchedulerE2ELatency)
 		metrics.Registry.MustRegister(schedulerAttemptsTotal)
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
+		metrics.Registry.MustRegister(llmdRoutingScorerCategory)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
@@ -547,6 +548,7 @@ func Reset() {
 	llmdSchedulerE2ELatency.Reset()
 	schedulerAttemptsTotal.Reset()
 	llmdSchedulerAttemptsTotal.Reset()
+	llmdRoutingScorerCategory.Reset()
 	pluginProcessingLatencies.Reset()
 	llmdPluginProcessingLatencies.Reset()
 	llmdPluginDataScopeViolations.Reset()
@@ -851,6 +853,26 @@ const (
 	SchedulerStatusSuccess = "success"
 	SchedulerStatusFailure = "failure"
 )
+
+// Routing scorer category label values. The first three mirror the scorer
+// categories; the sentinels cover decisions no single category explains.
+const (
+	RoutingCategoryAffinity     = "affinity"
+	RoutingCategoryDistribution = "distribution"
+	RoutingCategoryBalance      = "balance"
+	// RoutingCategoryNone: no scorer contributed a positive weighted score to
+	// the selected endpoint.
+	RoutingCategoryNone = "none"
+	// RoutingCategoryTie: several categories contributed the same top weighted
+	// score to the selected endpoint.
+	RoutingCategoryTie = "tie"
+)
+
+// RecordRoutingScorerCategory records the scorer category attributed to a
+// scheduling decision for the given target model.
+func RecordRoutingScorerCategory(targetModelName, category string) {
+	llmdRoutingScorerCategory.WithLabelValues(category, targetModelName).Inc()
+}
 
 // RecordPluginProcessingLatency records the processing latency for a plugin.
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {
