@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -97,6 +98,10 @@ type Producer struct {
 
 	subscribersManager subscriberManager
 	kvEventsConfig     *kvevents.Config
+	// podSelector is the parsed KVEventsConfig.PodDiscoveryConfig.PodLabelSelector.
+	// Endpoint notifications whose labels do not match are not subscribed to;
+	// nil matches every endpoint.
+	podSelector labels.Selector
 
 	kvBlockScorer kvcache.KVBlockScorer
 
@@ -158,6 +163,16 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 // The kvcache indexer, KV-events pool, and any local ZMQ subscriber start
 // in background goroutines bound to ctx.
 func New(ctx context.Context, name string, config PluginConfig) (*Producer, error) {
+	var podSelector labels.Selector
+	if kc := config.KVEventsConfig; kc != nil && kc.DiscoverPods && kc.PodDiscoveryConfig != nil && kc.PodDiscoveryConfig.PodLabelSelector != "" {
+		sel, err := labels.Parse(kc.PodDiscoveryConfig.PodLabelSelector)
+		if err != nil {
+			return nil, fmt.Errorf("invalid kvEventsConfig.podDiscoveryConfig.podLabelSelector %q: %w",
+				kc.PodDiscoveryConfig.PodLabelSelector, err)
+		}
+		podSelector = sel
+	}
+
 	if config.TokenProcessorConfig == nil {
 		config.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
 	}
@@ -208,6 +223,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		kvBlockScorer:      kvBlockScorer,
 		subscribersManager: subscribersManager,
 		kvEventsConfig:     config.KVEventsConfig,
+		podSelector:        podSelector,
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		pluginState:        plugin.NewPluginState(ctx),
 		speculativeCache:   speculativeCache,
