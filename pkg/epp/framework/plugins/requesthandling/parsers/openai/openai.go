@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
 
 const (
@@ -71,7 +72,12 @@ var (
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
 // https://developers.openai.com/api/reference/overview
 type OpenAIParser struct {
-	typedName fwkplugin.TypedName
+	typedName         fwkplugin.TypedName
+	propagatePriority bool
+}
+
+type openAIParserConfig struct {
+	PropagatePriority bool `json:"propagatePriority"`
 }
 
 // NewOpenAIParser creates a new OpenAIParser.
@@ -105,8 +111,17 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 	}
 }
 
-func OpenAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewOpenAIParser().WithName(name), nil
+func OpenAIParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	parser := NewOpenAIParser().WithName(name)
+	if parameters == nil {
+		return parser, nil
+	}
+	var cfg openAIParserConfig
+	if err := parameters.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode openai parser parameters: %w", err)
+	}
+	parser.propagatePriority = cfg.PropagatePriority
+	return parser, nil
 }
 
 func (p *OpenAIParser) WithName(name string) *OpenAIParser {
@@ -146,20 +161,19 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 	return m, nil
 }
 
-// Engine type labels used by endpoint metadata to identify backend priority semantics.
-const (
-	engineTypeLabelKey       = "llm-d.ai/engine-type"
-	legacyEngineTypeLabelKey = "inference.networking.k8s.io/engine-type"
-)
-
-// RewritePriority writes the resolved EPP priority into the OpenAI-compatible
-// request payload. SGLang and vLLM both accept a top-level priority field, but
-// vLLM treats lower values as more urgent, so invert EPP's higher-is-more-urgent
-// value for vLLM targets.
-func (p *OpenAIParser) RewritePriority(payload fwkrh.MarshalablePayload, priority int, ctx fwkrh.PriorityRewriteContext) (fwkrh.MarshalablePayload, error) {
+// RewritePriority removes any client-supplied priority from the
+// OpenAI-compatible request payload. If priority propagation is enabled, it then
+// writes the resolved EPP priority. SGLang and vLLM both accept a top-level
+// priority field, but vLLM treats lower values as more urgent, so invert EPP's
+// higher-is-more-urgent value for vLLM targets.
+func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, error) {
 	m, ok := payload.(fwkrh.PayloadMap)
 	if !ok {
 		return payload, nil
+	}
+	delete(m, "priority")
+	if !p.propagatePriority {
+		return m, nil
 	}
 	if isVLLMTarget(ctx) {
 		priority = -priority
@@ -168,12 +182,14 @@ func (p *OpenAIParser) RewritePriority(payload fwkrh.MarshalablePayload, priorit
 	return m, nil
 }
 
+const legacyEngineTypeLabelKey = "inference.networking.k8s.io/engine-type"
+
 func isVLLMTarget(ctx fwkrh.PriorityRewriteContext) bool {
 	meta := ctx.TargetEndpoint
 	if meta == nil || meta.Labels == nil {
 		return false
 	}
-	engineType := meta.Labels[engineTypeLabelKey]
+	engineType := meta.Labels[fwkplugins.EngineTypeLabelKey]
 	if engineType == "" {
 		engineType = meta.Labels[legacyEngineTypeLabelKey]
 	}

@@ -69,8 +69,18 @@ func NewVllmHTTPParser() *VllmHTTPParser {
 }
 
 // VllmHTTPParserPluginFactory is the factory function used to register the plugin.
-func VllmHTTPParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewVllmHTTPParser().WithName(name), nil
+func VllmHTTPParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	plugin, err := openai.OpenAIParserPluginFactory(name, parameters, nil)
+	if err != nil {
+		return nil, err
+	}
+	openAIParser, ok := plugin.(*openai.OpenAIParser)
+	if !ok {
+		return nil, fmt.Errorf("openai parser factory returned %T, want *openai.OpenAIParser", plugin)
+	}
+	parser := NewVllmHTTPParser().WithName(name)
+	parser.openai = openAIParser
+	return parser, nil
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -113,8 +123,8 @@ func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mode
 
 // RewritePriority delegates to the OpenAI-compatible map rewriter; the generate
 // body shares the same top-level priority field.
-func (p *VllmHTTPParser) RewritePriority(payload fwkrh.MarshalablePayload, priority int, ctx fwkrh.PriorityRewriteContext) (fwkrh.MarshalablePayload, error) {
-	return p.openai.RewritePriority(payload, priority, ctx)
+func (p *VllmHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, error) {
+	return p.openai.RewritePriority(ctx, payload, priority)
 }
 
 // parseGenerateRequest decodes a /inference/v1/generate body into an

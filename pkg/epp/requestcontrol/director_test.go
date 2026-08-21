@@ -68,6 +68,15 @@ var (
 	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
 
+func newOpenAIParserWithPriorityPropagation(t *testing.T) *openai.OpenAIParser {
+	t.Helper()
+	plugin, err := openai.OpenAIParserPluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"propagatePriority":true}`)), nil)
+	require.NoError(t, err)
+	parser, ok := plugin.(*openai.OpenAIParser)
+	require.True(t, ok)
+	return parser
+}
+
 // --- Mocks ---
 
 type mockAdmissionController struct {
@@ -422,16 +431,48 @@ func TestDirector_HandleRequest(t *testing.T) {
 		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
-		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
-			name: "successful completions request",
+			name: "successful completions request with priority propagation",
 			reqBodyMap: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			parser:                 newOpenAIParserWithPriorityPropagation(t),
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(2),
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "successful completions request strips client priority by default",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			schedulerMockSetup: func(m *mockScheduler) {
@@ -450,11 +491,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":    model,
-				"prompt":   "critical prompt",
-				"priority": float64(2),
+				"model":  model,
+				"prompt": "critical prompt",
 			},
-			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -1127,7 +1166,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
 				}
 
-				reqCtx.Parser = openai.NewOpenAIParser()
+				reqCtx.Parser = test.parser
+				if reqCtx.Parser == nil {
+					reqCtx.Parser = openai.NewOpenAIParser()
+				}
 				parseResult, parseErr := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				var returnedReqCtx *handlers.RequestContext
 				if parseErr != nil {
@@ -1168,9 +1210,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 					updatedBodyMap := make(map[string]any)
 					if err := json.Unmarshal(reqCtx.Request.RawBody, &updatedBodyMap); err != nil {
 						t.Errorf("Error to Unmarshal reqCtx.Request.UpdatedBody, err is %v", err)
-					}
-					if _, wantPriority := test.wantMutatedBody["priority"]; !wantPriority {
-						delete(updatedBodyMap, "priority")
 					}
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)

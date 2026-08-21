@@ -31,6 +31,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
 
 func TestNewVllmHTTPParser(t *testing.T) {
@@ -42,12 +43,19 @@ func TestNewVllmHTTPParser(t *testing.T) {
 }
 
 func TestVllmHTTPParser_RewritePriority(t *testing.T) {
-	parser := NewVllmHTTPParser()
+	plugin, err := VllmHTTPParserPluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"propagatePriority":true}`)), nil)
+	if err != nil {
+		t.Fatalf("VllmHTTPParserPluginFactory() error = %v", err)
+	}
+	parser, ok := plugin.(*VllmHTTPParser)
+	if !ok {
+		t.Fatalf("VllmHTTPParserPluginFactory() = %T, want *VllmHTTPParser", plugin)
+	}
 	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}}
 
-	got, err := parser.RewritePriority(payload, 2, fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
-		Labels: map[string]string{"llm-d.ai/engine-type": "vllm"},
-	}})
+	got, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+		Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
+	}}, payload, 2)
 	if err != nil {
 		t.Fatalf("RewritePriority() error = %v", err)
 	}
@@ -57,6 +65,25 @@ func TestVllmHTTPParser_RewritePriority(t *testing.T) {
 	}
 	if gotPriority := m["priority"]; gotPriority != -2 {
 		t.Errorf("priority = %v, want -2", gotPriority)
+	}
+}
+
+func TestVllmHTTPParser_RewritePriorityStripsByDefault(t *testing.T) {
+	parser := NewVllmHTTPParser()
+	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}, "priority": 100}
+
+	got, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+		Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
+	}}, payload, 2)
+	if err != nil {
+		t.Fatalf("RewritePriority() error = %v", err)
+	}
+	m, ok := got.(fwkrh.PayloadMap)
+	if !ok {
+		t.Fatalf("RewritePriority() payload = %T, want PayloadMap", got)
+	}
+	if _, ok := m["priority"]; ok {
+		t.Errorf("priority = %v, want absent", m["priority"])
 	}
 }
 
