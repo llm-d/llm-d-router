@@ -95,16 +95,30 @@ func (b *boundedLabel) pin(v string) {
 	b.pinned[v] = struct{}{}
 }
 
+// setMax sets the cap on the number of distinct admitted values.
+func (b *boundedLabel) setMax(max int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.max = max
+}
+
 var modelLabelLimiter = newBoundedLabel(maxModelLabelValues)
 
 // Fairness IDs are populated from a client request header (or an agent-identity attribute), so
 // like model names their cardinality is not operator-bounded. They label per-request and
 // flow-control metrics; without a cap, every distinct fairness ID ever observed permanently
-// grows the time series set. maxFairnessLabelValues bounds the distinct fairness_id label
-// values; values beyond the cap collapse to overflowValue.
-const maxFairnessLabelValues = 1000
+// grows the time series set. The limiter bounds the distinct fairness_id label values; values
+// beyond the cap collapse to overflowValue. A cap of 0 folds every ID onto the single overflow
+// series.
+const DefaultFairnessIDMetricLabelLimit = 1000
 
-var fairnessLabelLimiter = newBoundedLabel(maxFairnessLabelValues)
+var fairnessLabelLimiter = newBoundedLabel(DefaultFairnessIDMetricLabelLimit)
+
+// SetFairnessIDLabelLimit configures the cap on distinct fairness_id label values from startup
+// configuration.
+func SetFairnessIDLabelLimit(limit int) {
+	fairnessLabelLimiter.setMax(limit)
+}
 
 // boundFairnessID caps the request-derived fairness_id label.
 func boundFairnessID(fairnessID string) string {
