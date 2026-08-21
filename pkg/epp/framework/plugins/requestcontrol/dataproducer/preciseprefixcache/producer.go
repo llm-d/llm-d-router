@@ -36,6 +36,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -314,13 +315,13 @@ func (p *Producer) Produce(ctx context.Context,
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.epp.producer.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(telemetry.LLMDEPPProducerCandidateEndpoints(len(endpoints)))
 	if request != nil {
 		if request.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+			span.SetAttributes(telemetry.GenAIRequestModel(request.TargetModel))
 		}
 		if request.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+			span.SetAttributes(telemetry.GenAIRequestID(request.RequestID))
 		}
 	}
 
@@ -330,7 +331,7 @@ func (p *Producer) Produce(ctx context.Context,
 		return fmt.Errorf("failed to compute block keys: %w", err)
 	}
 	if len(perPromptKeys) == 0 {
-		span.SetAttributes(attribute.String("llm_d.epp.producer.result", "skipped_no_tokens"))
+		span.SetAttributes(telemetry.LLMDEPPProducerResult("skipped_no_tokens"))
 		return nil
 	}
 
