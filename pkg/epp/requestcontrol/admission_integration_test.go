@@ -199,7 +199,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
@@ -221,7 +221,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
@@ -273,7 +273,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		admitCtx, admitCancel := context.WithCancel(ctx)
 		defer admitCancel()
 		result := admitAsync(admitCtx, h.ac, "cancel-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "request should be queued before cancelling")
 		admitCancel()
 
