@@ -372,8 +372,8 @@ var (
 				"[Deprecated: Use llm_d_epp_flow_control_pool_saturation] Pool saturation signal gating Flow Control "+
 					"dispatch. 1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
 					"past it. An empty pool reads as 1.0. With the default utilization detector, endpoints with missing "+
-					"or stale metrics score as fully saturated (fail-closed; see "+
-					"llm_d_epp_flow_control_stale_endpoints).",
+					"or stale metrics score as fully saturated under stalenessPolicy=saturated; see "+
+					"llm_d_epp_flow_control_stale_endpoints.",
 				compbasemetrics.ALPHA),
 		},
 		[]string{"inference_pool"},
