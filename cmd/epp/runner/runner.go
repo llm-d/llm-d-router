@@ -62,6 +62,7 @@ import (
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrdiffusion "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/diffusion"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
@@ -94,6 +95,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/burstprefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/diffusionload"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
@@ -128,6 +130,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/activerequest"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/diffusioncost"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/headerlabelaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
@@ -635,6 +638,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(headerprofile.HeaderProfileHandlerType, fwkplugin.StabilityAlpha, headerprofile.HeaderProfileHandlerFactory)
 	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, fwkplugin.StabilityAlpha, endpointattribute.EndpointAttributeScorerFactory)
+	fwkplugin.Register(diffusioncost.DiffusionCostScorerType, fwkplugin.StabilityAlpha, diffusioncost.Factory)
 	fwkplugin.Register(topologyaffinityscorer.ScorerType, fwkplugin.StabilityAlpha, topologyaffinityscorer.Factory)
 	fwkplugin.Register(burstprefix.PluginType, fwkplugin.StabilityAlpha, burstprefix.Factory)
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
@@ -669,6 +673,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, fwkplugin.StabilityBeta, mmproducer.Factory, mmproducer.ProducedKey)
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, fwkplugin.StabilityBeta, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, fwkplugin.StabilityBeta, sessionid.Factory, attrsession.SessionIDDataKey)
+	// Alpha
+	fwkplugin.RegisterAsDefaultProducer(diffusionload.DiffusionLoadProducerType, fwkplugin.StabilityAlpha, diffusionload.DiffusionLoadProducerFactory, attrdiffusion.DiffusionLoadDataKey)
 
 	// Latency predictor plugins
 	// Beta
