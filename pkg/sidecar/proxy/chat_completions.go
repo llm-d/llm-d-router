@@ -187,7 +187,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				attribute.Int("llm_d.ec_proxy.encoder_count", len(allowedEncoders)),
 				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
 			)
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
 			return
 		}
 
