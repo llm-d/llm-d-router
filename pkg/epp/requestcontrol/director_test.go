@@ -1111,6 +1111,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 				config := NewConfig()
 				if test.dataProducerPlugin != nil {
+					datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{test.dataProducerPlugin})
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
 				if test.screener != nil {

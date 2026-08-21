@@ -28,6 +28,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -47,6 +48,9 @@ func TestSchedule(t *testing.T) {
 	prefixCacheScorer, err := schedprefix.New(context.Background(), schedprefix.PrefixCacheScorerPluginType, "approx-prefix-cache-producer")
 	assert.NoError(t, err)
 	loraAffinityScorer := loraaffinity.NewLoraAffinityScorer()
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{
+		kvCacheUtilizationScorer, queueingScorer, prefixCacheScorer, loraAffinityScorer,
+	})
 
 	defaultProfile := NewSchedulerProfile().
 		WithScorers(NewWeightedScorer(kvCacheUtilizationScorer, 1),
