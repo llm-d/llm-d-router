@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -525,4 +526,63 @@ func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), exists)
 	})
+}
+
+func TestAsyncBrokerRouteMatching(t *testing.T) {
+	cfg := &asyncBrokerConfig{
+		DefaultQueue: "default-q",
+		DefaultTier:  "default-t",
+		Routes: []asyncRoute{
+			{Model: "model-a", Tenant: "team-x", Queue: "qx", Tier: "tx"},
+			{Model: "model-a", Queue: "qa", Tier: "ta"},
+			{Model: "model-b", Queue: "qb"},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		model       string
+		tenant      string
+		wantQueue   string
+		wantTier    string
+		wantMatched bool
+	}{
+		{"model and tenant row wins", "model-a", "team-x", "qx", "tx", true},
+		{"model row for other tenants", "model-a", "team-y", "qa", "ta", true},
+		{"empty tier inherits default on a match", "model-b", "team-x", "qb", "default-t", true},
+		{"unrouted model falls through unmatched", "model-c", "team-x", "default-q", "default-t", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queue, tier, matched := cfg.route(tt.model, tt.tenant)
+			assert.Equal(t, tt.wantQueue, queue)
+			assert.Equal(t, tt.wantTier, tier)
+			assert.Equal(t, tt.wantMatched, matched)
+		})
+	}
+
+	t.Run("wildcard route matches everything", func(t *testing.T) {
+		wild := &asyncBrokerConfig{
+			DefaultQueue: "default-q",
+			Routes:       []asyncRoute{{Queue: "catch-all"}},
+		}
+		queue, _, matched := wild.route("anything", "anyone")
+		assert.Equal(t, "catch-all", queue)
+		assert.True(t, matched)
+	})
+}
+
+func TestAsyncBrokerUnroutedDedup(t *testing.T) {
+	s := &AsyncBrokerStep{unroutedModels: map[string]struct{}{}}
+
+	assert.True(t, s.rememberUnrouted("m1"), "first occurrence logs")
+	assert.False(t, s.rememberUnrouted("m1"), "repeat is deduped")
+	assert.True(t, s.rememberUnrouted("m2"), "distinct model logs")
+
+	// Model names are client-controlled: past the cap, new names stop being
+	// tracked (and stop logging at Info) instead of growing the set.
+	for i := 0; len(s.unroutedModels) < maxTrackedUnroutedModels; i++ {
+		s.rememberUnrouted(fmt.Sprintf("filler-%d", i))
+	}
+	assert.False(t, s.rememberUnrouted("fresh-after-cap"))
 }

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -78,6 +79,13 @@ type AsyncBrokerStep struct {
 	// logger serves construction-time messages and the registered route
 	// handlers, which run outside a pipeline request context.
 	logger logr.Logger
+
+	// unroutedModels dedupes the unrouted-model log line per model name so
+	// the first occurrence stays visible without flooding under load. Model
+	// names arrive in request bodies, so the set is size-capped; see
+	// rememberUnrouted.
+	unroutedMu     sync.Mutex
+	unroutedModels map[string]struct{}
 }
 
 var _ pipeline.Step = (*AsyncBrokerStep)(nil)
@@ -107,11 +115,12 @@ func NewAsyncBrokerStep(_ *gateway.Client, params map[string]any) (pipeline.Step
 
 	logger := ctrl.Log.WithName(AsyncBrokerStepName)
 	s := &AsyncBrokerStep{
-		cfg:    cfg,
-		rdb:    rdb,
-		sub:    prod,
-		quota:  &asyncQuotaClassifier{rdb: rdb, cfg: cfg.Quota},
-		logger: logger,
+		cfg:            cfg,
+		rdb:            rdb,
+		sub:            prod,
+		quota:          &asyncQuotaClassifier{rdb: rdb, cfg: cfg.Quota},
+		logger:         logger,
+		unroutedModels: map[string]struct{}{},
 	}
 	switch cfg.WakeupMode {
 	case "poll":
@@ -132,6 +141,50 @@ func NewAsyncBrokerStep(_ *gateway.Client, params map[string]any) (pipeline.Step
 }
 
 func (s *AsyncBrokerStep) Name() string { return AsyncBrokerStepName }
+
+// maxTrackedUnroutedModels bounds the unrouted-model dedup set. Model names
+// are client-controlled, so an unbounded set would let unique junk names
+// grow memory without limit; past the cap, repeats simply log at debug.
+const maxTrackedUnroutedModels = 1024
+
+// routeFor resolves the request's queue and tier, surfacing fall-through to
+// the defaults. Serving is unchanged — the defaults exist for exactly this
+// case — but an unrouted model must be visible somewhere: a typo in a route,
+// or a model served under a name no route lists (an adapter id whose base
+// model is the one routed), otherwise sends every request to the default
+// queue and tier with each response still 200, indistinguishable from a
+// correctly routed deployment. The first unrouted request per model logs at
+// Info; repeats log at debug.
+func (s *AsyncBrokerStep) routeFor(ctx context.Context, model, tenant string) (queue, tier string) {
+	queue, tier, matched := s.cfg.route(model, tenant)
+	if matched {
+		return queue, tier
+	}
+	logger := log.FromContext(ctx).WithName(AsyncBrokerStepName)
+	if s.rememberUnrouted(model) {
+		logger.Info("no route matched, serving from defaults",
+			"model", model, "tenant", tenant, "queue", queue, "tier", tier)
+	} else {
+		logger.V(logutil.DEBUG).Info("no route matched, serving from defaults",
+			"model", model, "tenant", tenant, "queue", queue, "tier", tier)
+	}
+	return queue, tier
+}
+
+// rememberUnrouted records the model in the dedup set, reporting true when
+// this is its first occurrence and the set has room.
+func (s *AsyncBrokerStep) rememberUnrouted(model string) bool {
+	s.unroutedMu.Lock()
+	defer s.unroutedMu.Unlock()
+	if _, seen := s.unroutedModels[model]; seen {
+		return false
+	}
+	if len(s.unroutedModels) >= maxTrackedUnroutedModels {
+		return false
+	}
+	s.unroutedModels[model] = struct{}{}
+	return true
+}
 
 func (s *AsyncBrokerStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
@@ -203,7 +256,7 @@ func (s *AsyncBrokerStep) passthrough(ctx context.Context, reqCtx *pipeline.Requ
 		}()
 	}
 
-	_, tier := s.cfg.route(reqCtx.Model, tenant)
+	_, tier := s.routeFor(ctx, reqCtx.Model, tenant)
 	// Identity headers are step-owned: strip client-supplied values
 	// unconditionally so priority cannot be self-assigned, even for tiers
 	// without a configured objective mapping.
@@ -240,7 +293,7 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 	}
 	timeout := time.Duration(timeoutSecs) * time.Second
 
-	queue, _ := s.cfg.route(reqCtx.Model, tenant)
+	queue, _ := s.routeFor(ctx, reqCtx.Model, tenant)
 	now := time.Now()
 
 	metadata := map[string]string{s.cfg.Quota.Attribute: tenant}

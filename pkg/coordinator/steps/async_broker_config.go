@@ -253,8 +253,11 @@ func (c *asyncBrokerConfig) timeoutBounds(m asyncMode) asyncTimeoutBounds {
 	return b
 }
 
-// route returns the queue and tier for a (model, tenant) pair.
-func (c *asyncBrokerConfig) route(model, tenant string) (queue, tier string) {
+// route returns the queue and tier for a (model, tenant) pair. matched
+// reports whether a configured route selected them: false means the pair
+// fell through to the defaults, which the caller surfaces rather than
+// swallows (see AsyncBrokerStep.routeFor).
+func (c *asyncBrokerConfig) route(model, tenant string) (queue, tier string, matched bool) {
 	for _, r := range c.Routes {
 		if (r.Model == "" || r.Model == model) && (r.Tenant == "" || r.Tenant == tenant) {
 			q, t := r.Queue, r.Tier
@@ -264,10 +267,10 @@ func (c *asyncBrokerConfig) route(model, tenant string) (queue, tier string) {
 			if t == "" {
 				t = c.DefaultTier
 			}
-			return q, t
+			return q, t, true
 		}
 	}
-	return c.DefaultQueue, c.DefaultTier
+	return c.DefaultQueue, c.DefaultTier, false
 }
 
 // parseAsyncBrokerConfig decodes the step's params block into a validated
