@@ -77,6 +77,20 @@ func TestProduceTimeout(t *testing.T) {
 	assert.Zero(t, newTestPlugin(&mockTokenizer{}).ProduceTimeout())
 }
 
+func TestNewPlugin_MergeAnthropicInlineSystem(t *testing.T) {
+	p, err := NewPlugin(context.Background(), "tok", &tokenizerPluginConfig{
+		ModelName: "m",
+		VLLM: &vllmConfig{
+			MergeAnthropicInlineSystem: true,
+		},
+	})
+	require.NoError(t, err)
+
+	backend, ok := p.backend.(renderBackend)
+	require.True(t, ok)
+	assert.True(t, backend.mergeAnthropicInlineSystem)
+}
+
 func TestPluginFactory_Validation(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := plugin.NewEppHandle(ctx, nil)
@@ -639,6 +653,43 @@ func TestMessagesToRenderChatRequest_RawSystem(t *testing.T) {
 	assert.Equal(t, &tokenizerTypes.Content{Raw: "You are helpful."}, result.Conversation[0].Content)
 	assert.Equal(t, "user", result.Conversation[1].Role)
 	assert.Equal(t, &tokenizerTypes.Content{Raw: "Hello"}, result.Conversation[1].Content)
+}
+
+func TestMessagesToRenderChatRequest_MergesInlineSystemForDefaultVLLMTemplate(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		System: fwkrh.AnthropicContent{Raw: "Top-level system."},
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "user", Content: fwkrh.AnthropicContent{Raw: "First turn."}},
+			{Role: "system", Content: fwkrh.AnthropicContent{Raw: "Inline system."}},
+			{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Second turn."}},
+		},
+	}
+
+	result := messagesToRenderChatRequest(msg, true)
+
+	// AnthropicServingMessages enables merge_inline_system when vLLM starts
+	// without an explicit --chat-template, which is the production GLM shape.
+	require.Len(t, result.Conversation, 3)
+	assert.Equal(t, "system", result.Conversation[0].Role)
+	assert.Equal(t, &tokenizerTypes.Content{Raw: "Top-level system.Inline system."}, result.Conversation[0].Content)
+	assert.Equal(t, "user", result.Conversation[1].Role)
+	assert.Equal(t, "user", result.Conversation[2].Role)
+}
+
+func TestMessagesToRenderChatRequest_RawInlineBillingHeaderStripped(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{
+			{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}},
+			{Role: "system", Content: fwkrh.AnthropicContent{Raw: "x-anthropic-billing-header: cc_version=2.1.160"}},
+			{Role: "assistant", Content: fwkrh.AnthropicContent{Raw: "Hi"}},
+		},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	require.Len(t, result.Conversation, 2)
+	assert.Equal(t, "user", result.Conversation[0].Role)
+	assert.Equal(t, "assistant", result.Conversation[1].Role)
 }
 
 func TestMessagesToRenderChatRequest_Tools(t *testing.T) {

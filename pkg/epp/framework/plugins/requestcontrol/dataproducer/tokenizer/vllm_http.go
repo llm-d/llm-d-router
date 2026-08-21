@@ -69,6 +69,9 @@ type vllmConfig struct {
 	// MMTimeout is the per-request timeout for multimodal requests
 	// (image download/processing). Defaults to 30s.
 	MMTimeout string `json:"mmTimeout,omitempty"`
+	// MergeAnthropicInlineSystem matches vLLM's Anthropic conversion when its
+	// chat template requires system messages to precede the conversation.
+	MergeAnthropicInlineSystem bool `json:"mergeAnthropicInlineSystem,omitempty"`
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's

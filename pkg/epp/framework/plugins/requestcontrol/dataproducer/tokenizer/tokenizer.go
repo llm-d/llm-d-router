@@ -305,7 +305,10 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
 		}
-		backend = renderBackend{tk: renderer}
+		backend = renderBackend{
+			tk:                         renderer,
+			mergeAnthropicInlineSystem: cfg.MergeAnthropicInlineSystem,
+		}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 	}
@@ -421,19 +424,35 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 // backend and the server apply the identical chat-template pipeline to the
 // same request and prefix-cache blocks line up.
 func MessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.RenderChatRequest {
+	return messagesToRenderChatRequest(msg, false)
+}
+
+func messagesToRenderChatRequest(msg *fwkrh.MessagesRequest, mergeInlineSystem bool) *tokenizerTypes.RenderChatRequest {
 	conversation := make([]tokenizerTypes.Conversation, 0, 1+len(msg.Messages))
 
-	if sys := anthropicSystemText(msg.System); sys != "" {
+	var system strings.Builder
+	system.WriteString(anthropicSystemText(msg.System))
+	if mergeInlineSystem {
+		for _, m := range msg.Messages {
+			if m.Role == "system" {
+				system.WriteString(anthropicInlineSystemText(m.Content))
+			}
+		}
+	}
+	if system.Len() > 0 {
 		conversation = append(conversation, tokenizerTypes.Conversation{
 			Role:    "system",
-			Content: &tokenizerTypes.Content{Raw: sys},
+			Content: &tokenizerTypes.Content{Raw: system.String()},
 		})
 	}
 
 	for _, m := range msg.Messages {
 		if m.Role == "system" {
+			if mergeInlineSystem {
+				continue
+			}
 			// Not valid Anthropic input; tolerated the way vLLM does.
-			if text := anthropicSystemText(m.Content); text != "" {
+			if text := anthropicInlineSystemText(m.Content); text != "" {
 				conversation = append(conversation, tokenizerTypes.Conversation{
 					Role:    "system",
 					Content: &tokenizerTypes.Content{Raw: text},
@@ -464,6 +483,16 @@ func anthropicSystemText(ac fwkrh.AnthropicContent) string {
 		}
 	}
 	return sb.String()
+}
+
+func anthropicInlineSystemText(ac fwkrh.AnthropicContent) string {
+	if ac.Raw != "" {
+		if strings.HasPrefix(ac.Raw, anthropicBillingHeaderPrefix) {
+			return ""
+		}
+		return ac.Raw
+	}
+	return anthropicSystemText(ac)
 }
 
 // appendAnthropicMessage appends the conversations for one message. User

@@ -52,6 +52,7 @@ Backend selection:
 | `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).         |
 | `vllm.timeout`   | `5s`                    | Per-request timeout for text-only requests.                       |
 | `vllm.mmTimeout` | `30s`                   | Per-request timeout for multimodal requests.                      |
+| `vllm.mergeAnthropicInlineSystem` | `false` | Merge inline Anthropic system messages into the leading system message. Set this to match vLLM when its chat template requires system-first ordering. |
 
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):
@@ -127,6 +128,7 @@ Plugin config — sidecar (loopback):
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://localhost:8000"       # optional; this is the default
+      mergeAnthropicInlineSystem: true   # when vLLM merges inline system messages
 ```
 
 Plugin config — dedicated render Service:
