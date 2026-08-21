@@ -174,7 +174,17 @@ func (fcac *FlowControlAdmissionController) Admit(
 		modelName:         reqCtx.IncomingModelName,
 	}
 
+	// Measure at the admission boundary: wall time around enqueue-and-wait covers queue residency plus
+	// dispatch handoff. Stamped on reqCtx for emission as the FlowQueueDuration response header, only on
+	// dispatch: rejections short-circuit into an immediate error response that never reads these fields,
+	// and their durations carry no signal (a capacity rejection is ~0, a TTL eviction is the configured
+	// TTL, a cancellation is the client's disconnect time).
+	start := time.Now()
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
+	if outcome == types.QueueOutcomeDispatched {
+		reqCtx.FlowControlQueueDuration = time.Since(start)
+		reqCtx.FlowControlAdmitted = true
+	}
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
 	// A TTL expiry signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,6 +54,7 @@ type mockFlowController struct {
 	outcome fctypes.QueueOutcome
 	err     error
 	called  bool
+	delay   time.Duration
 }
 
 func (m *mockFlowController) EnqueueAndWait(
@@ -60,6 +62,9 @@ func (m *mockFlowController) EnqueueAndWait(
 	_ flowcontrol.FlowControlRequest,
 ) (fctypes.QueueOutcome, error) {
 	m.called = true
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
 	return m.outcome, m.err
 }
 
@@ -346,6 +351,49 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
+	t.Parallel()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	newReqCtx := func() *handlers.RequestContext {
+		return &handlers.RequestContext{
+			SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+			Request:           &handlers.Request{Metadata: map[string]any{}},
+		}
+	}
+
+	t.Run("flow control stamps duration on dispatch", func(t *testing.T) {
+		t.Parallel()
+		reqCtx := newReqCtx()
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond}
+		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+
+		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
+		assert.True(t, reqCtx.FlowControlAdmitted)
+		assert.GreaterOrEqual(t, reqCtx.FlowControlQueueDuration, 5*time.Millisecond)
+	})
+
+	t.Run("flow control leaves fields unset on rejection", func(t *testing.T) {
+		t.Parallel()
+		reqCtx := newReqCtx()
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeRejectedCapacity, delay: 5 * time.Millisecond}
+		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+
+		require.Error(t, ac.Admit(ctx, reqCtx, 0))
+		assert.False(t, reqCtx.FlowControlAdmitted)
+		assert.Zero(t, reqCtx.FlowControlQueueDuration)
+	})
+
+	t.Run("legacy admission does not stamp", func(t *testing.T) {
+		t.Parallel()
+		reqCtx := newReqCtx()
+		ac := NewLegacyAdmissionController(&mockSaturationDetector{}, &mocks.MockEndpointCandidates{})
+
+		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
+		assert.False(t, reqCtx.FlowControlAdmitted)
+	})
 }
 
 func TestTranslateFlowControlOutcome(t *testing.T) {
