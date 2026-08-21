@@ -69,6 +69,21 @@ type RawMessage struct {
 	reset bool
 }
 
+// StreamEvent describes an endpoint KV-event stream transition relevant to
+// consumers that can repair an incomplete derived index.
+type StreamEvent string
+
+const (
+	StreamEventAttached      StreamEvent = "attached"
+	StreamEventDetached      StreamEvent = "detached"
+	StreamEventMissingParent StreamEvent = "missing_parent"
+	StreamEventKnownEmpty    StreamEvent = "known_empty"
+)
+
+// StreamObserver receives stream transitions keyed by the serving endpoint
+// address used by the scheduler (address:port).
+type StreamObserver func(sourceEndpoint string, event StreamEvent)
+
 // EngineAdapter defines the interface for engine-specific message parsers.
 // Each inference engine has its own adapter implementation that handles
 // parsing raw transport messages into domain events.

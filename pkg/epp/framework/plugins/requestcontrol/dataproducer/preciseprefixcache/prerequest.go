@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -52,6 +53,12 @@ type speculativeEntries struct {
 // requests use a length-1 outer slice.
 type blockKeysState struct {
 	perPromptKeys [][]kvblock.BlockHash
+	repairMatches map[string]repairMatch
+}
+
+type repairMatch struct {
+	total     int
+	confirmed int
 }
 
 // Clone implements plugin.StateData.
@@ -61,7 +68,11 @@ func (s *blockKeysState) Clone() plugin.StateData {
 		cp[i] = make([]kvblock.BlockHash, len(keys))
 		copy(cp[i], keys)
 	}
-	return &blockKeysState{perPromptKeys: cp}
+	matches := make(map[string]repairMatch, len(s.repairMatches))
+	for endpoint, match := range s.repairMatches {
+		matches[endpoint] = match
+	}
+	return &blockKeysState{perPromptKeys: cp, repairMatches: matches}
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -111,15 +122,13 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	return cache, ttl, nil
 }
 
-// PreRequest seeds speculative KV-block index entries for the endpoint(s)
-// selected by the scheduler, so the next same-prefix request hits without
-// waiting for confirmed KV-events from the engine. Entries are tracked in
-// a TTL cache and evicted automatically. No-op when speculativeIndexing
-// is disabled.
+// PreRequest may request a bounded full KV-cache report for an eligible,
+// materially under-indexed selected endpoint, then seeds speculative entries
+// when speculative indexing is enabled.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
-	if !p.speculativeEnabled {
+	if !p.speculativeEnabled && p.fullReportRepair == nil {
 		return nil
 	}
 
@@ -133,6 +142,12 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 	p.pluginState.Delete(request.RequestID)
+	// Decide from the confirmed lookup captured before speculative entries are added.
+	p.requestFullReportIfNeeded(ctx, request, schedulingResult, state)
+
+	if !p.speculativeEnabled {
+		return nil
+	}
 
 	hasKeys := false
 	for _, pk := range state.perPromptKeys {
@@ -198,4 +213,65 @@ func (p *Producer) PreRequest(ctx context.Context,
 		"prompts", len(state.perPromptKeys),
 		"ttl", p.speculativeTTL)
 	return nil
+}
+
+func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *scheduling.InferenceRequest,
+	schedulingResult *scheduling.SchedulingResult, state *blockKeysState,
+) {
+	if p.fullReportRepair == nil || request == nil || request.Body == nil ||
+		request.Body.Payload == nil || schedulingResult == nil {
+		return
+	}
+	// A disaggregated prefill endpoint owns the cache state being repaired.
+	selected := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
+	if prefill, ok := schedulingResult.ProfileResults[experimentalPrefillProfile]; ok &&
+		prefill != nil && len(prefill.TargetEndpoints) > 0 {
+		selected = prefill
+	}
+	if selected == nil || len(selected.TargetEndpoints) == 0 {
+		return
+	}
+	metadata := selected.TargetEndpoints[0].GetMetadata()
+	if metadata == nil {
+		return
+	}
+	endpoint := fmt.Sprintf("%s:%s", metadata.Address, metadata.Port)
+	match, ok := state.repairMatches[endpoint]
+	if !ok {
+		return
+	}
+	payload, ok := request.Body.Payload.AsMap()
+	if !ok {
+		return
+	}
+	// Preserve any caller-supplied vLLM arguments.
+	var xargs map[string]any
+	setXArgs := false
+	switch existing := payload["vllm_xargs"].(type) {
+	case nil:
+		xargs = map[string]any{}
+		setXArgs = true
+	case map[string]any:
+		xargs = existing
+	case fwkrh.PayloadMap:
+		xargs = map[string]any(existing)
+	default:
+		log.FromContext(ctx).V(logging.DEBUG).Info("Skipping full report repair for malformed vllm_xargs",
+			"requestID", request.RequestID, "endpoint", endpoint)
+		return
+	}
+	requestFull, reason := p.fullReportRepair.shouldRequest(endpoint, match)
+	if !requestFull {
+		return
+	}
+	// Use the body mutator so every protocol serializer sees the new argument.
+	request.Body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
+		if setXArgs {
+			payload["vllm_xargs"] = xargs
+		}
+		xargs["kv_cache_report_mode"] = "full"
+	})
+	log.FromContext(ctx).V(logging.DEBUG).Info("Requested full KV-cache report",
+		"requestID", request.RequestID, "endpoint", endpoint, "reason", reason,
+		"totalBlocks", match.total, "confirmedBlocks", match.confirmed)
 }

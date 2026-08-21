@@ -35,6 +35,28 @@ upstream. No-op otherwise.
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
 | `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
+| `fullReportRepair` | object | disabled | Lets the producer ask vLLM for a full report of cached blocks reused by selected requests. |
+| `fullReportRepair.fullReportThreshold` | number | `0.80` | Request a full report when confirmed coverage is below this fraction. |
+| `fullReportRepair.minMissingBlocks` | integer | `32` | Minimum number of missing blocks required before requesting a full report. |
+
+When an endpoint picker (EPP) starts after vLLM, it can miss earlier cache events
+and undercount warm prefixes. `fullReportRepair` asks vLLM to report the cached
+blocks reused by selected requests so the precise index can recover.
+
+Confirmed coverage is the selected endpoint's contiguous, non-speculative match
+divided by the prompt's total blocks. The producer requests a full report when at
+least `minMissingBlocks` are missing and coverage is below `fullReportThreshold`.
+A missing-parent error forces one report for the next eligible request. The
+endpoint stays eligible until its cache is cleared or its subscriber is removed;
+one full report repairs only that request's prefix.
+
+This option requires vLLM pod discovery without replay. Global ZMQ and replay
+configurations are rejected. The producer sets
+`vllm_xargs.kv_cache_report_mode: full` on the request body, so a disaggregated
+decoder may also build an unused report. Measure that cost before enabling this
+option in production. Use
+`kvEventsConfig.podDiscoveryConfig.podLabelSelector` to subscribe only to
+prefiller pods when the precise index represents prefill cache state.
 
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.

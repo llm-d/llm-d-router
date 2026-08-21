@@ -63,6 +63,9 @@ type PluginConfig struct {
 	// eviction. Go duration string; defaults to defaultSpeculativeTTL when
 	// empty.
 	SpeculativeTTL string `json:"speculativeTTL"`
+	// FullReportRepair enables bounded per-request cache reports that repair an
+	// event-derived index after attachment or an integrity fault.
+	FullReportRepair *FullReportRepairConfig `json:"fullReportRepair,omitempty"`
 }
 
 var (
@@ -107,6 +110,7 @@ type Producer struct {
 	speculativeCache   *ttlcache.Cache[string, *speculativeEntries]
 	speculativeTTL     time.Duration
 	speculativeEnabled bool
+	fullReportRepair   *fullReportRepair
 
 	blockSizeTokens int
 
@@ -161,6 +165,18 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if config.TokenProcessorConfig == nil {
 		config.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
 	}
+	// Validate the opt-in repair mode before starting background components.
+	var repair *fullReportRepair
+	if config.FullReportRepair != nil {
+		if err := validateFullReportRepairPrerequisites(config.KVEventsConfig); err != nil {
+			return nil, err
+		}
+		repairConfig, err := normalizeFullReportRepairConfig(*config.FullReportRepair)
+		if err != nil {
+			return nil, fmt.Errorf("invalid fullReportRepair: %w", err)
+		}
+		repair = newFullReportRepair(repairConfig)
+	}
 
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)
 	if err != nil {
@@ -187,6 +203,9 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
 	}
 	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+	if repair != nil {
+		pool.SetStreamObserver(repair.observe)
+	}
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
@@ -213,6 +232,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
+		fullReportRepair:   repair,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}, nil
@@ -371,6 +391,10 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	var repairMatches map[string]repairMatch
+	if p.fullReportRepair != nil {
+		repairMatches = make(map[string]repairMatch, len(endpoints))
+	}
 	for _, ep := range endpoints {
 		md := ep.GetMetadata()
 		if md == nil {
@@ -396,11 +420,19 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
 		}
 		ep.Put(p.dk, info)
+		// Repair ignores speculative rows so predictions cannot hide a stale index.
+		if repairMatches != nil {
+			confirmedBlocks := 0
+			for _, lu := range lookups {
+				confirmedBlocks += matchedConfirmedBlockCount(lu.keys, lu.keyToPods, addr)
+			}
+			repairMatches[addr] = repairMatch{total: totalBlocks, confirmed: confirmedBlocks}
+		}
 	}
 
-	if p.speculativeEnabled {
+	if p.speculativeEnabled || p.fullReportRepair != nil {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
-			&blockKeysState{perPromptKeys: perPromptKeys})
+			&blockKeysState{perPromptKeys: perPromptKeys, repairMatches: repairMatches})
 	}
 
 	span.SetAttributes(

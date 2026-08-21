@@ -2,6 +2,7 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -42,6 +43,14 @@ type recordingIndex struct {
 	kvblock.Index
 	getRequestKeyCalls int
 	evictCalls         int
+}
+
+type failingClearIndex struct {
+	kvblock.Index
+}
+
+func (i *failingClearIndex) Clear(context.Context, string) error {
+	return errors.New("clear failed")
 }
 
 func (i *recordingIndex) GetRequestKey(ctx context.Context, engineKey kvblock.BlockHash) (kvblock.BlockHash, error) {
@@ -1026,6 +1035,36 @@ func TestAllBlocksCleared_Dispatch(t *testing.T) {
 		require.Len(t, result[ck], 1, "only the surviving pod should remain on key %s", ck)
 		assert.Equal(t, "pod-kept", result[ck][0].PodIdentifier)
 	}
+}
+
+func TestPool_ReportsRepairIntegritySignals(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	var got []StreamEvent
+	pool.SetStreamObserver(func(endpoint string, event StreamEvent) {
+		assert.Equal(t, "10.0.0.9:8000", endpoint)
+		got = append(got, event)
+	})
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{2}, Tokens: makeTokens(16), ParentHash: 1},
+	}}, "10.0.0.9:8000", "test-model")
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&AllBlocksClearedEvent{},
+	}}, "10.0.0.9:8000", "test-model")
+
+	assert.Equal(t, []StreamEvent{StreamEventMissingParent, StreamEventKnownEmpty}, got)
+}
+
+func TestPool_FailedResetDoesNotReportKnownEmpty(t *testing.T) {
+	pool, idx, _ := newTestPool(t, 16)
+	pool.index = &failingClearIndex{Index: idx}
+	var got []StreamEvent
+	pool.SetStreamObserver(func(_ string, event StreamEvent) { got = append(got, event) })
+
+	pool.processRawMessage(t.Context(), &RawMessage{SourceEndpoint: "10.0.0.9:8000", reset: true})
+
+	assert.Empty(t, got)
 }
 
 // TestPool_AllBlocksClearedResetsDedup verifies the filter is reset on

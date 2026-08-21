@@ -446,6 +446,103 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	assert.Empty(t, info.CachedBlocksByTier())
 }
 
+func TestProduce_RepairMatchExcludesSpeculativeOnlyBlocks(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+	keys := []kvblock.BlockHash{1, 2, 3}
+	const pod = "10.0.0.1:8080"
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return keys, nil
+		},
+		index: &fakeKVBlockIndex{lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+			return map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {{PodIdentifier: pod, DeviceTier: "gpu"}},
+				2: {{PodIdentifier: pod, DeviceTier: "cpu"}},
+				3: {{PodIdentifier: pod, Speculative: true}},
+			}, nil
+		}},
+	}
+	p := newProducerWithIndexer(ctx, idx, &fakeKVBlockScorer{score: func(_ context.Context,
+		_ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry,
+	) (map[string]float64, error) {
+		return map[string]float64{pod: 3}, nil
+	}})
+	p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
+		FullReportThreshold: 0.80,
+		MinMissingBlocks:    32,
+	})
+	req := &scheduling.InferenceRequest{
+		RequestID:   "repair-counts",
+		TargetModel: "model",
+		Body: &fwkrh.InferenceRequestBody{TokenizedRequest: &fwkrh.TokenizedRequest{
+			Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 3*testBlockSize)}},
+		}},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	state, err := plugin.ReadPluginStateKey[*blockKeysState](p.pluginState, req.RequestID, blockKeysStateKey)
+	require.NoError(t, err)
+	assert.Equal(t, repairMatch{total: 3, confirmed: 2}, state.repairMatches[pod])
+}
+
+func TestProduceThenPreRequest_RepairsSelectedPrefill(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+	keys := make([]kvblock.BlockHash, 64)
+	for i := range keys {
+		keys[i] = kvblock.BlockHash(i + 1)
+	}
+	const prefill = "10.0.0.2:8080"
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return keys, nil
+		},
+		index: &fakeKVBlockIndex{lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+			found := make(map[kvblock.BlockHash][]kvblock.PodEntry, 16)
+			for _, key := range keys[:16] {
+				found[key] = []kvblock.PodEntry{{PodIdentifier: prefill, DeviceTier: "gpu"}}
+			}
+			return found, nil
+		}},
+	}
+	p := newProducerWithIndexer(ctx, idx, &fakeKVBlockScorer{score: func(_ context.Context,
+		_ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry,
+	) (map[string]float64, error) {
+		return map[string]float64{prefill: 16}, nil
+	}})
+	p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
+		FullReportThreshold: 0.80,
+		MinMissingBlocks:    32,
+	})
+	p.fullReportRepair.observe(prefill, kvevents.StreamEventAttached)
+	payload := fwkrh.PayloadMap{"model": "model"}
+	req := &scheduling.InferenceRequest{
+		RequestID:   "produce-prerequest-repair",
+		TargetModel: "model",
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: payload,
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(keys)*testBlockSize)}},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":                   {TargetEndpoints: []scheduling.Endpoint{endpoints[0]}},
+			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{endpoints[1]}},
+		},
+	}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	xargs, ok := payload["vllm_xargs"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "full", xargs["kv_cache_report_mode"])
+}
+
 // MM match uses cachedBlocks (literal), not matchLen (tier-weighted score).
 func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
 	ctx := utils.NewTestContext(t)
