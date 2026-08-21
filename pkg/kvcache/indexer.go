@@ -29,6 +29,7 @@ import (
 	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
@@ -167,10 +168,10 @@ func (k *Indexer) ScoreTokens(
 	}
 
 	span.SetAttributes(
-		attribute.String("gen_ai.request.model", modelName),
-		attribute.Int("llm_d.kv_cache.pod_count", len(podIdentifiers)),
-		attribute.Int("llm_d.kv_cache.token_count", len(tokens)),
-		attribute.Int("llm_d.kv_cache.block_keys.count", len(blockKeys)),
+		telemetry.GenAIRequestModel(modelName),
+		telemetry.LLMDKVCachePodCount(len(podIdentifiers)),
+		telemetry.LLMDKVCacheTokenCount(len(tokens)),
+		telemetry.LLMDKVCacheBlockKeysCount(len(blockKeys)),
 	)
 
 	if len(blockKeys) == 0 {

@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/telemetry"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -179,17 +180,17 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 
 	// Set initial attributes
 	span.SetAttributes(
-		attribute.Int("llm_d.epp.profile_handler.total_profiles", len(profiles)),
-		attribute.Int("llm_d.epp.profile_handler.executed_profiles", len(profileResults)),
+		telemetry.LLMDEPPProfileHandlerTotalProfiles(len(profiles)),
+		telemetry.LLMDEPPProfileHandlerExecutedProfiles(len(profileResults)),
 	)
 
 	// Set optional request attributes if request is not nil
 	if request != nil {
 		if request.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+			span.SetAttributes(telemetry.GenAIRequestModel(request.TargetModel))
 		}
 		if request.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+			span.SetAttributes(telemetry.GenAIRequestID(request.RequestID))
 		}
 		span.SetAttributes(mmobs.SpanAttributes(request)...)
 	}
@@ -197,8 +198,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		// if decode profile was not executed yet, first let the scheduler run the decode profile
 		span.SetAttributes(
-			attribute.String("llm_d.epp.profile_handler.decision", "run_decode"),
-			attribute.String("llm_d.epp.profile_handler.selected_profile", h.decodeProfile),
+			telemetry.LLMDEPPProfileHandlerDecision("run_decode"),
+			telemetry.LLMDEPPProfileHandlerSelectedProfile(h.decodeProfile),
 		)
 		return map[string]scheduling.SchedulerProfile{
 			h.decodeProfile: profiles[h.decodeProfile],
@@ -210,7 +211,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	// check if all configured profiles have been executed, or if decode failed, no need to run more profiles.
 	if len(profiles) == len(profileResults) || profileResults[h.decodeProfile] == nil {
 		span.SetAttributes(
-			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+			telemetry.LLMDEPPProfileHandlerDecision("complete"),
 			attribute.Bool("llm_d.epp.profile_handler.decode_failed", profileResults[h.decodeProfile] == nil),
 		)
 		return map[string]scheduling.SchedulerProfile{}
@@ -220,8 +221,8 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 		RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypePrefillDecode) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 		// run the prefill profile
 		span.SetAttributes(
-			attribute.String("llm_d.epp.profile_handler.decision", "prefill_decode"),
-			attribute.String("llm_d.epp.profile_handler.selected_profile", h.prefillProfile),
+			telemetry.LLMDEPPProfileHandlerDecision("prefill_decode"),
+			telemetry.LLMDEPPProfileHandlerSelectedProfile(h.prefillProfile),
 		)
 		return map[string]scheduling.SchedulerProfile{
 			h.prefillProfile: profiles[h.prefillProfile],
@@ -230,7 +231,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 
 	RecordPDDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypeDecodeOnly) //nolint:staticcheck // intentional: pd-profile-handler is itself deprecated
 	span.SetAttributes(
-		attribute.String("llm_d.epp.profile_handler.decision", "decode_only"),
+		telemetry.LLMDEPPProfileHandlerDecision("decode_only"),
 	)
 	return map[string]scheduling.SchedulerProfile{} // do not run prefill
 }
