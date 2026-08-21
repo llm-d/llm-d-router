@@ -65,6 +65,8 @@ type RawMessage struct {
 	Payload []byte
 	// SourceEndpoint is the serving endpoint associated with the subscriber.
 	SourceEndpoint string
+	// reset clears the message's pod before later messages on the same queue.
+	reset bool
 }
 
 // EngineAdapter defines the interface for engine-specific message parsers.

@@ -45,7 +45,11 @@ func New(policy flowcontrol.OrderingPolicy) contracts.SafeQueue {
 // item's flowcontrol.QueueItemHandle, allowing O(log n) removal by index without a side lookup
 // table.
 type heapItem struct {
-	item          flowcontrol.QueueItemAccessor
+	item flowcontrol.QueueItemAccessor
+	// byteSize is the item's byte size as reported at Add time. Removal paths debit this booked
+	// value rather than re-reading the request, so the queue's byte accounting stays exact even if
+	// a caller-implemented FlowControlRequest.ByteSize() is not stable across calls.
+	byteSize      uint64
 	index         int // position in itemHeap.items; set to -1 once removed.
 	isInvalidated bool
 }
@@ -102,8 +106,14 @@ func (h *itemHeap) Pop() any {
 // priorityQueue implements the SafeQueue interface using a container/heap.
 // The heap is ordered by the provided policy, with higher priority considered closer to the head.
 // This implementation is concurrent-safe.
+//
+// The queue owns its statistics. len and byteSize are published snapshots of the heap's state,
+// assigned in the same critical section as every mutation: len is stored from len(heap.items) and
+// byteSize credits/debits each item's booked size exactly once. Neither can drift from the heap's
+// actual contents, so both are non-negative by construction.
 type priorityQueue struct {
 	heap     *itemHeap
+	len      atomic.Int64
 	byteSize atomic.Uint64
 	mu       sync.RWMutex
 }
@@ -122,9 +132,7 @@ func newPriorityQueue(policy flowcontrol.OrderingPolicy) *priorityQueue {
 
 // Len returns the number of items in the queue.
 func (pq *priorityQueue) Len() int {
-	pq.mu.RLock()
-	defer pq.mu.RUnlock()
-	return len(pq.heap.items)
+	return int(pq.len.Load())
 }
 
 // ByteSize returns the total byte size of all items in the queue.
@@ -147,14 +155,14 @@ func (pq *priorityQueue) Peek() flowcontrol.QueueItemAccessor {
 // Add adds an item to the queue.
 // Time complexity: O(log n).
 func (pq *priorityQueue) Add(item flowcontrol.QueueItemAccessor) {
-	hi := &heapItem{item: item}
+	hi := &heapItem{item: item, byteSize: item.OriginalRequest().ByteSize()}
 	item.SetHandle(hi)
 
 	pq.mu.Lock()
 	heap.Push(pq.heap, hi)
+	pq.len.Store(int64(len(pq.heap.items)))
+	pq.byteSize.Add(hi.byteSize)
 	pq.mu.Unlock()
-
-	pq.byteSize.Add(item.OriginalRequest().ByteSize())
 }
 
 // Remove removes an item from the queue.
@@ -185,7 +193,8 @@ func (pq *priorityQueue) Remove(handle flowcontrol.QueueItemHandle) (flowcontrol
 	}
 
 	heap.Remove(pq.heap, i)
-	pq.byteSize.Add(^hi.item.OriginalRequest().ByteSize() + 1) // Atomic subtraction.
+	pq.len.Store(int64(len(pq.heap.items)))
+	pq.byteSize.Add(^hi.byteSize + 1) // Atomic subtraction of the booked size.
 	hi.Invalidate()
 	return hi.item, nil
 }
@@ -206,7 +215,7 @@ func (pq *priorityQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontro
 			removedItems = append(removedItems, hi.item)
 			hi.Invalidate()
 			hi.index = -1
-			pq.byteSize.Add(^hi.item.OriginalRequest().ByteSize() + 1) // Atomic subtraction.
+			pq.byteSize.Add(^hi.byteSize + 1) // Atomic subtraction of the booked size.
 			continue
 		}
 		items[kept] = hi
@@ -220,6 +229,7 @@ func (pq *priorityQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontro
 			items[i] = nil
 		}
 		pq.heap.items = items[:kept]
+		pq.len.Store(int64(len(pq.heap.items)))
 		// Re-establish the heap property on the remaining items.
 		heap.Init(pq.heap)
 	}
@@ -240,6 +250,7 @@ func (pq *priorityQueue) Drain() []flowcontrol.QueueItemAccessor {
 	}
 
 	pq.heap.items = make([]*heapItem, 0)
+	pq.len.Store(0)
 	pq.byteSize.Store(0)
 
 	return drainedItems

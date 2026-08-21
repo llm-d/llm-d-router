@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -38,9 +39,10 @@ import (
 )
 
 const (
-	DefaultGrpcPort      = 9002
-	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
-	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
+	DefaultGrpcPort           = 9002
+	DefaultPoolNamespace      = "default"        // default when pool namespace is empty (CLI flag default is empty)
+	DefaultDrainTimeout       = 30 * time.Second // graceful shutdown drain window
+	MinRefreshMetricsInterval = 50 * time.Millisecond
 )
 
 // deprecatedMetricFlags lists metric flags that are superseded by engineConfigs
@@ -121,6 +123,8 @@ type Options struct {
 	ConfigFile string // The path to the configuration file.
 	ConfigText string // The configuration specified as text, in lieu of a file.
 
+	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
+
 	// internal
 	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
 	endpointSelectorStr string         // Raw string from --endpoint-selector flag, parsed to EndpointSelector in Complete()
@@ -135,7 +139,7 @@ func NewOptions() *Options {
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
 		EmitEndpointScores:               false,
-		RefreshMetricsInterval:           50 * time.Millisecond,
+		RefreshMetricsInterval:           MinRefreshMetricsInterval,
 		RefreshPrometheusMetricsInterval: 5 * time.Second,
 		MetricsStalenessThreshold:        2 * time.Second,
 		TotalQueuedRequestsMetric:        "vllm:num_requests_waiting",
@@ -234,6 +238,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Directory with the metrics server certificates. Enables TLS on the metrics endpoint.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
+	fs.BoolVar(&opts.AllowExperimentalPlugins, "allow-experimental-plugins", opts.AllowExperimentalPlugins,
+		"Allows loading of experimental Alpha plugins.")
 }
 
 func (opts *Options) Complete() error {
@@ -381,6 +387,11 @@ func (opts *Options) Validate() error {
 		return errMetricsTLSWithoutAuth
 	}
 
+	if opts.RefreshMetricsInterval < MinRefreshMetricsInterval {
+		ctrl.Log.WithName("options").Info("Warning: refresh-metrics-interval below minimum, clamped",
+			"requested", opts.RefreshMetricsInterval, "effective", MinRefreshMetricsInterval)
+		opts.RefreshMetricsInterval = MinRefreshMetricsInterval
+	}
 	if opts.GRPCMaxRecvMsgSize < 0 {
 		return fmt.Errorf("grpc-max-recv-msg-size must be non-negative, got %d", opts.GRPCMaxRecvMsgSize)
 	}

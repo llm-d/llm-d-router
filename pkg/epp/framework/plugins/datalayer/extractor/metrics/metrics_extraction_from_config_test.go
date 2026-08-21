@@ -378,7 +378,7 @@ func TestMetricsExtractionCustomScalarFromConfig(t *testing.T) {
 
 	require.NoError(t, p.Poll(context.Background(), ep))
 
-	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attributeKey)
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey(attributeKey))
 	require.True(t, ok, "custom scalar metric should be stored as an endpoint attribute")
 	assert.InDelta(t, 42.5, float64(got), 0.001)
 	assert.Zero(t, ep.GetMetrics().WaitingQueueSize)
@@ -419,7 +419,7 @@ func TestMetricsExtractionCustomCounterFromConfig(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attributeKey)
+	got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey(attributeKey))
 	require.True(t, ok, "custom counter should be stored as an endpoint attribute")
 	assert.InDelta(t, 12.0, float64(got), 0.001)
 }

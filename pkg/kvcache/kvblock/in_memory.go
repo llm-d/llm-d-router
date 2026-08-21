@@ -27,8 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/collections"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-router/pkg/utils"
 )
 
 const (
@@ -358,7 +358,7 @@ func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) 
 func podsPerKeyPrintHelper(ks map[BlockHash][]PodEntry) string {
 	var b strings.Builder
 	for k, v := range ks {
-		fmt.Fprintf(&b, "%s: %v\n", k.String(), utils.SliceMap(v, func(pod PodEntry) string {
+		fmt.Fprintf(&b, "%s: %v\n", k.String(), collections.SliceMap(v, func(pod PodEntry) string {
 			return pod.String()
 		}))
 	}

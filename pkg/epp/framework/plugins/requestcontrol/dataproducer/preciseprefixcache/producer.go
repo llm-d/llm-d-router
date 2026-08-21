@@ -75,7 +75,7 @@ var (
 type subscriberManager interface {
 	EnsureSubscriber(
 		ctx context.Context,
-		podIdentifier, sourceEndpoint, endpoint, topicFilter string,
+		podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter string,
 		remoteSocket bool,
 	) error
 	RemoveSubscriber(ctx context.Context, podIdentifier string)
@@ -192,7 +192,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
-			config.KVEventsConfig.ZMQEndpoint, config.KVEventsConfig.TopicFilter, false); err != nil {
+			config.KVEventsConfig.ZMQEndpoint, "", config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
 		}
 	}
@@ -293,15 +293,15 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency from token-producer so
+// Consumes declares the TokenizedRequest dependency from token-producer so
 // the data-layer DAG orders tokenization before this producer runs.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
-// Produce hashes the request's TokenizedPrompt into KV-block keys, looks
+// Produce hashes the request's TokenizedRequest into KV-block keys, looks
 // them up in the per-endpoint KV-block index, and writes PrefixCacheMatchInfo
 // to each candidate endpoint. No-op when the request carries no tokens.
 // With speculativeIndexing enabled, the computed block keys are stashed
@@ -395,7 +395,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
 		}
-		ep.Put(p.dk.String(), info)
+		ep.Put(p.dk, info)
 	}
 
 	if p.speculativeEnabled {

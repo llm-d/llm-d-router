@@ -116,6 +116,9 @@ type FlowRegistryDataPlane interface {
 	// numeric value).
 	// The returned slice provides a definitive, ordered list of priority levels for iteration, for example, by a
 	// `controller.FlowController` worker's dispatch loop.
+	//
+	// Contract: the returned slice is a shared, immutable snapshot. Callers MUST NOT mutate it.
+	// Implementations may publish it copy-on-write, so reads are lock-free and allocation-free.
 	AllOrderedPriorityLevels() []int
 }
 

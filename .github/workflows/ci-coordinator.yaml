@@ -1,9 +1,9 @@
 name: CI - Coordinator Test
 
 # Runs coordinator unit tests and e2e tests. Path filter excludes paths not
-# exercised by the coordinator. The e2e-images matrix job is followed by an
-# e2e-images-status job that aggregates its result, since GitHub required
-# status checks cannot reference individual matrix legs.
+# exercised by the coordinator. The e2e-images and e2e-tests matrix jobs are
+# each followed by a *-status job that aggregates the matrix result, since
+# GitHub required status checks cannot reference individual matrix legs.
 on:
   push:
     branches:
@@ -43,6 +43,7 @@ jobs:
               - hack/**
               - test/**
               - config/coordinator/**
+              - deploy/**
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-coordinator.yaml
@@ -170,6 +171,15 @@ jobs:
     if: ${{ needs.check-changes.outputs.src == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - topology: single-EPP
+            target: test-e2e-coordinator-run
+          - topology: 3-EPP
+            target: test-e2e-coordinator-3epp-run
+    name: e2e-tests (${{ matrix.topology }})
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -214,4 +224,17 @@ jobs:
         env:
           GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
-        run: make -f Makefile.coord.mk test-e2e-coordinator-run
+        run: make -f Makefile.coord.mk ${{ matrix.target }}
+
+  e2e-tests-status:
+    needs: e2e-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check e2e-tests result
+        run: |
+          result="${{ needs.e2e-tests.result }}"
+          if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            echo "::error::e2e-tests failed for at least one topology"
+            exit 1
+          fi

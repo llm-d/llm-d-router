@@ -106,6 +106,14 @@ func (epm *EndpointMetadata) GetID() ID {
 	return epm.ID
 }
 
+// GetNamespacedName returns the endpoint's unique identity as a types.NamespacedName.
+func (epm *EndpointMetadata) GetNamespacedName() types.NamespacedName {
+	if epm == nil {
+		return types.NamespacedName{}
+	}
+	return epm.ID
+}
+
 // GetIPAddress returns the Endpoint's IP address.
 func (epm *EndpointMetadata) GetIPAddress() string {
 	return epm.Address

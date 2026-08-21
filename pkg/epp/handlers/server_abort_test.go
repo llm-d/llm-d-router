@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
 
 // mockProcessServer implements ExternalProcessor_ProcessServer for testing.
@@ -79,8 +80,8 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 			logger := logr.Discard()
 
 			reqCtx := &RequestContext{
-				RequestState:         RequestEvicted,
-				RequestDroppedReason: tt.requestDroppedReason,
+				requestState:         requestEvicted,
+				requestDroppedReason: tt.requestDroppedReason,
 			}
 
 			err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
@@ -114,10 +115,52 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 
 	// Normal state — no responses queued, nothing should be sent.
 	reqCtx := &RequestContext{
-		RequestState: RequestReceived,
+		requestState: requestReceived,
 	}
 
 	err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
 	require.NoError(t, err)
 	assert.Empty(t, srv.sentResponses, "Should not send any response for normal state without queued responses")
+}
+
+func TestTerminationCause(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		state  streamRequestState
+		ctxErr error
+		want   fwkrc.TerminationCause
+	}{
+		{
+			name:   "evicted outranks a cancelled context",
+			state:  requestEvicted,
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseEvicted,
+		},
+		{
+			name:   "a cancelled context is the client going away",
+			state:  responseReceived,
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseClientDisconnect,
+		},
+		{
+			name:  "anything else is an error",
+			state: responseReceived,
+			want:  fwkrc.TerminationCauseError,
+		},
+		{
+			name:  "skipped response processing never observes completion",
+			state: requestResponseProcessingSkipped,
+			want:  fwkrc.TerminationCauseError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reqCtx := &RequestContext{requestState: tt.state}
+			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
+		})
+	}
 }

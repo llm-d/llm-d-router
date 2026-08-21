@@ -55,6 +55,172 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 	return w.buffer.Bytes()
 }
 
+// deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
+// until the caller decides the outcome (the "commit point"). It is used by the
+// MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill
+// yet never surface a response to the client before prefill has succeeded:
+//
+//   - commit(): relay the buffered status/headers/body to the client and switch
+//     to pass-through mode, so any further decode writes stream straight to the
+//     client (SSE/streaming is preserved after the commit point).
+//   - abort():  discard the buffered output and drop every subsequent write, so
+//     a failed prefill can never let decode emit a (possibly 200) response; the
+//     caller then writes the prefill error to the client directly.
+//
+// It is safe for concurrent use by the decode goroutine (Write/WriteHeader/
+// Flush) and the coordinating goroutine (commit/abort).
+type deferredCommitWriter struct {
+	dst http.ResponseWriter
+
+	mu sync.Mutex
+	// committed: caller decided prefill succeeded, decode's response may reach
+	// the client. aborted: caller decided prefill failed, decode is discarded.
+	committed bool
+	aborted   bool
+	// wroteHeader records that decode has produced its status/headers.
+	wroteHeader bool
+	// headerFlushed records that decode's status/headers have been relayed to
+	// dst; after this, writes stream straight through.
+	headerFlushed bool
+	statusCode    int
+	header        http.Header
+	buffer        bytes.Buffer
+}
+
+func newDeferredCommitWriter(dst http.ResponseWriter) *deferredCommitWriter {
+	return &deferredCommitWriter{
+		dst:    dst,
+		header: make(http.Header),
+	}
+}
+
+func (w *deferredCommitWriter) Header() http.Header {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Once decode's headers have been relayed, hand back the real writer's
+	// header map. Until then (buffering, or committed but decode hasn't emitted
+	// its header yet) collect into our own map so we can relay it verbatim.
+	if w.headerFlushed {
+		return w.dst.Header()
+	}
+	return w.header
+}
+
+func (w *deferredCommitWriter) WriteHeader(statusCode int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.aborted {
+		return
+	}
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.statusCode = statusCode
+	}
+	// If we've already committed, decode's header is now known -> relay it.
+	if w.committed && !w.headerFlushed {
+		w.flushCommitLocked()
+	}
+}
+
+func (w *deferredCommitWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.aborted {
+		// Response was discarded (prefill failed); silently drop decode output.
+		return len(b), nil
+	}
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		if w.statusCode == 0 {
+			w.statusCode = http.StatusOK
+		}
+	}
+	if w.committed {
+		if !w.headerFlushed {
+			w.flushCommitLocked()
+		}
+		return w.dst.Write(b)
+	}
+	return w.buffer.Write(b)
+}
+
+// Flush only propagates once decode's response has been relayed to the client;
+// while buffering it is a no-op so nothing reaches the client before the commit
+// point.
+func (w *deferredCommitWriter) Flush() {
+	w.mu.Lock()
+	streaming := w.headerFlushed && !w.aborted
+	w.mu.Unlock()
+	if !streaming {
+		return
+	}
+	if f, ok := w.dst.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// flushCommitLocked relays decode's buffered status/headers/body to dst and
+// marks the response as flushed so subsequent writes stream through. Caller must
+// hold w.mu and must have set committed.
+func (w *deferredCommitWriter) flushCommitLocked() {
+	if w.headerFlushed {
+		return
+	}
+	dstHeader := w.dst.Header()
+	for key, values := range w.header {
+		dstHeader[key] = values
+	}
+	status := w.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.headerFlushed = true
+	w.dst.WriteHeader(status)
+	if w.buffer.Len() > 0 {
+		_, _ = w.dst.Write(w.buffer.Bytes())
+		w.buffer.Reset()
+	}
+	if f, ok := w.dst.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// commit allows decode's response to reach the client, preserving decode's own
+// status, headers, and body. If decode has already produced output it is flushed
+// immediately; otherwise the flush is deferred until decode emits its header, so
+// a fast-succeeding prefill never clobbers decode's status/headers with a
+// synthesized default. Returns false if the writer had already been aborted.
+func (w *deferredCommitWriter) commit() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.aborted {
+		return false
+	}
+	if w.committed {
+		return true
+	}
+	w.committed = true
+	// Only flush now if decode already emitted its header/body; otherwise wait
+	// for decode's WriteHeader/Write so we relay its real status and headers.
+	if w.wroteHeader || w.buffer.Len() > 0 {
+		w.flushCommitLocked()
+	}
+	return true
+}
+
+// abort discards buffered output and drops all future writes. It is a no-op if
+// decode's response has already been relayed to the client (which cannot happen
+// in the current flow, since the caller only aborts before committing).
+func (w *deferredCommitWriter) abort() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.headerFlushed {
+		return
+	}
+	w.aborted = true
+	w.buffer.Reset()
+}
+
 type flushableResponseWriter interface {
 	http.ResponseWriter
 	http.Flusher

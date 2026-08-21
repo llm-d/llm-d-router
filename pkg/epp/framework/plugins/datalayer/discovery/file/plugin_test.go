@@ -75,10 +75,11 @@ func writeTemp(t *testing.T, content string) string {
 
 func newFD(path string, watch bool) *FileDiscovery {
 	return &FileDiscovery{
-		path:      path,
-		watchFile: watch,
-		endpoints: make(map[types.NamespacedName]struct{}),
-		ready:     make(chan struct{}),
+		path:            path,
+		watchFile:       watch,
+		validateAddress: validateIPv4Address,
+		endpoints:       make(map[types.NamespacedName]struct{}),
+		ready:           make(chan struct{}),
 	}
 }
 
@@ -337,7 +338,7 @@ func TestDumpStateCaps(t *testing.T) {
 
 func TestDumpStateConcurrentWithLoad(t *testing.T) {
 	path := writeTemp(t, "endpoints:\n- name: ep1\n  address: 10.0.0.1\n  port: \"8000\"\n")
-	f := &FileDiscovery{path: path, endpoints: map[types.NamespacedName]struct{}{}}
+	f := &FileDiscovery{path: path, validateAddress: validateIPv4Address, endpoints: map[types.NamespacedName]struct{}{}}
 	notifier := &recordingNotifier{}
 
 	var wg sync.WaitGroup

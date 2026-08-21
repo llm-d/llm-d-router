@@ -50,7 +50,7 @@ func makeTestEndpointBase() scheduling.Endpoint {
 
 func makeTestEndpoint(cachedTokens int) scheduling.Endpoint {
 	ep := makeTestEndpointBase()
-	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedTokens, testTotalTokens, testBlockSize))
 	return ep
 }
@@ -64,10 +64,10 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 // withTokens sets the tokenized prompt to carry n token IDs, which the decider reads
 // as the input token count. Any existing tokenized prompt is preserved.
 func withTokens(req *scheduling.InferenceRequest, n int) *scheduling.InferenceRequest {
-	if req.Body.TokenizedPrompt == nil {
-		req.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{}
+	if req.Body.TokenizedRequest == nil {
+		req.Body.TokenizedRequest = &fwkrh.TokenizedRequest{}
 	}
-	req.Body.TokenizedPrompt.PerPromptTokens = [][]uint32{make([]uint32, n)}
+	req.Body.TokenizedRequest.Prompts = []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}}
 	return req
 }
 
@@ -118,7 +118,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 							Strings: []string{"hello world", "foo bar baz"},
 						},
 					},
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 5)}},
+					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 5)}}},
 				},
 			},
 			want: 5,
@@ -160,8 +160,8 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			name: "generate request returns exact token count",
 			req: &scheduling.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					Generate:        &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 7)}},
+					Generate:         &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
+					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 7)}}},
 				},
 			},
 			want: 7,
@@ -424,7 +424,7 @@ func TestDisaggregate_UsesUnweightedCachedBlockCount(t *testing.T) {
 
 	newEndpoint := func(info *attrprefix.PrefixCacheMatchInfo) scheduling.Endpoint {
 		ep := makeTestEndpointBase()
-		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), info)
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, info)
 		return ep
 	}
 	// Exact token count via the tokenized-prompt path the decider reads.
@@ -463,7 +463,7 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	ep := makeTestEndpointBase()
-	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), &notPrefixCacheMatchInfo{})
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, &notPrefixCacheMatchInfo{})
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 5})
 	require.NoError(t, err)
