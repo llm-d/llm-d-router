@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 )
 
 // internalSpanKind is hoisted to avoid allocating a span-start option on every
@@ -250,10 +251,10 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	ctx, span := tracer.Start(ctx, "llm_d.epp.scorer."+typedName.Type, internalSpanKind)
 	defer span.End()
 	span.SetAttributes(
-		attribute.String("llm_d.epp.scorer.type", typedName.Type),
-		attribute.String("llm_d.epp.scorer.name", typedName.Name),
-		attribute.Float64("llm_d.epp.scorer.weight", scorer.Weight()),
-		attribute.Int("llm_d.epp.scorer.candidate_endpoints", len(endpoints)),
+		semconv.LLMDEPPScorerType(typedName.Type),
+		semconv.LLMDEPPScorerName(typedName.Name),
+		semconv.LLMDEPPScorerWeight(scorer.Weight()),
+		semconv.LLMDEPPScorerCandidateEndpoints(len(endpoints)),
 	)
 
 	before := time.Now()
@@ -271,9 +272,9 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 			totalScore += s
 		}
 		span.SetAttributes(
-			attribute.Float64("llm_d.epp.scorer.score.max", maxScore),
-			attribute.Float64("llm_d.epp.scorer.score.avg", totalScore/float64(len(scores))),
-			attribute.Int("llm_d.epp.scorer.endpoints_scored", len(scores)),
+			semconv.LLMDEPPScorerScoreMax(maxScore),
+			semconv.LLMDEPPScorerScoreAvg(totalScore/float64(len(scores))),
+			semconv.LLMDEPPScorerEndpointsScored(len(scores)),
 		)
 	}
 
@@ -286,10 +287,10 @@ func requestSpanAttributes(request *fwksched.InferenceRequest) []attribute.KeyVa
 	}
 	attributes := make([]attribute.KeyValue, 0, 2)
 	if request.TargetModel != "" {
-		attributes = append(attributes, attribute.String("gen_ai.request.model", request.TargetModel))
+		attributes = append(attributes, semconv.GenAIRequestModel(request.TargetModel))
 	}
 	if request.RequestID != "" {
-		attributes = append(attributes, attribute.String("gen_ai.request.id", request.RequestID))
+		attributes = append(attributes, semconv.GenAIRequestID(request.RequestID))
 	}
 	return attributes
 }
