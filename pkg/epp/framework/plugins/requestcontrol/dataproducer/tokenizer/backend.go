@@ -194,9 +194,9 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 // body uses the Anthropic Messages schema (top-level system, source-based image
 // blocks), which vLLM /render does not accept, so the payload is always rebuilt
 // from the typed struct into the /render chat schema regardless of body.Payload.
-// Messages and tools are embedded as raw JSON rather than decoded maps: Go maps
-// re-serialize with sorted keys, which would reorder tool schemas and break
-// token parity with what vLLM renders server-side.
+// Messages and tools are embedded as raw JSON to avoid another untyped
+// decode-and-encode cycle. Arbitrary Anthropic JSON fields are canonicalized
+// during conversion to the same order as the forwarded PayloadMap body.
 func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 	rr := buildChatRenderRequest(MessagesToRenderChatRequest(body.Messages))
 	msgs := make([]any, len(rr.Messages))

@@ -569,7 +569,8 @@ func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.Anthropic
 
 // anthropicToolCall converts a tool_use block into an OpenAI function tool
 // call. Arguments are CPython json.dumps formatted (separators, ASCII
-// escaping, wire key order) - the exact string vLLM renders into the prompt.
+// escaping, forwarded key order) - the exact string vLLM renders into the
+// prompt after EPP repackage.
 func anthropicToolCall(b fwkrh.AnthropicContentBlock) map[string]any {
 	id := b.ID
 	if id == "" {
@@ -594,6 +595,7 @@ func pythonArguments(raw json.RawMessage) string {
 	case "", "null", "{}":
 		return "{}"
 	}
+	raw = canonicalizeRepackagedJSON(raw)
 	if out, err := pythonDumps(raw); err == nil {
 		return out
 	}
@@ -638,8 +640,7 @@ func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokeni
 }
 
 // convertAnthropicTools rewrites Anthropic tool definitions into OpenAI
-// function tools. input_schema passes through as raw JSON so the template's
-// re-serialization keeps the wire key order.
+// function tools.
 func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 	if len(tools) == 0 {
 		return nil
@@ -650,6 +651,11 @@ func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 		if len(schema) == 0 || bytes.Equal(schema, []byte("null")) {
 			schema = json.RawMessage(`{"type":"object"}`)
 		}
+		// Anthropic requests are forwarded from PayloadMap, whose Marshal uses
+		// encoding/json and therefore sorts every object key. Canonicalize the
+		// schema the same way before tokenization so the lookup blocks match the
+		// prompt vLLM actually receives after EPP repackage.
+		schema = canonicalizeAnthropicInputSchema(schema)
 		fn := map[string]any{
 			"name":       t.Name,
 			"parameters": schema,
@@ -666,6 +672,48 @@ func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
 	return out
+}
+
+// canonicalizeRepackagedJSON applies the same decode-and-encode cycle used by
+// PayloadMap.Marshal. encoding/json sorts object keys, including nested ones.
+func canonicalizeRepackagedJSON(raw json.RawMessage) json.RawMessage {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return canonical
+}
+
+// canonicalizeAnthropicInputSchema also mirrors vLLM's AnthropicTool
+// validator, which supplies an object type when input_schema omits it.
+func canonicalizeAnthropicInputSchema(raw json.RawMessage) json.RawMessage {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	schema, ok := decoded.(map[string]any)
+	if !ok {
+		return canonical
+	}
+	if _, exists := schema["type"]; exists {
+		return canonical
+	}
+	// vLLM validates the already-decoded schema and appends the default type
+	// to that Python dict. Keep the same insertion order after the existing
+	// canonical keys instead of re-sorting the added member with encoding/json.
+	if len(schema) == 0 {
+		return json.RawMessage(`{"type":"object"}`)
+	}
+	canonical = append(canonical[:len(canonical)-1], []byte(`,"type":"object"}`)...)
+	return canonical
 }
 
 // anthropicImageToURL converts an Anthropic image source to an OpenAI-shaped

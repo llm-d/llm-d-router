@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	anthropicparser "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -709,7 +710,7 @@ func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
 		"function": map[string]any{
 			"name":        "get_weather",
 			"description": "Get the weather",
-			"parameters":  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+			"parameters":  json.RawMessage(`{"properties":{"city":{"type":"string"}},"type":"object"}`),
 		},
 	}, result.Tools[0])
 }
@@ -721,12 +722,13 @@ func TestMessagesToRenderChatRequest_ToolDefaults(t *testing.T) {
 		Tools: []fwkrh.AnthropicTool{
 			{Name: "no_schema"},
 			{Name: "flags", InputSchema: json.RawMessage(`null`), Strict: &strict, DeferLoading: &deferLoading},
+			{Name: "implicit_type", InputSchema: json.RawMessage(`{"z":0,"a":1}`)},
 		},
 	}
 
 	result := MessagesToRenderChatRequest(msg)
 
-	require.Len(t, result.Tools, 2)
+	require.Len(t, result.Tools, 3)
 	assert.Equal(t, map[string]any{
 		"type": "function",
 		"function": map[string]any{
@@ -743,6 +745,13 @@ func TestMessagesToRenderChatRequest_ToolDefaults(t *testing.T) {
 			"defer_loading": false,
 		},
 	}, result.Tools[1])
+	assert.Equal(t, map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":       "implicit_type",
+			"parameters": json.RawMessage(`{"a":1,"z":0,"type":"object"}`),
+		},
+	}, result.Tools[2])
 }
 
 func TestMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
@@ -990,6 +999,7 @@ func TestPythonArguments(t *testing.T) {
 	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`null`)))
 	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`{}`)))
 	assert.Equal(t, `{"a": 1}`, pythonArguments(json.RawMessage(`{"a":1}`)))
+	assert.Equal(t, `{"a": 1, "b": 2}`, pythonArguments(json.RawMessage(`{"b":2,"a":1}`)))
 }
 
 // TestMessagesToRenderChatRequest_ToolUseAndThinking covers an assistant
@@ -1166,8 +1176,8 @@ func TestMessagesToRenderChatRequest_FullAgenticTurn(t *testing.T) {
 }
 
 // TestProduce_MessagesRequestToolSchemaOrder asserts that tool input_schema
-// key order survives the trip to the render payload: Go maps would
-// alphabetize the keys and desynchronize prefix hashes from the engine's.
+// uses the same encoding/json key order as the PayloadMap body forwarded to
+// vLLM after EPP repackage.
 func TestProduce_MessagesRequestToolSchemaOrder(t *testing.T) {
 	var gotPayload fwkrh.RequestPayload
 	tok := &mockTokenizer{
@@ -1194,6 +1204,81 @@ func TestProduce_MessagesRequestToolSchemaOrder(t *testing.T) {
 	rendered, err := json.Marshal(gotPayload)
 	require.NoError(t, err)
 	assert.Contains(t, string(rendered),
-		`"parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`,
-		"input_schema key order must be preserved verbatim")
+		`"parameters":{"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"}`,
+		"input_schema key order must match the forwarded request body")
+}
+
+func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
+	raw := []byte(`{
+		"model":"zai-org/GLM-5.2-FP8",
+		"tools":[{
+			"name":"run",
+			"input_schema":{"z":0,"nested":{"b":2,"a":1},"a":3}
+		}],
+		"messages":[
+			{"role":"user","content":"Run it"},
+			{"role":"assistant","content":[{
+				"type":"tool_use","id":"toolu_01","name":"run",
+				"input":{"z":0,"nested":{"b":2,"a":1},"a":3}
+			}]}
+		]
+	}`)
+	parsed, err := anthropicparser.NewAnthropicParser().ParseRequest(
+		context.Background(), raw, map[string]string{":path": "/v1/messages"})
+	require.NoError(t, err)
+
+	marshaler, ok := parsed.Body.Payload.(fwkrh.Marshaler)
+	require.True(t, ok)
+	forwardedJSON, err := marshaler.Marshal()
+	require.NoError(t, err)
+	var forwarded struct {
+		Tools []struct {
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(forwardedJSON, &forwarded))
+	var forwardedToolUse []struct {
+		Input json.RawMessage `json:"input"`
+	}
+	require.NoError(t, json.Unmarshal(forwarded.Messages[1].Content, &forwardedToolUse))
+
+	renderJSON, err := json.Marshal(buildChatRenderRequest(
+		MessagesToRenderChatRequest(parsed.Body.Messages)))
+	require.NoError(t, err)
+	var rendered struct {
+		Tools []struct {
+			Function struct {
+				Parameters json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+		Messages []struct {
+			ToolCalls []struct {
+				Function struct {
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(renderJSON, &rendered))
+
+	require.Len(t, forwarded.Tools, 1)
+	require.Len(t, forwarded.Messages, 2)
+	require.Len(t, forwardedToolUse, 1)
+	require.Len(t, rendered.Tools, 1)
+	require.Len(t, rendered.Messages, 2)
+	require.Len(t, rendered.Messages[1].ToolCalls, 1)
+
+	assert.Equal(t,
+		`{"a":3,"nested":{"a":1,"b":2},"z":0}`,
+		string(forwarded.Tools[0].InputSchema))
+	assert.Equal(t,
+		`{"a":3,"nested":{"a":1,"b":2},"z":0,"type":"object"}`,
+		string(rendered.Tools[0].Function.Parameters))
+
+	expectedArguments, err := pythonDumps(forwardedToolUse[0].Input)
+	require.NoError(t, err)
+	assert.Equal(t, expectedArguments, rendered.Messages[1].ToolCalls[0].Function.Arguments)
 }

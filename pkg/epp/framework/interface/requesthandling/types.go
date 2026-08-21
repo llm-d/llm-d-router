@@ -707,7 +707,8 @@ type MessagesRequest struct {
 }
 
 // AnthropicTool is a tool definition in the Anthropic schema. InputSchema keeps
-// the raw JSON bytes so the wire key order survives downstream re-serialization.
+// the raw JSON bytes for token-faithful canonicalization against the forwarded
+// request body.
 type AnthropicTool struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
@@ -779,8 +780,8 @@ func (ac AnthropicContent) textLen() int {
 }
 
 // AnthropicContentBlock is one block of an Anthropic content array. Field sets
-// are disjoint per Type; Input and InputSchema keep raw JSON bytes to preserve
-// the wire key order for token-faithful re-serialization.
+// are disjoint per Type; Input keeps raw JSON bytes for token-faithful
+// canonicalization against the forwarded request body.
 type AnthropicContentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
