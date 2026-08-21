@@ -62,6 +62,10 @@ type MappingConfig struct {
 type CustomMetric struct {
 	AttributeKey string
 	Spec         *Spec
+	// LabelName, when set, extracts the named Prometheus label's string value
+	// instead of the metric's numeric value. The result is stored as a
+	// StringMetricValue attribute rather than a ScalarMetricValue.
+	LabelName string
 }
 
 type namedSpec struct {
@@ -202,6 +206,7 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         cfg.Spec,
+			LabelName:    cfg.LabelName,
 		})
 	}
 	return metrics, errs
