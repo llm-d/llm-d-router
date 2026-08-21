@@ -275,6 +275,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
+		Metadata:         reqCtx.Request.Metadata,
 		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
@@ -301,7 +302,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, err
 	}
 
-	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
+	endpointCandidates := d.endpointCandidates.Locate(ctx, nil)
 	if len(endpointCandidates) == 0 {
 		return reqCtx, errcommon.Error{
 			Code: errcommon.ServiceUnavailable,
@@ -314,7 +315,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if len(snapshotOfCandidatePods) == 0 {
 		return reqCtx, errcommon.Error{
 			Code: errcommon.ServiceUnavailable,
-			Msg:  "screeners eliminated all endpoint candidates",
+			Msg:  "failed to find endpoint candidates for serving the request",
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.

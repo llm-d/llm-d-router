@@ -27,126 +27,25 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
-// --- DatastoreEndpointCandidates Tests ---
-
-func TestDatastoreEndpointCandidates_Locate(t *testing.T) {
+func TestDatastoreEndpointCandidates_LocateReturnsAllPods(t *testing.T) {
 	t.Parallel()
 
 	endpointA := makeMockEndpoint("pod-a", "10.0.0.1")
 	endpointB := makeMockEndpoint("pod-b", "10.0.0.2")
 	endpointC := makeMockEndpoint("pod-c", "10.0.0.3")
-
 	allEndpoints := []fwkdl.Endpoint{endpointA, endpointB, endpointC}
 	mockDS := &mockDatastore{pods: allEndpoints}
 
-	tests := []struct {
-		name                string
-		opts                []EndpointCandidatesOption
-		metadata            map[string]any
-		expectedEndpointIPs []string
-	}{
-		{
-			name:                "Nil metadata returns all pods",
-			metadata:            nil,
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
-		},
-		{
-			name:                "Empty metadata returns all pods",
-			metadata:            map[string]any{},
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
-		},
-		{
-			name: "Metadata without subset namespace returns all pods",
-			metadata: map[string]any{
-				"other-filter": "value",
-			},
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
-		},
-		{
-			name: "Subset filter with single match",
-			metadata: makeMetadataWithSubset([]any{
-				"10.0.0.1:8080",
-			}),
-			expectedEndpointIPs: []string{"10.0.0.1"},
-		},
-		{
-			name: "Subset filter with multiple matches",
-			metadata: makeMetadataWithSubset([]any{
-				"10.0.0.1:8080",
-				"10.0.0.3:9090",
-			}),
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.3"},
-		},
-		{
-			name: "Subset filter with no matches (Scale-from-Zero scenario)",
-			metadata: makeMetadataWithSubset([]any{
-				"192.168.1.1:8080", // Does not exist in mockDS
-			}),
-			expectedEndpointIPs: []string{},
-		},
-		{
-			name: "Subset filter is present but list is empty",
-			metadata: map[string]any{
-				metadata.SubsetFilterNamespace: map[string]any{
-					metadata.SubsetFilterKey: []any{},
-				},
-			},
-			expectedEndpointIPs: []string{},
-		},
-		{
-			name: "Subset filter contains malformed data (non-string)",
-			metadata: makeMetadataWithSubset([]any{
-				"10.0.0.1:8080",
-				12345, // Should be ignored
-			}),
-			expectedEndpointIPs: []string{"10.0.0.1"},
-		},
-		{
-			name: "Subset filter with match (filter disabled)",
-			opts: []EndpointCandidatesOption{
-				WithDisableEndpointSubsetFilter(true),
-			},
-			metadata: makeMetadataWithSubset([]any{
-				"10.0.0.1:8080",
-			}),
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
-		},
-		{
-			name: "Subset filter is present but list is empty (filter disabled)",
-			opts: []EndpointCandidatesOption{
-				WithDisableEndpointSubsetFilter(true),
-			},
-			metadata:            makeMetadataWithSubset([]any{}),
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
-		},
-		{
-			name: "Subset filter with no matches (filter disabled)",
-			opts: []EndpointCandidatesOption{
-				WithDisableEndpointSubsetFilter(true),
-			},
-			metadata: makeMetadataWithSubset([]any{
-				"192.168.1.1:8080",
-			}),
-			expectedEndpointIPs: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
-		},
-	}
+	candidates := NewDatastoreEndpointCandidates(mockDS)
+	got := candidates.Locate(context.Background(), nil)
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			endpointCandidates := NewDatastoreEndpointCandidates(mockDS, tc.opts...)
-			result := endpointCandidates.Locate(context.Background(), tc.metadata)
-
-			gotIPs := make([]string, len(result))
-			for idx, ep := range result {
-				gotIPs[idx] = ep.GetMetadata().GetIPAddress()
-			}
-			assert.ElementsMatch(t, tc.expectedEndpointIPs, gotIPs, "Locate returned unexpected set of endpoint candidates")
-		})
+	gotIPs := make([]string, len(got))
+	for idx, ep := range got {
+		gotIPs[idx] = ep.GetMetadata().GetIPAddress()
 	}
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, gotIPs)
 }
 
 // --- CachedEndpointCandidates Tests ---
@@ -161,15 +60,14 @@ func TestCachedEndpointCandidates_CachingBehavior(t *testing.T) {
 	// Use a short TTL for testing.
 	ttl := 20 * time.Millisecond
 	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, ttl)
-	meta := makeMetadataWithSubset([]any{"1.1.1.1:80"})
 
 	// 1. First Call: Should hit delegate
-	res1 := cached.Locate(context.Background(), meta)
+	res1 := cached.Locate(context.Background(), nil)
 	require.Len(t, res1, 1)
 	assert.Equal(t, 1, mockDelegate.callCount(), "Expected delegate to be called on first access")
 
 	// 2. Second Call (Immediate): Should hit cache
-	res2 := cached.Locate(context.Background(), meta)
+	res2 := cached.Locate(context.Background(), nil)
 	require.Len(t, res2, 1)
 	assert.Equal(t, 1, mockDelegate.callCount(), "Expected delegate NOT to be called again (cache hit)")
 
@@ -177,26 +75,26 @@ func TestCachedEndpointCandidates_CachingBehavior(t *testing.T) {
 	time.Sleep(ttl * 2)
 
 	// 4. Third Call (Expired): Should hit delegate again
-	res3 := cached.Locate(context.Background(), meta)
+	res3 := cached.Locate(context.Background(), nil)
 	require.Len(t, res3, 1)
 	assert.Equal(t, 2, mockDelegate.callCount(), "Expected delegate to be called after TTL expiry")
 }
 
-func TestCachedEndpointCandidates_CacheKeyDeterminism(t *testing.T) {
+func TestCachedEndpointCandidates_IgnoresRequestMetadata(t *testing.T) {
 	t.Parallel()
 
-	mockDelegate := &mockEndpointCandidates{}
+	// The Delegate no longer varies by request metadata, so the cache key is
+	// the same regardless of the metadata handed to Locate.
+	mockDelegate := &mockEndpointCandidates{
+		result: []fwkdl.Endpoint{makeMockEndpoint("p1", "1.1.1.1")},
+	}
 	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
 
-	// Scenario: subset [A, B] should generate same cache key as [B, A].
-	metaOrder1 := makeMetadataWithSubset([]any{"10.0.0.1:80", "10.0.0.2:80"})
-	metaOrder2 := makeMetadataWithSubset([]any{"10.0.0.2:80", "10.0.0.1:80"})
+	cached.Locate(context.Background(), nil)
+	cached.Locate(context.Background(), map[string]any{"any": "thing"})
+	cached.Locate(context.Background(), map[string]any{"other": "value"})
 
-	cached.Locate(context.Background(), metaOrder1)
-	assert.Equal(t, 1, mockDelegate.callCount(), "Initial call")
-
-	cached.Locate(context.Background(), metaOrder2)
-	assert.Equal(t, 1, mockDelegate.callCount(), "Different order of subset endpoints should hit the same cache entry")
+	assert.Equal(t, 1, mockDelegate.callCount(), "Cache key must not depend on request metadata")
 }
 
 func TestCachedEndpointCandidates_Concurrency_ThunderingHerd(t *testing.T) {
@@ -211,7 +109,6 @@ func TestCachedEndpointCandidates_Concurrency_ThunderingHerd(t *testing.T) {
 	}
 
 	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, 100*time.Millisecond)
-	meta := makeMetadataWithSubset([]any{"1.1.1.1:80"})
 
 	concurrency := 50
 	var wg sync.WaitGroup
@@ -224,7 +121,7 @@ func TestCachedEndpointCandidates_Concurrency_ThunderingHerd(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // Synchronize start.
-			res := cached.Locate(context.Background(), meta)
+			res := cached.Locate(context.Background(), nil)
 			assert.Len(t, res, 1)
 		}()
 	}
@@ -232,45 +129,8 @@ func TestCachedEndpointCandidates_Concurrency_ThunderingHerd(t *testing.T) {
 	close(start) // Release the hounds.
 	wg.Wait()
 
-	// Ideally, the delegate should be called exactly once.
-	// However, due to double-checked locking, strict 'once' is guaranteed.
+	// Strict double-checked locking guarantees the delegate is called exactly once.
 	assert.Equal(t, 1, mockDelegate.callCount(), "Delegate should be called exactly once despite concurrent access")
-}
-
-func TestCachedEndpointCandidates_DifferentSubsetsAreIsolated(t *testing.T) {
-	t.Parallel()
-
-	mockDelegate := &mockEndpointCandidates{}
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
-
-	metaA := makeMetadataWithSubset([]any{"10.0.0.1:80"})
-	metaB := makeMetadataWithSubset([]any{"10.0.0.2:80"})
-
-	cached.Locate(context.Background(), metaA)
-	assert.Equal(t, 1, mockDelegate.callCount())
-
-	cached.Locate(context.Background(), metaB)
-	assert.Equal(t, 2, mockDelegate.callCount(), "Different subsets must trigger distinct delegate calls")
-}
-
-func TestCachedEndpointCandidates_CacheIsolation_EmptyVsDefault(t *testing.T) {
-	t.Parallel()
-
-	mockDelegate := &mockEndpointCandidates{
-		result: []fwkdl.Endpoint{makeMockEndpoint("p1", "1.1.1.1")},
-	}
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
-
-	// 1. Request All Pods (No Metadata)
-	res1 := cached.Locate(context.Background(), nil)
-	assert.NotEmpty(t, res1)
-	assert.Equal(t, 1, mockDelegate.callCount())
-
-	// 2. Request Empty Subset (Should be distinct key)
-	// We expect the delegate to be called AGAIN because "__explicit_empty__" is not "__default__".
-	metaEmpty := makeMetadataWithSubset([]any{})
-	_ = cached.Locate(context.Background(), metaEmpty)
-	assert.Equal(t, 2, mockDelegate.callCount(), "Empty subset should not hit the default cache key")
 }
 
 // --- Helpers & Mocks ---
@@ -307,12 +167,4 @@ func makeMockEndpoint(name, ip string) fwkdl.Endpoint {
 		ID:      types.NamespacedName{Namespace: "default", Name: name},
 		Address: ip,
 	}, nil)
-}
-
-func makeMetadataWithSubset(endpoints []any) map[string]any {
-	return map[string]any{
-		metadata.SubsetFilterNamespace: map[string]any{
-			metadata.SubsetFilterKey: endpoints,
-		},
-	}
 }

@@ -65,7 +65,7 @@ func TestMultiClusterConfigLoad(t *testing.T) {
 			require.NoError(t, err)
 
 			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
-			_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+			_, err = r.parseConfigurationPhaseTwo(ctx, opts, rawConfig, ds)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return

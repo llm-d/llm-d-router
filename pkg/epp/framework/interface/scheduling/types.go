@@ -52,6 +52,8 @@ type InferenceRequest struct {
 	Body *fwkrh.InferenceRequestBody
 	// Headers is a map of the request headers.
 	Headers map[string]string
+	// Metadata is the raw dynamic-metadata map carried by the ext_proc request.
+	Metadata map[string]any
 	// Request Objective
 	Objectives RequestObjectives
 	// FairnessID is the identity used by the flow control system to group requests into fairness queues.
