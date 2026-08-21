@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -131,5 +132,29 @@ func TestReconcilerRunOnNonLeaders(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPeerReconcilerRunsOnNonLeaders(t *testing.T) {
+	mgr := newCapturingManager(t)
+	r := &EPPPeerReconciler{
+		Selector:  labels.Everything(),
+		Namespace: "test",
+	}
+	if err := r.BindNotifier(&recordingNotifier{}); err != nil {
+		t.Fatalf("BindNotifier: %v", err)
+	}
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Fatalf("SetupWithManager: %v", err)
+	}
+	if len(mgr.added) != 1 {
+		t.Fatalf("expected exactly 1 runnable registered, got %d", len(mgr.added))
+	}
+	ler, ok := mgr.added[0].(manager.LeaderElectionRunnable)
+	if !ok {
+		t.Fatal("registered runnable is not a LeaderElectionRunnable")
+	}
+	if ler.NeedLeaderElection() {
+		t.Error("EPPPeerReconciler must not require leader election")
 	}
 }
