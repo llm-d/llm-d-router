@@ -31,13 +31,14 @@ import (
 type auxRouteStep struct {
 	stubStep
 	registered bool
+	gotID      string
 }
 
 func (s *auxRouteStep) RegisterRoutes(r chi.Router) {
 	s.registered = true
 	r.Get("/v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s.gotID = chi.URLParam(r, "id")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(chi.URLParam(r, "id")))
 	})
 }
 
@@ -58,8 +59,8 @@ func TestServerRegistersStepRoutes(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 from step route, got %d", rec.Code)
 	}
-	if rec.Body.String() != "abc-123" {
-		t.Fatalf("expected path param in body, got %q", rec.Body.String())
+	if step.gotID != "abc-123" {
+		t.Fatalf("expected path param in handler, got %q", step.gotID)
 	}
 
 	// The built-in routes are untouched.
