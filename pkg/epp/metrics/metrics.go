@@ -370,13 +370,15 @@ var (
 			Name:      "flow_control_pool_saturation",
 			Help: metricsutil.HelpMsgWithStability(
 				"[Deprecated: Use llm_d_epp_flow_control_pool_saturation] Pool saturation signal gating Flow Control "+
-					"dispatch. 1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
+					"dispatch. The stage label partitions by pipeline role: 'prefill' and 'decode' are per-stage "+
+					"signals, 'effective' is max(prefill, decode) and is the value used for gating. "+
+					"1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
 					"past it. An empty pool reads as 1.0. With the default utilization detector, endpoints with missing "+
 					"or stale metrics score as fully saturated (fail-closed; see "+
 					"llm_d_epp_flow_control_stale_endpoints).",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"inference_pool", "stage"},
 	)
 )
 
@@ -950,10 +952,17 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 	llmdFlowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Sub(float64(bytes))
 }
 
-// RecordFlowControlPoolSaturation records the current saturation level for an inference pool.
-func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
-	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
-	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+// RecordFlowControlPoolSaturation records the current saturation level for an inference pool
+// partitioned by pipeline stage ("prefill", "decode", or "effective").
+func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation float64) {
+	flowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+}
+
+// DeleteFlowControlPoolSaturation removes the saturation gauge series for a pool/stage pair.
+func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
+	flowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
+	llmdFlowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
 }
 
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation

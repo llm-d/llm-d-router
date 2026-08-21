@@ -41,6 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 const (
@@ -1104,6 +1105,226 @@ func TestProcessor(t *testing.T) {
 					require.True(t, dispatched, "Expected a low-priority dispatch on cycle %d", i+1)
 				}
 				assert.Equal(t, 0, qLow.Len(), "Low-priority queue should be empty")
+			})
+		})
+
+		t.Run("partitionEndpoints", func(t *testing.T) {
+			t.Parallel()
+
+			makeEndpoint := func(labels map[string]string) fwkdl.Endpoint {
+				return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Labels: labels}, nil)
+			}
+
+			t.Run("should classify endpoints by role label", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefill}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleDecode}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleBoth}), //nolint:staticcheck // testing backward compat
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefillDecode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Len(t, prefill, 2, "prefill should contain RolePrefill and RoleEncodePrefill")
+				assert.Len(t, decode, 1, "decode should contain RoleDecode")
+				assert.Len(t, interleaved, 3, "interleaved should contain RolePrefillDecode, RoleBoth, RoleEncodePrefillDecode")
+			})
+
+			t.Run("should default unlabeled endpoints to decode", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(nil),                                 // no labels map
+					makeEndpoint(map[string]string{}),                 // empty labels
+					makeEndpoint(map[string]string{"other": "value"}), // unrelated label
+					fwkdl.NewEndpoint(nil, nil),                       // nil metadata gets defaulted by NewEndpoint
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Len(t, decode, 4, "all unlabeled endpoints should land in decode")
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude unrecognized role from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: "unknown-role"}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude encode-only endpoints from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should skip nil endpoints", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					nil,
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Len(t, prefill, 1)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should return empty slices for empty input", func(t *testing.T) {
+				t.Parallel()
+				prefill, decode, interleaved := partitionEndpoints(nil)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+		})
+
+		t.Run("stage-aware saturation gating", func(t *testing.T) {
+			t.Parallel()
+
+			makeEndpoint := func(role string) fwkdl.Endpoint {
+				return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					Labels: map[string]string{bylabel.RoleLabel: role},
+				}, nil)
+			}
+
+			t.Run("should gate on highest stage saturation", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					for _, ep := range endpoints {
+						if ep.GetMetadata().Labels[bylabel.RoleLabel] != bylabel.RolePrefill {
+							// Any mixed or decode set reads healthy: the flat average is
+							// diluted by idle decode workers.
+							return 0.3
+						}
+					}
+					return 1.5 // homogeneous prefill subset: stage saturated
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.False(t, dispatched, "should block when any stage is saturated")
+			})
+
+			t.Run("should not gate when all stages are healthy", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+					return 0.3
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "should dispatch when all stages are healthy")
+			})
+
+			t.Run("should skip empty partitions", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				// Only decode endpoints, no prefill. Empty prefill partition should
+				// be skipped, not treated as saturated (detector returns 1.0 for empty slices).
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					if len(endpoints) == 0 {
+						return 1.0 // Would block if not skipped.
+					}
+					return 0.2
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "should dispatch when only non-empty partitions are healthy")
+			})
+
+			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+					makeEndpoint(bylabel.RolePrefillDecode), // interleaved
+				}
+
+				// Track which endpoints each Saturation call receives.
+				var calls [][]string
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					roles := make([]string, 0, len(endpoints))
+					for _, ep := range endpoints {
+						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
+					}
+					calls = append(calls, roles)
+					return 0.2
+				}
+
+				h.processor.dispatchCycle(context.Background())
+
+				require.Len(t, calls, 2, "detector should be called once per stage")
+				// Prefill pool: prefill + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RolePrefill, bylabel.RolePrefillDecode}, calls[0])
+				// Decode pool: decode + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RoleDecode, bylabel.RolePrefillDecode}, calls[1])
+			})
+
+			t.Run("should behave like monolithic when no role labels exist", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				// Unlabeled endpoints all land in decode, behaving like the pre-change single-pool path.
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					fwkdl.NewEndpoint(nil, nil),
+					fwkdl.NewEndpoint(nil, nil),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+					return 0.4
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "monolithic deployment should dispatch normally")
 			})
 		})
 
