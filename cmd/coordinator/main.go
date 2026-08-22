@@ -91,7 +91,7 @@ func main() {
 	}
 
 	p := pipeline.New(steps)
-	srv, err := server.New(cfg.Server, p)
+	srv, err := server.New(cfg.Server, p, gwClient)
 	if err != nil {
 		log.Error(err, "failed to create server")
 		os.Exit(1)

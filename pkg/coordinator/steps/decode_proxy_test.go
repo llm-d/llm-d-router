@@ -18,12 +18,14 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 )
 
@@ -74,4 +76,63 @@ func TestNewDecodeProxy_MidStreamTruncationLogged(t *testing.T) {
 		}
 	}
 	t.Fatalf("expected a partial-response error log, got %v", msgs)
+}
+
+// logCaptureSink is a logr.LogSink that records every Info and Error call.
+// Tests use it to assert which log level a code path takes.
+type logCaptureSink struct {
+	infos  []capturedLog
+	errors []capturedLog
+}
+
+type capturedLog struct {
+	level int
+	msg   string
+	err   error
+}
+
+func (s *logCaptureSink) Init(_ logr.RuntimeInfo) {}
+func (s *logCaptureSink) Enabled(_ int) bool      { return true }
+func (s *logCaptureSink) Info(level int, msg string, _ ...any) {
+	s.infos = append(s.infos, capturedLog{level: level, msg: msg})
+}
+func (s *logCaptureSink) Error(err error, msg string, _ ...any) {
+	s.errors = append(s.errors, capturedLog{msg: msg, err: err})
+}
+func (s *logCaptureSink) WithValues(_ ...any) logr.LogSink { return s }
+func (s *logCaptureSink) WithName(_ string) logr.LogSink   { return s }
+
+func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
+	// Client disconnects (context.Canceled) and request-context deadlines are
+	// routine events, not backend faults. They must not surface as Error logs;
+	// non-cancellation errors still must. errCacheMiss stays swallowed (no log,
+	// no response) so the miss can fall through to the rest of the pipeline.
+	cases := []struct {
+		name          string
+		err           error
+		wantStatus    int
+		wantErrorLogs int
+	}{
+		{"client cancelled", context.Canceled, http.StatusBadGateway, 0},
+		{"context deadline exceeded", context.DeadlineExceeded, http.StatusBadGateway, 0},
+		{"transport failure", errors.New("boom"), http.StatusBadGateway, 1},
+		{"cache miss falls through", errCacheMiss, http.StatusOK, 0},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &logCaptureSink{}
+			proxy := newDecodeProxy(logr.New(sink), http.DefaultTransport, nil)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			proxy.ErrorHandler(rec, req, tt.err)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status: got %d want %d", rec.Code, tt.wantStatus)
+			}
+			if got := len(sink.errors); got != tt.wantErrorLogs {
+				t.Fatalf("Error-level logs: got %d (%v), want %d", got, sink.errors, tt.wantErrorLogs)
+			}
+		})
+	}
 }
