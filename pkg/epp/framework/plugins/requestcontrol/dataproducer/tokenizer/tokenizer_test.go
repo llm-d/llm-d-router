@@ -660,6 +660,27 @@ func TestMessagesToRenderChatRequest_RawSystem(t *testing.T) {
 	assert.Equal(t, &tokenizerTypes.Content{Raw: "Hello"}, result.Conversation[1].Content)
 }
 
+func TestMessagesToRenderChatRequest_PreservesTemplateControls(t *testing.T) {
+	msg := &fwkrh.MessagesRequest{
+		Messages: []fwkrh.AnthropicMessage{{
+			Role:    "user",
+			Content: fwkrh.AnthropicContent{Raw: "Hello"},
+		}},
+		ChatTemplateKWArgs: map[string]any{
+			"enable_thinking":  false,
+			"reasoning_effort": "low",
+		},
+		OutputConfig: &fwkrh.AnthropicOutputConfig{Effort: "high"},
+	}
+
+	result := MessagesToRenderChatRequest(msg)
+
+	assert.Equal(t, map[string]any{
+		"enable_thinking":  false,
+		"reasoning_effort": "high",
+	}, result.ChatTemplateKWArgs)
+}
+
 func TestMessagesToRenderChatRequest_MergesInlineSystemForDefaultVLLMTemplate(t *testing.T) {
 	msg := &fwkrh.MessagesRequest{
 		System: fwkrh.AnthropicContent{Raw: "Top-level system."},
@@ -1215,6 +1236,8 @@ func TestProduce_MessagesRequestToolSchemaOrder(t *testing.T) {
 func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
 	raw := []byte(`{
 		"model":"zai-org/GLM-5.2-FP8",
+		"chat_template_kwargs":{"enable_thinking":false,"custom":"value"},
+		"output_config":{"effort":"high"},
 		"tools":[{
 			"name":"run",
 			"input_schema":{"z":0,"nested":{"b":2,"a":1},"a":3}
@@ -1253,7 +1276,8 @@ func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
 		MessagesToRenderChatRequest(parsed.Body.Messages)))
 	require.NoError(t, err)
 	var rendered struct {
-		Tools []struct {
+		ChatTemplateKWArgs map[string]any `json:"chat_template_kwargs"`
+		Tools              []struct {
 			Function struct {
 				Parameters json.RawMessage `json:"parameters"`
 			} `json:"function"`
@@ -1274,6 +1298,11 @@ func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
 	require.Len(t, rendered.Tools, 1)
 	require.Len(t, rendered.Messages, 2)
 	require.Len(t, rendered.Messages[1].ToolCalls, 1)
+	assert.Equal(t, map[string]any{
+		"enable_thinking":  false,
+		"custom":           "value",
+		"reasoning_effort": "high",
+	}, rendered.ChatTemplateKWArgs)
 
 	assert.Equal(t,
 		`{"a":3,"nested":{"a":1,"b":2},"z":0}`,

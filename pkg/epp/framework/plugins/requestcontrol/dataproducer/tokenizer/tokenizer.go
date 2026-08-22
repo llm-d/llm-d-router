@@ -461,9 +461,32 @@ func messagesToRenderChatRequest(msg *fwkrh.MessagesRequest, mergeInlineSystem b
 	}
 
 	return &tokenizerTypes.RenderChatRequest{
-		Conversation: conversation,
-		Tools:        convertAnthropicTools(msg.Tools),
+		Conversation:       conversation,
+		Tools:              convertAnthropicTools(msg.Tools),
+		ChatTemplateKWArgs: anthropicChatTemplateKWArgs(msg),
 	}
+}
+
+// anthropicChatTemplateKWArgs mirrors ChatCompletionRequest.build_chat_params
+// after vLLM converts /v1/messages to an OpenAI chat request. Anthropic
+// output_config.effort becomes reasoning_effort and also enables thinking
+// unless the caller explicitly supplied enable_thinking.
+func anthropicChatTemplateKWArgs(msg *fwkrh.MessagesRequest) map[string]any {
+	if len(msg.ChatTemplateKWArgs) == 0 && (msg.OutputConfig == nil || msg.OutputConfig.Effort == "") {
+		return nil
+	}
+
+	kwargs := make(map[string]any, len(msg.ChatTemplateKWArgs)+2)
+	for key, value := range msg.ChatTemplateKWArgs {
+		kwargs[key] = value
+	}
+	if msg.OutputConfig != nil && msg.OutputConfig.Effort != "" {
+		kwargs["reasoning_effort"] = msg.OutputConfig.Effort
+		if _, exists := kwargs["enable_thinking"]; !exists {
+			kwargs["enable_thinking"] = true
+		}
+	}
+	return kwargs
 }
 
 // anthropicSystemText joins the system prompt's text blocks with no
