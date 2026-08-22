@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -39,14 +38,6 @@ type Config struct {
 	KVBlockIndexConfig  *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
 	KVBlockScorerConfig *KVBlockScorerConfig    // not exported
 	BackendConfigs      []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
-
-	// TokenizersPoolConfig configured the deprecated in-process tokenization
-	// pool. The pool itself lives in llm-d-kv-cache; the indexer no longer
-	// consumes it, but the field is retained so existing configurations keep
-	// parsing. The precise-prefix-cache legacy producer reads it.
-	//
-	// Deprecated: tokenize externally and call Indexer.ScoreTokens.
-	TokenizersPoolConfig *kvctok.Config `json:"tokenizersPoolConfig,omitempty"`
 }
 
 // NewDefaultConfig returns a default configuration for the Indexer module.

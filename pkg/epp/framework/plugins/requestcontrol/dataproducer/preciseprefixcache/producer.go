@@ -47,10 +47,7 @@ import (
 // PluginType is the registered type name of the precise-prefix-cache-producer.
 const PluginType = "precise-prefix-cache-producer"
 
-// PluginConfig configures the precise-prefix-cache-producer. Nested fields
-// mirror the llm-d-kv-cache configuration shape (see that repo's
-// docs/configuration.md for details on TokenProcessorConfig, IndexerConfig,
-// and KVEventsConfig).
+// PluginConfig configures the precise-prefix-cache-producer.
 type PluginConfig struct {
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
 	IndexerConfig        *kvcache.Config               `json:"indexerConfig"`
@@ -116,8 +113,7 @@ type Producer struct {
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
-// Producer. Rejects configs with indexerConfig.tokenizersPoolConfig set, since
-// this producer is tokens-only and requires an upstream token-producer.
+// Producer.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
 	if err != nil {
@@ -138,12 +134,6 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	if parameters.IndexerConfig == nil {
 		return nil, errors.New("indexerConfig is required")
 	}
-	// Tokens-only: reject configs that rely on the indexer's internal tokenizer.
-	//nolint:staticcheck // SA1019
-	if parameters.IndexerConfig.TokenizersPoolConfig != nil {
-		return nil, errors.New("tokenizersPoolConfig is not supported; configure a token-producer plugin instead")
-	}
-
 	p, err := New(handle.Context(), name, parameters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
