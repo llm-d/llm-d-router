@@ -26,6 +26,14 @@ router:
     # unreachable, for active/passive resiliency.
     failOpen: true
 
+    # Priority Routing configuration for Envoy ext_proc cluster (only supported in mode: service).
+    priorityRouting:
+      enabled: false
+      healthyPanicThreshold: 10.0
+      dnsRefreshRate: "5s"
+      primaryReplicas: 1
+      standbyReplicas: 1
+
     resources:
       requests:
         cpu: "4"
@@ -208,8 +216,21 @@ router:
                       http_header_name: x-gateway-destination-endpoint
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
-                    connect_timeout: 86400s
-                    lb_policy: LEAST_REQUEST
+                    connect_timeout: {{ if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}0.250s{{ else }}86400s{{ end }}
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    {{- if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}
+                    dns_refresh_rate: {{ .Values.router.proxy.priorityRouting.dnsRefreshRate | default "5s" }}
+                    common_lb_config:
+                      ignore_new_hosts_until_first_hc: true
+                      healthy_panic_threshold:
+                        value: {{ .Values.router.proxy.priorityRouting.healthyPanicThreshold | default 10.0 }}
+                    outlier_detection:
+                      split_external_local_origin_errors: true
+                      consecutive_local_origin_failure: 1
+                      enforcing_consecutive_local_origin_failure: 100
+                      max_ejection_percent: 50
+                      base_ejection_time: 30s
+                    {{- end }}
                     circuit_breakers:
                       thresholds:
                         - max_connections: 40000
@@ -217,11 +238,11 @@ router:
                           max_requests: 40000
                           max_retries: 1024
                     health_checks:
-                      - timeout: 2s
-                        interval: 10s
-                        unhealthy_threshold: 3
-                        healthy_threshold: 2
-                        reuse_connection: true
+                      - timeout: {{ if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}{{ .Values.router.proxy.healthCheckTimeout | default "1s" }}{{ else }}{{ .Values.router.proxy.healthCheckTimeout | default "2s" }}{{ end }}
+                        interval: {{ if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}{{ .Values.router.proxy.healthCheckInterval | default "5s" }}{{ else }}{{ .Values.router.proxy.healthCheckInterval | default "10s" }}{{ end }}
+                        unhealthy_threshold: {{ if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}{{ .Values.router.proxy.healthCheckUnhealthyThreshold | default 2 }}{{ else }}{{ .Values.router.proxy.healthCheckUnhealthyThreshold | default 3 }}{{ end }}
+                        healthy_threshold: {{ if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}{{ .Values.router.proxy.healthCheckHealthyThreshold | default 3 }}{{ else }}{{ .Values.router.proxy.healthCheckHealthyThreshold | default 2 }}{{ end }}
+                        reuse_connection: {{ if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}false{{ else }}true{{ end }}
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
               {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
@@ -235,7 +256,45 @@ router:
                             initial_connection_window_size: 1048576
                     load_assignment:
                       cluster_name: ext_proc
+                      {{- if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}
+                      {{- $primaryReplicas := include "llm-d-router.priorityRouting.primaryReplicas" . | int }}
+                      policy:
+                        overprovisioning_factor: {{ mul 100 $primaryReplicas }}
+                      {{- end }}
                       endpoints:
+                        {{- if eq (include "llm-d-router.priorityRouting.enabled" .) "true" }}
+                        {{- $primaryReplicas := include "llm-d-router.priorityRouting.primaryReplicas" . | int }}
+                        {{- $standbyReplicas := include "llm-d-router.priorityRouting.standbyReplicas" . | int }}
+                        - locality:
+                            region: ext_proc/primary
+                          priority: 0
+                          load_balancing_weight:
+                            value: 1
+                          lb_endpoints:
+                            {{- range $i := untilStep 0 (int $primaryReplicas) 1 }}
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: 9002
+                              load_balancing_weight: 1
+                            {{- end }}
+                        - locality:
+                            region: ext_proc/standby
+                          priority: 1
+                          load_balancing_weight:
+                            value: 1
+                          lb_endpoints:
+                            {{- range $j := untilStep 0 (int $standbyReplicas) 1 }}
+                            {{- $ord := add (int $primaryReplicas) (int $j) }}
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: 9002
+                              load_balancing_weight: 1
+                            {{- end }}
+                        {{- else }}
                         - locality:
                             region: ext_proc/e2e/0
                           lb_endpoints:
@@ -245,6 +304,7 @@ router:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
                               load_balancing_weight: 1
+                        {{- end }}
         name: envoy-proxy
         image: docker.io/envoyproxy/envoy:distroless-v1.33.2
         command: "envoy"
@@ -290,7 +350,7 @@ router:
         volumes:
           - name: config
             configMap:
-              name: envoy
+              name: '{{ .Values.router.proxy.presets.envoy.configMap.name | default "envoy" }}'
               items:
                 - key: envoy.yaml
                   path: envoy.yaml
