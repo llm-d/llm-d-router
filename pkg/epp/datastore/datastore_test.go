@@ -18,8 +18,10 @@ package datastore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"reflect"
 	"strconv"
 	"sync"
@@ -41,9 +43,13 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	respondermodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/responder/models"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
@@ -1625,4 +1631,67 @@ func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
 	eps := ds.PodList(AllPodsPredicate)
 	assert.Len(t, eps, 1)
 	assert.Equal(t, "10.0.0.1", eps[0].GetMetadata().Address)
+}
+
+func TestModelsResponder_ConcurrentWithPodChurn(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{})
+
+	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(inferencePool)))
+
+	const goroutines = 8
+	const iterations = 200
+
+	responder := respondermodels.New()
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				// 4 concurrent create endpoints then add metadata, delete endpoint immediately
+				for j := 0; j < iterations; j++ {
+					id := types.NamespacedName{Namespace: "default", Name: "pod-" + strconv.Itoa(i) + "-" + strconv.Itoa(j)}
+					meta := &fwkdl.EndpointMetadata{
+						ID:      id,
+						Address: net.IPv4(10, 0, byte(i), byte(j%256)).String(),
+						Port:    "8000",
+					}
+					ds.EndpointUpsert(ctx, meta)
+					// EndpointUpsert does not return the endpoint, so retrieve it from datastore and set model attributes on it.
+					eps := ds.PodList(func(ep fwkdl.Endpoint) bool {
+						return ep.GetMetadata().ID == id
+					})
+					for _, ep := range eps {
+						ep.GetAttributes().Put(
+							attrmodels.ModelsAttributeKey,
+							attrmodels.ModelDataCollection{{ID: "model-" + id.Name}},
+						)
+					}
+					ds.EndpointDelete(id)
+				}
+			} else {
+				// rest 4 concurrent reads through the responder plugin.
+				request := &fwkrc.RequestLine{Method: http.MethodGet, Path: "/v1/models"}
+				for j := 0; j < iterations; j++ {
+					resp, err := responder.Respond(ctx, request, ds.PodList(AllPodsPredicate))
+					if err != nil {
+						// Nothing scraped yet in this window; the responder reports unavailable.
+						assert.Equal(t, errcommon.ServiceUnavailable, errcommon.CanonicalCode(err))
+						continue
+					}
+					require.NotNil(t, resp)
+					var decoded attrmodels.ModelResponse
+					require.NoError(t, json.Unmarshal(resp.Body, &decoded))
+					assert.Equal(t, "list", decoded.Object)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }

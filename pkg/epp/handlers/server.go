@@ -89,6 +89,12 @@ func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
 	s.emitEndpointScores = enabled
 }
 
+// SetResponders sets the plugins that may answer a request instead of routing it. They are
+// asked in the given order.
+func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
+	s.responders = responders
+}
+
 type Director interface {
 	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
@@ -98,6 +104,7 @@ type Director interface {
 
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
+	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 }
 
 // Server implements the Envoy external processing server.
@@ -112,6 +119,8 @@ type StreamingServer struct {
 	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores bool
+	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
+	responders []fwkrc.Responder
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -172,6 +181,7 @@ type RequestContext struct {
 	respHeaderResp  *extProcPb.ProcessingResponse
 	respBodyResp    []*extProcPb.ProcessingResponse
 	respTrailerResp *extProcPb.ProcessingResponse
+	localResp       *extProcPb.ProcessingResponse
 }
 
 type Request struct {
@@ -199,6 +209,10 @@ const (
 	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
 	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
 	requestResponseProcessingSkipped
+	// requestAnsweredLocal indicates a Responder answered the request itself with an
+	// ImmediateResponse rather than routing it to a model server. The state machine sends the
+	// stored response and gracefully closes the stream.
+	requestAnsweredLocal
 )
 
 // recvResult holds the result of a srv.Recv() call from the reader goroutine.
@@ -618,6 +632,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// See: https://github.com/envoyproxy/envoy/blob/0533de0acca281110945e5726bbb306fbb12bde5/api/envoy/service/ext_proc/v3/external_processor.proto#L40-L41
 			return nil
 		}
+		if reqCtx.requestState == requestAnsweredLocal {
+			// Request fully answered locally (e.g. GET /v1/models); close the gRPC stream without routing.
+			// The request never carries a model name, so model_name=""
+			fairnessID, priority := extractFairnessAndPriority(reqCtx)
+			metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, reqCtx.Priority)
+			metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestSize)
+			recordRequestProcessing()
+			return nil
+		}
 	}
 }
 
@@ -724,6 +747,15 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 			}
 		}
 		return nil
+	}
+
+	// EPP produced the full response itself (e.g. GET /v1/models).
+	if r.requestState == requestAnsweredLocal {
+		if r.localResp == nil {
+			return nil
+		}
+		loggerTrace.Info("Sending ImmediateResponse for locally-answered request", "obj", r.localResp)
+		return srv.Send(r.localResp)
 	}
 
 	// No switch statement as we could send multiple responses in one pass.

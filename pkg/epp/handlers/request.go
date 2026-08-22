@@ -38,6 +38,12 @@ import (
 func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *RequestContext, req *extProcPb.ProcessingRequest_RequestHeaders) error {
 	reqCtx.RequestReceivedTimestamp = time.Now()
 
+	// Responders run before the EndOfStream fallback so they can intercept bodyless
+	// GETs (e.g. /v1/models) that would otherwise be routed to a random endpoint.
+	if handled, err := s.tryRespondLocally(ctx, reqCtx, req); handled {
+		return err
+	}
+
 	// an EoS in the request headers means this request has no body or trailers.
 	if req.RequestHeaders.EndOfStream {
 		// We will route this request to a random endpoint as this is assumed to just be a GET
