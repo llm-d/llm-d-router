@@ -756,7 +756,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 
 	r.registerInTreePlugins()
 
-	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger)
+	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger, opts.FeatureGates...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config - %w", err)
 	}
