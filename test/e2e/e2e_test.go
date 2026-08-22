@@ -182,7 +182,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		})
 	}))
 
-	ginkgo.When("Running a PD configuration with nixlv2 connector(deprecated pd-profile-handler)", ginkgo.Ordered, testWrapper(func() {
+	ginkgo.When("Running a PD configuration with nixlv2 connector and metrics validation", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should run successfully", func() {
 			infPoolObjects := createInferencePool(1)
 
@@ -190,7 +190,7 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			decodeReplicas := 4
 			modelServers := createModelServersPDNixlV2(prefillReplicas, decodeReplicas)
 
-			epp := createEndPointPicker(deprecatedPdConfig)
+			epp := createEndPointPicker(pdConfig)
 			nsName := getNamespace()
 
 			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
@@ -233,12 +233,12 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 
 			// Metrics Validation
 			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypePrefillDecode, simModelName)
-			prefillDecodeCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_pd_decision_total", labelFilter)
-			prefillDecodeCountllmDEpp := getCounterMetric(metricsURL, "llm_d_epp_pd_decision_total", labelFilter)
+			prefillDecodeCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter)
+			prefillDecodeCountllmDEpp := getCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter)
 
 			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeDecodeOnly, simModelName)
-			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_pd_decision_total", labelFilter2)
-			decodeOnlyCountllmDEpp := getCounterMetric(metricsURL, "llm_d_epp_pd_decision_total", labelFilter2)
+			decodeOnlyCount := getCounterMetric(metricsURL, "llm_d_inference_scheduler_disagg_decision_total", labelFilter2)
+			decodeOnlyCountllmDEpp := getCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter2)
 
 			gomega.Expect(prefillDecodeCount).Should(gomega.Equal(4))
 			gomega.Expect(prefillDecodeCountllmDEpp).Should(gomega.Equal(4))
@@ -255,7 +255,6 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 		name   string
 		config string
 	}{
-		{"deprecated pd-profile-handler", deprecatedPdConfig},
 		{"disagg-profile-handler", pdConfig},
 	} {
 		config := tc.config // capture for closure
