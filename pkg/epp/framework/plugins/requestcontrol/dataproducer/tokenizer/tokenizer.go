@@ -421,19 +421,35 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 // backend and the server apply the identical chat-template pipeline to the
 // same request and prefix-cache blocks line up.
 func MessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.RenderChatRequest {
+	return messagesToRenderChatRequest(msg, false)
+}
+
+func messagesToRenderChatRequest(msg *fwkrh.MessagesRequest, mergeInlineSystem bool) *tokenizerTypes.RenderChatRequest {
 	conversation := make([]tokenizerTypes.Conversation, 0, 1+len(msg.Messages))
 
-	if sys := anthropicSystemText(msg.System); sys != "" {
+	var system strings.Builder
+	system.WriteString(anthropicSystemText(msg.System))
+	if mergeInlineSystem {
+		for _, m := range msg.Messages {
+			if m.Role == "system" {
+				system.WriteString(anthropicInlineSystemText(m.Content))
+			}
+		}
+	}
+	if system.Len() > 0 {
 		conversation = append(conversation, tokenizerTypes.Conversation{
 			Role:    "system",
-			Content: &tokenizerTypes.Content{Raw: sys},
+			Content: &tokenizerTypes.Content{Raw: system.String()},
 		})
 	}
 
 	for _, m := range msg.Messages {
 		if m.Role == "system" {
+			if mergeInlineSystem {
+				continue
+			}
 			// Not valid Anthropic input; tolerated the way vLLM does.
-			if text := anthropicSystemText(m.Content); text != "" {
+			if text := anthropicInlineSystemText(m.Content); text != "" {
 				conversation = append(conversation, tokenizerTypes.Conversation{
 					Role:    "system",
 					Content: &tokenizerTypes.Content{Raw: text},
@@ -445,9 +461,32 @@ func MessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.Ren
 	}
 
 	return &tokenizerTypes.RenderChatRequest{
-		Conversation: conversation,
-		Tools:        convertAnthropicTools(msg.Tools),
+		Conversation:       conversation,
+		Tools:              convertAnthropicTools(msg.Tools),
+		ChatTemplateKWArgs: anthropicChatTemplateKWArgs(msg),
 	}
+}
+
+// anthropicChatTemplateKWArgs mirrors ChatCompletionRequest.build_chat_params
+// after vLLM converts /v1/messages to an OpenAI chat request. Anthropic
+// output_config.effort becomes reasoning_effort and also enables thinking
+// unless the caller explicitly supplied enable_thinking.
+func anthropicChatTemplateKWArgs(msg *fwkrh.MessagesRequest) map[string]any {
+	if len(msg.ChatTemplateKWArgs) == 0 && (msg.OutputConfig == nil || msg.OutputConfig.Effort == "") {
+		return nil
+	}
+
+	kwargs := make(map[string]any, len(msg.ChatTemplateKWArgs)+2)
+	for key, value := range msg.ChatTemplateKWArgs {
+		kwargs[key] = value
+	}
+	if msg.OutputConfig != nil && msg.OutputConfig.Effort != "" {
+		kwargs["reasoning_effort"] = msg.OutputConfig.Effort
+		if _, exists := kwargs["enable_thinking"]; !exists {
+			kwargs["enable_thinking"] = true
+		}
+	}
+	return kwargs
 }
 
 // anthropicSystemText joins the system prompt's text blocks with no
@@ -464,6 +503,16 @@ func anthropicSystemText(ac fwkrh.AnthropicContent) string {
 		}
 	}
 	return sb.String()
+}
+
+func anthropicInlineSystemText(ac fwkrh.AnthropicContent) string {
+	if ac.Raw != "" {
+		if strings.HasPrefix(ac.Raw, anthropicBillingHeaderPrefix) {
+			return ""
+		}
+		return ac.Raw
+	}
+	return anthropicSystemText(ac)
 }
 
 // appendAnthropicMessage appends the conversations for one message. User
@@ -540,7 +589,8 @@ func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.Anthropic
 
 // anthropicToolCall converts a tool_use block into an OpenAI function tool
 // call. Arguments are CPython json.dumps formatted (separators, ASCII
-// escaping, wire key order) - the exact string vLLM renders into the prompt.
+// escaping, forwarded key order) - the exact string vLLM renders into the
+// prompt after EPP repackage.
 func anthropicToolCall(b fwkrh.AnthropicContentBlock) map[string]any {
 	id := b.ID
 	if id == "" {
@@ -565,6 +615,7 @@ func pythonArguments(raw json.RawMessage) string {
 	case "", "null", "{}":
 		return "{}"
 	}
+	raw = canonicalizeRepackagedJSON(raw)
 	if out, err := pythonDumps(raw); err == nil {
 		return out
 	}
@@ -609,8 +660,7 @@ func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokeni
 }
 
 // convertAnthropicTools rewrites Anthropic tool definitions into OpenAI
-// function tools. input_schema passes through as raw JSON so the template's
-// re-serialization keeps the wire key order.
+// function tools.
 func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 	if len(tools) == 0 {
 		return nil
@@ -621,6 +671,11 @@ func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 		if len(schema) == 0 || bytes.Equal(schema, []byte("null")) {
 			schema = json.RawMessage(`{"type":"object"}`)
 		}
+		// Anthropic requests are forwarded from PayloadMap, whose Marshal uses
+		// encoding/json and therefore sorts every object key. Canonicalize the
+		// schema the same way before tokenization so the lookup blocks match the
+		// prompt vLLM actually receives after EPP repackage.
+		schema = canonicalizeAnthropicInputSchema(schema)
 		fn := map[string]any{
 			"name":       t.Name,
 			"parameters": schema,
@@ -637,6 +692,48 @@ func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
 	return out
+}
+
+// canonicalizeRepackagedJSON applies the same decode-and-encode cycle used by
+// PayloadMap.Marshal. encoding/json sorts object keys, including nested ones.
+func canonicalizeRepackagedJSON(raw json.RawMessage) json.RawMessage {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return canonical
+}
+
+// canonicalizeAnthropicInputSchema also mirrors vLLM's AnthropicTool
+// validator, which supplies an object type when input_schema omits it.
+func canonicalizeAnthropicInputSchema(raw json.RawMessage) json.RawMessage {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	schema, ok := decoded.(map[string]any)
+	if !ok {
+		return canonical
+	}
+	if _, exists := schema["type"]; exists {
+		return canonical
+	}
+	// vLLM validates the already-decoded schema and appends the default type
+	// to that Python dict. Keep the same insertion order after the existing
+	// canonical keys instead of re-sorting the added member with encoding/json.
+	if len(schema) == 0 {
+		return json.RawMessage(`{"type":"object"}`)
+	}
+	canonical = append(canonical[:len(canonical)-1], []byte(`,"type":"object"}`)...)
+	return canonical
 }
 
 // anthropicImageToURL converts an Anthropic image source to an OpenAI-shaped

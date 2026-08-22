@@ -52,6 +52,7 @@ Backend selection:
 | `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).         |
 | `vllm.timeout`   | `5s`                    | Per-request timeout for text-only requests.                       |
 | `vllm.mmTimeout` | `30s`                   | Per-request timeout for multimodal requests.                      |
+| `vllm.mergeAnthropicInlineSystem` | automatic | Override detection of whether vLLM merges inline Anthropic system messages into the leading system message. Set this only when the vLLM server does not provide `/v1/messages/count_tokens`; `true` is the common setting for servers without an explicit chat-template override. |
 
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):

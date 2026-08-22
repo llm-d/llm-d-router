@@ -702,12 +702,22 @@ type MessagesRequest struct {
 	System AnthropicContent `json:"system,omitempty"`
 	// Tools field for tool use capabilities.
 	Tools []AnthropicTool `json:"tools,omitempty"`
+	// ChatTemplateKWArgs are forwarded by vLLM to the model chat template.
+	ChatTemplateKWArgs map[string]any `json:"chat_template_kwargs,omitempty"`
+	// OutputConfig carries prompt-affecting output controls.
+	OutputConfig *AnthropicOutputConfig `json:"output_config,omitempty"`
 	// CacheSalt isolates prefix caches for security.
 	CacheSalt string `json:"cache_salt,omitempty"`
 }
 
+// AnthropicOutputConfig is the prompt-affecting subset of Anthropic output_config.
+type AnthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
+}
+
 // AnthropicTool is a tool definition in the Anthropic schema. InputSchema keeps
-// the raw JSON bytes so the wire key order survives downstream re-serialization.
+// the raw JSON bytes for token-faithful canonicalization against the forwarded
+// request body.
 type AnthropicTool struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
@@ -779,8 +789,8 @@ func (ac AnthropicContent) textLen() int {
 }
 
 // AnthropicContentBlock is one block of an Anthropic content array. Field sets
-// are disjoint per Type; Input and InputSchema keep raw JSON bytes to preserve
-// the wire key order for token-faithful re-serialization.
+// are disjoint per Type; Input keeps raw JSON bytes for token-faithful
+// canonicalization against the forwarded request body.
 type AnthropicContentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`

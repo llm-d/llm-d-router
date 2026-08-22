@@ -46,7 +46,11 @@ const testHTTPModel = "test-model"
 
 func newHTTPRenderer(t *testing.T, srv *httptest.Server) *vllmHTTPRenderer {
 	t.Helper()
-	r, err := newVLLMHTTPRenderer(&vllmConfig{URL: srv.URL}, testHTTPModel)
+	mergeInlineSystem := false
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                        srv.URL,
+		MergeAnthropicInlineSystem: &mergeInlineSystem,
+	}, testHTTPModel)
 	require.NoError(t, err)
 	return r
 }
@@ -112,6 +116,145 @@ func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	require.NoError(t, json.Unmarshal(cap.completions, &sent))
 	assert.Equal(t, "kept", sent["dummy_field"])
 	assert.Equal(t, testHTTPModel, sent["model"])
+}
+
+func TestProduce_MessagesVLLMHTTPMergesInlineSystem(t *testing.T) {
+	srv, cap := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{1, 2, 3}})
+	defer srv.Close()
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Messages: &fwkrh.MessagesRequest{
+				System: fwkrh.AnthropicContent{Raw: "root"},
+				Messages: []fwkrh.AnthropicMessage{
+					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "first"}},
+					{Role: "system", Content: fwkrh.AnthropicContent{Raw: "inline"}},
+					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "second"}},
+				},
+			},
+		},
+	}
+
+	mergeInlineSystem := true
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                        srv.URL,
+		MergeAnthropicInlineSystem: &mergeInlineSystem,
+	}, testHTTPModel)
+	require.NoError(t, err)
+	p := newTestPlugin(renderer)
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+
+	var sent struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(cap.chat, &sent))
+	require.Len(t, sent.Messages, 3)
+	assert.Equal(t, "system", sent.Messages[0].Role)
+	assert.Equal(t, "rootinline", sent.Messages[0].Content)
+	assert.Equal(t, "user", sent.Messages[1].Role)
+	assert.Equal(t, "user", sent.Messages[2].Role)
+}
+
+func TestProduce_MessagesVLLMHTTPDetectsAndCachesInlineSystemMode(t *testing.T) {
+	tests := []struct {
+		name           string
+		countTokens    int
+		rejectUnmerged bool
+		expectMerged   bool
+	}{
+		{name: "merged", countTokens: 3, expectMerged: true},
+		{name: "merged when unmerged render is rejected", countTokens: 3, rejectUnmerged: true, expectMerged: true},
+		{name: "unmerged", countTokens: 4, expectMerged: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			countCalls := 0
+			chatCalls := 0
+			lastMessageCount := 0
+			mux := http.NewServeMux()
+			mux.HandleFunc(anthropicCountPath, func(w http.ResponseWriter, _ *http.Request) {
+				countCalls++
+				_ = json.NewEncoder(w).Encode(anthropicCountTokensResponse{InputTokens: tt.countTokens})
+			})
+			mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, r *http.Request) {
+				chatCalls++
+				var body struct {
+					Messages []json.RawMessage `json:"messages"`
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				lastMessageCount = len(body.Messages)
+				if tt.rejectUnmerged && lastMessageCount == 4 {
+					http.Error(w, "system message must be first", http.StatusBadRequest)
+					return
+				}
+				tokenIDs := make([]uint32, lastMessageCount)
+				_ = json.NewEncoder(w).Encode(renderResponse{TokenIDs: tokenIDs})
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: srv.URL}, testHTTPModel)
+			require.NoError(t, err)
+			p := newTestPlugin(renderer)
+
+			require.NoError(t, p.Produce(context.Background(), anthropicSystemTestRequest(), nil))
+			assert.Equal(t, 1, countCalls)
+			assert.Equal(t, 3, chatCalls, "detection renders two candidates and the request once")
+			if tt.expectMerged {
+				assert.Equal(t, 3, lastMessageCount)
+			} else {
+				assert.Equal(t, 4, lastMessageCount)
+			}
+
+			require.NoError(t, p.Produce(context.Background(), anthropicSystemTestRequest(), nil))
+			assert.Equal(t, 1, countCalls, "detected mode is cached")
+			assert.Equal(t, 4, chatCalls, "subsequent requests render once")
+		})
+	}
+}
+
+func TestProduce_MessagesVLLMHTTPRejectsAmbiguousInlineSystemMode(t *testing.T) {
+	countCalls := 0
+	chatCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc(anthropicCountPath, func(w http.ResponseWriter, _ *http.Request) {
+		countCalls++
+		_ = json.NewEncoder(w).Encode(anthropicCountTokensResponse{InputTokens: 3})
+	})
+	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		chatCalls++
+		_ = json.NewEncoder(w).Encode(renderResponse{TokenIDs: []uint32{1, 2, 3}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: srv.URL}, testHTTPModel)
+	require.NoError(t, err)
+	p := newTestPlugin(renderer)
+
+	err = p.Produce(context.Background(), anthropicSystemTestRequest(), nil)
+	require.ErrorContains(t, err, "did not uniquely match")
+	assert.Equal(t, 1, countCalls)
+	assert.Equal(t, 2, chatCalls)
+}
+
+func anthropicSystemTestRequest() *scheduling.InferenceRequest {
+	return &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Messages: &fwkrh.MessagesRequest{
+				System: fwkrh.AnthropicContent{Raw: "root"},
+				Messages: []fwkrh.AnthropicMessage{
+					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "first"}},
+					{Role: "system", Content: fwkrh.AnthropicContent{Raw: "inline"}},
+					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "second"}},
+				},
+			},
+		},
+	}
 }
 
 // TestVLLMHTTPRenderer_RenderChat_Multimodal covers the chat endpoint: the raw
