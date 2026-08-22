@@ -159,6 +159,10 @@ func (k *Indexer) ScoreTokens(
 	)
 	defer span.End()
 
+	// Correlate the log lines below (block keys, pod scores) when the indexer is
+	// driven directly. Reached through an EPP request the context is already
+	// correlated at the entry point and this is a no-op.
+	ctx = tracing.LoggerWithSpanContext(ctx, span)
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvcache.ScoreTokens")
 
 	blockKeys, err := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraFeatures)
