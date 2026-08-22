@@ -174,13 +174,17 @@ Labels `{plugin_name, plugin_type, model_name, target_model_name}` (some add `ty
 
 ### Disaggregation
 
-Carries labels `{plugin_name, plugin_type, model_name, decision_type}`. The current name is under
-`llm_d_epp_`; it has a deprecated `llm_d_inference_scheduler_*` twin.
+Two variants are emitted. The current `llm_d_epp_disagg_decision_total` carries
+`{plugin_name, plugin_type, model_name, decision_type}`. Its deprecated
+`llm_d_inference_scheduler_disagg_decision_total` twin carries only
+`{model_name, decision_type}`.
 
 #### `disagg_decision_total`
 
 *   **Type:** Counter
 *   **Labels:**
+    *   `plugin_name`, `plugin_type`: the `disagg-profile-handler` plugin instance recording the
+        decision (`llm_d_epp_` variant only; absent from the deprecated twin)
     *   `model_name`: the target model name, or "unknown" if empty
     *   `decision_type`: one of
         *   `decode-only` - decode-only path (no disaggregation)
