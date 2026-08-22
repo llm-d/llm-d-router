@@ -801,6 +801,13 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
 	}
 
+	// Runs after auto-defaults so an absent token-producer (now materialized as
+	// the estimate backend) is caught; the check is independent of factory
+	// instantiation order. See #1471.
+	if err := preciseproducer.ValidateTokenProducer(handle); err != nil {
+		return nil, fmt.Errorf("invalid configuration - %w", err)
+	}
+
 	// Add requestControl plugins
 	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
 

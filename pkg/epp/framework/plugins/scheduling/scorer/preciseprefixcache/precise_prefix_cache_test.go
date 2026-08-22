@@ -141,7 +141,6 @@ func TestPluginFactory_DefersToExistingProducer(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
 	existing, err := preciseproducer.PluginFactory("my-precise", nil, handle)
 	require.NoError(t, err)
 	handle.AddPlugin(existing.TypedName().Name, existing)
@@ -161,7 +160,6 @@ func TestPluginFactory_RejectsMultipleExistingProducers(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
 	first, err := preciseproducer.PluginFactory("first", nil, handle)
 	require.NoError(t, err)
 	handle.AddPlugin(first.TypedName().Name, first)
@@ -198,7 +196,6 @@ func TestLegacyProducer_ConsumesDropsTokenizedRequestWhenPoolSet(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
 	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
 	require.NoError(t, err)
 
@@ -219,7 +216,6 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
 	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
 	require.NoError(t, err)
 
@@ -302,7 +298,6 @@ func TestLegacyProducer_KeepsExistingTokenizedRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
 	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
 	require.NoError(t, err)
 
