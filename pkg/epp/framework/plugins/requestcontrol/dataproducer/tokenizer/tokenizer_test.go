@@ -691,7 +691,7 @@ func TestMessagesToRenderChatRequest_MergesInlineSystemForDefaultVLLMTemplate(t 
 		},
 	}
 
-	result := messagesToRenderChatRequest(msg, true)
+	result := messagesToRenderChatRequest(msg, true, false)
 
 	// AnthropicServingMessages enables merge_inline_system when vLLM starts
 	// without an explicit --chat-template, which is the production GLM shape.
@@ -735,7 +735,7 @@ func TestMessagesToRenderChatRequest_Tools(t *testing.T) {
 		"function": map[string]any{
 			"name":        "get_weather",
 			"description": "Get the weather",
-			"parameters":  json.RawMessage(`{"properties":{"city":{"type":"string"}},"type":"object"}`),
+			"parameters":  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
 		},
 	}, result.Tools[0])
 }
@@ -774,7 +774,7 @@ func TestMessagesToRenderChatRequest_ToolDefaults(t *testing.T) {
 		"type": "function",
 		"function": map[string]any{
 			"name":       "implicit_type",
-			"parameters": json.RawMessage(`{"a":1,"z":0,"type":"object"}`),
+			"parameters": json.RawMessage(`{"z":0,"a":1,"type":"object"}`),
 		},
 	}, result.Tools[2])
 }
@@ -1020,11 +1020,12 @@ func TestPythonDumpsNonASCIIEscaped(t *testing.T) {
 }
 
 func TestPythonArguments(t *testing.T) {
-	assert.Equal(t, "{}", pythonArguments(nil))
-	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`null`)))
-	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`{}`)))
-	assert.Equal(t, `{"a": 1}`, pythonArguments(json.RawMessage(`{"a":1}`)))
-	assert.Equal(t, `{"a": 1, "b": 2}`, pythonArguments(json.RawMessage(`{"b":2,"a":1}`)))
+	assert.Equal(t, "{}", pythonArguments(nil, false))
+	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`null`), false))
+	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`{}`), false))
+	assert.Equal(t, `{"a": 1}`, pythonArguments(json.RawMessage(`{"a":1}`), false))
+	assert.Equal(t, `{"b": 2, "a": 1}`, pythonArguments(json.RawMessage(`{"b":2,"a":1}`), false))
+	assert.Equal(t, `{"a": 1, "b": 2}`, pythonArguments(json.RawMessage(`{"b":2,"a":1}`), true))
 }
 
 // TestMessagesToRenderChatRequest_ToolUseAndThinking covers an assistant
@@ -1200,9 +1201,8 @@ func TestMessagesToRenderChatRequest_FullAgenticTurn(t *testing.T) {
 	require.Len(t, result.Tools, 1)
 }
 
-// TestProduce_MessagesRequestToolSchemaOrder asserts that tool input_schema
-// uses the same encoding/json key order as the PayloadMap body forwarded to
-// vLLM after EPP repackage.
+// TestProduce_MessagesRequestToolSchemaOrder asserts that an unchanged body
+// preserves the client key order that the director forwards to vLLM.
 func TestProduce_MessagesRequestToolSchemaOrder(t *testing.T) {
 	var gotPayload fwkrh.RequestPayload
 	tok := &mockTokenizer{
@@ -1229,11 +1229,11 @@ func TestProduce_MessagesRequestToolSchemaOrder(t *testing.T) {
 	rendered, err := json.Marshal(gotPayload)
 	require.NoError(t, err)
 	assert.Contains(t, string(rendered),
-		`"parameters":{"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"}`,
+		`"parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`,
 		"input_schema key order must match the forwarded request body")
 }
 
-func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
+func TestMessagesRenderMatchesForwardedAnthropicJSON(t *testing.T) {
 	raw := []byte(`{
 		"model":"zai-org/GLM-5.2-FP8",
 		"chat_template_kwargs":{"enable_thinking":false,"custom":"value"},
@@ -1254,11 +1254,7 @@ func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
 		context.Background(), raw, map[string]string{":path": "/v1/messages"})
 	require.NoError(t, err)
 
-	marshaler, ok := parsed.Body.Payload.(fwkrh.Marshaler)
-	require.True(t, ok)
-	forwardedJSON, err := marshaler.Marshal()
-	require.NoError(t, err)
-	var forwarded struct {
+	type forwardedRequest struct {
 		Tools []struct {
 			InputSchema json.RawMessage `json:"input_schema"`
 		} `json:"tools"`
@@ -1266,16 +1262,7 @@ func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
-	require.NoError(t, json.Unmarshal(forwardedJSON, &forwarded))
-	var forwardedToolUse []struct {
-		Input json.RawMessage `json:"input"`
-	}
-	require.NoError(t, json.Unmarshal(forwarded.Messages[1].Content, &forwardedToolUse))
-
-	renderJSON, err := json.Marshal(buildChatRenderRequest(
-		MessagesToRenderChatRequest(parsed.Body.Messages)))
-	require.NoError(t, err)
-	var rendered struct {
+	type renderedRequest struct {
 		ChatTemplateKWArgs map[string]any `json:"chat_template_kwargs"`
 		Tools              []struct {
 			Function struct {
@@ -1290,28 +1277,64 @@ func TestMessagesRenderMatchesRepackagedAnthropicJSON(t *testing.T) {
 			} `json:"tool_calls"`
 		} `json:"messages"`
 	}
-	require.NoError(t, json.Unmarshal(renderJSON, &rendered))
 
-	require.Len(t, forwarded.Tools, 1)
-	require.Len(t, forwarded.Messages, 2)
-	require.Len(t, forwardedToolUse, 1)
-	require.Len(t, rendered.Tools, 1)
-	require.Len(t, rendered.Messages, 2)
-	require.Len(t, rendered.Messages[1].ToolCalls, 1)
-	assert.Equal(t, map[string]any{
-		"enable_thinking":  false,
-		"custom":           "value",
-		"reasoning_effort": "high",
-	}, rendered.ChatTemplateKWArgs)
+	tests := []struct {
+		name            string
+		mutated         bool
+		forwardedJSON   []byte
+		wantSchemaOrder string
+	}{
+		{
+			name:            "unchanged body preserves wire order",
+			forwardedJSON:   raw,
+			wantSchemaOrder: `{"z":0,"nested":{"b":2,"a":1},"a":3,"type":"object"}`,
+		},
+		{
+			name:            "mutated body matches PayloadMap repackage",
+			mutated:         true,
+			wantSchemaOrder: `{"a":3,"nested":{"a":1,"b":2},"z":0,"type":"object"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			forwardedJSON := tt.forwardedJSON
+			if tt.mutated {
+				marshaler, ok := parsed.Body.Payload.(fwkrh.Marshaler)
+				require.True(t, ok)
+				var err error
+				forwardedJSON, err = marshaler.Marshal()
+				require.NoError(t, err)
+			}
 
-	assert.Equal(t,
-		`{"a":3,"nested":{"a":1,"b":2},"z":0}`,
-		string(forwarded.Tools[0].InputSchema))
-	assert.Equal(t,
-		`{"a":3,"nested":{"a":1,"b":2},"z":0,"type":"object"}`,
-		string(rendered.Tools[0].Function.Parameters))
+			var forwarded forwardedRequest
+			require.NoError(t, json.Unmarshal(forwardedJSON, &forwarded))
+			var forwardedToolUse []struct {
+				Input json.RawMessage `json:"input"`
+			}
+			require.NoError(t, json.Unmarshal(forwarded.Messages[1].Content, &forwardedToolUse))
 
-	expectedArguments, err := pythonDumps(forwardedToolUse[0].Input)
-	require.NoError(t, err)
-	assert.Equal(t, expectedArguments, rendered.Messages[1].ToolCalls[0].Function.Arguments)
+			renderJSON, err := json.Marshal(buildChatRenderRequest(
+				messagesToRenderChatRequest(parsed.Body.Messages, false, tt.mutated)))
+			require.NoError(t, err)
+			var rendered renderedRequest
+			require.NoError(t, json.Unmarshal(renderJSON, &rendered))
+
+			require.Len(t, forwarded.Tools, 1)
+			require.Len(t, forwarded.Messages, 2)
+			require.Len(t, forwardedToolUse, 1)
+			require.Len(t, rendered.Tools, 1)
+			require.Len(t, rendered.Messages, 2)
+			require.Len(t, rendered.Messages[1].ToolCalls, 1)
+			assert.Equal(t, map[string]any{
+				"enable_thinking":  false,
+				"custom":           "value",
+				"reasoning_effort": "high",
+			}, rendered.ChatTemplateKWArgs)
+			assert.Equal(t, tt.wantSchemaOrder, string(rendered.Tools[0].Function.Parameters))
+
+			expectedArguments, err := pythonDumps(forwardedToolUse[0].Input)
+			require.NoError(t, err)
+			assert.Equal(t, expectedArguments, rendered.Messages[1].ToolCalls[0].Function.Arguments)
+		})
+	}
 }

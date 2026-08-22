@@ -65,8 +65,8 @@ func (r *vllmHTTPRenderer) detectAnthropicInlineSystem(ctx context.Context) (boo
 		return false, fmt.Errorf("detect Anthropic inline-system mode: %w", err)
 	}
 
-	unmergedIDs, _, unmergedErr := r.renderChatRequest(ctx, messagesToRenderChatRequest(probe, false))
-	mergedIDs, _, mergedErr := r.renderChatRequest(ctx, messagesToRenderChatRequest(probe, true))
+	unmergedIDs, _, unmergedErr := r.renderChatRequest(ctx, messagesToRenderChatRequest(probe, false, false))
+	mergedIDs, _, mergedErr := r.renderChatRequest(ctx, messagesToRenderChatRequest(probe, true, false))
 	unmergedMatches := unmergedErr == nil && len(unmergedIDs) == countResponse.InputTokens
 	mergedMatches := mergedErr == nil && len(mergedIDs) == countResponse.InputTokens
 

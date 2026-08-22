@@ -183,12 +183,12 @@ func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.Request
 
 // RenderAnthropic converts an Anthropic request using the same inline-system
 // mode as the serving vLLM process and renders the resulting chat request.
-func (r *vllmHTTPRenderer) RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+func (r *vllmHTTPRenderer) RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest, canonicalizeJSON bool) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	mergeInlineSystem, err := r.anthropicInlineSystemMode(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	return r.renderChatRequest(ctx, messagesToRenderChatRequest(request, mergeInlineSystem))
+	return r.renderChatRequest(ctx, messagesToRenderChatRequest(request, mergeInlineSystem, canonicalizeJSON))
 }
 
 func (r *vllmHTTPRenderer) renderChatRequest(ctx context.Context, request *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {

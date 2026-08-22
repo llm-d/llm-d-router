@@ -158,6 +158,76 @@ func TestProduce_MessagesVLLMHTTPMergesInlineSystem(t *testing.T) {
 	assert.Equal(t, "user", sent.Messages[2].Role)
 }
 
+func TestProduce_MessagesVLLMHTTPMatchesForwardedJSONOrder(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutated       bool
+		wantSchema    string
+		wantArguments string
+	}{
+		{
+			name:          "unchanged body preserves wire order",
+			wantSchema:    `{"z":0,"nested":{"b":2,"a":1},"a":3,"type":"object"}`,
+			wantArguments: `{"z": 0, "nested": {"b": 2, "a": 1}, "a": 3}`,
+		},
+		{
+			name:          "mutated body matches repackage order",
+			mutated:       true,
+			wantSchema:    `{"a":3,"nested":{"a":1,"b":2},"z":0,"type":"object"}`,
+			wantArguments: `{"a": 3, "nested": {"a": 1, "b": 2}, "z": 0}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, cap := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{1}})
+			defer srv.Close()
+
+			req := &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{
+				Mutated: tt.mutated,
+				Messages: &fwkrh.MessagesRequest{
+					Tools: []fwkrh.AnthropicTool{{
+						Name:        "run",
+						InputSchema: json.RawMessage(`{"z":0,"nested":{"b":2,"a":1},"a":3}`),
+					}},
+					Messages: []fwkrh.AnthropicMessage{
+						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Run it"}},
+						{Role: "assistant", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{{
+							Type:  blockTypeToolUse,
+							ID:    "toolu_01",
+							Name:  "run",
+							Input: json.RawMessage(`{"z":0,"nested":{"b":2,"a":1},"a":3}`),
+						}}}},
+					},
+				},
+			}}
+
+			p := newTestPlugin(newHTTPRenderer(t, srv))
+			require.NoError(t, p.Produce(context.Background(), req, nil))
+
+			var sent struct {
+				Tools []struct {
+					Function struct {
+						Parameters json.RawMessage `json:"parameters"`
+					} `json:"function"`
+				} `json:"tools"`
+				Messages []struct {
+					ToolCalls []struct {
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"messages"`
+			}
+			require.NoError(t, json.Unmarshal(cap.chat, &sent))
+			require.Len(t, sent.Tools, 1)
+			require.Len(t, sent.Messages, 2)
+			require.Len(t, sent.Messages[1].ToolCalls, 1)
+			assert.Equal(t, tt.wantSchema, string(sent.Tools[0].Function.Parameters))
+			assert.Equal(t, tt.wantArguments, sent.Messages[1].ToolCalls[0].Function.Arguments)
+		})
+	}
+}
+
 func TestProduce_MessagesVLLMHTTPDetectsAndCachesInlineSystemMode(t *testing.T) {
 	tests := []struct {
 		name           string

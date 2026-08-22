@@ -106,7 +106,7 @@ type renderBackend struct {
 }
 
 type anthropicRenderer interface {
-	RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
+	RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest, canonicalizeJSON bool) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
@@ -132,7 +132,7 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			err        error
 		)
 		if renderer, ok := b.tk.(anthropicRenderer); ok {
-			tokenIDs, mmFeatures, err = renderer.RenderAnthropic(ctx, body.Messages)
+			tokenIDs, mmFeatures, err = renderer.RenderAnthropic(ctx, body.Messages, body.Mutated)
 		} else {
 			tokenIDs, mmFeatures, err = b.tk.RenderChat(ctx, messagesPayload(body))
 		}
@@ -190,10 +190,10 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 // blocks), which vLLM /render does not accept, so the payload is always rebuilt
 // from the typed struct into the /render chat schema regardless of body.Payload.
 // Messages and tools are embedded as raw JSON to avoid another untyped
-// decode-and-encode cycle. Arbitrary Anthropic JSON fields are canonicalized
-// during conversion to the same order as the forwarded PayloadMap body.
+// decode-and-encode cycle. Their object order follows the bytes the director
+// forwards: client order for unchanged bodies, PayloadMap order after mutation.
 func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	rr := buildChatRenderRequest(MessagesToRenderChatRequest(body.Messages))
+	rr := buildChatRenderRequest(messagesToRenderChatRequest(body.Messages, false, body.Mutated))
 	msgs := make([]any, len(rr.Messages))
 	for i, m := range rr.Messages {
 		data, _ := json.Marshal(m)
