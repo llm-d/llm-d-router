@@ -218,7 +218,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict verify-boilerplate
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -342,6 +342,10 @@ post-deploy-test: ## Run post deployment tests
 .PHONY: verify-manifests
 verify-manifests: kubectl-validate ## Validate deployment manifests.
 	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
+.PHONY: verify-boilerplate
+verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
+	hack/copyright.sh verify
 
 ##@ Helm
 
