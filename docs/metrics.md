@@ -174,8 +174,8 @@ Labels `{plugin_name, plugin_type, model_name, target_model_name}` (some add `ty
 
 ### Disaggregation
 
-Both metrics carry labels `{plugin_name, plugin_type, model_name, decision_type}`. The current names
-are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin.
+Carries labels `{plugin_name, plugin_type, model_name, decision_type}`. The current name is under
+`llm_d_epp_`; it has a deprecated `llm_d_inference_scheduler_*` twin.
 
 #### `disagg_decision_total`
 
@@ -191,15 +191,6 @@ are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.
-
-#### `pd_decision_total` (deprecated handler)
-
-> Prefer `disagg_decision_total`. This metric is maintained for the deprecated `pd-profile-handler`
-> and covers only P/D disaggregation, not encode disaggregation.
-
-*   **Type:** Counter
-*   **Labels:** `model_name`; `decision_type` (`decode-only` or `prefill-decode`).
-*   **Description:** Counts requests by the Prefill/Decode disaggregation decision.
 
 #### DisaggregatedSet rollout
 
