@@ -57,6 +57,8 @@ type Runtime struct {
 	syncer       fwkdl.CrossReplicaSyncer
 	syncInterval time.Duration
 
+	crossReplicaPub *crossReplicaPublisher
+
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
 
@@ -238,17 +240,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		markBound(srcName, extType)
 	}
 
-	// Register the cross-replica publisher as a polling source so the datalayer
-	// drives it per endpoint at its own interval, like any other dispatcher.
-	if pub := newCrossReplicaPublisher(r.syncer, r.extractors, r.syncInterval); pub != nil {
-		period, err := periodTicks(pub.Interval(), r.pollingInterval)
-		if err != nil {
-			return fmt.Errorf("cross-replica publisher: %w", err)
-		}
-		if err := r.dispatchers.Register(newIntervalDispatcher(pub, period)); err != nil {
-			return fmt.Errorf("register cross-replica publisher: %w", err)
-		}
-	}
+	r.crossReplicaPub = newCrossReplicaPublisher(r.syncer, r.extractors, r.syncInterval)
 
 	logger.Info("Datalayer runtime configured",
 		"pollers", r.dispatchers.Count(),
@@ -395,8 +387,12 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 }
 
 // Start is called to enable the Runtime to start processing data collection. It wires
-// Kubernetes notifications into the manager.
+// Kubernetes notifications into the manager and starts cross-replica syncing.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
+	if r.crossReplicaPub != nil {
+		go r.runCrossReplicaSync(ctx)
+	}
+
 	return r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
 		var extractors []fwkdl.NotificationExtractor
 		if rawExts, ok := r.extractors.Get(srcName); ok {
@@ -435,7 +431,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	collector := NewCollector()
 
 	key := endpointMetadata.GetID()
-	if !r.collectors.Register(key, collector) {
+	if !r.collectors.Register(key, collector, endpoint) {
 		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
 		return nil
 	}
@@ -448,7 +444,26 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	}
 
 	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
+
 	return endpoint
+}
+
+// runCrossReplicaSync publishes endpoint state on its own ticker rather than
+// the collectors' polling interval, so the configured sync interval is
+// honoured. One loop serves every endpoint.
+func (r *Runtime) runCrossReplicaSync(ctx context.Context) {
+	ticker := time.NewTicker(r.crossReplicaPub.Interval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.collectors.RangeEndpoints(func(ep fwkdl.Endpoint) {
+				_ = r.crossReplicaPub.Dispatch(ctx, ep)
+			})
+		}
+	}
 }
 
 // ReleaseEndpoint terminates polling for data on the given endpoint.

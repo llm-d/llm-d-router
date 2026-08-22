@@ -195,6 +195,14 @@ func newEndpointManager() *endpointManager {
 	return &endpointManager{variantSourceMap: newVariantSourceMap[fwkdl.EndpointSource](variantEndpoint)}
 }
 
+// collectorEntry pairs an endpoint's Collector with the endpoint itself, so
+// callers can enumerate the live endpoints without a second registry that
+// could drift out of step with this one.
+type collectorEntry struct {
+	collector *Collector
+	endpoint  fwkdl.Endpoint
+}
+
 // collectorManager tracks per-endpoint Collectors keyed by namespaced name.
 type collectorManager struct {
 	// sync.Map: per-pod reconcilers concurrently add and remove
@@ -208,8 +216,8 @@ func newCollectorManager() *collectorManager {
 
 // Register stores c under key if absent. Returns true if c was stored, false
 // if a collector was already registered for key.
-func (cm *collectorManager) Register(key types.NamespacedName, c *Collector) bool {
-	_, loaded := cm.m.LoadOrStore(key, c)
+func (cm *collectorManager) Register(key types.NamespacedName, c *Collector, ep fwkdl.Endpoint) bool {
+	_, loaded := cm.m.LoadOrStore(key, &collectorEntry{collector: c, endpoint: ep})
 	return !loaded
 }
 
@@ -219,15 +227,28 @@ func (cm *collectorManager) Remove(key types.NamespacedName) (*Collector, bool) 
 	if !ok {
 		return nil, false
 	}
-	c, _ := v.(*Collector)
-	return c, c != nil
+	e, _ := v.(*collectorEntry)
+	if e == nil {
+		return nil, false
+	}
+	return e.collector, e.collector != nil
+}
+
+// RangeEndpoints calls f for each currently registered endpoint.
+func (cm *collectorManager) RangeEndpoints(f func(ep fwkdl.Endpoint)) {
+	cm.m.Range(func(_, v any) bool {
+		if e, ok := v.(*collectorEntry); ok && e.endpoint != nil {
+			f(e.endpoint)
+		}
+		return true
+	})
 }
 
 // StopAll calls Stop on every registered collector.
 func (cm *collectorManager) StopAll() {
 	cm.m.Range(func(_, v any) bool {
-		if c, ok := v.(*Collector); ok {
-			c.Stop()
+		if e, ok := v.(*collectorEntry); ok && e.collector != nil {
+			e.collector.Stop()
 		}
 		return true
 	})
