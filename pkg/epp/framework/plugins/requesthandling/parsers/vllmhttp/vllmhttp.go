@@ -46,6 +46,7 @@ const (
 var (
 	_ fwkrh.Parser            = &VllmHTTPParser{}
 	_ fwkrh.ModelNameRewriter = &VllmHTTPParser{}
+	_ fwkrh.PriorityRewriter  = &VllmHTTPParser{}
 )
 
 // VllmHTTPParser implements fwkrh.Parser for vLLM HTTP endpoints. It handles
@@ -108,6 +109,12 @@ func (p *VllmHTTPParser) ParseResponse(ctx context.Context, body []byte, headers
 // RewriteModelName delegates to the OpenAI parser; the generate body shares the payload map format.
 func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
 	return p.openai.RewriteModelName(payload, model)
+}
+
+// RewritePriority delegates to the OpenAI-compatible map rewriter; the generate
+// body shares the same top-level priority field.
+func (p *VllmHTTPParser) RewritePriority(payload fwkrh.MarshalablePayload, priority int, ctx fwkrh.PriorityRewriteContext) (fwkrh.MarshalablePayload, error) {
+	return p.openai.RewritePriority(payload, priority, ctx)
 }
 
 // parseGenerateRequest decodes a /inference/v1/generate body into an

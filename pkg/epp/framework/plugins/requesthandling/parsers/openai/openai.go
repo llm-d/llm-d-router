@@ -65,6 +65,7 @@ const (
 var (
 	_ fwkrh.Parser            = &OpenAIParser{}
 	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
+	_ fwkrh.PriorityRewriter  = &OpenAIParser{}
 )
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
@@ -143,6 +144,40 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 	}
 	m["model"] = model
 	return m, nil
+}
+
+// Engine type labels used by endpoint metadata to identify backend priority semantics.
+const (
+	engineTypeLabelKey       = "llm-d.ai/engine-type"
+	legacyEngineTypeLabelKey = "inference.networking.k8s.io/engine-type"
+)
+
+// RewritePriority writes the resolved EPP priority into the OpenAI-compatible
+// request payload. SGLang and vLLM both accept a top-level priority field, but
+// vLLM treats lower values as more urgent, so invert EPP's higher-is-more-urgent
+// value for vLLM targets.
+func (p *OpenAIParser) RewritePriority(payload fwkrh.MarshalablePayload, priority int, ctx fwkrh.PriorityRewriteContext) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	if isVLLMTarget(ctx) {
+		priority = -priority
+	}
+	m["priority"] = priority
+	return m, nil
+}
+
+func isVLLMTarget(ctx fwkrh.PriorityRewriteContext) bool {
+	meta := ctx.TargetEndpoint
+	if meta == nil || meta.Labels == nil {
+		return false
+	}
+	engineType := meta.Labels[engineTypeLabelKey]
+	if engineType == "" {
+		engineType = meta.Labels[legacyEngineTypeLabelKey]
+	}
+	return strings.EqualFold(engineType, "vllm")
 }
 
 // maxOutputTokensForAPI normalizes the per-API output-token cap field into a

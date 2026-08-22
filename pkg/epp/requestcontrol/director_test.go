@@ -452,8 +452,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
 			wantMutatedBody: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(2),
 			},
 			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
@@ -1214,6 +1215,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					updatedBodyMap := make(map[string]any)
 					if err := json.Unmarshal(reqCtx.Request.RawBody, &updatedBodyMap); err != nil {
 						t.Errorf("Error to Unmarshal reqCtx.Request.UpdatedBody, err is %v", err)
+					}
+					if _, wantPriority := test.wantMutatedBody["priority"]; !wantPriority {
+						delete(updatedBodyMap, "priority")
 					}
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
