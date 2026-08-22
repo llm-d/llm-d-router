@@ -77,7 +77,6 @@ const (
 	StreamEventAttached      StreamEvent = "attached"
 	StreamEventDetached      StreamEvent = "detached"
 	StreamEventMissingParent StreamEvent = "missing_parent"
-	StreamEventKnownEmpty    StreamEvent = "known_empty"
 )
 
 // StreamObserver receives stream transitions keyed by the serving endpoint

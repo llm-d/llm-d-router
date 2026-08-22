@@ -23,6 +23,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -271,6 +272,7 @@ func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *sched
 		}
 		xargs["kv_cache_report_mode"] = "full"
 	})
+	metrics.FullReportRequests.WithLabelValues(reason).Inc()
 	log.FromContext(ctx).V(logging.DEBUG).Info("Requested full KV-cache report",
 		"requestID", request.RequestID, "endpoint", endpoint, "reason", reason,
 		"totalBlocks", match.total, "confirmedBlocks", match.confirmed)

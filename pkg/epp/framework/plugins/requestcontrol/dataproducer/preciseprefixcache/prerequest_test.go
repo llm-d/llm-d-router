@@ -54,11 +54,11 @@ func newProducerForPreRequest(ctx context.Context, speculativeEnabled bool, idx 
 	}
 }
 
-func primaryOnly(name string, endpoint scheduling.Endpoint) *scheduling.SchedulingResult {
+func primaryOnly(endpoint scheduling.Endpoint) *scheduling.SchedulingResult {
 	return &scheduling.SchedulingResult{
-		PrimaryProfileName: name,
+		PrimaryProfileName: "default",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			name: {TargetEndpoints: []scheduling.Endpoint{endpoint}},
+			"default": {TargetEndpoints: []scheduling.Endpoint{endpoint}},
 		},
 	}
 }
@@ -81,7 +81,7 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-1"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: [][]kvblock.BlockHash{blockKeys}})
 
-	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
+	_ = p.PreRequest(ctx, req, primaryOnly(testEndpoints[0]))
 
 	require.Len(t, calls, 1)
 	assert.Equal(t, blockKeys, calls[0].keys)
@@ -112,7 +112,7 @@ func TestPreRequest_EmptyBlockKeys_NoAdd(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-empty"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: nil})
 
-	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
+	_ = p.PreRequest(ctx, req, primaryOnly(testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
 }
@@ -172,7 +172,7 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	p.pluginState.Write(req.RequestID, blockKeysStateKey,
 		&blockKeysState{perPromptKeys: [][]kvblock.BlockHash{{0xDD}}})
 
-	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
+	_ = p.PreRequest(ctx, req, primaryOnly(testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
 }
@@ -183,7 +183,7 @@ func TestPreRequest_FullReportRepairUsesPrefillAndMergesXArgs(t *testing.T) {
 	p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
 		FullReportThreshold: 0.80,
 		MinMissingBlocks:    32,
-	})
+	}, 0)
 	p.fullReportRepair.observe("10.0.0.2:8080", kvevents.StreamEventAttached)
 
 	payload := fwkrh.PayloadMap{
@@ -236,7 +236,7 @@ func TestPreRequest_FullReportRepairMarksJSONProtocolsMutated(t *testing.T) {
 			p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
 				FullReportThreshold: 0.80,
 				MinMissingBlocks:    32,
-			})
+			}, 0)
 			const endpoint = "10.0.0.1:8080"
 			p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
 			req := &scheduling.InferenceRequest{
@@ -247,7 +247,7 @@ func TestPreRequest_FullReportRepairMarksJSONProtocolsMutated(t *testing.T) {
 				repairMatches: map[string]repairMatch{endpoint: {total: 200, confirmed: 100}},
 			})
 
-			require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0])))
+			require.NoError(t, p.PreRequest(ctx, req, primaryOnly(testEndpoints[0])))
 			assert.True(t, req.Body.Mutated)
 			body, err := tt.payload.Marshal()
 			require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestPreRequest_FullReportRepairThresholdAndOneShotForce(t *testing.T) {
 			p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
 				FullReportThreshold: 0.80,
 				MinMissingBlocks:    32,
-			})
+			}, 0)
 			const endpoint = "10.0.0.1:8080"
 			p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
 			if tt.signal != "" {
@@ -297,7 +297,7 @@ func TestPreRequest_FullReportRepairThresholdAndOneShotForce(t *testing.T) {
 				repairMatches: map[string]repairMatch{endpoint: {total: tt.total, confirmed: tt.confirmed}},
 			})
 
-			require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0])))
+			require.NoError(t, p.PreRequest(ctx, req, primaryOnly(testEndpoints[0])))
 			xargs, _ := payload["vllm_xargs"].(map[string]any)
 			assert.Equal(t, tt.wantFull, xargs["kv_cache_report_mode"] == "full")
 
@@ -310,7 +310,7 @@ func TestPreRequest_FullReportRepairThresholdAndOneShotForce(t *testing.T) {
 				p.pluginState.Write(req2.RequestID, blockKeysStateKey, &blockKeysState{
 					repairMatches: map[string]repairMatch{endpoint: {total: tt.total, confirmed: tt.confirmed}},
 				})
-				require.NoError(t, p.PreRequest(ctx, req2, primaryOnly("default", testEndpoints[0])))
+				require.NoError(t, p.PreRequest(ctx, req2, primaryOnly(testEndpoints[0])))
 				xargs2, _ := payload2["vllm_xargs"].(map[string]any)
 				assert.NotEqual(t, "full", xargs2["kv_cache_report_mode"],
 					"the explicit bypass is consumed once")
@@ -325,7 +325,7 @@ func TestPreRequest_FullReportRepairDoesNotOverwriteMalformedXArgs(t *testing.T)
 	p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
 		FullReportThreshold: 0.80,
 		MinMissingBlocks:    32,
-	})
+	}, 0)
 	const endpoint = "10.0.0.1:8080"
 	p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
 	p.fullReportRepair.observe(endpoint, kvevents.StreamEventMissingParent)
@@ -338,7 +338,7 @@ func TestPreRequest_FullReportRepairDoesNotOverwriteMalformedXArgs(t *testing.T)
 		repairMatches: map[string]repairMatch{endpoint: {total: 200, confirmed: 168}},
 	})
 
-	require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0])))
+	require.NoError(t, p.PreRequest(ctx, req, primaryOnly(testEndpoints[0])))
 	assert.Equal(t, "invalid", payload["vllm_xargs"])
 	assert.False(t, req.Body.Mutated)
 	request, reason := p.fullReportRepair.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 168})
@@ -347,7 +347,7 @@ func TestPreRequest_FullReportRepairDoesNotOverwriteMalformedXArgs(t *testing.T)
 }
 
 func TestFullReportRepairLifecycle(t *testing.T) {
-	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32})
+	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
 	const endpoint = "10.0.0.1:8080"
 
 	r.observe(endpoint, kvevents.StreamEventAttached)
@@ -362,7 +362,10 @@ func TestFullReportRepairLifecycle(t *testing.T) {
 	assert.True(t, request)
 	assert.Equal(t, "threshold", reason, "force is one shot but eligibility remains")
 
-	r.observe(endpoint, kvevents.StreamEventKnownEmpty)
+	r.observe(endpoint, kvevents.StreamEventDetached)
 	request, _ = r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
 	assert.False(t, request)
+	r.observe(endpoint, kvevents.StreamEventMissingParent)
+	request, _ = r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
+	assert.False(t, request, "a late fault from a detached stream must not resurrect eligibility")
 }

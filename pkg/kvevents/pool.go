@@ -347,15 +347,13 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	p.processEventBatch(ctx, &batch, podID, modelName)
 }
 
-func (p *Pool) clearPod(ctx context.Context, podIdentifier string) bool {
+func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
-		return false
 	}
 	p.dedup.clear(podIdentifier)
-	return true
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -693,10 +691,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"anyway (tier-scoped clear is not supported)",
 					"podIdentifier", podIdentifier, "deviceTier", ev.DeviceTier)
 			}
-			if p.clearPod(ctx, podIdentifier) {
-				// A successful reset leaves the event-derived index complete and empty.
-				p.notifyStreamEvent(podIdentifier, StreamEventKnownEmpty)
-			}
+			p.clearPod(ctx, podIdentifier)
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)

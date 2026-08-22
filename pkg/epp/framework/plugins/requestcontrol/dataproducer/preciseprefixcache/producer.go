@@ -171,11 +171,11 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		if err := validateFullReportRepairPrerequisites(config.KVEventsConfig); err != nil {
 			return nil, err
 		}
-		repairConfig, err := normalizeFullReportRepairConfig(*config.FullReportRepair)
+		repairConfig, cooldown, err := normalizeFullReportRepairConfig(*config.FullReportRepair)
 		if err != nil {
 			return nil, fmt.Errorf("invalid fullReportRepair: %w", err)
 		}
-		repair = newFullReportRepair(repairConfig)
+		repair = newFullReportRepair(repairConfig, cooldown)
 	}
 
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)

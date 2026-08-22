@@ -101,10 +101,15 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // pops on eviction and emits BlockRemoved), so the map tracks the engine's
 // offload-pool capacity and drains in steady state; an entry is also reclaimed
 // the moment its count returns to zero, and clear() drops a whole pod on
-// AllBlocksCleared. The only growth paths are lost ZMQ removes or an
+// AllBlocksCleared. The growth paths are lost ZMQ removes or an
 // index-internal eviction with no matching wire remove, both of which leave a
-// harmless over-estimate (see above) rather than a correctness error. This
-// mirrors the bounded-by-the-wire behavior of Dynamo's EventDedupFilter.
+// harmless over-estimate (see above) rather than a correctness error, and a
+// full KV-cache report (the preciseprefixcache producer's fullReportRepair)
+// re-announcing a block whose original store was already counted, which
+// suppresses the block's final wire remove and keeps the index row until the
+// index's own eviction; the report path is rate-bounded by the producer's
+// per-endpoint cooldown. This mirrors the bounded-by-the-wire behavior of
+// Dynamo's EventDedupFilter.
 //
 // It is safe for concurrent use: the single mutex guards the whole cross-pod
 // map. The Pool additionally shards work by pod identifier (see Pool.AddTask),
