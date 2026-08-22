@@ -40,6 +40,26 @@ python3 test/perf/run_nightly_perf.py \
     --router-machine-family e2
 ```
 
+### Precise Prefix Routing Configs
+
+The `router-configs/` directory includes precise-prefix routing variants for comparing the existing cache-affinity profile with LMetric:
+
+- `precise-prefix.yaml`: baseline precise-prefix configuration.
+- `precise-prefix-lmetric.yaml`: LMetric routing with `cost = PToken * BS`, where `PToken` is uncached prefill tokens and `BS` is in-flight requests plus one.
+
+For example:
+
+```bash
+python3 test/perf/run_nightly_perf.py \
+    --router-config test/perf/config/router-configs/precise-prefix-lmetric.yaml \
+    --test-name precise-prefix-lmetric-job1 \
+    --perf-job test/perf/config/shared_prefix_job1.yaml \
+    --sim-replicas 10 \
+    --gcp-project <your-gcp-project-id> \
+    --results-dir test/perf/results/precise-prefix-lmetric \
+    --router-machine-family e2
+```
+
 ### Parameters
 - `--router-config`: Path to the consolidated Helm values file for the EPP.
 - `--test-name`: Unique name for this test run (defines the markdown filename).
