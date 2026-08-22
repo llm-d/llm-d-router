@@ -352,7 +352,7 @@ func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
 func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	params := `{
 		"modelName": "m",
-		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"},
+		"estimate": {},
 		"vllm": {"url": "http://localhost:8000"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)

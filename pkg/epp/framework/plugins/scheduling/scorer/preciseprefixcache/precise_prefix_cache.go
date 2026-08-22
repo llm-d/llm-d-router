@@ -64,7 +64,7 @@ type PluginConfig struct {
 // directly.
 type Plugin struct {
 	typedName    plugin.TypedName
-	producer     *legacyProducer
+	producer     *preciseproducer.Producer
 	scorer       *prefixscorer.Plugin
 	matchInfoKey plugin.DataKey
 }
@@ -97,9 +97,8 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		return prefixscorer.New(ctx, name, existing.TypedName().Name)
 	}
 
-	// Self-host: defaults first, then overlay the operator's YAML — matches
-	// the historical factory so partial IndexerConfig (e.g. only
-	// tokenizersPoolConfig set) doesn't leave the indexer half-built.
+	// Self-host: defaults first, then overlay the operator's YAML, so a
+	// partial IndexerConfig doesn't leave the indexer half-built.
 	defaultIndexerCfg, err := kvcache.NewDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize indexer config: %w", err)
@@ -122,7 +121,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		SpeculativeTTL:       legacy.SpeculativeTTL,
 	}
 
-	producer, err := newLegacyProducer(ctx, name, producerCfg)
+	producer, err := preciseproducer.New(ctx, name, producerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create internal producer for %s: %w", PrecisePrefixCachePluginType, err)
 	}
