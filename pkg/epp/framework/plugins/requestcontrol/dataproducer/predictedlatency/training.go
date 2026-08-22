@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
@@ -130,9 +131,19 @@ func recordTTFTTrainingData(
 		entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatch
 	}
 	entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
+	entry.PredictedTTFT = predictedLatencyMSPtr(predictedLatencyCtx.predictedTTFT)
 	if err := predictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 		logger.V(logutil.DEBUG).Error(err, "record TTFT training failed")
 	}
+}
+
+// predictedLatencyMSPtr returns a pointer for optional predicted_* JSON fields.
+// Zero or non-finite values mean no usable selected prediction and must be omitted.
+func predictedLatencyMSPtr(ms float64) *float64 {
+	if ms <= 0 || math.IsNaN(ms) || math.IsInf(ms, 0) {
+		return nil
+	}
+	return &ms
 }
 
 // refreshLastSeenMetrics updates predictedLatencyCtx.lastSeenMetrics from scheduling results.

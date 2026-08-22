@@ -18,7 +18,9 @@ package predictedlatency
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -296,4 +300,308 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, results)
 	assert.True(t, strings.Contains(err.Error(), "metrics state at index 0 cannot be nil"))
+}
+
+func TestPredictedLatencyMSPtr(t *testing.T) {
+	assert.Nil(t, predictedLatencyMSPtr(0))
+	assert.Nil(t, predictedLatencyMSPtr(-1))
+	assert.Nil(t, predictedLatencyMSPtr(math.NaN()))
+	assert.Nil(t, predictedLatencyMSPtr(math.Inf(1)))
+	require.NotNil(t, predictedLatencyMSPtr(12.5))
+	assert.Equal(t, 12.5, *predictedLatencyMSPtr(12.5))
+}
+
+func assertPredictedJSONFields(t *testing.T, entry latencypredictor.TrainingEntry, wantTTFT *float64, wantTPOT *float64) {
+	t.Helper()
+	raw, err := json.Marshal(entry)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+
+	if wantTTFT == nil {
+		_, ok := payload["predicted_ttft_ms"]
+		assert.False(t, ok, "predicted_ttft_ms should be omitted: %s", raw)
+	} else {
+		got, ok := payload["predicted_ttft_ms"].(float64)
+		require.True(t, ok, "predicted_ttft_ms missing: %s", raw)
+		assert.Equal(t, *wantTTFT, got)
+	}
+	if wantTPOT == nil {
+		_, ok := payload["predicted_tpot_ms"]
+		assert.False(t, ok, "predicted_tpot_ms should be omitted: %s", raw)
+	} else {
+		got, ok := payload["predicted_tpot_ms"].(float64)
+		require.True(t, ok, "predicted_tpot_ms missing: %s", raw)
+		assert.Equal(t, *wantTPOT, got)
+	}
+}
+
+func TestRecordTTFTTrainingData_LookupSelectedPredictedTTFT(t *testing.T) {
+	mp := &mockPredictor{}
+	endpoint := createTestEndpoint("selected-pod", 0.5, 1, 1)
+	request := createTestInferenceRequest("ttft-pred", 100, 50)
+	plCtx := newPredictedLatencyContext(request)
+	plCtx.ttft = 120
+	plCtx.targetMetadata = endpoint.GetMetadata()
+	plCtx.predictionsForScheduling = map[string]endpointPredictionResult{
+		"selected-pod": {Endpoint: endpoint, TTFT: 80, TPOT: 10, TTFTValid: false, TPOTValid: false, IsValid: false},
+		"other-pod":    {TTFT: 999, TPOT: 10, TTFTValid: true, TPOTValid: true, IsValid: true},
+	}
+
+	// Resolve selected prediction the same way PreRequest does. SLO-invalid
+	// selected predictions must still train (drift needs those samples).
+	processPreRequestForLatencyPrediction(context.Background(), plCtx)
+	assert.Equal(t, 80.0, plCtx.predictedTTFT)
+
+	recordTTFTTrainingData(
+		context.Background(),
+		mp,
+		"",
+		plCtx,
+		&fwkdl.Metrics{KVCacheUsagePercent: 0.5, WaitingQueueSize: 1, RunningRequestsSize: 1},
+		endpoint.GetMetadata(),
+		time.Now(),
+		0.4,
+		0,
+	)
+
+	require.Len(t, mp.capturedTrainingEntries, 1)
+	entry := mp.capturedTrainingEntries[0]
+	assert.Equal(t, 120.0, entry.ActualTTFT)
+	assert.Equal(t, 0.0, entry.ActualTPOT)
+	require.NotNil(t, entry.PredictedTTFT)
+	assert.Equal(t, 80.0, *entry.PredictedTTFT)
+	assert.Nil(t, entry.PredictedTPOT)
+	want := 80.0
+	assertPredictedJSONFields(t, entry, &want, nil)
+}
+
+func TestRecordTTFTTrainingData_OmitsPredictedWhenMissing(t *testing.T) {
+	mp := &mockPredictor{}
+	endpoint := createTestEndpoint("pod1", 0.5, 1, 1)
+	request := createTestInferenceRequest("ttft-missing", 100, 50)
+	plCtx := newPredictedLatencyContext(request)
+	plCtx.ttft = 100
+	plCtx.targetMetadata = endpoint.GetMetadata()
+	plCtx.predictionsForScheduling = map[string]endpointPredictionResult{}
+
+	processPreRequestForLatencyPrediction(context.Background(), plCtx)
+	assert.Equal(t, 0.0, plCtx.predictedTTFT)
+
+	recordTTFTTrainingData(
+		context.Background(),
+		mp,
+		"",
+		plCtx,
+		&fwkdl.Metrics{KVCacheUsagePercent: 0.5},
+		endpoint.GetMetadata(),
+		time.Now(),
+		0,
+		0,
+	)
+
+	require.Len(t, mp.capturedTrainingEntries, 1)
+	assert.Nil(t, mp.capturedTrainingEntries[0].PredictedTTFT)
+	assert.Nil(t, mp.capturedTrainingEntries[0].PredictedTPOT)
+	assert.Equal(t, 100.0, mp.capturedTrainingEntries[0].ActualTTFT)
+	assertPredictedJSONFields(t, mp.capturedTrainingEntries[0], nil, nil)
+}
+
+func TestRecordTTFTTrainingData_PrefillLookupSelectedPredictedTTFT(t *testing.T) {
+	mp := &mockPredictor{}
+	prefill := createTestEndpoint("prefill-pod", 0.4, 1, 0)
+	decode := createTestEndpoint("decode-pod", 0.5, 1, 1)
+	request := createTestInferenceRequest("ttft-pd", 100, 50)
+	plCtx := newPredictedLatencyContext(request)
+	plCtx.ttft = 150
+	plCtx.targetMetadata = decode.GetMetadata()
+	plCtx.prefillTargetMetadata = prefill.GetMetadata()
+	plCtx.predictionsForScheduling = map[string]endpointPredictionResult{
+		"prefill-pod": {Endpoint: prefill, TTFT: 95, TPOT: 0},
+		"decode-pod":  {Endpoint: decode, TTFT: 40, TPOT: 12},
+	}
+
+	processPreRequestForLatencyPrediction(context.Background(), plCtx)
+	assert.Equal(t, 95.0, plCtx.predictedTTFT, "TTFT must come from prefill, not decode")
+
+	recordTTFTTrainingData(
+		context.Background(),
+		mp,
+		"",
+		plCtx,
+		&fwkdl.Metrics{KVCacheUsagePercent: 0.4},
+		prefill.GetMetadata(),
+		time.Now(),
+		0.2,
+		0,
+	)
+
+	require.Len(t, mp.capturedTrainingEntries, 1)
+	require.NotNil(t, mp.capturedTrainingEntries[0].PredictedTTFT)
+	assert.Equal(t, 95.0, *mp.capturedTrainingEntries[0].PredictedTTFT)
+	assert.Nil(t, mp.capturedTrainingEntries[0].PredictedTPOT)
+	want := 95.0
+	assertPredictedJSONFields(t, mp.capturedTrainingEntries[0], &want, nil)
+}
+
+func TestResponseBody_TPOTTrainingIncludesSelectedPredictedTPOT(t *testing.T) {
+	router := createTestRouter()
+	mp := &mockPredictor{}
+	router.latencypredictor = mp
+
+	endpoint := createTestEndpoint("decode-pod", 0.5, 1, 1)
+	request := createTestInferenceRequest("tpot-pred", 100, 50)
+	response := &requestcontrol.Response{EndOfStream: true}
+	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
+
+	plCtx := newPredictedLatencyContext(request)
+	plCtx.targetMetadata = endpoint.GetMetadata()
+	plCtx.schedulingResult = schedulingResult
+	plCtx.schedulingRequest = *request
+	plCtx.incomingModelName = testModelName
+	plCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
+	plCtx.ttft = 80
+	plCtx.avgTPOT = 25
+	plCtx.generatedTokenCount = 1 // keep pre-set avgTPOT; do not recompute
+	plCtx.predictionsForScheduling = map[string]endpointPredictionResult{
+		"decode-pod": {Endpoint: endpoint, TTFT: 85, TPOT: 22},
+		"other-pod":  {TTFT: 10, TPOT: 999},
+	}
+	predictFirstTPOT(context.Background(), plCtx)
+	assert.Equal(t, 22.0, plCtx.avgPredictedTPOT)
+
+	plCtx.lastSeenMetrics["default"] = &fwkdl.Metrics{
+		KVCacheUsagePercent: 0.5,
+		WaitingQueueSize:    1,
+		RunningRequestsSize: 1,
+	}
+	router.setPredictedLatencyContextForRequest(request, plCtx)
+
+	queue := newRequestPriorityQueue()
+	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
+
+	router.ResponseBody(context.Background(), request, response, endpoint.GetMetadata())
+
+	require.NotEmpty(t, mp.capturedTrainingEntries)
+	var tpotEntry *latencypredictor.TrainingEntry
+	for i := range mp.capturedTrainingEntries {
+		if mp.capturedTrainingEntries[i].ActualTPOT > 0 {
+			tpotEntry = &mp.capturedTrainingEntries[i]
+			break
+		}
+	}
+	require.NotNil(t, tpotEntry, "expected a TPOT training entry")
+	assert.Equal(t, 0.0, tpotEntry.ActualTTFT)
+	require.NotNil(t, tpotEntry.PredictedTPOT)
+	assert.Equal(t, 22.0, *tpotEntry.PredictedTPOT)
+	assert.Nil(t, tpotEntry.PredictedTTFT)
+	want := 22.0
+	assertPredictedJSONFields(t, *tpotEntry, nil, &want)
+}
+
+func TestResponseBody_PDDecodeTPOTUsesSelectedDecodePrediction(t *testing.T) {
+	router := createTestRouter()
+	mp := &mockPredictor{}
+	router.latencypredictor = mp
+
+	prefill := createTestEndpoint("prefill-pod", 0.4, 1, 0)
+	decodeSelected := createTestEndpoint("decode-selected", 0.5, 1, 1)
+	decodeOther := createTestEndpoint("decode-other", 0.6, 1, 1)
+	request := createTestInferenceRequest("tpot-pd", 100, 50)
+	response := &requestcontrol.Response{EndOfStream: true}
+
+	schedulingResult := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{decodeSelected}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+		},
+	}
+
+	plCtx := newPredictedLatencyContext(request)
+	plCtx.targetMetadata = decodeSelected.GetMetadata()
+	plCtx.prefillTargetMetadata = prefill.GetMetadata()
+	plCtx.schedulingResult = schedulingResult
+	plCtx.schedulingRequest = *request
+	plCtx.incomingModelName = testModelName
+	plCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
+	plCtx.ttft = 80
+	plCtx.avgTPOT = 25
+	plCtx.generatedTokenCount = 1
+	plCtx.predictionsForScheduling = map[string]endpointPredictionResult{
+		"prefill-pod":     {Endpoint: prefill, TTFT: 90, TPOT: 1},
+		"decode-selected": {Endpoint: decodeSelected, TTFT: 40, TPOT: 18},
+		"decode-other":    {Endpoint: decodeOther, TTFT: 35, TPOT: 777},
+	}
+	predictFirstTPOT(context.Background(), plCtx)
+	assert.Equal(t, 18.0, plCtx.avgPredictedTPOT, "TPOT must come from selected decode, not prefill/other")
+
+	plCtx.lastSeenMetrics["default"] = &fwkdl.Metrics{KVCacheUsagePercent: 0.5}
+	plCtx.lastSeenMetrics["prefill"] = &fwkdl.Metrics{KVCacheUsagePercent: 0.4}
+	router.setPredictedLatencyContextForRequest(request, plCtx)
+
+	queue := newRequestPriorityQueue()
+	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	router.runningRequestLists.Store(decodeSelected.GetMetadata().ID, queue)
+
+	router.ResponseBody(context.Background(), request, response, decodeSelected.GetMetadata())
+
+	require.NotEmpty(t, mp.capturedTrainingEntries)
+	var tpotEntry *latencypredictor.TrainingEntry
+	for i := range mp.capturedTrainingEntries {
+		if mp.capturedTrainingEntries[i].ActualTPOT > 0 {
+			tpotEntry = &mp.capturedTrainingEntries[i]
+			break
+		}
+	}
+	require.NotNil(t, tpotEntry)
+	require.NotNil(t, tpotEntry.PredictedTPOT)
+	assert.Equal(t, 18.0, *tpotEntry.PredictedTPOT)
+	assert.NotEqual(t, 1.0, *tpotEntry.PredictedTPOT)
+	assert.NotEqual(t, 777.0, *tpotEntry.PredictedTPOT)
+	want := 18.0
+	assertPredictedJSONFields(t, *tpotEntry, nil, &want)
+}
+
+func TestResponseBody_TPOTTrainingOmitsPredictedWhenMissing(t *testing.T) {
+	router := createTestRouter()
+	mp := &mockPredictor{}
+	router.latencypredictor = mp
+
+	endpoint := createTestEndpoint("decode-pod", 0.5, 1, 1)
+	request := createTestInferenceRequest("tpot-missing", 100, 50)
+	response := &requestcontrol.Response{EndOfStream: true}
+	schedulingResult := createTestSchedulingResult(endpoint.GetMetadata())
+
+	plCtx := newPredictedLatencyContext(request)
+	plCtx.targetMetadata = endpoint.GetMetadata()
+	plCtx.schedulingResult = schedulingResult
+	plCtx.schedulingRequest = *request
+	plCtx.incomingModelName = testModelName
+	plCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
+	plCtx.ttft = 80
+	plCtx.avgTPOT = 25
+	plCtx.generatedTokenCount = 1
+	plCtx.avgPredictedTPOT = 0
+	plCtx.lastSeenMetrics["default"] = &fwkdl.Metrics{KVCacheUsagePercent: 0.5}
+	router.setPredictedLatencyContextForRequest(request, plCtx)
+
+	queue := newRequestPriorityQueue()
+	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
+
+	router.ResponseBody(context.Background(), request, response, endpoint.GetMetadata())
+
+	require.NotEmpty(t, mp.capturedTrainingEntries)
+	found := false
+	for _, entry := range mp.capturedTrainingEntries {
+		if entry.ActualTPOT > 0 {
+			found = true
+			assert.Nil(t, entry.PredictedTPOT)
+			assert.Nil(t, entry.PredictedTTFT)
+			assertPredictedJSONFields(t, entry, nil, nil)
+		}
+	}
+	assert.True(t, found)
 }
