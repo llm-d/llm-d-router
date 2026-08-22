@@ -563,7 +563,7 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 			prefill = append(prefill, ep)
 		case bylabel.RoleDecode, "":
 			decode = append(decode, ep)
-		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode: //nolint:staticcheck // RoleBoth is deprecated but must be matched for backward compatibility
+		case bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
 			interleaved = append(interleaved, ep)
 		case bylabel.RoleEncode:
 			// Encode-only pods receive no prefill or decode traffic; excluding them
