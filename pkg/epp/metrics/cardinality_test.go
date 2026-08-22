@@ -235,3 +235,39 @@ func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
 	require.Equal(t, 2, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
 		"the llm_d_epp family must be preserved identically")
 }
+
+// SetFairnessIDLabelLimit changes the cap on distinct fairness_id label values.
+func TestSetFairnessIDLabelLimit(t *testing.T) {
+	t.Cleanup(func() {
+		fairnessLabelLimiter = newBoundedLabel(DefaultFairnessIDMetricLabelLimit)
+		flowControlRequestEnqueueDuration.Reset()
+		llmdFlowControlRequestEnqueueDuration.Reset()
+	})
+
+	tests := []struct {
+		name       string
+		limit      int
+		wantSeries int
+	}{
+		// cap distinct IDs to the limit plus one overflow series.
+		{name: "low cap", limit: 3, wantSeries: 4},
+		// a zero cap folds every ID onto the single overflow series.
+		{name: "zero disables per-id recording", limit: 0, wantSeries: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fairnessLabelLimiter = newBoundedLabel(DefaultFairnessIDMetricLabelLimit)
+			flowControlRequestEnqueueDuration.Reset()
+			llmdFlowControlRequestEnqueueDuration.Reset()
+
+			SetFairnessIDLabelLimit(test.limit)
+
+			for i := 0; i < 100; i++ {
+				RecordFlowControlRequestEnqueueDuration(fmt.Sprintf("tenant-%d", i), "0", "Dispatched", time.Millisecond)
+			}
+
+			require.Equal(t, test.wantSeries, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration))
+		})
+	}
+}
