@@ -471,25 +471,6 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	assert.False(t, decider.disaggregate(ctx, makeRequestWithTokens(100), ep))
 }
 
-func TestConsumes(t *testing.T) {
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
-	require.NoError(t, err)
-
-	handler, err := NewPdProfileHandler(
-		"test-handler",
-		PdProfileHandlerParameters{
-			PrefillProfile:              "prefill",
-			DecodeProfile:               "decode",
-			PrefixMatchInfoProducerName: "test",
-		},
-		decider,
-	)
-	require.NoError(t, err)
-
-	consumed := handler.Consumes()
-	assert.Contains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
-}
-
 func TestWithName(t *testing.T) {
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
 	require.NoError(t, err)

@@ -6,7 +6,6 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
 
 - [Profile Handlers](#profile-handlers)
   - [DisaggProfileHandler](#disaggprofilehandler)
-  - [PdProfileHandler (Deprecated)](#pdprofilehandler-deprecated)
 - [PreRequest Plugins](#prerequest-plugins)
   - [DisaggHeadersHandler (Deprecated)](#disaggheadershandler-deprecated)
   - [PrefillHeaderHandler (Deprecated)](#prefillheaderhandler-deprecated)
@@ -86,15 +85,6 @@ plugins:
 - Without a configured decider, the corresponding stage is disabled for all requests — this is a static decision at startup, not per-request.
 - The names in `deciders.prefill` and `deciders.encode` must match plugin names declared earlier in the same configuration.
 - When using P/D disaggregation, a `PrefixCachePlugin` must be configured in the prefill and decode scheduling profiles.
-
----
-
-### PdProfileHandler (Deprecated)
-
-**Type:** `pd-profile-handler`
-**Interfaces**: `scheduling.ProfileHandler`
-
-> **Deprecated:** Use `disagg-profile-handler` instead.
 
 ---
 

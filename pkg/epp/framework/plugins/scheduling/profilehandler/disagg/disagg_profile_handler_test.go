@@ -255,99 +255,9 @@ func TestHandlerFactory(t *testing.T) {
 		{"unknown encodeDecider", map[string]any{
 			"deciders": map[string]any{"encode": "INVALID"},
 		}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
-			if tt.expectErr {
-				assert.Error(t, err)
-				assert.Nil(t, p)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, p)
-			}
-		})
-	}
-}
-
-func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := handleWithDeciders(ctx)
-
-	tests := []struct {
-		name      string
-		params    map[string]any
-		expectErr bool
-	}{
-		{"deprecated prefillDeciderPluginName", map[string]any{
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"deprecated encodeDeciderPluginName", map[string]any{
-			"encodeDeciderPluginName": AlwaysDisaggMulimodalPluginType,
-		}, false},
-		{"deprecated custom profile names", map[string]any{
-			"decodeProfile":            "my-decode",
-			"prefillProfile":           "my-prefill",
-			"encodeProfile":            "my-encode",
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"nested format with unknown extra fields is rejected", map[string]any{
+		{"unknown field is rejected", map[string]any{
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
-		}, true},
-		{"mixing deprecated and nested fields is an error", map[string]any{
-			"decodeProfile": "my-decode",
-			"profiles":      map[string]any{"decode": "other-decode"},
-		}, true},
-		{"mixing deprecated decider and nested deciders is an error", map[string]any{
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-			"deciders":                 map[string]any{"prefill": AlwaysDisaggPDDeciderPluginType},
-		}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
-			if tt.expectErr {
-				assert.Error(t, err)
-				assert.Nil(t, p)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, p)
-			}
-		})
-	}
-}
-
-// TestHandlerFactory_PdProfileHandlerParams verifies that
-// Handler accepts the exact parameter format of the deprecated
-// pd-profile-handler, enabling a zero-change migration between the two types.
-func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := handleWithDeciders(ctx)
-
-	tests := []struct {
-		name      string
-		params    map[string]any
-		expectErr bool
-	}{
-		{"pd-profile-handler defaults (no params)", map[string]any{}, false},
-		{"pd-profile-handler with deciderPluginName", map[string]any{
-			"decodeProfile":     "decode",
-			"prefillProfile":    "prefill",
-			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"pd-profile-handler with unknown fields is rejected", map[string]any{
-			"decodeProfile":     "decode",
-			"prefillProfile":    "prefill",
-			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			"prefixPluginType":  "prefix-cache-scorer", // unknown to both schemas (#1068)
-			"prefixPluginName":  "prefix-cache-scorer",
-			"primaryPort":       8080,
-		}, true},
-		{"pd-profile-handler unknown deciderPluginName", map[string]any{
-			"deciderPluginName": "INVALID",
 		}, true},
 	}
 	for _, tt := range tests {
@@ -1509,39 +1419,12 @@ func TestHandler_Factory_StageOrder(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "legacy flat format with stageOrder",
-			params: map[string]any{
-				"decodeProfile": "decode",
-				"stageOrder":    "prefill-first",
-			},
-			expectErr:   false,
-			expectOrder: StageOrderPrefillFirst,
-		},
-		{
 			name: "prefill-first with deciders.prefill returns error",
 			params: map[string]any{
 				"stageOrder": "prefill-first",
 				"deciders": map[string]any{
 					"prefill": PrefixBasedPDDeciderPluginType,
 				},
-			},
-			expectErr: true,
-		},
-		{
-			name: "prefill-first with legacy deciderPluginName returns error",
-			params: map[string]any{
-				"stageOrder":        "prefill-first",
-				"decodeProfile":     "decode",
-				"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			},
-			expectErr: true,
-		},
-		{
-			name: "prefill-first with legacy prefillDeciderPluginName returns error",
-			params: map[string]any{
-				"stageOrder":               "prefill-first",
-				"decodeProfile":            "decode",
-				"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
 			},
 			expectErr: true,
 		},

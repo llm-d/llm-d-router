@@ -1122,14 +1122,13 @@ func TestProcessor(t *testing.T) {
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefill}),
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleDecode}),
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode}),
-					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleBoth}), //nolint:staticcheck // testing backward compat
 					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefillDecode}),
 				}
 
 				prefill, decode, interleaved := partitionEndpoints(endpoints)
 				assert.Len(t, prefill, 2, "prefill should contain RolePrefill and RoleEncodePrefill")
 				assert.Len(t, decode, 1, "decode should contain RoleDecode")
-				assert.Len(t, interleaved, 3, "interleaved should contain RolePrefillDecode, RoleBoth, RoleEncodePrefillDecode")
+				assert.Len(t, interleaved, 2, "interleaved should contain RolePrefillDecode and RoleEncodePrefillDecode")
 			})
 
 			t.Run("should default unlabeled endpoints to decode", func(t *testing.T) {

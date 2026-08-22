@@ -235,7 +235,6 @@ By default, llm-d uses the label key `llm-d.ai/role` with values:
 - `"encode-decode"` → pods capable of both encode and decode (E/PD, rare)
 - `"prefill-decode"` → pods capable of both prefill and decode
 - `"encode-prefill-decode"` → pods capable of all three stages
-- `"both"` → **deprecated** (use `"prefill-decode"` instead)
 
 However, external systems may use alternative labels like:
 ```yaml
