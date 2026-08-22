@@ -28,7 +28,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
-	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 )
 
 // tokenInputProducer turns a request body into a TokenizedRequest. Backends vary
@@ -103,15 +102,11 @@ func warmupChat(imageURLs ...string) *fwkrh.InferenceRequestBody {
 // renderBackend produces real token IDs and owns protocol dispatch, including
 // the pre-tokenized (Generate) passthrough.
 type renderBackend struct {
-	tk                         tokenizer
-	mergeAnthropicInlineSystem bool
+	tk tokenizer
 }
 
-// typedChatRenderer accepts the already-converted render request. The vLLM
-// backend implements this to avoid converting large Anthropic requests through
-// JSON into a generic map only to marshal that map again for HTTP.
-type typedChatRenderer interface {
-	RenderChatRequest(ctx context.Context, request *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
+type anthropicRenderer interface {
+	RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
@@ -136,8 +131,8 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			mmFeatures *tokenization.MultiModalFeatures
 			err        error
 		)
-		if renderer, ok := b.tk.(typedChatRenderer); ok {
-			tokenIDs, mmFeatures, err = renderer.RenderChatRequest(ctx, messagesToRenderChatRequest(body.Messages, b.mergeAnthropicInlineSystem))
+		if renderer, ok := b.tk.(anthropicRenderer); ok {
+			tokenIDs, mmFeatures, err = renderer.RenderAnthropic(ctx, body.Messages)
 		} else {
 			tokenIDs, mmFeatures, err = b.tk.RenderChat(ctx, messagesPayload(body))
 		}

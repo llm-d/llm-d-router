@@ -79,17 +79,21 @@ func TestProduceTimeout(t *testing.T) {
 }
 
 func TestNewPlugin_MergeAnthropicInlineSystem(t *testing.T) {
+	mergeInlineSystem := true
 	p, err := NewPlugin(context.Background(), "tok", &tokenizerPluginConfig{
 		ModelName: "m",
 		VLLM: &vllmConfig{
-			MergeAnthropicInlineSystem: true,
+			MergeAnthropicInlineSystem: &mergeInlineSystem,
 		},
 	})
 	require.NoError(t, err)
 
 	backend, ok := p.backend.(renderBackend)
 	require.True(t, ok)
-	assert.True(t, backend.mergeAnthropicInlineSystem)
+	renderer, ok := backend.tk.(*vllmHTTPRenderer)
+	require.True(t, ok)
+	require.NotNil(t, renderer.mergeAnthropicInlineSystem)
+	assert.True(t, *renderer.mergeAnthropicInlineSystem)
 }
 
 func TestPluginFactory_Validation(t *testing.T) {
