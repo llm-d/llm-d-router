@@ -268,6 +268,15 @@ var (
 		append([]string{"status", "target_model_name"}, llmdEndpointLabels...),
 	)
 
+	llmdRoutingScorerCategory = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "routing_scorer_category_total",
+			Help:      metricsutil.HelpMsgWithStability("Scheduling decisions by the scorer category that contributed the largest weighted score to the selected endpoint.", compbasemetrics.ALPHA),
+		},
+		[]string{"category", "target_model_name"},
+	)
+
 	llmdPluginProcessingLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,

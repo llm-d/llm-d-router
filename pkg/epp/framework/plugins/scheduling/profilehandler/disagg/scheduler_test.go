@@ -264,7 +264,7 @@ func TestPDSchedule(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
-				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates", "RoutingScorerCategory")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 			if test.wantRes2 != nil { // Checking the prefix match in the decode pod.
@@ -279,7 +279,7 @@ func TestPDSchedule(t *testing.T) {
 				}
 
 				if diff := cmp.Diff(test.wantRes2, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
-					cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+					cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates", "RoutingScorerCategory")); diff != "" {
 					t.Errorf("Unexpected output in subsequent schedule call (-want +got): %v", diff)
 				}
 			}
@@ -357,7 +357,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 	assert.NoError(t, err)
 
 	if diff := cmp.Diff(prefillDecodeResult, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
-		cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+		cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates", "RoutingScorerCategory")); diff != "" {
 		t.Errorf("Unexpected output (-want +got): %v", diff)
 	}
 }

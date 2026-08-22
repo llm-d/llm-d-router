@@ -108,7 +108,7 @@ type Plugin struct {
 	inFlightLoadDataKey          fwkplugin.DataKey
 }
 
-func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&config); err != nil {
@@ -117,6 +117,11 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 	}
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	if handle != nil {
+		if err := registerMetrics(handle.Metrics()); err != nil {
+			return nil, err
+		}
 	}
 	return &Plugin{
 		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
@@ -166,6 +171,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	logger := log.FromContext(ctx)
 
 	if len(endpoints) <= 1 || p.config.AffinityThreshold <= 0 {
+		recordDecision(p.typedName.Name, outcomeNotApplicable)
 		return endpoints
 	}
 
@@ -173,6 +179,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	if rand.Float64() < p.config.ExplorationProbability {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: exploration skip, keeping all",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
+		recordDecision(p.typedName.Name, outcomeExploration)
 		return endpoints
 	}
 
@@ -190,6 +197,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	if len(sticky) == 0 {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: no sticky endpoints",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
+		recordDecision(p.typedName.Name, outcomeNoMatch)
 		return endpoints
 	}
 
@@ -201,12 +209,14 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
 				"penalty", bestStickyTTFT-bestNonStickyTTFT, "maxPenalty", p.config.MaxTTFTPenaltyMs)
+			recordDecision(p.typedName.Name, outcomeLoadOverride)
 			return endpoints
 		}
 	}
 
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
+	recordDecision(p.typedName.Name, outcomeSticky)
 	return sticky
 }
 

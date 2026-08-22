@@ -170,6 +170,11 @@ type ProfileRunResult struct {
 	// a subset of these, so the two are not parallel. Ordering is unspecified;
 	// consumers key by endpoint.
 	ScoredCandidates []ScoredEndpoint
+	// RoutingScorerCategory is the scorer category whose weighted contribution to
+	// the selected endpoint (the first of TargetEndpoints) was the largest, as a
+	// metric label value. It is a sentinel when no scorer expressed a preference
+	// or several categories tied, and empty when the profile selected no endpoint.
+	RoutingScorerCategory string
 }
 
 // SchedulingResult captures the result of the scheduling cycle.

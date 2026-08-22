@@ -144,6 +144,15 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		err = errors.Join(errs...)
 	}
 
+	if err == nil && result != nil {
+		// Attribute the request to the scorer category of the primary profile's
+		// selected endpoint. A profile handler that rebuilds the primary result
+		// leaves the category empty, in which case the decision is not attributed.
+		if primary := result.ProfileResults[result.PrimaryProfileName]; primary != nil && primary.RoutingScorerCategory != "" {
+			metrics.RecordRoutingScorerCategory(request.TargetModel, primary.RoutingScorerCategory)
+		}
+	}
+
 	return result, err
 }
 
