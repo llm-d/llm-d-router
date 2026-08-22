@@ -25,6 +25,11 @@ const (
 	//
 	// Deprecated: Use DisaggProfileHandlerType instead, disagg-profile-handler now implements PreRequest natively.
 	DisaggHeadersHandlerType = "disagg-headers-handler"
+
+	// PrefillHeaderHandlerType is a deprecated alias for DisaggHeadersHandlerType.
+	//
+	// Deprecated: Use DisaggProfileHandlerType instead, disagg-profile-handler now implements PreRequest natively.
+	PrefillHeaderHandlerType = "prefill-header-handler"
 )
 
 // compile-time type assertion

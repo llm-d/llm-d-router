@@ -1,6 +1,6 @@
 # Disaggregated Profile Handler, PreRequest, and Decider Plugins
 
-Plugins for disaggregated inference scheduling: a profile handler that selects the active stages: EPD (no disaggregation), P/D (Prefill/Decode), E/P/D (Encode/Prefill/Decode), or E/PD (Encode/Prefill-Decode), a legacy headers handler (deprecated) kept for backward compatibility, and decider plugins that control whether each disaggregation stage runs per request.
+Plugins for disaggregated inference scheduling: a profile handler that selects the active stages: EPD (no disaggregation), P/D (Prefill/Decode), E/P/D (Encode/Prefill/Decode), or E/PD (Encode/Prefill-Decode), legacy headers handlers (deprecated) kept for backward compatibility, and decider plugins that control whether each disaggregation stage runs per request.
 
 ## Contents
 
@@ -8,6 +8,7 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
   - [DisaggProfileHandler](#disaggprofilehandler)
 - [PreRequest Plugins](#prerequest-plugins)
   - [DisaggHeadersHandler (Deprecated)](#disaggheadershandler-deprecated)
+  - [PrefillHeaderHandler (Deprecated)](#prefillheaderhandler-deprecated)
 - [Decider Plugins](#decider-plugins)
   - [PrefixBasedPDDecider](#prefixbasedpddecider)
   - [AlwaysDisaggPDDecider](#alwaysdisaggpddecider)
@@ -141,6 +142,15 @@ plugins:
       prefillProfile: "my-prefill"
       encodeProfile: "my-encode"
 ```
+
+### PrefillHeaderHandler (Deprecated)
+
+**Type:** `prefill-header-handler`
+**Interfaces**: `requestcontrol.PreRequest`
+
+> **Deprecated:** Use `disagg-profile-handler` instead.
+>
+> Planned removal: `v0.11`.
 
 ---
 

@@ -616,6 +616,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, fwkplugin.StabilityBeta, weightedrandom.WeightedRandomPickerFactory)
 	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityBeta, single.SingleProfileHandlerFactory)
 	fwkplugin.RegisterDeprecated(disagg.DisaggHeadersHandlerType, fwkplugin.StabilityBeta, disagg.HeadersHandlerFactory, "v0.9.0", "v0.11.0", disagg.DisaggProfileHandlerType) //nolint:staticcheck // deprecated in v0.9.0 (#905)
+	fwkplugin.RegisterDeprecated(disagg.PrefillHeaderHandlerType, fwkplugin.StabilityBeta, disagg.HeadersHandlerFactory, "v0.9.0", "v0.11.0", disagg.DisaggProfileHandlerType) //nolint:staticcheck // deprecated in v0.9.0 (#905)
 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
