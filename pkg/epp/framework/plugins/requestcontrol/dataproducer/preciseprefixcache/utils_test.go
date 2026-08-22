@@ -185,3 +185,17 @@ func TestMatchedBlockCountByTier(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchedConfirmedBlockCount(t *testing.T) {
+	const pod = "10.0.0.1:8000"
+	keys := []kvblock.BlockHash{1, 2, 3, 4}
+	entries := map[kvblock.BlockHash][]kvblock.PodEntry{
+		1: {{PodIdentifier: pod, Speculative: true}, {PodIdentifier: pod, DeviceTier: "gpu"}},
+		2: {{PodIdentifier: pod, DeviceTier: "cpu"}},
+		3: {{PodIdentifier: pod, Speculative: true}},
+		4: {{PodIdentifier: pod, DeviceTier: "gpu"}},
+	}
+
+	assert.Equal(t, 2, matchedConfirmedBlockCount(keys, entries, pod),
+		"confirmed matching stops at the first speculative-only block")
+}

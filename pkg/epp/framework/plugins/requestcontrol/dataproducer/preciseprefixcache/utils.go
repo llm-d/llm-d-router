@@ -56,6 +56,28 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	return count
 }
 
+// matchedConfirmedBlockCount returns the contiguous prefix held by
+// engine-confirmed rows. A speculative-only block ends the chain.
+func matchedConfirmedBlockCount(
+	keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string,
+) int {
+	matched := 0
+	for _, key := range keys {
+		confirmed := false
+		for _, entry := range keyToPods[key] {
+			if entry.PodIdentifier == podID && !entry.Speculative {
+				confirmed = true
+				break
+			}
+		}
+		if !confirmed {
+			break
+		}
+		matched++
+	}
+	return matched
+}
+
 // matchedBlockCountByTier returns, per device tier, the number of contiguous
 // cached prefix blocks podID holds in that tier, counting from the first
 // block until the first block the pod does not hold in that tier. A block

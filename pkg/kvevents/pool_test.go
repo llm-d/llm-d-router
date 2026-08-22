@@ -1028,6 +1028,22 @@ func TestAllBlocksCleared_Dispatch(t *testing.T) {
 	}
 }
 
+func TestPool_ReportsRepairIntegritySignals(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	var got []StreamEvent
+	pool.SetStreamObserver(func(endpoint string, event StreamEvent) {
+		assert.Equal(t, "10.0.0.9:8000", endpoint)
+		got = append(got, event)
+	})
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{2}, Tokens: makeTokens(16), ParentHash: 1},
+	}}, "10.0.0.9:8000", "test-model")
+
+	assert.Equal(t, []StreamEvent{StreamEventMissingParent}, got)
+}
+
 // TestPool_AllBlocksClearedResetsDedup verifies the filter is reset on
 // AllBlocksCleared, so a post-clear store/remove cycle behaves freshly rather
 // than carrying a stale reference that would suppress the remove. This is the

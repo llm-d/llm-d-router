@@ -166,6 +166,8 @@ type Pool struct {
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
 	queueDepth atomic.Int64
+	observerMu sync.RWMutex
+	observer   StreamObserver
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -199,6 +201,26 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	metrics.Register()
 
 	return p
+}
+
+// SetStreamObserver installs the observer for endpoint stream state. It is
+// normally called before Start.
+func (p *Pool) SetStreamObserver(observer StreamObserver) {
+	p.observerMu.Lock()
+	defer p.observerMu.Unlock()
+	p.observer = observer
+}
+
+func (p *Pool) notifyStreamEvent(sourceEndpoint string, event StreamEvent) {
+	if sourceEndpoint == "" || event == "" {
+		return
+	}
+	p.observerMu.RLock()
+	observer := p.observer
+	p.observerMu.RUnlock()
+	if observer != nil {
+		observer(sourceEndpoint, event)
+	}
 }
 
 // addQueueDepth adjusts the tracked queue depth by delta and publishes the new
@@ -506,6 +528,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"numTokens", len(ev.Tokens),
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)
+					// The child is dropped, so the endpoint needs a repair report.
+					p.notifyStreamEvent(podIdentifier, StreamEventMissingParent)
 					continue
 				}
 				parentRequestKey = key

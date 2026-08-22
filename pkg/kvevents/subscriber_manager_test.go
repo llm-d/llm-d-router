@@ -40,14 +40,20 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
 	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	var streamEvents []kvevents.StreamEvent
+	pool.SetStreamObserver(func(endpoint string, event kvevents.StreamEvent) {
+		assert.Equal(t, "10.0.0.1:8000", endpoint)
+		streamEvents = append(streamEvents, event)
+	})
 
 	sm := kvevents.NewSubscriberManager(pool)
 
 	podID := "default/test-pod-0"
+	sourceEndpoint := "10.0.0.1:8000"
 	endpoint := "tcp://127.0.0.1:5557"
 	topicFilter := "kv@"
 
-	err = sm.EnsureSubscriber(ctx, podID, "", endpoint, "", topicFilter, true)
+	err = sm.EnsureSubscriber(ctx, podID, sourceEndpoint, endpoint, "", topicFilter, true)
 	assert.NoError(t, err)
 
 	identifiers, endpoints := sm.GetActiveSubscribers()
@@ -56,7 +62,7 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	assert.Contains(t, endpoints, endpoint)
 
 	// Ensure with same endpoint should be no-op
-	err = sm.EnsureSubscriber(ctx, podID, "", endpoint, "", topicFilter, true)
+	err = sm.EnsureSubscriber(ctx, podID, sourceEndpoint, endpoint, "", topicFilter, true)
 	assert.NoError(t, err)
 	identifiers, _ = sm.GetActiveSubscribers()
 	assert.Len(t, identifiers, 1)
@@ -64,6 +70,10 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	sm.Shutdown(ctx)
 	identifiers, _ = sm.GetActiveSubscribers()
 	assert.Len(t, identifiers, 0)
+	assert.Equal(t, []kvevents.StreamEvent{
+		kvevents.StreamEventAttached,
+		kvevents.StreamEventDetached,
+	}, streamEvents)
 }
 
 func TestSubscriberManager_RemoveSubscriber(t *testing.T) {
