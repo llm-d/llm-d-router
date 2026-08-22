@@ -121,6 +121,8 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
+		migrateDiscoveryConfig(logger, rawConfig)
+
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
 		logger.Info("A configuration wasn't specified. A default one is being used.")
@@ -141,6 +143,25 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	}
 
 	return rawConfig, featureConfig, nil
+}
+
+// migrateDiscoveryConfig lifts the deprecated bare pluginRef into the
+// consolidated discovery section:
+//
+//	dataLayer.discovery.pluginRef -> dataLayer.discovery.endpoints.pluginRef
+func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPickerConfig) {
+	if rawConfig.DataLayer == nil {
+		return
+	}
+	dl := rawConfig.DataLayer
+
+	//nolint:staticcheck // SA1019: dl.Discovery.PluginRef is deprecated: use discovery.endpoints instead.
+	if dl.Discovery != nil && dl.Discovery.PluginRef != "" {
+		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead.")
+		if dl.Discovery.Endpoints == nil {
+			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
+		}
+	}
 }
 
 // InstantiateAndConfigure performs the heavy lifting of plugin instantiation, system architecture injection, and

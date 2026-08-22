@@ -66,7 +66,7 @@ func (n *peerNotifier) Delete(id types.NamespacedName) {
 
 // PeerDiscovery discovers peer EPP replicas and drives their lifecycle through
 // a PeerNotifier. Implementations are registered in the plugin registry and
-// selected via EndpointPickerConfig.dataLayer.peerDiscovery.pluginRef.
+// selected via EndpointPickerConfig.dataLayer.discovery.peers.pluginRef.
 type PeerDiscovery interface {
 	fwkplugin.Plugin
 

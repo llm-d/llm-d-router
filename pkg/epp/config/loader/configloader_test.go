@@ -264,6 +264,39 @@ func TestLoadRawConfiguration(t *testing.T) {
 			deprecated: false,
 		},
 		{
+			name:       "Success - Deprecated discovery.pluginRef",
+			configText: successDeprecatedDiscoveryPluginRefText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: configapi.GroupVersion.String(),
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+					{Name: "my-disc", Type: "file-discovery"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{},
+				DataLayer: &configapi.DataLayerConfig{
+					Discovery: &configapi.DiscoveryConfig{
+						PluginRef: "my-disc",
+						Endpoints: &configapi.EndpointDiscoveryConfig{
+							PluginRef: "my-disc",
+						},
+					},
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
+		},
+		{
 			name:       "Success - Deprecated Top-level SaturationDetector",
 			configText: successDeprecatedTopLevelSaturationDetectorText,
 			want: &configapi.EndpointPickerConfig{
