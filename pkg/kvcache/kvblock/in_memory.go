@@ -120,7 +120,7 @@ func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	highestHitIdx := 0
 
 	for idx, requestKey := range requestKeys {
-		if pods, found := m.data.Get(requestKey); found { //nolint:nestif // TODO: can this be optimized?
+		if pods, found := m.data.Peek(requestKey); found { //nolint:nestif // TODO: can this be optimized?
 			if pods == nil || pods.cache.Len() == 0 {
 				traceLogger.Info("no pods found for key, cutting search", "key", requestKey)
 				return podsPerKey, nil // early stop since prefix-chain breaks here

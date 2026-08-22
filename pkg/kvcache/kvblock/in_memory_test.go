@@ -222,3 +222,26 @@ func TestAddWithNilEngineKeys(t *testing.T) {
 	_, err = index.GetRequestKey(ctx, requestKey)
 	assert.Error(t, err, "GetRequestKey should fail since no engineKey mapping was created")
 }
+
+// Lookup reads recency without refreshing it, so a looked-up key stays in its
+// original eviction position.
+func TestLookupDoesNotRefreshIndexLRU(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 2, PodCacheSize: 1})
+	require.NoError(t, err)
+
+	entry := []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{10}, entry))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{20}, entry))
+
+	pods, err := index.Lookup(ctx, []BlockHash{10}, nil)
+	require.NoError(t, err)
+	require.Contains(t, pods, BlockHash(10))
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{30}, entry))
+
+	pods, err = index.Lookup(ctx, []BlockHash{10, 20}, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, pods, BlockHash(10))
+	assert.Contains(t, pods, BlockHash(20))
+}
