@@ -21,12 +21,14 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -68,10 +70,25 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	var cacheMiss bool
-	proxy := newDecodeProxy(logger, s.gwClient.Transport(), func(resp *http.Response) error {
-		if resp.StatusCode == http.StatusPreconditionFailed {
+	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamConditionalDecode)
+	transport := &timedRoundTripper{
+		inner: s.gwClient.Transport(),
+		record: func(d time.Duration) {
+			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamConditionalDecode, d)
+		},
+	}
+	proxy, out := newDecodeProxy(logger, transport, func(resp *http.Response) error {
+		switch {
+		case resp.StatusCode == http.StatusPreconditionFailed:
 			cacheMiss = true
+			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
 			return errCacheMiss
+		case resp.StatusCode >= http.StatusBadRequest:
+			// Worker error (any 4xx/5xx except 412): the response is still
+			// streamed to the client, but the outcome is not a served hit.
+			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultError)
+		default:
+			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
 		}
 		return nil
 	})
@@ -80,6 +97,12 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
 		return nil
+	}
+	if out.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, Cause: out.TransportErr}
+	}
+	if out.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, StatusCode: out.Status}
 	}
 
 	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")

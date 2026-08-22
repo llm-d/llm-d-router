@@ -40,7 +40,11 @@ const BytesPerMB = 1024 * 1024
 const DefaultMaxRequestBodySize = 64 // 64 MB
 
 type ServerConfig struct {
-	ListenAddr         string        `mapstructure:"listen_addr"`
+	ListenAddr string `mapstructure:"listen_addr"`
+	// MetricsPort is the port for the Prometheus /metrics endpoint. A
+	// non-positive value disables the endpoint, matching pkg/sidecar/proxy
+	// semantics; the default (9090) enables it.
+	MetricsPort        int           `mapstructure:"metrics_port"`
 	ReadTimeout        time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout       time.Duration `mapstructure:"write_timeout"`
 	ShutdownTimeout    time.Duration `mapstructure:"shutdown_timeout"`
@@ -75,6 +79,7 @@ func Load(path string) (*Config, error) {
 
 	v.SetDefault("log_level", 2)
 	v.SetDefault("server.listen_addr", ":8080")
+	v.SetDefault("server.metrics_port", 9090)
 	v.SetDefault("server.read_timeout", 30*time.Second)
 	v.SetDefault("server.write_timeout", 120*time.Second)
 	v.SetDefault("server.shutdown_timeout", 25*time.Second)
