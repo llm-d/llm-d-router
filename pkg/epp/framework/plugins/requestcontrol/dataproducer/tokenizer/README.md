@@ -31,7 +31,6 @@ Backend selection:
   certificates, configure `vllm.caCertPath` to trust the CA, and optionally
   `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS. Future protocol fields
   (e.g. `grpc`) can be added alongside `url` under the same `vllm` block.
-- **`udsTokenizerConfig`**: deprecated gRPC-over-UDS sidecar (see warning below).
 
 > [!WARNING]
 > The `estimate` backend approximates token boundaries (≈4 bytes/token); its
@@ -39,12 +38,6 @@ Backend selection:
 > requires real tokens — configure a `vllm` `token-producer` explicitly for it.
 > If omitted, the auto-created `estimate` producer satisfies the dependency but
 > silently degrades precise cache correlation.
-
-> [!WARNING]
-> The `udsTokenizerConfig` backend (gRPC-over-UDS sidecar) is **deprecated**
-> and will be removed in a future release. Existing configs continue to work
-> but emit a deprecation warning at startup. Migrate to `vllm.url`. See
-> [Migration](#migration-from-udstokenizerconfig) below.
 
 ## Config
 
@@ -175,36 +168,6 @@ containers:
 ```
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
-
-## Migration from `udsTokenizerConfig`
-
-The legacy UDS backend ran a per-pod tokenizer sidecar and connected over a
-shared Unix domain socket. Replace it with the vLLM HTTP /render backend,
-which calls the same model-serving pods (or a co-located `vllm launch render`
-sidecar) and removes the dedicated tokenizer image.
-
-Before:
-
-```yaml
-- type: token-producer
-  parameters:
-    modelName: "${MODEL_NAME}"
-    udsTokenizerConfig:
-      socketFile: /tmp/tokenizer/tokenizer-uds.socket
-```
-
-After:
-
-```yaml
-- type: token-producer
-  parameters:
-    modelName: "${MODEL_NAME}"
-    vllm:
-      url: "http://localhost:8000"   # or a shared render Service
-```
-
-See the [Deployment](#deployment) section above for sidecar vs shared-Service
-options.
 
 ---
 

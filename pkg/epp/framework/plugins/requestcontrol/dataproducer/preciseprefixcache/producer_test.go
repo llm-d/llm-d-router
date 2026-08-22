@@ -656,14 +656,15 @@ func TestProduce_NoOpPaths(t *testing.T) {
 	require.NoError(t, p.Produce(ctx, &scheduling.InferenceRequest{RequestID: "x", Body: &fwkrh.InferenceRequestBody{}}, testEndpoints))
 }
 
-// Tokens-only: reject legacy tokenizersPoolConfig at factory time.
+// The indexer has no tokenization pool, so a config still carrying one is
+// rejected by strict decoding rather than silently ignored.
 func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
 	raw := json.RawMessage(`{"indexerConfig":{"tokenizersPoolConfig":{"modelName":"x"}}}`)
 
 	_, err := PluginFactory("test", plugin.StrictDecoder(raw), handle)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "tokenizersPoolConfig is not supported")
+	require.Contains(t, err.Error(), `unknown field "tokenizersPoolConfig"`)
 }
 
 // Key built from string literals so an upstream rename trips the test.
