@@ -22,14 +22,49 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
+
+type capturedLogCall struct {
+	level int
+	msg   string
+	kv    []any
+}
+
+type captureLogSink struct {
+	infos  []capturedLogCall
+	errors []capturedLogCall
+}
+
+func (s *captureLogSink) Init(_ logr.RuntimeInfo) {}
+func (s *captureLogSink) Enabled(_ int) bool      { return true }
+func (s *captureLogSink) Info(level int, msg string, kv ...any) {
+	s.infos = append(s.infos, capturedLogCall{level: level, msg: msg, kv: kv})
+}
+func (s *captureLogSink) Error(_ error, msg string, kv ...any) {
+	s.errors = append(s.errors, capturedLogCall{msg: msg, kv: kv})
+}
+func (s *captureLogSink) WithValues(_ ...any) logr.LogSink { return s }
+func (s *captureLogSink) WithName(_ string) logr.LogSink   { return s }
+
+func logValue(call capturedLogCall, key string) any {
+	for i := 0; i+1 < len(call.kv); i += 2 {
+		if call.kv[i] == key {
+			return call.kv[i+1]
+		}
+	}
+	return nil
+}
 
 func TestPrefixPluginScore(t *testing.T) {
 	producerName := "approx-prefix-cache-producer"
@@ -48,6 +83,65 @@ func TestPrefixPluginScore(t *testing.T) {
 
 	assert.Equal(t, 0.5, scores[endpoint1])
 	assert.Equal(t, 0.2, scores[endpoint2])
+}
+
+func TestPrefixPluginScoreAggregatesMissingMatchInfo(t *testing.T) {
+	producerName := "precise-prefix-cache-producer"
+	p, err := New(context.Background(), PrefixCacheScorerPluginType, producerName)
+	require.NoError(t, err)
+
+	endpoints := make([]fwksched.Endpoint, 3)
+	for i := range endpoints {
+		endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID: k8stypes.NamespacedName{Name: "pod" + string(rune('1'+i))},
+		}, fwkdl.NewMetrics(), nil)
+	}
+
+	sink := &captureLogSink{}
+	ctx := log.IntoContext(t.Context(), logr.New(sink))
+	scores := p.Score(ctx, nil, endpoints)
+
+	require.Len(t, scores, len(endpoints))
+	for _, endpoint := range endpoints {
+		assert.Zero(t, scores[endpoint])
+	}
+	require.Len(t, sink.infos, 1)
+	assert.Empty(t, sink.errors)
+	assert.Equal(t, logging.DEFAULT, sink.infos[0].level)
+	assert.Equal(t, "PrefixCacheMatchInfo not found for endpoints, assigning score 0", sink.infos[0].msg)
+	assert.Equal(t, len(endpoints), logValue(sink.infos[0], "count"))
+}
+
+// Endpoints missing match info are counted on their own: the aggregate record
+// reports only those, while endpoints carrying match info still score normally.
+func TestPrefixPluginScoreMixedMissingMatchInfo(t *testing.T) {
+	producerName := "precise-prefix-cache-producer"
+	p, err := New(context.Background(), PrefixCacheScorerPluginType, producerName)
+	require.NoError(t, err)
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
+
+	endpoints := make([]fwksched.Endpoint, 3)
+	for i := range endpoints {
+		endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID: k8stypes.NamespacedName{Name: "pod" + string(rune('1'+i))},
+		}, fwkdl.NewMetrics(), nil)
+	}
+	// match 5 of 10 blocks, block size 1 -> matchRatio 0.5
+	endpoints[0].Put(key, attrprefix.NewPrefixCacheMatchInfo(5, 10, 1))
+
+	sink := &captureLogSink{}
+	ctx := log.IntoContext(t.Context(), logr.New(sink))
+	scores := p.Score(ctx, nil, endpoints)
+
+	require.Len(t, scores, len(endpoints))
+	assert.InDelta(t, 0.5, scores[endpoints[0]], 0.0001, "endpoint with match info scores normally")
+	assert.Zero(t, scores[endpoints[1]])
+	assert.Zero(t, scores[endpoints[2]])
+
+	require.Len(t, sink.infos, 1, "one aggregate record per scoring call")
+	assert.Empty(t, sink.errors)
+	assert.Equal(t, logging.DEFAULT, sink.infos[0].level)
+	assert.Equal(t, 2, logValue(sink.infos[0], "count"), "count covers only endpoints missing match info")
 }
 
 func TestPrefixPluginScoreWithWeights(t *testing.T) {

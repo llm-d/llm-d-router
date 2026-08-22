@@ -438,6 +438,27 @@ requestHandler:
   - pluginRef: secondParser
 `
 
+// successExplicitPassthroughConfigText configures a fallback explicitly under a
+// custom name, alongside a claimed-path parser.
+const successExplicitPassthroughConfigText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+- name: myFallback
+  type: passthrough-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: myFallback
+`
+
 // successDataLayerAutoDefaultText has the datalayer enabled without data config.
 // The loader should auto-populate default datalayer plugins.
 // successDataLayerAutoDefaultText has NO featureGates — datalayer is enabled by default.

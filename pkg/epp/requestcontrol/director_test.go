@@ -414,11 +414,13 @@ func TestDirector_HandleRequest(t *testing.T) {
 		initialTargetModelName  string // Initial target model in the reqCtx.
 		parser                  fwkrh.Parser
 		wantErrCode             string                   // Expected errcommon code string
+		wantDroppedReason       string                   // If non-empty, expected x-llm-d-request-dropped-reason header on the error
 		wantReqCtx              *handlers.RequestContext // Fields to check in the returned RequestContext
 		targetModelName         string                   // Expected model name after target model resolution
 		admitRequestDenialError error                    // Expected denial error from admission plugin
 		dataProducerPlugin      *mockDataProducerPlugin
 		screener                *mockScreener
+		emptyEndpoints          bool // If true, the director locates no endpoint candidates.
 		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
@@ -995,7 +997,21 @@ func TestDirector_HandleRequest(t *testing.T) {
 			screener: &mockScreener{name: "eliminate-all", screen: func([]fwksched.Endpoint) []fwksched.Endpoint {
 				return nil
 			}},
-			wantErrCode: errcommon.ServiceUnavailable,
+			wantErrCode:       errcommon.ServiceUnavailable,
+			wantDroppedReason: string(errcommon.RequestDroppedReasonNoEndpoints),
+		},
+		{
+			name: "no endpoint candidates located",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			initialTargetModelName:  model,
+			inferenceObjectiveName:  objectiveName,
+			emptyEndpoints:          true,
+			wantErrCode:             errcommon.ServiceUnavailable,
+			wantDroppedReason:       string(errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
 			name: "scheduler returns error",
@@ -1008,6 +1024,30 @@ func TestDirector_HandleRequest(t *testing.T) {
 				m.scheduleErr = errors.New("simulated scheduler failure")
 			},
 			wantErrCode:            errcommon.ResourceExhausted,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			// The typed error inside a joined scheduler error, including its
+			// drop-reason header, must reach the caller instead of the
+			// untyped-error fallback.
+			name: "scheduler returns joined error with typed capacity rejection",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "prompt that causes scheduling drain",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleErr = errors.Join(
+					errors.New("failed to run scheduler profile 'default'"),
+					fmt.Errorf("profile %q: %w", "default", errcommon.Error{
+						Code:    errcommon.ResourceExhausted,
+						Msg:     "no endpoints available for the given request",
+						Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+					}),
+				)
+			},
+			wantErrCode:            errcommon.ResourceExhausted,
+			wantDroppedReason:      string(errcommon.RequestDroppedReasonSaturated),
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -1071,6 +1111,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 				config := NewConfig()
 				if test.dataProducerPlugin != nil {
+					datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{test.dataProducerPlugin})
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
 				if test.screener != nil {
@@ -1090,6 +1131,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
+				if test.emptyEndpoints {
+					director.endpointCandidates = &mockEndpointCandidates{}
+				}
 				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
@@ -1140,6 +1184,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					var e errcommon.Error
 					if assert.ErrorAs(t, err, &e, "Error should be of type errcommon.Error") {
 						assert.Equal(t, test.wantErrCode, e.Code, "Error code mismatch")
+						if test.wantDroppedReason != "" {
+							assert.Equal(t, test.wantDroppedReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey], "drop-reason header mismatch")
+						}
 					}
 					return
 				}
