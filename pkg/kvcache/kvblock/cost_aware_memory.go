@@ -42,11 +42,14 @@ type CostAwareMemoryIndexConfig struct {
 	// Size is the maximum memory size that can be used by the index.
 	// Supports human-readable formats like "2GiB", "500MiB", "1GB", etc.
 	Size string `json:"size,omitempty"`
+	// NumCounters is the number of Ristretto counters used for admission and eviction.
+	NumCounters int64 `json:"numCounters,omitempty"`
 }
 
 func DefaultCostAwareMemoryIndexConfig() *CostAwareMemoryIndexConfig {
 	return &CostAwareMemoryIndexConfig{
-		Size: "2GiB", // 2GiB default size
+		Size:        "2GiB", // 2GiB default size
+		NumCounters: defaultNumCounters,
 	}
 }
 
@@ -60,6 +63,11 @@ func NewCostAwareMemoryIndex(cfg *CostAwareMemoryIndexConfig) (*CostAwareMemoryI
 	sizeBytes, err := humanize.ParseBytes(cfg.Size)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize cost aware index: %w", err)
+	}
+
+	numCounters := cfg.NumCounters
+	if numCounters == 0 {
+		numCounters = defaultNumCounters
 	}
 
 	requestKeys, err := lru.New[BlockHash, []BlockHash](defaultNumCounters)
@@ -79,7 +87,7 @@ func NewCostAwareMemoryIndex(cfg *CostAwareMemoryIndexConfig) (*CostAwareMemoryI
 	// because Add holds mu while blocking in data.Wait(), which is what drains the
 	// buffer that triggers these callbacks; taking mu here would deadlock.
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *CostPodCache]{
-		NumCounters: defaultNumCounters, // number of keys to track.
+		NumCounters: numCounters,        // number of keys to track.
 		MaxCost:     int64(sizeBytes),   // #nosec G115 , maximum cost of cache
 		BufferItems: defaultBufferItems, // number of keys per Get buffer.
 		OnEvict:     index.onCostCacheRemoval,
@@ -154,6 +162,16 @@ func (m *CostAwareMemoryIndex) snapshotKeyIndex() []string {
 
 func (m *CostAwareMemoryIndex) MaxCost() int64 {
 	return m.data.MaxCost()
+}
+
+// Close releases the index's cache resources. It is safe to call multiple times.
+func (m *CostAwareMemoryIndex) Close() error {
+	m.data.Close()
+	m.requestKeys.Purge()
+	m.keyIndexMu.Lock()
+	clear(m.keyIndex)
+	m.keyIndexMu.Unlock()
+	return nil
 }
 
 // CostPodCache wraps a sync.Map of PodEntry and provides cost calculation for memory usage estimation.
