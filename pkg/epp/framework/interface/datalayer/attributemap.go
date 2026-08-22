@@ -47,7 +47,10 @@ func (d *DynamicAttribute) Clone() Cloneable {
 // Keys are DataKey values rather than strings so that a plugin can only reach
 // an attribute through a key it holds -- the same value it names in Produces()
 // or Consumes(). This removes the raw-string escape hatch by which a plugin
-// could read or write an attribute unrelated to its declaration.
+// could read or write an attribute unrelated to its declaration. Put is the
+// canonical write entry point and is what Slot[T].Put calls; the slot is the
+// recommended path because it additionally pins the value type at compile
+// time.
 type AttributeMap interface {
 	Put(fwkplugin.DataKey, Cloneable)
 	Get(fwkplugin.DataKey) (Cloneable, bool)

@@ -615,3 +615,67 @@ func TestCreateMissingDataProducers_AlphaStabilityBlocked(t *testing.T) {
 	err = fwkplugin.ValidatePluginStability(handle, true)
 	assert.NoError(t, err)
 }
+
+// TestValidateAndOrder_RegistryChecks exercises the registry layer added in
+// the typed-attribute-slots change: ValidateAndOrderDataDependencies now
+// builds a *Registry from producer declarations and rejects consumers that
+// reference unknown DataKeys or declare a value type that does not match
+// the producer's declaration. These are the "existence" and "type"
+// halves of the value-safety check, complementing PR 2190's key-safety
+// check (which constrains WHO may claim a key).
+func TestValidateAndOrder_RegistryChecks(t *testing.T) {
+	dkProduced := fwkplugin.NewDataKey("produced", "mock")
+	dkStranger := fwkplugin.NewDataKey("stranger", "mock")
+	dkMismatch := fwkplugin.NewDataKey("mismatch", "mock")
+
+	producer := &mockDataProducerP{
+		name: "producer",
+		produces: map[fwkplugin.DataKey]any{
+			dkProduced: &mockProducedDataType{},
+			dkMismatch: &mockProducedDataType{},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		consumer fwkplugin.Plugin
+		wantErr  string
+	}{
+		{
+			name: "consumer references produced key with matching type",
+			consumer: &mockDataProducerP{
+				name:     "good-consumer",
+				consumes: map[fwkplugin.DataKey]any{dkProduced: &mockProducedDataType{}},
+			},
+		},
+		{
+			name: "consumer references a key no producer owns",
+			consumer: &mockDataProducerP{
+				name:     "missing-consumer",
+				consumes: map[fwkplugin.DataKey]any{dkStranger: &mockProducedDataType{}},
+			},
+			wantErr: "not produced by any registered plugin",
+		},
+		{
+			name: "consumer declares the wrong value type for a produced key",
+			consumer: &mockDataProducerP{
+				name:     "wrong-type-consumer",
+				consumes: map[fwkplugin.DataKey]any{dkMismatch: string("")},
+			},
+			wantErr: "type",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plugins := []fwkplugin.Plugin{producer, tc.consumer}
+			_, err := ValidateAndOrderDataDependencies(plugins)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
