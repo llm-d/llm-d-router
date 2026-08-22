@@ -29,6 +29,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
@@ -767,5 +768,137 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 				t.Errorf("getEngineTypeFromEndpoint() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTieredOffloadingExtraction(t *testing.T) {
+	ctx := context.Background()
+
+	tieringSpecs := []AttributeMetric{
+		{AttributeKey: "tiering_block_hits", Spec: mustSpec(t, "vllm:kv_offload_tiering_block_hits_total{tier=\"1:fs\"}")},
+		{AttributeKey: "tiering_block_queries", Spec: mustSpec(t, "vllm:kv_offload_tiering_block_queries_total{tier=\"1:fs\"}")},
+		{AttributeKey: "tiering_allocation_failures", Spec: mustSpec(t, "vllm:kv_offload_tiering_promotion_allocation_failures_total")},
+	}
+
+	registry := NewMappingRegistry()
+	mapping, err := NewMappingFromConfig(MappingConfig{
+		Queue:            defaultTotalQueuedRequestsMetric,
+		Running:          defaultTotalRunningRequestsMetric,
+		TieredOffloading: tieringSpecs,
+	})
+	if err != nil {
+		t.Fatalf("failed to create mapping: %v", err)
+	}
+	if err := registry.Register(DefaultEngineType, mapping); err != nil {
+		t.Fatalf("failed to register mapping: %v", err)
+	}
+
+	extractor, err := NewCoreMetricsExtractor(registry, "")
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+
+	tierLabel := []*dto.LabelPair{{Name: proto.String("tier"), Value: proto.String("1:fs")}}
+
+	t.Run("all tiering metrics present", func(t *testing.T) {
+		ep := fwkdl.NewEndpoint(nil, nil)
+		data := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:  gaugeFamily(5),
+			defaultTotalRunningRequestsMetric: gaugeFamily(1),
+			"vllm:kv_offload_tiering_block_hits_total": &dto.MetricFamily{
+				Type:   dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{{Label: tierLabel, Counter: &dto.Counter{Value: ptr.To(100.0)}}},
+			},
+			"vllm:kv_offload_tiering_block_queries_total": &dto.MetricFamily{
+				Type:   dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{{Label: tierLabel, Counter: &dto.Counter{Value: ptr.To(200.0)}}},
+			},
+			"vllm:kv_offload_tiering_promotion_allocation_failures_total": &dto.MetricFamily{
+				Type:   dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{{Counter: &dto.Counter{Value: ptr.To(0.0)}}},
+			},
+		}
+
+		err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+
+		assertScalarMetric(t, ep, "tiering_block_hits", 100.0)
+		assertScalarMetric(t, ep, "tiering_block_queries", 200.0)
+		assertScalarMetric(t, ep, "tiering_allocation_failures", 0.0)
+	})
+
+	t.Run("no tiering metrics, non-tiering deployment", func(t *testing.T) {
+		ep := fwkdl.NewEndpoint(nil, nil)
+		data := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:  gaugeFamily(5),
+			defaultTotalRunningRequestsMetric: gaugeFamily(1),
+		}
+
+		err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+		if err != nil {
+			t.Errorf("unexpected error on non-tiering deployment: %v", err)
+		}
+
+		assertNoScalarMetric(t, ep, "tiering_block_hits")
+		assertNoScalarMetric(t, ep, "tiering_block_queries")
+		assertNoScalarMetric(t, ep, "tiering_allocation_failures")
+	})
+
+	t.Run("partial tiering metrics, error on missing", func(t *testing.T) {
+		ep := fwkdl.NewEndpoint(nil, nil)
+		data := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:  gaugeFamily(5),
+			defaultTotalRunningRequestsMetric: gaugeFamily(1),
+			"vllm:kv_offload_tiering_block_hits_total": &dto.MetricFamily{
+				Type:   dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{{Label: tierLabel, Counter: &dto.Counter{Value: ptr.To(50.0)}}},
+			},
+		}
+
+		err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+		if err == nil {
+			t.Error("expected error for partial tiering metrics, got nil")
+		}
+
+		assertScalarMetric(t, ep, "tiering_block_hits", 50.0)
+		assertNoScalarMetric(t, ep, "tiering_block_queries")
+		assertNoScalarMetric(t, ep, "tiering_allocation_failures")
+	})
+}
+
+func mustSpec(t *testing.T, s string) *Spec {
+	t.Helper()
+	spec, err := parseStringToSpec(s)
+	if err != nil {
+		t.Fatalf("failed to parse spec %q: %v", s, err)
+	}
+	return spec
+}
+
+func gaugeFamily(value float64) *dto.MetricFamily {
+	return &dto.MetricFamily{
+		Type:   dto.MetricType_GAUGE.Enum(),
+		Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(value)}}},
+	}
+}
+
+func assertScalarMetric(t *testing.T, ep fwkdl.Endpoint, key string, want float64) {
+	t.Helper()
+	val, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey(key))
+	if !ok {
+		t.Errorf("expected attribute %q to be set", key)
+		return
+	}
+	if float64(val) != want {
+		t.Errorf("attribute %q = %v, want %v", key, val, want)
+	}
+}
+
+func assertNoScalarMetric(t *testing.T, ep fwkdl.Endpoint, key string) {
+	t.Helper()
+	if _, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey(key)); ok {
+		t.Errorf("expected attribute %q to not be set", key)
 	}
 }

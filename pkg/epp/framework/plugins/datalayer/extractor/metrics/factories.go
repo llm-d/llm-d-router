@@ -61,16 +61,24 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels). Used by engines like Triton TRT-LLM.
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// TieredOffloadingSpecs lists metric specifications for kv_offload_tiering_*
+		// metrics exposed when TieringOffloadingSpec is the kv_connector.
+		TieredOffloadingSpecs []attributeMetricConfigParams `json:"tieredOffloadingSpecs,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
 	}
 
-	customMetricConfigParams struct {
+	// attributeMetricConfigParams holds a metric spec paired with the
+	// endpoint attribute key where its extracted value is stored.
+	attributeMetricConfigParams struct {
 		// AttributeKey is the endpoint attribute key where the scalar value is stored.
 		AttributeKey string `json:"attributeKey"`
 		// MetricSpec defines the source metric specification string.
 		MetricSpec string `json:"metricSpec"`
 	}
+
+	// customMetricConfigParams is an alias for attributeMetricConfigParams.
+	customMetricConfigParams = attributeMetricConfigParams
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
 	modelServerExtractorParams struct {
@@ -95,6 +103,18 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		// Defaults target tier "1:fs" (single filesystem tier).
+		// Multi-tier deployments override via engineConfigs JSON with
+		// per-tier attribute keys (e.g. "tiering_block_hits_fs",
+		// "tiering_block_hits_p2p").
+		TieredOffloadingSpecs: []attributeMetricConfigParams{
+			{AttributeKey: "tiering_block_hits", MetricSpec: "vllm:kv_offload_tiering_block_hits_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_block_queries", MetricSpec: "vllm:kv_offload_tiering_block_queries_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_read_bytes", MetricSpec: "vllm:kv_offload_tiering_read_bytes_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_read_time", MetricSpec: "vllm:kv_offload_tiering_read_time_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_promotion_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_job_failures_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_allocation_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_allocation_failures_total"},
+		},
 	},
 	{
 		Name:                    "sglang",
@@ -207,7 +227,11 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			return nil, fmt.Errorf("engine config name cannot be %q (reserved)", DefaultEngineType)
 		}
 
-		customMetrics, customMetricErrs := customMetricConfigs(engineConfig.CustomMetrics)
+		tieredOffloading, tieredErrs := parseAttributeMetricConfigs(engineConfig.TieredOffloadingSpecs)
+		if len(tieredErrs) != 0 {
+			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(tieredErrs...))
+		}
+		customMetrics, customMetricErrs := parseAttributeMetricConfigs(engineConfig.CustomMetrics)
 		if len(customMetricErrs) != 0 {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(customMetricErrs...))
 		}
@@ -222,6 +246,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
 			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
 			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
+			TieredOffloading:    tieredOffloading,
 			CustomMetrics:       customMetrics,
 		})
 		if err != nil {
@@ -257,21 +282,21 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 	return extractor, nil
 }
 
-func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
-	custom := make([]CustomMetric, 0, len(configs))
+func parseAttributeMetricConfigs(configs []attributeMetricConfigParams) ([]AttributeMetric, []error) {
+	metrics := make([]AttributeMetric, 0, len(configs))
 	var errs []error
 	for _, cfg := range configs {
 		spec, err := parseStringToSpec(cfg.MetricSpec)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", cfg.AttributeKey, err))
+			errs = append(errs, fmt.Errorf("attribute metric %q: %w", cfg.AttributeKey, err))
 			continue
 		}
-		custom = append(custom, CustomMetric{
+		metrics = append(metrics, AttributeMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         spec,
 		})
 	}
-	return custom, errs
+	return metrics, errs
 }
 
 func defaultExtractorParams() *modelServerExtractorParams {
