@@ -46,7 +46,11 @@ import (
 // body as a single "stream" event.
 func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *RequestContext, responseBytes []byte, endOfStream bool) *RequestContext {
 	logger := log.FromContext(ctx)
-	logger.V(logutil.DEBUG).Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
+	// The Enabled() guard is intentional: passing arguments to a disabled logger
+	// still boxes them into a heap-allocated slice, and this runs per chunk.
+	if debug := logger.V(logutil.DEBUG); debug.Enabled() {
+		debug.Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
+	}
 
 	fairnessID, priority := extractFairnessAndPriority(reqCtx)
 

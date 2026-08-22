@@ -529,14 +529,22 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// served the request, and Envoy only reports that at the response phase.
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
+			// The traceEnabled guard is intentional: passing arguments to a disabled
+			// logger still boxes them into a heap-allocated slice, and this loop runs
+			// per header. string(header.RawValue) in the status comparison does not
+			// allocate; the content-type check runs at most once per response.
+			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
-				value := string(header.RawValue)
-				loggerTrace.Info("header", "key", header.Key, "value", value)
-				if header.Key == "status" && value != "200" {
+				if traceEnabled {
+					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
+				}
+				if header.Key == "status" && string(header.RawValue) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
-				} else if header.Key == "content-type" && strings.Contains(value, "text/event-stream") {
+				} else if header.Key == "content-type" && strings.Contains(string(header.RawValue), "text/event-stream") {
 					reqCtx.modelServerStreaming = true
-					loggerTrace.Info("model server is streaming response")
+					if traceEnabled {
+						loggerTrace.Info("model server is streaming response")
+					}
 				}
 			}
 			reqCtx.requestState = responseReceived

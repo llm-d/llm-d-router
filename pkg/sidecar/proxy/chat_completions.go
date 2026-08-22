@@ -26,7 +26,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -101,7 +101,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(prefillHostPort) == 0 {
-			s.logger.V(4).Info("skip disaggregated prefill", "api", apiType.String())
+			s.logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())
 			span.SetAttributes(
 				attribute.Bool("llm_d.pd_proxy.disaggregation_used", false),
 				attribute.String("llm_d.pd_proxy.reason", "no_prefill_header"),
@@ -129,7 +129,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				http.Error(w, "Forbidden: prefill target not allowed by SSRF protection", http.StatusForbidden)
 				return
 			}
-			s.logger.V(4).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
+			s.logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
 		}
 
 		kvCacheSource := strings.TrimSpace(r.Header.Get(routing.KVCacheSourceHeader))
@@ -166,7 +166,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				encoderHost = strings.TrimSpace(encoderHost)
 				if s.allowlistValidator.IsAllowed(encoderHost) {
 					allowedEncoders = append(allowedEncoders, encoderHost)
-					s.logger.V(4).Info("SSRF protection: encoder target allowed", "target", encoderHost)
+					s.logger.V(logging.DEBUG).Info("SSRF protection: encoder target allowed", "target", encoderHost)
 				} else {
 					s.logger.Info("SSRF protection: encoder target not in allowlist, removing from list",
 						"target", encoderHost,
@@ -178,7 +178,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
-			s.logger.V(4).Info("encoder headers detected, using EC connector",
+			s.logger.V(logging.DEBUG).Info("encoder headers detected, using EC connector",
 				"encoderCount", len(allowedEncoders),
 				"encoderCandidates", len(encoderHostPorts),
 				"hasPrefiller", len(prefillHostPort) > 0)
@@ -201,12 +201,12 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		}
 
 		if len(prefillHostPort) > 0 {
-			s.logger.V(4).Info("using P/D protocol")
+			s.logger.V(logging.DEBUG).Info("using P/D protocol")
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
 
-		s.logger.V(4).Info("no prefiller or encoder, using decoder only")
+		s.logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)

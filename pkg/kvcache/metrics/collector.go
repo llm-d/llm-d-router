@@ -116,12 +116,14 @@ var (
 	// LookupRequests counts how many Lookup() calls have been made.
 	LookupRequests = newDualCounter("index", "lookup_requests_total",
 		"kv_cache_index_lookup_requests_total", "Total number of lookup calls")
-	// MaxPodHitCount counts the maximum cache hits on a single pod on Lookup().
+	// MaxPodHitCount counts, per lookup, the longest contiguous prefix chain
+	// any single pod holds counting from the first requested block.
 	MaxPodHitCount = newDualCounter("index", "max_pod_hit_count_total",
-		"kv_cache_index_max_pod_hit_count_total", "Maximum cache hits on a single pod on Lookup()")
-	// LookupHits counts how many keys were found in the cache on Lookup().
+		"kv_cache_index_max_pod_hit_count_total", "Longest contiguous per-pod prefix chain observed per lookup")
+	// LookupHits accumulates the same per-lookup contiguous chain length as
+	// MaxPodHitCount.
 	LookupHits = newDualCounter("index", "lookup_hits_total",
-		"kv_cache_index_lookup_hits_total", "Number of keys found in the cache on Lookup()")
+		"kv_cache_index_lookup_hits_total", "Contiguous prefix blocks matched by the best pod per lookup")
 	// LookupLatency logs latency of lookup calls.
 	LookupLatency = newDualHistogram("index", "lookup_latency_seconds",
 		"kv_cache_index_lookup_latency_seconds", "Latency of Lookup calls in seconds", prometheus.DefBuckets)

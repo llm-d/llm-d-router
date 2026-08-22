@@ -249,15 +249,18 @@ Exposed when the `flowControl` feature gate is enabled.
 #### `flow_control_pool_saturation`
 
 *   **Type:** Gauge
-*   **Labels:** `inference_pool`
-*   **Description:** Pool saturation signal gating dispatch. 1.0 is the gating set point; values
-    above 1.0 indicate the magnitude of oversubscription past it (deliberately not clamped). An
-    empty pool reads as 1.0, and with the default utilization detector, endpoints with missing or
-    stale metrics score as fully saturated (fail-closed).
-*   **Usage:** When saturation reaches the usage limit threshold, the dispatch cycle skips
-    dispatching and requests remain queued. A reading pinned at exactly 1.0 can be fail-closed
-    stale-metrics or an empty pool rather than genuine overload (which typically reads above 1.0);
-    check `flow_control_stale_endpoints` to disambiguate.
+*   **Labels:** `inference_pool`, `stage`
+*   **Description:** Pool saturation signal gating dispatch. The `stage` label partitions by
+    pipeline role: `prefill` and `decode` are per-stage signals, `effective` is
+    `max(prefill, decode)` and is the value used for gating. In monolithic deployments (no role
+    labels) all endpoints land in the decode stage. 1.0 is the gating set point; values above 1.0
+    indicate the magnitude of oversubscription past it (deliberately not clamped). An empty pool
+    reads as 1.0, and with the default utilization detector, endpoints with missing or stale
+    metrics score as fully saturated (fail-closed).
+*   **Usage:** When the effective saturation reaches the usage limit threshold, the dispatch cycle
+    skips dispatching and requests remain queued. A reading pinned at exactly 1.0 can be
+    fail-closed stale-metrics or an empty pool rather than genuine overload (which typically reads
+    above 1.0); check `flow_control_stale_endpoints` to disambiguate.
 
 #### `flow_control_stale_endpoints`
 
@@ -266,7 +269,10 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Description:** Number of candidate endpoints whose metrics are missing or older than the
     staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
     saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
-    `inference_extension_*` twin).
+    `inference_extension_*` twin). This gauge carries no `stage` label and is written on every
+    detector call, so it reflects the most recently evaluated stage. A reading of 0 does not rule
+    out stale metrics in another stage; per-stage stale accounting is tracked in
+    [#2475](https://github.com/llm-d/llm-d-router/issues/2475).
 *   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
     problem (scrape path, port, TLS, auth) rather than genuine overload.
 
@@ -418,8 +424,8 @@ Prefix `llm_d_epp_`. Registered only when the embedded llm-d-kv-cache metrics ar
 | `kv_cache_index_admissions_total` | Counter | Blocks admitted to the index. |
 | `kv_cache_index_evictions_total` | Counter | Blocks evicted from the index. |
 | `kv_cache_index_lookup_requests_total` | Counter | Index lookups performed. |
-| `kv_cache_index_lookup_hits_total` | Counter | Lookups that matched at least one block. |
-| `kv_cache_index_max_pod_hit_count_total` | Counter | Best per-pod hit count observed per lookup. |
+| `kv_cache_index_lookup_hits_total` | Counter | Contiguous prefix blocks matched by the best pod per lookup. |
+| `kv_cache_index_max_pod_hit_count_total` | Counter | Longest contiguous per-pod prefix chain observed per lookup. |
 | `kv_cache_index_lookup_latency_seconds` | Histogram | Index lookup latency. |
 | `kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | Deduplicated removal hashes suppressed. |
 | `kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | Deduplicated removal hashes forwarded. |

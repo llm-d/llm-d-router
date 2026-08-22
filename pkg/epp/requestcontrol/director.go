@@ -304,8 +304,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
 	if len(endpointCandidates) == 0 {
 		return reqCtx, errcommon.Error{
-			Code: errcommon.ServiceUnavailable,
-			Msg:  "failed to find endpoint candidates for serving the request",
+			Code:    errcommon.ServiceUnavailable,
+			Msg:     "failed to find endpoint candidates for serving the request",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
 
@@ -313,8 +314,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if len(snapshotOfCandidatePods) == 0 {
 		return reqCtx, errcommon.Error{
-			Code: errcommon.ServiceUnavailable,
-			Msg:  "screeners eliminated all endpoint candidates",
+			Code:    errcommon.ServiceUnavailable,
+			Msg:     "screeners eliminated all endpoint candidates",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.
@@ -678,18 +680,26 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.InferenceRequest,
 	schedulingResult *fwksched.SchedulingResult) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	debugEnabled := loggerDebug.Enabled()
 	var errs []error
 	for _, plugin := range d.requestControlPlugins.preRequestPlugins {
-		loggerDebug.Info("Running PreRequest plugin", "plugin", plugin.TypedName())
+		name := plugin.TypedName()
+		if debugEnabled {
+			loggerDebug.Info("Running PreRequest plugin", "plugin", name)
+		}
 		before := time.Now()
 		err := plugin.PreRequest(ctx, request, schedulingResult)
-		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, name.Type, name.Name, time.Since(before))
 		if err != nil {
-			loggerDebug.Info("PreRequest plugin failed", "plugin", plugin.TypedName(), "error", err.Error())
-			errs = append(errs, fmt.Errorf("PreRequest %q failed: %w", plugin.TypedName().String(), err))
+			if debugEnabled {
+				loggerDebug.Info("PreRequest plugin failed", "plugin", name, "error", err.Error())
+			}
+			errs = append(errs, fmt.Errorf("PreRequest %q failed: %w", name.String(), err))
 			continue
 		}
-		loggerDebug.Info("Completed running PreRequest plugin successfully", "plugin", plugin.TypedName())
+		if debugEnabled {
+			loggerDebug.Info("Completed running PreRequest plugin successfully", "plugin", name)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -699,14 +709,20 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 		return nil
 	}
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.requestHeaderPlugins {
-		loggerDebug.Info("Running RequestHeaderProcessor plugin", "plugin", plugin.TypedName())
+		name := plugin.TypedName()
+		if debugEnabled {
+			loggerDebug.Info("Running RequestHeaderProcessor plugin", "plugin", name)
+		}
 		before := time.Now()
 		if err := plugin.RequestHeader(ctx, request); err != nil {
 			return err
 		}
-		metrics.RecordPluginProcessingLatency(fwkrc.RequestHeaderExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
-		loggerDebug.Info("Completed running RequestHeaderProcessor plugin successfully", "plugin", plugin.TypedName())
+		metrics.RecordPluginProcessingLatency(fwkrc.RequestHeaderExtensionPoint, name.Type, name.Name, time.Since(before))
+		if debugEnabled {
+			loggerDebug.Info("Completed running RequestHeaderProcessor plugin successfully", "plugin", name)
+		}
 	}
 	return nil
 }
@@ -730,13 +746,17 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 func (d *Director) runScreeners(ctx context.Context,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	debugEnabled := loggerDebug.Enabled()
 	filteredEndpoints := endpoints
 	for _, plugin := range d.requestControlPlugins.screeners {
-		loggerDebug.Info("Running Screener plugin", "plugin", plugin.TypedName())
+		name := plugin.TypedName()
+		if debugEnabled {
+			loggerDebug.Info("Running Screener plugin", "plugin", name)
+		}
 		before := time.Now()
 		pluginEndpoints := plugin.Screen(ctx, request, slices.Clone(endpoints))
 		metrics.RecordPluginProcessingLatency(fwkrc.ScreenerExtensionPoint,
-			plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+			name.Type, name.Name, time.Since(before))
 		allowed := make(map[fwksched.Endpoint]struct{}, len(pluginEndpoints))
 		for _, endpoint := range pluginEndpoints {
 			allowed[endpoint] = struct{}{}
@@ -748,8 +768,10 @@ func (d *Director) runScreeners(ctx context.Context,
 			}
 		}
 		filteredEndpoints = intersection
-		loggerDebug.Info("Completed running Screener plugin successfully",
-			"plugin", plugin.TypedName(), "remainingEndpoints", len(filteredEndpoints))
+		if debugEnabled {
+			loggerDebug.Info("Completed running Screener plugin successfully",
+				"plugin", name, "remainingEndpoints", len(filteredEndpoints))
+		}
 	}
 	return filteredEndpoints
 }
@@ -757,37 +779,51 @@ func (d *Director) runScreeners(ctx context.Context,
 func (d *Director) runAdmissionPlugins(ctx context.Context,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
-		loggerDebug.Info("Running Admit plugin", "plugin", plugin.TypedName())
+		name := plugin.TypedName()
+		if debugEnabled {
+			loggerDebug.Info("Running Admit plugin", "plugin", name)
+		}
 		before := time.Now()
 		denyReason := plugin.Admit(ctx, request, endpoints)
-		metrics.RecordPluginProcessingLatency(fwkrc.AdmissionExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(fwkrc.AdmissionExtensionPoint, name.Type, name.Name, time.Since(before))
 		if denyReason != nil {
-			loggerDebug.Info("Admit plugin denied the request", "plugin", plugin.TypedName(), "reason", denyReason.Error())
+			if debugEnabled {
+				loggerDebug.Info("Admit plugin denied the request", "plugin", name, "reason", denyReason.Error())
+			}
 			return denyReason
 		}
-		loggerDebug.Info("Completed running Admit plugin successfully", "plugin", plugin.TypedName())
+		if debugEnabled {
+			loggerDebug.Info("Completed running Admit plugin successfully", "plugin", name)
+		}
 	}
 	return nil
 }
 
 func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.responseReceivedPlugins {
-		loggerDebug.Info("Running ResponseReceived plugin", "plugin", plugin.TypedName())
+		name := plugin.TypedName()
+		if debugEnabled {
+			loggerDebug.Info("Running ResponseReceived plugin", "plugin", name)
+		}
 		before := time.Now()
 		plugin.ResponseHeader(ctx, request, response, targetEndpoint)
-		metrics.RecordPluginProcessingLatency(fwkrc.ResponseReceivedExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
-		loggerDebug.Info("Completed running ResponseReceived plugin successfully", "plugin", plugin.TypedName())
+		metrics.RecordPluginProcessingLatency(fwkrc.ResponseReceivedExtensionPoint, name.Type, name.Name, time.Since(before))
+		if debugEnabled {
+			loggerDebug.Info("Completed running ResponseReceived plugin successfully", "plugin", name)
+		}
 	}
 }
 
 func (d *Director) runResponseBodyPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 	for _, plugin := range d.requestControlPlugins.responseStreamingPlugins {
-		// This loop runs per response chunk, so unlike the other plugin runners it
-		// caches TypedName and guards the log calls: passing arguments to a
-		// disabled logger still boxes them into a heap-allocated slice.
+		// This loop runs per response chunk, so it caches TypedName and guards
+		// the log calls: passing arguments to a disabled logger still boxes them
+		// into a heap-allocated slice.
 		name := plugin.TypedName()
 		if loggerTrace.Enabled() {
 			loggerTrace.Info("Running ResponseStreaming plugin", "plugin", name)
