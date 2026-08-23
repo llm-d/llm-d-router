@@ -122,23 +122,23 @@ func main() {
 	}
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
-	if err := run(srv, cfg.Server); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, srv, cfg.Server); err != nil {
 		log.Error(err, "server error")
 		os.Exit(1)
 	}
 }
 
 // run starts the inference server and, when cfg.MetricsPort > 0, the
-// Prometheus /metrics server alongside it. It blocks until a signal is
-// received or either server exits. On any exit condition both servers are
-// drained before run returns: the inference server bounded by
-// cfg.ShutdownTimeout, the metrics server by metricsShutdownTimeout. A
-// non-positive MetricsPort disables the metrics endpoint entirely, matching
-// pkg/sidecar/proxy semantics.
-func run(srv *server.Server, cfg config.ServerConfig) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
+// Prometheus /metrics server alongside it. It blocks until ctx is cancelled
+// or either server exits. On any exit condition both servers are drained
+// before run returns: the inference server bounded by cfg.ShutdownTimeout,
+// the metrics server by metricsShutdownTimeout. A non-positive MetricsPort
+// disables the metrics endpoint entirely, matching pkg/sidecar/proxy
+// semantics.
+func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
