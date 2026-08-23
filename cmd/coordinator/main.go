@@ -136,8 +136,7 @@ func main() {
 // or either server exits. On any exit condition both servers are drained
 // before run returns: the inference server bounded by cfg.ShutdownTimeout,
 // the metrics server by metricsShutdownTimeout. A non-positive MetricsPort
-// disables the metrics endpoint entirely, matching pkg/sidecar/proxy
-// semantics.
+// disables the metrics endpoint entirely.
 func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error {
 	g, gctx := errgroup.WithContext(ctx)
 
