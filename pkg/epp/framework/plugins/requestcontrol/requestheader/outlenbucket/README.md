@@ -98,11 +98,18 @@ When the attribute is absent, it reads as its zero value, `UNKNOWN`, so an
 explicitly-published UNKNOWN and a missing attribute produce the same estimate.
 
 **Ordering is a phase guarantee, not a list-order requirement.** The producer
-reads the bucket in its `Produce` / `PreRequest` hooks, which the framework runs
-after all `RequestHeader` hooks (where this plugin publishes) -- regardless of the
-order plugins appear in the config. That guarantee is not expressed as a declared
-`Produce`/`Consume` dependency, so the only way the read fails is if this plugin is
-not enabled at all, in which case every request falls back to `UNKNOWN`.
+reads the bucket in its `Produce` / `PreRequest` hooks, which always run after
+this plugin's `RequestHeader` hook -- regardless of config order. The guarantee is
+the fixed call sequence in `Director.HandleRequest`
+(`pkg/epp/requestcontrol/director.go`): `runRequestHeaderProcessors` before
+`runDataProducerPlugins` and `runPreRequestPlugins`. It is *not* a declared
+`Produce`/`Consume` dependency (`RequestHeaderProcessor` has none, and the
+attribute API is untyped/string-keyed with no ordering check); `agentidentity`
+relies on the same contract. If the plugin is not enabled -- or a future refactor
+runs a reader before `runRequestHeaderProcessors` -- the read silently falls back
+to `UNKNOWN` with no error, so anyone changing that call order must keep
+`RequestHeader` first. (The producer logs a one-time warning on the not-enabled
+case; see `warnMissingOutlenBucket`.)
 
 ## Limitations
 

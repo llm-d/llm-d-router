@@ -501,14 +501,13 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 
 // warnMissingOutlenBucket logs a single warning when AddEstimatedOutputTokens is
 // enabled but no outlen-bucket attribute is present on the request, so every request
-// is estimated as UNKNOWN. This surfaces the missing/misordered outlen-bucket plugin
-// without emitting a log line per request.
+// is estimated as UNKNOWN. This surfaces a missing outlen-bucket plugin without
+// emitting a log line per request.
 func (p *InFlightLoadProducer) warnMissingOutlenBucket(ctx context.Context) {
 	p.outlenBucketMissingWarn.Do(func() {
 		log.FromContext(ctx).V(logutil.DEFAULT).Info(
 			"addEstimatedOutputTokens is enabled but no outlen-bucket attribute is present; " +
-				"every request is estimated as UNKNOWN. Enable the outlen-bucket plugin and order it " +
-				"before this producer so its RequestHeader hook runs before PreRequest.")
+				"every request is estimated as UNKNOWN. Add outlen-bucket to the plugins list in the EndpointPickerConfig to fix this.")
 	})
 }
 

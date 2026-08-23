@@ -91,6 +91,8 @@ func TestSimpleTokenEstimator_EstimateInput(t *testing.T) {
 	}
 }
 
+// TestEstimateOutputFromRequest_Buckets verifies bucket-to-estimate mapping and client-cap clamping,
+// including that max_output_tokens=0 is treated as "not set" (no cap), not a clamp to 0.
 func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	e := NewSimpleTokenEstimator(nil)
 
@@ -106,6 +108,11 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	t.Run("LONG capped by max_output_tokens", func(t *testing.T) {
 		req := requestWithBucket(outlenbucket.Long, ptr.To(int64(2000)))
 		require.Equal(t, int64(2000), e.EstimateOutputFromRequest(req))
+	})
+
+	t.Run("LONG, max_output_tokens=0 -> no cap (0 means unset in API requests)", func(t *testing.T) {
+		req := requestWithBucket(outlenbucket.Long, ptr.To(int64(0)))
+		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("SHORT bucket -> 100", func(t *testing.T) {
@@ -130,9 +137,9 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 
 	// A missing attribute reads as the zero value (UNKNOWN): the estimate is the
 	// flat UNKNOWN value and does NOT scale with input length -- input tokens carry
-	// no output-length signal, which is the whole premise of the osl-bucket plugin.
+	// no output-length signal, which is the whole premise of the outlen-bucket plugin.
 	t.Run("missing attribute -> UNKNOWN 1000 (input length ignored)", func(t *testing.T) {
-		req := tokenizedRequest(100) // no osl-bucket attribute
+		req := tokenizedRequest(100) // no outlen-bucket attribute
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
 

@@ -122,7 +122,7 @@ func TestEstimateOutlen(t *testing.T) {
 		},
 		{
 			name: "tools only on messages shape -> UNKNOWN (not inspected)",
-			body: &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{Tools: oneTool}},
+			body: &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{Tools: []fwkrh.AnthropicTool{{Name: "f"}}}},
 			want: Unknown,
 		},
 		{
@@ -141,7 +141,7 @@ func TestEstimateOutlen(t *testing.T) {
 }
 
 func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
-	p, err := PluginFactory("osl", nil, nil)
+	p, err := PluginFactory("outlen", nil, nil)
 	require.NoError(t, err)
 	plugin := p.(*Plugin)
 

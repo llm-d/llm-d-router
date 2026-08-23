@@ -38,8 +38,7 @@ const (
 	// LONG-vs-SHORT separation dominates, not to predict exact length.
 	LongOutputTokens int64 = 4096
 	// UnknownOutputTokens is the flat output-token estimate for an UNKNOWN
-	// request (no output-length signal). It sits at the midpoint of the UNKNOWN zone
-	// (500-1,999 tokens), preserving the ranking invariant
+	// request (no output-length signal), preserving the ranking invariant
 	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
 	// TODO(outlen): replace with a dynamic estimate (e.g. per-pool running average
 	// of observed CompletionTokens) in a follow-up PR.

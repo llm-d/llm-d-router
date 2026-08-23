@@ -805,12 +805,12 @@ func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 // tests rely on: input tokens plus a fixed 3:2 output allowance (1 input -> 3
 // total, 4 input -> 10 total). It is deliberately local so the saturation math
 // stays independent of the production in-flight token estimator's policy, which
-// derives output tokens from the osl-bucket attribute rather than a fixed ratio.
+// derives output tokens from the outlen-bucket attribute rather than a fixed ratio.
 func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
-	if req == nil || req.Body == nil || req.Body.TokenizedPrompt == nil {
+	if req == nil || req.Body == nil || req.Body.TokenizedRequest == nil {
 		return 0
 	}
-	input := int64(req.Body.TokenizedPrompt.TokenCount())
+	input := int64(req.Body.TokenizedRequest.TokenCount())
 	// round(input * 1.5) via integer half-up, matching the numbers these tests assert.
 	return input + (input*3+1)/2
 }
