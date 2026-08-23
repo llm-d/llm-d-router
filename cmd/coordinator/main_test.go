@@ -58,8 +58,8 @@ func waitForDial(t *testing.T, addr string, timeout time.Duration) {
 }
 
 // With MetricsPort <= 0 no metrics goroutine joins the errgroup, so the only
-// exit path is context cancellation. run must return nil once the inference
-// server drains.
+// exit path is context cancellation. run must return nil once the
+// coordinator server drains.
 func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 	port, err := fwknet.GetFreePort()
 	require.NoError(t, err)
@@ -92,9 +92,9 @@ func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 }
 
 // A bind failure in the metrics goroutine must fault the errgroup and drain
-// the inference server; run's returned error surfaces the metrics-server
-// failure, and the inference socket must no longer accept connections.
-func TestRun_MetricsPortCollision_DrainsInferenceServer(t *testing.T) {
+// the coordinator server; run's returned error surfaces the metrics-server
+// failure, and the coordinator socket must no longer accept connections.
+func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	blocker, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = blocker.Close() })
@@ -130,6 +130,6 @@ func TestRun_MetricsPortCollision_DrainsInferenceServer(t *testing.T) {
 	conn, dialErr := net.DialTimeout("tcp", listenAddr, 100*time.Millisecond)
 	if dialErr == nil {
 		_ = conn.Close()
-		t.Fatalf("inference server at %s still accepts connections after run returned", listenAddr)
+		t.Fatalf("coordinator server at %s still accepts connections after run returned", listenAddr)
 	}
 }

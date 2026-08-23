@@ -131,10 +131,10 @@ func main() {
 	}
 }
 
-// run starts the inference server and, when cfg.MetricsPort > 0, the
+// run starts the coordinator server and, when cfg.MetricsPort > 0, the
 // Prometheus /metrics server alongside it. It blocks until ctx is cancelled
 // or either server exits. On any exit condition both servers are drained
-// before run returns: the inference server bounded by cfg.ShutdownTimeout,
+// before run returns: the coordinator server bounded by cfg.ShutdownTimeout,
 // the metrics server by metricsShutdownTimeout. A non-positive MetricsPort
 // disables the metrics endpoint entirely.
 func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error {
@@ -146,15 +146,15 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error
 		select {
 		case err := <-errCh:
 			// ListenAndServe returned before shutdown was requested; always a failure.
-			return fmt.Errorf("inference server: %w", err)
+			return fmt.Errorf("coordinator server: %w", err)
 		case <-gctx.Done():
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 			defer cancel()
 			if err := srv.Shutdown(shutdownCtx); err != nil {
-				return fmt.Errorf("inference server shutdown: %w", err)
+				return fmt.Errorf("coordinator server shutdown: %w", err)
 			}
 			if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return fmt.Errorf("inference server: %w", err)
+				return fmt.Errorf("coordinator server: %w", err)
 			}
 			return nil
 		}
