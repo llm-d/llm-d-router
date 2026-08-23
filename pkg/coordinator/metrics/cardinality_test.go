@@ -17,44 +17,10 @@ limitations under the License.
 package metrics
 
 import (
-	"fmt"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestBoundedLabel_AdmitsUpToCapThenOverflows(t *testing.T) {
-	b := newBoundedLabel(3)
-	require.Equal(t, "a", b.bound("a"))
-	require.Equal(t, "b", b.bound("b"))
-	require.Equal(t, "c", b.bound("c"))
-	// Fourth distinct value spills to overflow.
-	require.Equal(t, overflowValue, b.bound("d"))
-	// Already-admitted values keep their real label.
-	require.Equal(t, "a", b.bound("a"))
-}
-
-func TestBoundedLabel_ConcurrentAdmissionsUnderCap(t *testing.T) {
-	b := newBoundedLabel(1000)
-	// Each goroutine writes its result at its own index — no overlap, no
-	// synchronization needed on the slice. Assertions run on the test
-	// goroutine after wg.Wait: require.Equal is unsafe from spawned
-	// goroutines per Go's testing.T.FailNow docs.
-	got := make([]string, 500)
-	var wg sync.WaitGroup
-	for i := 0; i < 500; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			got[i] = b.bound(fmt.Sprintf("m%d", i))
-		}(i)
-	}
-	wg.Wait()
-	for i, g := range got {
-		require.Equal(t, fmt.Sprintf("m%d", i), g)
-	}
-}
 
 func TestBoundModel_EmptyIsUnknown(t *testing.T) {
 	// Empty model name resolves to ModelUnknown before touching the cap, so

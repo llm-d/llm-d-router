@@ -23,42 +23,16 @@ import (
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
-
-func TestBoundedLabel(t *testing.T) {
-	b := newBoundedLabel(2)
-
-	require.Equal(t, "a", b.bound("a"), "first value admitted")
-	require.Equal(t, "b", b.bound("b"), "second value admitted")
-	require.Equal(t, overflowValue, b.bound("c"), "value beyond cap collapses to overflow")
-	require.Equal(t, "a", b.bound("a"), "already-admitted value still returns itself after cap")
-	require.Equal(t, overflowValue, b.bound("d"), "further unseen values keep collapsing")
-	require.Equal(t, "", b.bound(""), "empty value passes through without consuming a slot")
-}
-
-// Pinned names model operator-configured models (InferenceModelRewrite sources
-// and targets): they must emit their real label even when the cap is exhausted
-// by unconfigured names, and must not consume cap slots themselves.
-func TestBoundedLabelPin(t *testing.T) {
-	b := newBoundedLabel(2)
-
-	b.pin("configured")
-	b.pin("configured") // idempotent
-	require.Equal(t, "a", b.bound("a"), "pin does not consume a cap slot")
-	require.Equal(t, "b", b.bound("b"), "cap still has room for a second unconfigured name")
-	require.Equal(t, overflowValue, b.bound("c"), "cap full for unconfigured names")
-	require.Equal(t, "configured", b.bound("configured"), "pinned name survives a full cap")
-
-	b.pin("late")
-	require.Equal(t, "late", b.bound("late"), "name pinned after the cap fills still emits its real label")
-}
 
 // PreAdmitModelLabels feeds the package-level limiter used by the record
 // functions, so a flood of junk names must not displace a configured model.
 func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(testCap)
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
 	requestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
@@ -84,7 +58,7 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(testCap)
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
 	requestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
@@ -106,7 +80,7 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 	const testCap = 5
 	old := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(testCap)
+	fairnessLabelLimiter = metricsutil.NewBoundedLabel(testCap)
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
@@ -130,7 +104,7 @@ func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 // series must not linger for the lifetime of the process.
 func TestDeleteFlowControlFlowSeries(t *testing.T) {
 	old := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(10)
+	fairnessLabelLimiter = metricsutil.NewBoundedLabel(10)
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
@@ -159,9 +133,9 @@ func TestDeleteFlowControlFlowSeries(t *testing.T) {
 func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 	const testCap = 3
 	oldFairness := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(testCap)
+	fairnessLabelLimiter = metricsutil.NewBoundedLabel(testCap)
 	oldModels := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(10)
+	modelLabelLimiter = metricsutil.NewBoundedLabel(10)
 	requestCounter.Reset()
 	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
@@ -186,9 +160,9 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 func TestQueueDurationBoundsModelLabels(t *testing.T) {
 	const testCap = 3
 	oldModels := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(testCap)
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
 	oldFairness := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(10)
+	fairnessLabelLimiter = metricsutil.NewBoundedLabel(10)
 	flowControlRequestQueueDuration.Reset()
 	llmdFlowControlRequestQueueDuration.Reset()
 	t.Cleanup(func() {
@@ -213,7 +187,7 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 // delete the shared overflow series that aggregates every capped-out tenant.
 func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
 	old := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(1)
+	fairnessLabelLimiter = metricsutil.NewBoundedLabel(1)
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
@@ -228,7 +202,7 @@ func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
 	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
 		"setup: expected the admitted series plus the overflow series")
 
-	DeleteFlowControlFlowSeries(overflowValue, "0")
+	DeleteFlowControlFlowSeries(metricsutil.OverflowValue, "0")
 
 	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
 		"deleting the overflow value must be a no-op; the shared overflow series must survive")

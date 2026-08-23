@@ -1049,7 +1049,7 @@ func RecordFlowControlRevocationConfirmationDuration(inferencePool string, durat
 func DeleteFlowControlFlowSeries(fairnessID, priority string) {
 	// The overflow value aggregates every capped-out fairness ID, so a flow whose client-chosen ID
 	// equals it must not delete the shared series.
-	if fairnessID == overflowValue {
+	if fairnessID == metricsutil.OverflowValue {
 		return
 	}
 	labels := prometheus.Labels{"fairness_id": fairnessID, "priority": priority}
