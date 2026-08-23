@@ -46,23 +46,27 @@ import (
 // body as a single "stream" event.
 func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *RequestContext, responseBytes []byte, endOfStream bool) *RequestContext {
 	logger := log.FromContext(ctx)
-	logger.V(logutil.DEBUG).Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
+	// The Enabled() guard is intentional: passing arguments to a disabled logger
+	// still boxes them into a heap-allocated slice, and this runs per chunk.
+	if debug := logger.V(logutil.DEBUG); debug.Enabled() {
+		debug.Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
+	}
 
 	fairnessID, priority := extractFairnessAndPriority(reqCtx)
 
-	reqCtx.ResponseSize += len(responseBytes)
+	reqCtx.responseSize += len(responseBytes)
 
-	if reqCtx.FirstTokenTimestamp.IsZero() && len(responseBytes) > 0 {
-		reqCtx.FirstTokenTimestamp = time.Now()
+	if reqCtx.firstTokenTimestamp.IsZero() && len(responseBytes) > 0 {
+		reqCtx.firstTokenTimestamp = time.Now()
 	}
 
 	if reqCtx.modelServerStreaming && len(responseBytes) > 0 {
 		now := time.Now()
-		if !reqCtx.LastChunkReceivedTimestamp.IsZero() {
-			itl := now.Sub(reqCtx.LastChunkReceivedTimestamp).Seconds()
+		if !reqCtx.lastChunkReceivedTimestamp.IsZero() {
+			itl := now.Sub(reqCtx.lastChunkReceivedTimestamp).Seconds()
 			metrics.RecordInterTokenLatency(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, itl)
 		}
-		reqCtx.LastChunkReceivedTimestamp = now
+		reqCtx.lastChunkReceivedTimestamp = now
 	}
 
 	var parsedResp *fwkrh.ParsedResponse
@@ -77,22 +81,52 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 			logger.Error(err, "parsing response")
 		}
 	}
+	if parsedResp != nil {
+		reqCtx.StreamedEvents += parsedResp.StreamedEvents
+	}
 	if parsedResp != nil && parsedResp.Usage != nil {
-		reqCtx.Usage = *parsedResp.Usage
-		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)
-		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.CompletionTokens)
-		if reqCtx.Usage.PromptTokenDetails != nil {
-			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokenDetails.CachedTokens)
+		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
+		// Metrics observe the values this chunk carried, not the accumulated ones: a field
+		// already reported by an earlier chunk would otherwise be observed a second time.
+		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokens)
+		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.CompletionTokens)
+		if parsedResp.Usage.PromptTokenDetails != nil {
+			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokenDetails.CachedTokens)
 		}
 	}
 	if endOfStream {
-		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
-		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.ResponseCompleteTimestamp)
-		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.ResponseSize)
-		metrics.RecordRequestTTFT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.modelServerStreaming, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp)
-		metrics.RecordRequestTPOT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.modelServerStreaming, reqCtx.RequestReceivedTimestamp, reqCtx.FirstTokenTimestamp, reqCtx.ResponseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
+		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.responseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
+		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.responseCompleteTimestamp)
+		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.responseSize)
+		metrics.RecordRequestTTFT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.modelServerStreaming, reqCtx.RequestReceivedTimestamp, reqCtx.firstTokenTimestamp)
+		metrics.RecordRequestTPOT(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.modelServerStreaming, reqCtx.RequestReceivedTimestamp, reqCtx.firstTokenTimestamp, reqCtx.responseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 	}
 	return s.director.HandleResponseBody(ctx, reqCtx, endOfStream)
+}
+
+// mergeUsage folds a parsed usage block into the usage accumulated for the request.
+// The Anthropic streaming format splits usage across events - message_start carries the
+// prompt tokens and the cached-token detail, message_delta carries the completion tokens -
+// and those events reach the parser in separate chunks, so each field is taken only from
+// the blocks that report it. Parsers that emit usage once with every field populated are
+// unaffected.
+func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
+	if src.PromptTokens != 0 {
+		dst.PromptTokens = src.PromptTokens
+	}
+	if src.CompletionTokens != 0 {
+		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.PromptTokenDetails != nil {
+		dst.PromptTokenDetails = src.PromptTokenDetails
+	}
+	// A block reporting both halves of the usage owns the total it came with; a partial
+	// block carries a total covering only its own fields, so derive it from the merge.
+	if src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
+		dst.TotalTokens = src.TotalTokens
+		return
+	}
+	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 }
 
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {

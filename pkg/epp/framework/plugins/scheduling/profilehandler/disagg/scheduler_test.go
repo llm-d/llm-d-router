@@ -12,7 +12,9 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -39,8 +41,8 @@ const (
 // the input token count.
 func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 	return &fwkrh.InferenceRequestBody{
-		Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
+		Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
 	}
 }
 
@@ -224,6 +226,7 @@ func TestPDSchedule(t *testing.T) {
 			//  initialize scheduler with config
 			prefixScorer, err := prefix.New(ctx, prefix.PrefixCacheScorerPluginType, "")
 			assert.NoError(t, err, "Prefix plugin creation returned unexpected error")
+			datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{prefixScorer})
 
 			prefillSchedulerProfile := scheduling.NewSchedulerProfile().
 				WithFilters(bylabel.NewPrefillRole()).

@@ -31,15 +31,15 @@ import (
 func tokenizedRequest(n int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{make([]uint32, n)},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}},
 			},
 		},
 	}
 }
 
-// requestWithBucket builds a request whose OSL bucket attribute is set (as the
-// osl-bucket plugin would), plus an optional client output cap.
+// requestWithBucket builds a request whose outlen-bucket attribute is set (as the
+// outlen-bucket plugin would), plus an optional client output cap.
 func requestWithBucket(bucket outlenbucket.Bucket, maxOut *int64) *fwksched.InferenceRequest {
 	req := &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{MaxOutputTokens: maxOut},
