@@ -24,6 +24,11 @@ server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
 
+  # metrics_port is the port for the Prometheus /metrics endpoint. Non-positive
+  # disables the endpoint entirely. The --metrics-port CLI flag overrides this.
+  # env: COORDINATOR_SERVER_METRICS_PORT
+  # metrics_port: 9090
+
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
   read_timeout: 30s
