@@ -65,6 +65,16 @@ pipeline:
 var coordinatorConfigNIXLGenerate = strings.Replace(
 	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false", 1)
 
+// coordinatorConfigNIXLDataParallel is coordinatorConfigNIXL with DP-rank
+// pinning enabled (pipeline.dp_size: 4). Exercises the kv-nixl connector's
+// x-data-parallel-rank header wiring through the real Envoy/gateway-client
+// path, which a unit test's synthetic httptest server cannot cover. The
+// model servers' own --data-parallel-size stays at 1 (VLLM_DATA_PARALLEL_SIZE
+// default): this only verifies the coordinator pins both legs to the same
+// rank on the wire, not the simulator's runtime DP behavior.
+var coordinatorConfigNIXLDataParallel = strings.Replace(
+	coordinatorConfigNIXL, "kv_connector: kv-nixl\n", "kv_connector: kv-nixl\n  dp_size: 4\n", 1)
+
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its
 // EPP-Profile header value (see header-profile-handler); the role filters

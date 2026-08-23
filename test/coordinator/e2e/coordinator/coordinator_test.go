@@ -30,6 +30,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -98,6 +99,14 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		)), allSteps, 2, 0, 0)
 	})
 
+	ginkgo.It("pins the prefill and decode legs to the same DP rank when dp_size>1", func() {
+		logs := runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+			`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`,
+			modelName,
+		)), textOnlySteps, 0, 0, 0, coordinatorConfigNIXLDataParallel)
+		verifyDPRankPinning(logs)
+	})
+
 })
 
 // inlineImageDataURI is a 64x64 solid-color PNG encoded as a base64 data URI.
@@ -115,8 +124,10 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 // min_tokens/max_tokens unchanged, while prefill (and encode, for multimodal
 // requests) cap max_tokens to 1 and strip min_tokens.
 // coordinatorConfig, when supplied, overrides the default coordinatorConfigNIXL
-// pipeline config for the coordinator deployment.
-func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int, coordinatorConfig ...string) {
+// pipeline config for the coordinator deployment. Returns the coordinator's
+// pod logs for the caller to run additional assertions against (e.g. DP-rank
+// header pinning), since they are already fetched here for step verification.
+func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int, coordinatorConfig ...string) string {
 	nsName := getNamespace()
 	var (
 		coordinator  []string
@@ -207,6 +218,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		}
 		verifyTokenLimits(logs, wantMinTokens, wantMaxTokens, capLegs)
 	}
+	return logs
 }
 
 // verifyCoordinatorSteps asserts that the coordinator logs show every expected
@@ -412,6 +424,57 @@ func verifyEncodeSkipped(nsName string) {
 	ginkgo.By("Verifying encode was skipped for the generate request")
 	gomega.Expect(logHasLine(logs, `"msg":"skipping encode for generate request"`)).To(gomega.BeTrue(),
 		"coordinator logs missing 'skipping encode for generate request'")
+}
+
+// verifyDPRankPinning asserts the coordinator's kv-nixl connector pinned the
+// prefill and decode legs of one request to the same x-data-parallel-rank
+// header value (see pkg/coordinator/connectors/kv/nixl.go RankHeaderer).
+// Without pinning, a DP>1 backend that shares its HTTP port across ranks
+// (e.g. via SO_REUSEPORT) could split the two legs across ranks and hang the
+// KV transfer. Both legs' headers surface in the coordinator's own "request
+// body" trace: prefill's via the gateway client, decode's via the reverse
+// proxy request builder (see verifyCoordinatorSteps for the analogous
+// kv_transfer_params checks).
+func verifyDPRankPinning(logs string) {
+	ginkgo.By("Verifying prefill and decode are pinned to the same DP rank")
+
+	prefillRank := extractQuotedField(logs, routing.DataParallelRankHeader, `"msg":"request body"`, `"epp-profile":"prefill"`)
+	decodeRank := extractQuotedField(logs, routing.DataParallelRankHeader, `"msg":"request body"`, `"epp-profile":"decode"`)
+
+	gomega.Expect(prefillRank).NotTo(gomega.BeEmpty(),
+		"coordinator logs have no prefill request body carrying the %s header", routing.DataParallelRankHeader)
+	gomega.Expect(decodeRank).NotTo(gomega.BeEmpty(),
+		"coordinator logs have no decode request body carrying the %s header", routing.DataParallelRankHeader)
+	gomega.Expect(decodeRank).To(gomega.Equal(prefillRank),
+		"decode leg pinned to DP rank %q but prefill was pinned to %q", decodeRank, prefillRank)
+}
+
+// extractQuotedField returns the value of a `"field":"value"` JSON pair from
+// the first log line matching all of matchSubstrs, or "" if no line matches
+// or the field is absent on the matching line.
+func extractQuotedField(logs, field string, matchSubstrs ...string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		matched := true
+		for _, s := range matchSubstrs {
+			if !strings.Contains(line, s) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		marker := `"` + field + `":"`
+		idx := strings.Index(line, marker)
+		if idx == -1 {
+			continue
+		}
+		rest := line[idx+len(marker):]
+		if end := strings.Index(rest, `"`); end != -1 {
+			return rest[:end]
+		}
+	}
+	return ""
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.
