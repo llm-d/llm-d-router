@@ -649,6 +649,38 @@ func TestPrefillStep_ConflictingECParams_RejectsRequest(t *testing.T) {
 	}
 }
 
+// TestPrefillStep_CapturesPeerTopologyHeader verifies that the x-peer-topology
+// response header set by the prefill EPP's topology-stamp-handler is captured
+// into reqCtx.PeerTopology for later forwarding to the decode request.
+func TestPrefillStep_CapturesPeerTopologyHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(gateway.PeerTopologyHeader, "host=node12,zone=us-east1-a")
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+
+	step, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		Model:            "test",
+		TokenIDs:         []int{1, 2345},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := reqCtx.PeerTopology, "host=node12,zone=us-east1-a"; got != want {
+		t.Fatalf("reqCtx.PeerTopology = %q, want %q", got, want)
+	}
+}
+
 func TestPrefillStep_GatewayError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

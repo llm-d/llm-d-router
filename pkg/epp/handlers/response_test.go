@@ -488,11 +488,12 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	reqCtx := &RequestContext{
 		Response: &Response{
 			Headers: map[string]string{
-				"x-backend-server":              "vllm-v0.6.3",                // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id",     // should be stripped
-				metadata.OldObjectiveKey:        "old-sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "10.2.0.5:8080",              // should be stripped
-				"content-length":                "500",                        // should be stripped
+				"x-backend-server":              "vllm-v0.6.3",                 // should passthrough
+				metadata.ObjectiveKey:           "sensitive-objective-id",      // should be stripped
+				metadata.OldObjectiveKey:        "old-sensitive-objective-id",  // should be stripped
+				metadata.DestinationEndpointKey: "10.2.0.5:8080",               // should be stripped
+				"content-length":                "500",                         // should be stripped
+				"x-peer-topology":               "host=node12,zone=us-east1-a", // stamped by topology-stamp-handler, must reach the coordinator
 			},
 		},
 	}
@@ -510,6 +511,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
+	assert.Equal(t, "host=node12,zone=us-east1-a", gotHeaders["x-peer-topology"])
 }
 
 func TestRewriteModelName(t *testing.T) {

@@ -112,6 +112,20 @@ func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 	}
 }
 
+func TestForwardedHeaders_ExcludesClientSuppliedPeerTopology(t *testing.T) {
+	rc := &RequestContext{
+		OriginalHeaders: http.Header{
+			"X-Peer-Topology": {"host=spoofed"},
+		},
+	}
+
+	out := rc.ForwardedHeaders()
+
+	if _, ok := out["x-peer-topology"]; ok {
+		t.Fatalf("x-peer-topology should not be forwarded: %v", out)
+	}
+}
+
 func TestForwardedHeaders_NilOriginalHeaders(t *testing.T) {
 	rc := &RequestContext{}
 	if out := rc.ForwardedHeaders(); len(out) != 0 {

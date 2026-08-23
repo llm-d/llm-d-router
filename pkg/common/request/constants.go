@@ -18,6 +18,11 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// PeerTopologyHeaderKey carries the prefill endpoint's encoded topology
+	// from the prefill EPP's response, through the coordinator, to the decode
+	// EPP's request, for topology-affinity-filter and topology-affinity-scorer
+	// running in coordinator deployments.
+	PeerTopologyHeaderKey = "x-peer-topology"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"

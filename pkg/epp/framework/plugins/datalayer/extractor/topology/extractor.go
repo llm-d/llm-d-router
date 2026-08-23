@@ -42,6 +42,7 @@ import (
 
 var (
 	_ fwkplugin.Plugin            = (*TopologyExtractor)(nil)
+	_ fwkplugin.ProducerPlugin    = (*TopologyExtractor)(nil)
 	_ fwkdl.Registrant            = (*TopologyExtractor)(nil)
 	_ fwkdl.EndpointExtractor     = (*endpointHandler)(nil)
 	_ fwkdl.NotificationExtractor = (*podNotificationHandler)(nil)
@@ -138,8 +139,6 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 func (e *TopologyExtractor) TypedName() fwkplugin.TypedName {
 	return e.typedName
 }
-
-var _ fwkplugin.ProducerPlugin = &TopologyExtractor{}
 
 // Produces declares the Topology attribute both of this extractor's handlers
 // publish.
