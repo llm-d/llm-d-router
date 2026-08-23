@@ -41,7 +41,7 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -1242,7 +1242,7 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(40))})
 		require.NoError(t, err)
 		// LONG bucket estimates 4096, capped to the operator cap of 40.
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(40), p.tokenEstimator.EstimateOutputFromRequest(req))
 	})
 
@@ -1251,7 +1251,7 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(5000))})
 		require.NoError(t, err)
 		// LONG bucket estimates 4096, below the operator cap of 5000.
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(4096), p.tokenEstimator.EstimateOutputFromRequest(req))
 	})
 
@@ -1262,29 +1262,29 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 	})
 }
 
-// TestInFlightLoadProducer_WarnsOnceOnMissingOSLBucket verifies that when
-// AddEstimatedOutputTokens is enabled but requests carry no osl-bucket attribute
-// (the osl-bucket plugin is not enabled), the producer logs the misconfiguration
+// TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket verifies that when
+// AddEstimatedOutputTokens is enabled but requests carry no outlen-bucket attribute
+// (the outlen-bucket plugin is not enabled), the producer logs the misconfiguration
 // warning exactly once across many requests, not per request.
-func TestInFlightLoadProducer_WarnsOnceOnMissingOSLBucket(t *testing.T) {
+func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t) // AddEstimatedOutputTokens: true
 
 	var warnings int
 	logger := funcr.New(func(_, args string) {
-		if strings.Contains(args, "no osl-bucket attribute is present") {
+		if strings.Contains(args, "no outlen-bucket attribute is present") {
 			warnings++
 		}
 	}, funcr.Options{Verbosity: logutil.DEFAULT})
 	ctx := log.IntoContext(context.Background(), logger)
 
 	res := makeSchedulingResult("warn-endpoint")
-	// makeTokenRequest sets no osl-bucket attribute, so each PreRequest hits the
+	// makeTokenRequest sets no outlen-bucket attribute, so each PreRequest hits the
 	// missing-attribute branch; the sync.Once must collapse them to one warning.
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w1", 4), res))
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w2", 4), res))
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w3", 4), res))
 
-	require.Equal(t, 1, warnings, "missing-osl-bucket warning must fire exactly once")
+	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
 }

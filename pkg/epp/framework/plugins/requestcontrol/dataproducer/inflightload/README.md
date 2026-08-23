@@ -27,13 +27,13 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the OSL bucket published by the `osl-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
+| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 
 When `addEstimatedOutputTokens` is true, the estimated output per request is a flat
-value determined by the OSL bucket published by the `osl-bucket` plugin:
+value determined by the output-length bucket published by the `outlen-bucket` plugin:
 
-| OSL Bucket | Estimated output tokens |
+| Output-Length Bucket | Estimated output tokens |
 |------------|------------------------|
 | `LONG` (reasoning chains) | 4 096 |
 | `SHORT` (tool-call JSON) | 100 |
@@ -41,7 +41,7 @@ value determined by the OSL bucket published by the `osl-bucket` plugin:
 
 The estimate is then bounded by the client-requested cap (`max_output_tokens` / `max_tokens`)
 and `maxEstimatedOutputTokens`. Ranking invariant: SHORT (100) < UNKNOWN (1 000) < LONG (4 096).
-When the `osl-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
+When the `outlen-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
 logs a one-time warning.
 
 ---

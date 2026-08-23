@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package oslbucket
+package outlenbucket
 
 import (
 	"context"
@@ -40,7 +40,7 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 	}
 }
 
-func TestEstimateOSLBucket(t *testing.T) {
+func TestEstimateOutlen(t *testing.T) {
 	oneTool := []any{map[string]any{"type": "function"}}
 
 	tests := []struct {
@@ -134,7 +134,7 @@ func TestEstimateOSLBucket(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := EstimateOSLBucket(tc.body)
+			got := EstimateOutlen(tc.body)
 			require.Equal(t, tc.want, got, "got %s want %s", got, tc.want)
 		})
 	}

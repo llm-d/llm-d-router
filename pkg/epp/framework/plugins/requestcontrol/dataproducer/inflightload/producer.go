@@ -38,7 +38,7 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
 
 const (
@@ -51,7 +51,7 @@ const (
 type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
 	// the in-flight token counter. Defaults to false. The per-request output
-	// estimate comes from the OSL bucket published by the osl-bucket plugin; enable
+	// estimate comes from the output-length bucket published by the outlen-bucket plugin; enable
 	// that plugin (ordered before this producer) so requests are classified rather
 	// than all estimated as UNKNOWN.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
@@ -140,10 +140,10 @@ type InFlightLoadProducer struct {
 	uncachedRequestTokensDk  fwkplugin.DataKey
 	syncCrossReplicaState    bool
 	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
-	// oslBucketMissingWarn gates a single warning when AddEstimatedOutputTokens is
-	// enabled but no osl-bucket attribute is present on requests (the osl-bucket
+	// outlenBucketMissingWarn gates a single warning when AddEstimatedOutputTokens is
+	// enabled but no outlen-bucket attribute is present on requests (the outlen-bucket
 	// plugin is not configured or is ordered after this producer).
-	oslBucketMissingWarn sync.Once
+	outlenBucketMissingWarn sync.Once
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -411,22 +411,22 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	priority := strconv.Itoa(request.Objectives.Priority)
 
 	if request.Body != nil {
-		if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey); ok {
+		if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
 			// -1 signals "no client cap" so the log renders a value, not a pointer.
 			maxOutputTokens := int64(-1)
 			if request.Body.MaxOutputTokens != nil {
 				maxOutputTokens = *request.Body.MaxOutputTokens
 			}
-			log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL estimate",
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen estimate",
 				"requestID", request.RequestID,
 				"bucket", bucket.String(),
 				"maxOutputTokens", maxOutputTokens,
 			)
 		} else if p.addEstimatedOutputTokens {
-			// addEstimatedOutputTokens is on but no osl-bucket attribute was
+			// addEstimatedOutputTokens is on but no outlen-bucket attribute was
 			// published: every request is estimated as UNKNOWN. Warn once so the
 			// misconfiguration is visible without spamming per request.
-			p.warnMissingOSLBucket(ctx)
+			p.warnMissingOutlenBucket(ctx)
 		}
 	}
 
@@ -491,7 +491,7 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		// Add the estimated output tokens from the OSL bucket the osl-bucket plugin
+		// Add the estimated output tokens from the output-length bucket the outlen-bucket plugin
 		// published; an absent bucket is estimated as UNKNOWN (see PreRequest, which
 		// warns once when that happens with this option enabled).
 		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
@@ -499,15 +499,15 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	return tokens
 }
 
-// warnMissingOSLBucket logs a single warning when AddEstimatedOutputTokens is
-// enabled but no osl-bucket attribute is present on the request, so every request
-// is estimated as UNKNOWN. This surfaces the missing/misordered osl-bucket plugin
+// warnMissingOutlenBucket logs a single warning when AddEstimatedOutputTokens is
+// enabled but no outlen-bucket attribute is present on the request, so every request
+// is estimated as UNKNOWN. This surfaces the missing/misordered outlen-bucket plugin
 // without emitting a log line per request.
-func (p *InFlightLoadProducer) warnMissingOSLBucket(ctx context.Context) {
-	p.oslBucketMissingWarn.Do(func() {
+func (p *InFlightLoadProducer) warnMissingOutlenBucket(ctx context.Context) {
+	p.outlenBucketMissingWarn.Do(func() {
 		log.FromContext(ctx).V(logutil.DEFAULT).Info(
-			"addEstimatedOutputTokens is enabled but no osl-bucket attribute is present; " +
-				"every request is estimated as UNKNOWN. Enable the osl-bucket plugin and order it " +
+			"addEstimatedOutputTokens is enabled but no outlen-bucket attribute is present; " +
+				"every request is estimated as UNKNOWN. Enable the outlen-bucket plugin and order it " +
 				"before this producer so its RequestHeader hook runs before PreRequest.")
 	})
 }
@@ -570,8 +570,8 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
-			if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey); ok {
-				log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
+			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
+				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",
 					"requestID", request.RequestID,
 					"estimatedBucket", bucket.String(),
 					"actualCompletionTokens", resp.Usage.CompletionTokens,

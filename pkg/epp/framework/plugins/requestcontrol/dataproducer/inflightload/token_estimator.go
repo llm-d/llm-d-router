@@ -18,7 +18,7 @@ package inflightload
 
 import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
 
 // TokenEstimator estimates token counts for an LLM request.
@@ -26,7 +26,7 @@ type TokenEstimator interface {
 	// EstimateInput returns the estimated input token count for the request.
 	EstimateInput(request *fwksched.InferenceRequest) int64
 	// EstimateOutputFromRequest returns the estimated output token count for a
-	// request from the OSL bucket published by the osl-bucket plugin, bounded by
+	// request from the output-length bucket published by the outlen-bucket plugin, bounded by
 	// the client-requested cap and the estimator's operator cap.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 }
@@ -38,10 +38,10 @@ const (
 	// LONG-vs-SHORT separation dominates, not to predict exact length.
 	LongOutputTokens int64 = 4096
 	// UnknownOutputTokens is the flat output-token estimate for an UNKNOWN
-	// request (no OSL signal). It sits at the midpoint of the UNKNOWN zone
+	// request (no output-length signal). It sits at the midpoint of the UNKNOWN zone
 	// (500-1,999 tokens), preserving the ranking invariant
 	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
-	// TODO(osl): replace with a dynamic estimate (e.g. per-pool running average
+	// TODO(outlen): replace with a dynamic estimate (e.g. per-pool running average
 	// of observed CompletionTokens) in a follow-up PR.
 	UnknownOutputTokens int64 = 1000
 	// ShortOutputTokens is the flat output-token estimate for a SHORT
@@ -50,7 +50,7 @@ const (
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
-// OSL bucket published by the osl-bucket plugin to a flat output-token estimate,
+// output-length bucket published by the outlen-bucket plugin to a flat output-token estimate,
 // bounded by the client-requested cap and an optional operator cap.
 type SimpleTokenEstimator struct {
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens
@@ -74,19 +74,19 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 }
 
 // EstimateOutputFromRequest returns the estimated output token count for a request
-// from the OSL bucket published by the osl-bucket plugin: LONG (reasoning) maps to
+// from the output-length bucket published by the outlen-bucket plugin: LONG (reasoning) maps to
 // a flat 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to 1000 --
 // preserving the ranking invariant SHORT < UNKNOWN < LONG. The estimate is bounded
 // by the client-requested cap and the estimator's operator cap.
 //
-// Ordering dependency: the bucket comes from an attribute that the osl-bucket
+// Ordering dependency: the bucket comes from an attribute that the outlen-bucket
 // plugin publishes in its RequestHeader hook, which this method reads. The read is
 // correct only because the framework always runs RequestHeader before both Produce
 // and PreRequest -- this method's only callers -- so the publish happens first.
 // This is a phase guarantee, not a declared Produce/Consume dependency. When the
-// osl-bucket plugin is not enabled, the attribute is absent and reads as its zero
+// outlen-bucket plugin is not enabled, the attribute is absent and reads as its zero
 // value, Unknown, so every request is estimated as UNKNOWN; the producer logs a
-// one-time warning in that case (see InFlightLoadProducer.warnMissingOSLBucket).
+// one-time warning in that case (see InFlightLoadProducer.warnMissingOutlenBucket).
 func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
@@ -94,13 +94,13 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 
 	// An absent attribute reads as the zero value (Unknown) and is handled by the
 	// switch default; there is no separate fallback path.
-	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey)
+	bucket, _ := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
 
 	var est int64
 	switch bucket {
-	case oslbucket.Long:
+	case outlenbucket.Long:
 		est = LongOutputTokens
-	case oslbucket.Short:
+	case outlenbucket.Short:
 		est = ShortOutputTokens
 	default:
 		est = UnknownOutputTokens
@@ -110,7 +110,7 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 
 // clampOutput bounds est by the client-requested cap and the operator cap.
 // Client cap applies only when positive (> 0): MaxOutputTokens=0 is treated as
-// "no cap", matching the osl-bucket classifier's convention. This intentionally
+// "no cap", matching the outlen-bucket classifier's convention. This intentionally
 // diverges from the prior ratio-based estimator (which used >= 0 and clamped to 0)
 // and from InferenceRequestBody.MaxOutputTokens's contract elsewhere. Operator cap
 // uses >= 0, so MaxEstimatedOutputTokens=0 still clamps to 0.

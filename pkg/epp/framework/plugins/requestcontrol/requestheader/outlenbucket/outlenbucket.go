@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package oslbucket provides a RequestHeaderProcessor plugin that predicts the
-// output-sequence-length (OSL) bin for a request from request-time signals
+// Package outlenbucket provides a RequestHeaderProcessor plugin that predicts the
+// output-length bin for a request from request-time signals
 // (enable_thinking, has_tools, thinking_budget) and publishes it as a request
 // attribute. Downstream consumers -- the in-flight token estimator today, and
 // flow-control queue ordering / KV-pressure gating in the future -- read it via
 // scheduling.ReadRequestAttribute to make output-length-aware decisions.
-package oslbucket
+package outlenbucket
 
 import (
 	"context"
@@ -34,13 +34,13 @@ import (
 )
 
 // AttributeKey is the request-attribute key under which this plugin
-// publishes the predicted OSL bin. Downstream consumers read it via
+// publishes the predicted output-length bin. Downstream consumers read it via
 // scheduling.ReadRequestAttribute[Bucket].
-var AttributeKey = plugin.NewDataKey("osl-bucket", "")
+var AttributeKey = plugin.NewDataKey("outlen-bucket", "")
 
 const (
 	// PluginType is the plugin type name used in the EPP config.
-	PluginType = "osl-bucket"
+	PluginType = "outlen-bucket"
 
 	// longBudgetThresholdTokens is the thinking_budget above which a request is
 	// classified LONG even when enable_thinking is not explicitly set.
@@ -50,7 +50,7 @@ const (
 	shortMaxOutputTokens = 500
 )
 
-// Bucket is the predicted output-sequence-length category for a request,
+// Bucket is the predicted output-length category for a request,
 // derived from request-time signals before any tokens are generated.
 type Bucket int8
 
@@ -76,9 +76,9 @@ func (b Bucket) String() string {
 	}
 }
 
-// EstimateOSLBucket predicts the output-length bin using request-time signals
+// EstimateOutlen predicts the output-length bin using request-time signals
 // (enable_thinking, thinking_budget, has_tools, max_output_tokens).
-func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) Bucket {
+func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	if body == nil {
 		return Unknown
 	}
@@ -135,7 +135,7 @@ func requestHasTools(body *fwkrh.InferenceRequestBody) bool {
 	return body.ChatCompletions != nil && len(body.ChatCompletions.Tools) > 0
 }
 
-// PluginFactory is the factory function for the OSL bucket plugin.
+// PluginFactory is the factory function for the outlen-bucket plugin.
 func PluginFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	return &Plugin{
 		typedName: plugin.TypedName{Type: PluginType, Name: name},
@@ -145,7 +145,7 @@ func PluginFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin
 // compile-time interface assertion
 var _ requestcontrol.RequestHeaderProcessor = &Plugin{}
 
-// Plugin predicts the OSL bin for a request and stores it as a request
+// Plugin predicts the output-length bin for a request and stores it as a request
 // attribute for output-length-aware scheduling.
 type Plugin struct {
 	typedName plugin.TypedName
@@ -156,13 +156,13 @@ func (p *Plugin) TypedName() plugin.TypedName {
 }
 
 // RequestHeader runs after the request body is parsed and attached, but before
-// admission control. It classifies the request into an OSL bin and publishes
-// the result as a request attribute.
+// admission control. It classifies the request into an output-length bin and
+// publishes the result as a request attribute.
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	if request == nil || request.Body == nil {
 		return nil
 	}
-	request.PutAttribute(AttributeKey, EstimateOSLBucket(request.Body))
+	request.PutAttribute(AttributeKey, EstimateOutlen(request.Body))
 	return nil
 }
 
