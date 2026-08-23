@@ -267,9 +267,9 @@ func benchmarkBulkAddThenBulkRemoveScoring(b *testing.B, q contracts.SafeQueue, 
 	}
 }
 
-// benchmarkHighContentionScoring mirrors benchmarkHighContention, bumping the policy every N consumer Peeks
-// so refreshIfStale's rebuild fires at a throttle ratio between the worst case (N=1, every Peek contends for
-// the write lock instead of only the read lock the cached fast path would take) and an amortized
+// benchmarkHighContentionScoring mirrors benchmarkHighContention exactly, bumping the policy every N consumer
+// Peeks so refreshIfStale's rebuild fires at a throttle ratio between the worst case (N=1, every Peek contends
+// for the write lock instead of only the read lock the cached fast path would take) and an amortized
 // approximation of a real throttled policy. The consumer count is tracked with an atomic counter rather than
 // a per-goroutine index: RunParallel shares this callback across goroutines, so a plain counter would race.
 func benchmarkHighContentionScoring(b *testing.B, q contracts.SafeQueue, policy *mocks.MockScoringOrderingPolicy, bumpEveryN int) {
@@ -281,11 +281,7 @@ func benchmarkHighContentionScoring(b *testing.B, q contracts.SafeQueue, policy 
 	stopCh := make(chan struct{})
 	var wgProducers sync.WaitGroup
 
-	// Cap backlog at the prefill depth: at low bumpEveryN, consumer Peeks are slow enough that an unthrottled
-	// producer outpaces them and the queue grows without bound for the run's duration, so each rebuild gets
-	// progressively more expensive and ns/op never settles. Capping keeps queue depth -- and so rebuild cost
-	// -- in a steady state, comparable across bumpEveryN values and across repeated runs.
-	const maxQueueLen = 1000
+	// Start producer goroutines to run in the background.
 	for range 4 {
 		wgProducers.Go(func() {
 			for {
@@ -293,9 +289,6 @@ func benchmarkHighContentionScoring(b *testing.B, q contracts.SafeQueue, policy 
 				case <-stopCh:
 					return
 				default:
-					if q.Len() >= maxQueueLen {
-						continue
-					}
 					item := mocks.NewMockQueueItemAccessor(1, "item", benchmarkFlowKey)
 					q.Add(item)
 				}
