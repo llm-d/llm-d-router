@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sync/atomic"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -70,6 +71,11 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
 type MaxScorePicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int // maximum number of endpoints to pick
+	// requestCounter provides deterministic round-robin tie-breaking when multiple
+	// endpoints have equal scores. Without this, concurrent requests that see identical
+	// scores (e.g., when all pods have the same prefix cached) all pick the same
+	// random winner, causing severe routing imbalance.
+	requestCounter uint64
 }
 
 // WithName sets the picker's name
@@ -88,8 +94,12 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
 		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
 
-	// Shuffle in-place - needed for random tie break when scores are equal
-	picker.ShuffleScoredEndpoints(scoredEndpoints)
+	// Use an atomic counter for deterministic round-robin tie-breaking.
+	// When concurrent requests see identical scores (common with prefix cache
+	// affinity where all pods have the same prefix cached), random shuffle
+	// causes all requests to converge on the same winner. The counter ensures
+	// each request rotates through the equal-score group, spreading load evenly.
+	counter := atomic.AddUint64(&p.requestCounter, 1)
 
 	slices.SortStableFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first
 		if i.Score > j.Score {
@@ -100,6 +110,24 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 		}
 		return 0
 	})
+
+	// Rotate the top equal-score group by the counter to distribute ties
+	if len(scoredEndpoints) > 1 {
+		topScore := scoredEndpoints[0].Score
+		equalCount := 1
+		for equalCount < len(scoredEndpoints) && scoredEndpoints[equalCount].Score == topScore {
+			equalCount++
+		}
+		if equalCount > 1 {
+			rotation := int(counter % uint64(equalCount))
+			rotated := make([]*fwksched.ScoredEndpoint, len(scoredEndpoints))
+			for i := 0; i < equalCount; i++ {
+				rotated[i] = scoredEndpoints[(i+rotation)%equalCount]
+			}
+			copy(rotated[equalCount:], scoredEndpoints[equalCount:])
+			copy(scoredEndpoints, rotated)
+		}
+	}
 
 	// if we have enough endpoints to return keep only the "maxNumOfEndpoints" highest scored endpoints
 	if p.maxNumOfEndpoints < len(scoredEndpoints) {
