@@ -16,8 +16,8 @@ relative score to every endpoint based on a TTFT latency prediction under its *c
 The scorer uses a TTFT latency curve that takes into account how many requests are already in flight
 when a new one arrives, interpolating linearly between measured load points.
 The producer's job is to find the anchor points based on the observed request traffic. It computes
-three anchor points — a floor, a low-load and a typical-load latency data point — for the scorer to
-interpolate between when predicting the current request's TTFT.
+three anchor points for the scorer to interpolate between when predicting the current request's TTFT:
+a floor, a low-load and a typical-load latency data point.
 
 The black-box approach supports cases where scraping metrics from the endpoints is not feasible.
 
@@ -44,8 +44,8 @@ flush swaps a pointer rather than writing the attribute map.
 
 ### What drives the recompute
 
-The producer implements `PollingDispatcher`, so the datalayer's collector — which already visits every
-endpoint on a tick — calls `Dispatch` once per `intervalDuration`. The plugin owns no goroutine, no
+The producer implements `PollingDispatcher`. The datalayer's collector already visits every endpoint
+on a tick, and calls `Dispatch` once per `intervalDuration`. The plugin owns no goroutine, no
 request pays for the recompute, and an endpoint that goes quiet is still visited, so its window ages
 out instead of freezing on a stale snapshot.
 
@@ -61,8 +61,8 @@ is rejected because this dispatcher publishes its own state rather than sourcing
 ## Streaming responses only
 
 A time-to-first-token exists only when the response arrives in chunks. If the whole body comes back
-at once its latency is end-to-end — prefill plus every decode step — which sits far above the real
-TTFT, so it is discarded rather than recorded.
+at once its latency covers prefill plus every decode step, which sits far above the real TTFT, so it
+is discarded rather than recorded.
 
 A deployment whose responses are not streamed therefore produces no observations, every endpoint
 stays cold, and the scorer scores them all equally. That is correct, but it means the plugin
@@ -90,8 +90,8 @@ floor.
 Until the history window holds an entry, the P10 of the short window stands in as the floor, so an
 endpoint has a usable floor from its first flush.
 
-All three are published as one snapshot once per `intervalDuration`, so no request pays for the work
-and an endpoint that goes quiet ages its window out rather than freezing on stale anchors — while its
+All three are published as one snapshot once per `intervalDuration`, so no request pays for the work.
+An endpoint that goes quiet ages its window out rather than freezing on stale anchors, while its
 long-term baseline survives the lull untouched.
 
 ## Load confidence
@@ -128,12 +128,12 @@ parameter configures the threshold, the field carries it to consumers.
 | `maxObservationAge` | 3m | Age bound for the short window | Lower to follow load changes faster; raise if routing flaps |
 | `maxRequests` | 100 | Count bound for the short window. Must be `<= windowSize` | Same direction as `maxObservationAge` |
 | `minRequests` | 10 | Observations before an anchor is calibrated; published as `CalibrationThreshold` | Lower so new endpoints get traffic sooner, at the cost of noisier data |
-| `lowPercentile` | 25 | Low-load anchor percentile → `LowLoadTTFT` / `InflightAtLowLoad` | Leave alone unless the latency curve bends somewhere unusual |
-| `typicalPercentile` | 50 | Typical-load anchor percentile → `TypicalLoadTTFT` / `InflightAtTypicalLoad`. Must satisfy `0 < low < typical < 100` | As above |
+| `lowPercentile` | 25 | Low-load anchor percentile, sets `LowLoadTTFT` / `InflightAtLowLoad` | Leave alone unless the latency curve bends somewhere unusual |
+| `typicalPercentile` | 50 | Typical-load anchor percentile, sets `TypicalLoadTTFT` / `InflightAtTypicalLoad`. Must satisfy `0 < low < typical < 100` | As above |
 | `windowSize` | 5000 | Ring buffer capacity per endpoint, allocated up front (~200 KB) | Lower to cut per-endpoint memory; keep `>= maxRequests` |
 | `bucketDuration` | 1m | Window for each floor-history entry's P10 | Keep `<= maxObservationAge`; with `bucketHistorySize`, sets how far back the floor remembers |
 | `bucketHistorySize` | 1000 | Per-bucket P10s kept for the floor. Must be >= 2 | Lower to let the floor forgive an endpoint that became permanently slower |
-| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | — |
+| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | n/a |
 
 
 ## Configuration
@@ -161,7 +161,7 @@ dataLayer:
 ```
 
 `intervalDuration` is rounded to a multiple of the datalayer's base tick, and that base tick drops to
-the smallest interval any configured source asks for — so a fast scrape source elsewhere in the
+the smallest interval any configured source asks for, so a fast scrape source elsewhere in the
 config can shift when this recompute lands.
 
 See the [scorer README](../../../scheduling/scorer/latencyobservation/README.md) for the prediction model and

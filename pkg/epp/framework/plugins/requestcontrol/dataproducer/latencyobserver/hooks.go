@@ -109,8 +109,8 @@ func readInFlightRequests(endpoint fwksched.Endpoint, key fwkplugin.DataKey) int
 	return 0
 }
 
-// PreRequest records the dispatch — which endpoint won, what it was carrying,
-// when the request left — for ResponseBody to turn into a TTFT.
+// PreRequest records which endpoint won, what it was carrying, and when the
+// request left, for ResponseBody to turn into a TTFT.
 //
 // Always returns nil: a returned error fails the request, and failing to record
 // an observation is never a reason to reject one.

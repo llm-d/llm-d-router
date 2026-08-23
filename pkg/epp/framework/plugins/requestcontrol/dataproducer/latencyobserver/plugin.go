@@ -274,8 +274,8 @@ func (p *Observer) RegisterDependencies(r fwkdl.Registrar) error {
 // the pointer behind it.
 //
 // A delete racing the add of a recreated endpoint of the same name can discard
-// fresh state; that endpoint then reads cold and re-calibrates, so the cost is
-// lost observations, not a wrong value.
+// fresh state; that endpoint then reads cold and re-calibrates, costing
+// observations while the published values stay correct.
 func (p *Observer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil

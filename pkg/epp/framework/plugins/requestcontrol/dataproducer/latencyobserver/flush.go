@@ -72,10 +72,10 @@ func (p *Observer) publish(ctx context.Context, id string, state *endpointState,
 	}
 }
 
-// flush recomputes one endpoint's snapshot from two windows: the short one is
-// capped and age-bounded, so its load anchors track current behaviour, while the
+// flush recomputes one endpoint's snapshot from two windows. The short one is
+// capped and age-bounded, so its load anchors track current behaviour. The
 // bucket history spans busy and quiet buckets, so a low percentile of it locks
-// onto the quiet ones — the queue-free floor — rather than drifting up with load.
+// onto the quiet ones, the queue-free floor, rather than drifting up with load.
 func (s *endpointState) flush(now time.Time, cfg resolvedConfig) *attrlatency.TTFTPercentiles {
 	s.mu.Lock()
 	defer s.mu.Unlock()

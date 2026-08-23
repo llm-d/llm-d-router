@@ -98,7 +98,7 @@ func TestProduce(t *testing.T) {
 func TestPreRequest(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("records the winner, not a loser", func(t *testing.T) {
+	t.Run("records only the winning endpoint", func(t *testing.T) {
 		p := newObserver(t)
 		winner, loser := newSchedEndpoint("winner", inflightPtr(4)), newSchedEndpoint("loser", inflightPtr(11))
 

@@ -10,7 +10,7 @@ It does not depend on polling data from the endpoints.
 
 Both inputs are declared `Required`, so the observer and `inflight-load-producer` are auto-created
 from the scorer's data keys. The observer additionally needs an entry under `dataLayer.sources` to
-drive its recompute — see [Configuration](#configuration).
+drive its recompute. See [Configuration](#configuration).
 
 ## Motivation
 
@@ -20,7 +20,7 @@ scorer predicts rather than ranks on a measured latency directly. A busy endpoin
 gently can still beat a lightly loaded one that saturates sharply, and only a curve can express that.
 
 The numbers come from responses the EPP already receives, so nothing has to be scraped. Metrics can be
-missing — an endpoint may expose none, or sit behind a gateway that hides them — and they can lag, by
+missing, since an endpoint may expose none or sit behind a gateway that hides them, and they can lag by
 a poll interval, by the endpoint's own reporting delay, or by whatever the network adds in between.
 Neither limits this scorer: any endpoint that answers requests can be scored, and its load is read at
 the moment of scoring.
@@ -62,7 +62,7 @@ else:                                            # segment A->C, extended past C
 the curve is always evaluated at the endpoint's load right now.
 
 The curve is continuous (both branches give `LowLoadTTFT` at `InflightAtLowLoad`), equals `FloorTTFT`
-at zero load, and is monotone non-decreasing given `FloorTTFT < LowLoadTTFT < TypicalLoadTTFT` — which
+at zero load, and is monotone non-decreasing given `FloorTTFT < LowLoadTTFT < TypicalLoadTTFT`, which
 the admissibility checks enforce. `predictedTTFT` is clamped to `>= FloorTTFT` as a defensive guard.
 
 **Why three anchors and not two.** TTFT rises *faster than linearly* with in-flight load as an
@@ -70,9 +70,9 @@ endpoint approaches saturation. A single chord from the floor to **C** cuts acro
 and under-predicts in between; **B** lets the curve bend so the loaded segment follows the local slope
 where the endpoint is actually operating.
 
-**Why A→B is a segment of its own.** The B→C slope is measured where queueing dominates, so it is
+**Why A-B is a segment of its own.** The B-C slope is measured where queueing dominates, so it is
 steep. Running it backwards below **B** makes TTFT cross below the floor within a handful of
-requests — a draining-but-still-loaded endpoint would be predicted at its idle latency and win every
+requests. A draining-but-still-loaded endpoint would be predicted at its idle latency and win every
 decision it appeared in. Interpolating from `(0, FloorTTFT)` matches how TTFT flattens as the queue
 drains.
 
@@ -83,12 +83,12 @@ tuning knobs:
 
 | check | condition | why |
 |---|---|---|
-| separated in load | `InflightAtTypicalLoad - InflightAtLowLoad >= minInflightGap` | the B→C slope is `ΔTTFT / Δinflight`; if both anchors sit at the same load that denominator is noise and the slope is meaningless |
+| separated in load | `InflightAtTypicalLoad - InflightAtLowLoad >= minInflightGap` | the B-C slope is `change in TTFT over change in inflight`; if both anchors sit at the same load that denominator is noise and the slope is meaningless |
 | ordered in latency | `TypicalLoadTTFT > LowLoadTTFT` | TTFT must rise with the percentile. If noise inverts them the slope goes negative and the *most* loaded endpoint scores best |
-| above the floor | `LowLoadTTFT > FloorTTFT` | the floor is a long-window statistic and `LowLoadTTFT` a recent one, so after a drain the recent P25 can fall below it — which would tilt the A→B segment downwards |
-| positive in-flight | `InflightAtLowLoad > 0` | keeps the A→B divisor safe; the gap check alone does not imply it |
+| above the floor | `LowLoadTTFT > FloorTTFT` | the floor is a long-window statistic and `LowLoadTTFT` a recent one, so after a drain the recent P25 can fall below it, tilting the A-B segment downwards |
+| positive in-flight | `InflightAtLowLoad > 0` | keeps the A-B divisor safe; the gap check alone does not imply it |
 
-When **B** is dropped the curve is the single floor chord **A → C**, which is well defined at any
+When **B** is dropped the curve is the single floor chord **A to C**, which is well defined at any
 load.
 
 ## Endpoint states
@@ -96,11 +96,11 @@ load.
 The observer's snapshot carries its own counts and calibration threshold, so the scorer classifies
 each endpoint without a parameter of its own:
 
-- **cold** — `Floor() == 0` (never observed, or fewer observations than `CalibrationThreshold`, so the
+- **cold**: `Floor() == 0` (never observed, or fewer observations than `CalibrationThreshold`, so the
   floor is not yet trustworthy). Seeded optimistically at the best observed TTFT.
-- **seed** — has a floor but is not calibrated (`RecentRequestCount < CalibrationThreshold`, or no
+- **seed**: has a floor but is not calibrated (`RecentRequestCount < CalibrationThreshold`, or no
   in-flight anchor). Predicts at the floor.
-- **trusted** — `RecentRequestCount >= CalibrationThreshold`, `InflightAtTypicalLoad > 0`,
+- **trusted**: `RecentRequestCount >= CalibrationThreshold`, `InflightAtTypicalLoad > 0`,
   `TypicalLoadTTFT > floor`. Uses the curve above.
 
 An endpoint whose live in-flight load cannot be read is demoted to untrusted: the curve would be
@@ -118,14 +118,14 @@ all score 1.0 and the picker's tie-break spreads the traffic.
 ### Exploration
 
 An under-observed endpoint can be starved: competing against a calibrated one it may never win the
-traffic it needs to calibrate. `explorationRate` breaks that loop — each under-observed endpoint is
+traffic it needs to calibrate. `explorationRate` breaks that loop. Each under-observed endpoint is
 flipped independently per request, and with probability `explorationRate` its final score is forced
 to `1.0` so the picker sends it a probe; otherwise it is suppressed to `0`, but only when a
 calibrated endpoint exists to take the traffic. The override applies to the **final score only**, so
 a probe never distorts the trusted endpoints' normalisation.
 
 Together with the observer's load confidence gate this reproduces what a manual warmup would do: a
-new endpoint reads as cold → receives probes → crosses the calibration threshold → competes on its
+new endpoint reads as cold, receives probes, crosses the calibration threshold, then competes on its
 true latency.
 
 Note the default is non-zero. At `0` an uncalibrated endpoint is seeded at the best observed TTFT
@@ -138,8 +138,8 @@ and ties for the win, taking a share of all traffic before anything is known abo
 | `explorationRate` | 0.1 | Per-endpoint probability of probing an under-observed endpoint. Range `[0, 1]` | Raise to give new or recovered endpoints a better chance of being tried; `0` sends everything to the trusted winner |
 | `minInflightGap` | 2.0 | In-flight separation the two load anchors need before the low-load one is used. Must be > 0 | Raise to be stricter about when the curve is trusted; lower to use it on endpoints whose load barely varies |
 | `roundTTFTStep` | 0.0 | Rounding step for predictions, in seconds. `0` disables. Must be >= 0 | Set to about `0.01` (10 ms) when endpoints swap over differences too small to matter |
-| `ttftPercentilesProducerName` | "" | Which `latency-observer-producer-hub` instance to read. Empty uses the default | — |
-| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | — |
+| `ttftPercentilesProducerName` | "" | Which `latency-observer-producer-hub` instance to read. Empty uses the default | n/a |
+| `inFlightLoadProducerName` | "" | Which `inflight-load-producer` instance to read. Empty uses the default | n/a |
 
 
 ## Configuration
