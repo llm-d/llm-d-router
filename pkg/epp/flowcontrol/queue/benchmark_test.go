@@ -86,6 +86,14 @@ func BenchmarkQueuesScoring(b *testing.B) {
 				})
 			}
 		})
+
+		b.Run("ScoringRefresh", func(b *testing.B) {
+			for _, n := range refreshDepthSweep {
+				b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+					benchmarkScoringRefresh(b, n)
+				})
+			}
+		})
 	})
 }
 
@@ -96,6 +104,11 @@ func BenchmarkQueuesScoring(b *testing.B) {
 // recalibrate iteration count against the now-slower loop, changing how many bumps land within D each run.
 // An iteration-count ratio has no such feedback loop and stays deterministic and benchstat-comparable.
 var bumpEveryNSweep = []int{1, 10, 100, 1000}
+
+// refreshDepthSweep is the set of fixed queue depths at which benchmarkScoringRefresh prices one
+// refreshIfStale rebuild, bracketing the depths the ordering-policy proposal calls out (1000, 10000) for
+// bounding write-lock hold time, with 5000 as a midpoint.
+var refreshDepthSweep = []int{1000, 5000, 10000}
 
 // benchmarkAddRemove measures the throughput of tightly coupled Add and Remove operations in parallel. This is a good
 // measure of the base overhead of the queue's data structure and locking mechanism.
@@ -316,4 +329,31 @@ func benchmarkHighContentionScoring(b *testing.B, q contracts.SafeQueue, policy 
 	b.StopTimer()
 	close(stopCh)
 	wgProducers.Wait()
+}
+
+// benchmarkScoringRefresh isolates the cost of a single refreshIfStale rebuild at a fixed queue depth,
+// decoupled from any Add/Remove traffic. AddPeekRemoveScoring and BulkAddThenBulkRemoveScoring exercise
+// rebuilds at depths their own Add/Remove pattern produces (at most 100); HighContentionScoring reaches real
+// depth but conflates rebuild cost with producer/consumer contention. Depth here is fixed at n for the whole
+// benchmark -- no Add or Remove during the timed loop -- so ns/op is purely a function of n. A fresh queue and
+// policy per call avoid carrying state between depths in the refreshDepthSweep.
+func benchmarkScoringRefresh(b *testing.B, n int) {
+	policy := mocks.NewMockScoringOrderingPolicy("refresh", func(item flowcontrol.QueueItemAccessor) float64 {
+		return float64(item.OriginalRequest().ByteSize())
+	})
+	q := New(policy)
+
+	for i := range n {
+		q.Add(mocks.NewMockQueueItemAccessor(1, fmt.Sprintf("prefill-%d", i), benchmarkFlowKey))
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		policy.Bump()
+		if q.Peek() == nil {
+			b.Fatal("Peek failed")
+		}
+	}
 }
