@@ -215,6 +215,18 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(finalize()).To(Succeed())
 		Expect(recorder.Body.String()).To(ContainSubstring(`"cached_tokens":7`))
 	})
+
+	It("should preserve streamed content chunks without usage", func() {
+		body := []byte(`data: {"choices":[{"delta":{"content":" the"}}]}` + "\n\ndata: [DONE]\n")
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
+
+	It("should preserve streamed content chunks that mention usage in the content", func() {
+		// The guard matches on the JSON key, but content is free text: a chunk that
+		// merely contains the word must still come out byte-for-byte unchanged.
+		body := []byte(`data: {"choices":[{"delta":{"content":" \"usage\" is a word"}}]}` + "\n")
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
 })
 
 // Streamed responses send one SSE frame per token and only the final frame carries
