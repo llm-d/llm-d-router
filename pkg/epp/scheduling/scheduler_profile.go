@@ -126,7 +126,15 @@ func (p *SchedulerProfile) String() string {
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
-		return nil, errcommon.Error{Code: errcommon.Internal, Msg: "no endpoints available for the given request"}
+		// Filters draining a non-empty candidate set means the pool is busy, not
+		// broken: an empty pool is rejected in the director before scheduling
+		// runs. Report it with the same status and drop-reason vocabulary as a
+		// flow control capacity rejection.
+		return nil, errcommon.Error{
+			Code:    errcommon.ResourceExhausted,
+			Msg:     "no endpoints available for the given request",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+		}
 	}
 	// if we got here, there is at least one endpoint to score
 	weightedScorePerEndpoint := p.runScorerPlugins(ctx, request, endpoints)
@@ -139,17 +147,29 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
 	filteredEndpoints := endpoints
-	logger.V(logutil.DEBUG).Info("Before running filter plugins", "endpoints", filteredEndpoints)
+	debug := logger.V(logutil.DEBUG)
+	debugEnabled := debug.Enabled()
+	verbose := logger.V(logutil.VERBOSE)
+	verboseEnabled := verbose.Enabled()
+	if debugEnabled {
+		debug.Info("Before running filter plugins", "endpoints", filteredEndpoints)
+	}
 
 	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "filter_endpoints",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
-	span.SetAttributes(attribute.Int("llm_d.epp.filter.candidate_endpoints", len(endpoints)))
-	span.SetAttributes(requestSpanAttributes(request)...)
+	tracingActive := span.IsRecording()
+	if tracingActive {
+		span.SetAttributes(attribute.Int("llm_d.epp.filter.candidate_endpoints", len(endpoints)))
+		span.SetAttributes(requestSpanAttributes(request)...)
+	}
 
 	for _, filter := range p.filters {
-		logger.V(logutil.VERBOSE).Info("Running filter plugin", "plugin", filter.TypedName())
+		typedName := filter.TypedName()
+		if verboseEnabled {
+			verbose.Info("Running filter plugin", "plugin", typedName)
+		}
 		// The violations are dropped: Filter has no error return, so a rejected
 		// write cannot fail the request here. Scope has already dropped the write,
 		// logged it, and counted it under plugin_data_scope_violations_total, which
@@ -158,22 +178,42 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		scoped, _ := datalayer.Scope(logger, filterExtensionPoint, filter, filteredEndpoints)
 		before := time.Now()
 		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, request, scoped))
-		metrics.RecordPluginProcessingLatency(filterExtensionPoint, filter.TypedName().Type, filter.TypedName().Name, time.Since(before))
-		logger.V(logutil.DEBUG).Info("Completed running filter plugin successfully", "plugin", filter.TypedName(), "endpoints", filteredEndpoints)
+		metrics.RecordPluginProcessingLatency(filterExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+		if debugEnabled {
+			debug.Info("Completed running filter plugin successfully", "plugin", typedName, "endpoints", filteredEndpoints)
+		}
 		if len(filteredEndpoints) == 0 {
-			logger.V(logutil.VERBOSE).Info("Filter eliminated all endpoints", "plugin", filter.TypedName(), "endpointsBefore", len(endpoints))
+			if verboseEnabled {
+				verbose.Info("Filter eliminated all endpoints", "plugin", typedName, "endpointsBefore", len(endpoints))
+			}
 			break
 		}
 	}
-	span.SetAttributes(attribute.Int("llm_d.epp.filter.filtered_endpoints", len(filteredEndpoints)))
-	logger.V(logutil.VERBOSE).Info("Completed running filter plugins", "remainingEndpoints", len(filteredEndpoints))
+	if tracingActive {
+		span.SetAttributes(attribute.Int("llm_d.epp.filter.filtered_endpoints", len(filteredEndpoints)))
+	}
+	if verboseEnabled {
+		verbose.Info("Completed running filter plugins", "remainingEndpoints", len(filteredEndpoints))
+	}
 
 	return filteredEndpoints
 }
 
 func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	logger := log.FromContext(ctx)
-	logger.V(logutil.DEBUG).Info("Before running scorer plugins", "endpoints", endpoints)
+	// Cache the leveled loggers and their enabled state once. The per-endpoint
+	// Info call in the scoring loop below evaluates and boxes its variadic args
+	// even when the verbosity gate would suppress output; on a 100-endpoint,
+	// 4-scorer fleet that line alone accounted for ~80% of total allocations per
+	// Scheduler.Schedule call. Guarding by Enabled() preserves debugging behavior
+	// while removing the allocation when the level is off (the production default).
+	debug := logger.V(logutil.DEBUG)
+	debugEnabled := debug.Enabled()
+	verbose := logger.V(logutil.VERBOSE)
+	verboseEnabled := verbose.Enabled()
+	if debugEnabled {
+		debug.Info("Before running scorer plugins", "endpoints", endpoints)
+	}
 
 	// Parent span over the whole scorer chain. Per-scorer child spans (and any
 	// plugin-internal spans) nest under it. Attributes are request- and
@@ -199,28 +239,26 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	for _, endpoint := range endpoints {
 		weightedScorePerEndpoint[endpoint] = float64(0) // initialize weighted score per endpoint with 0 value
 	}
-	// Cache the debug logger and its enabled state once. The per-endpoint Info
-	// call below evaluates and boxes its variadic args even when the verbosity
-	// gate would suppress output; on a 100-endpoint, 4-scorer fleet that line
-	// alone accounted for ~80% of total allocations per Scheduler.Schedule call.
-	// Guarding by Enabled() preserves debugging behavior while removing the
-	// per-endpoint allocation when DEBUG logging is off (the production default).
-	debug := logger.V(logutil.DEBUG)
-	debugEnabled := debug.Enabled()
-
 	// Iterate through each scorer in the chain and accumulate the weighted scores.
 	for _, scorer := range p.scorers {
-		logger.V(logutil.VERBOSE).Info("Running scorer plugin", "plugin", scorer.TypedName())
+		typedName := scorer.TypedName()
+		if verboseEnabled {
+			verbose.Info("Running scorer plugin", "plugin", typedName)
+		}
 		scores := runScorer(ctx, tracer, tracingActive, scorer, request, endpoints)
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {
-				debug.Info("Calculated score", "plugin", scorer.TypedName(), "endpoint", endpoint.GetMetadata().ID, "score", score)
+				debug.Info("Calculated score", "plugin", typedName, "endpoint", endpoint.GetMetadata().ID, "score", score)
 			}
 			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
 		}
-		debug.Info("Completed running scorer plugin successfully", "plugin", scorer.TypedName())
+		if debugEnabled {
+			debug.Info("Completed running scorer plugin successfully", "plugin", typedName)
+		}
 	}
-	logger.V(logutil.VERBOSE).Info("Completed running scorer plugins successfully")
+	if verboseEnabled {
+		verbose.Info("Completed running scorer plugins successfully")
+	}
 
 	return weightedScorePerEndpoint
 }
@@ -312,32 +350,43 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		scoredEndpoints[i] = &storage[i]
 		i++
 	}
-	logger.V(logutil.VERBOSE).Info("Running picker plugin", "plugin", p.picker.TypedName())
-	logger.V(logutil.DEBUG).Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
+	typedName := p.picker.TypedName()
+	debug := logger.V(logutil.DEBUG)
+	debugEnabled := debug.Enabled()
+	if verbose := logger.V(logutil.VERBOSE); verbose.Enabled() {
+		verbose.Info("Running picker plugin", "plugin", typedName)
+	}
+	if debugEnabled {
+		debug.Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
+	}
 
 	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "pick_endpoints",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
-	// The picker almost always returns a single target, so its count carries
-	// little signal. The score distribution across the strongest candidates is
-	// what explains why an endpoint was chosen, so record the highest-scoring
-	// few (names with their weighted scores). Captured before Pick because
-	// pickers reorder scoredEndpoints in place.
-	if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
-		span.SetAttributes(
-			attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
-			attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
-		)
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
+		// The picker almost always returns a single target, so its count carries
+		// little signal. The score distribution across the strongest candidates is
+		// what explains why an endpoint was chosen, so record the highest-scoring
+		// few (names with their weighted scores). Captured before Pick because
+		// pickers reorder scoredEndpoints in place.
+		if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
+			span.SetAttributes(
+				attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
+				attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
+			)
+		}
+		span.SetAttributes(requestSpanAttributes(request)...)
 	}
-	span.SetAttributes(requestSpanAttributes(request)...)
 
 	before := time.Now()
 	result := p.picker.Pick(ctx, scoredEndpoints)
-	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, p.picker.TypedName().Type, p.picker.TypedName().Name, time.Since(before))
-	logger.V(logutil.DEBUG).Info("Completed running picker plugin successfully", "plugin", p.picker.TypedName(), "result", result)
+	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+	if debugEnabled {
+		debug.Info("Completed running picker plugin successfully", "plugin", typedName, "result", result)
+	}
 
 	if result != nil {
 		// Record the complete candidate set, which pickers narrow to their

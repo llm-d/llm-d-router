@@ -31,6 +31,7 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -976,6 +977,7 @@ func TestRunScorer_ScopesTheWrappedPluginDeclarations(t *testing.T) {
 		&fwkdl.Metrics{}, attrs)
 
 	scorer := &declaringScorer{key: key, reads: map[string]bool{}}
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{scorer})
 	scores := runScorer(context.Background(), nil, false,
 		NewWeightedScorer(scorer, 1), &fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
 

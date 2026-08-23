@@ -33,21 +33,25 @@ import (
 // level can be adjusted after the controller-runtime delegation is fulfilled.
 var atomicLevel = uberzap.NewAtomicLevelAt(zapcore.InfoLevel)
 
-func customLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+// LevelEncoder maps negative Zap levels to human-readable names that match
+// the project's verbosity constants (VERBOSE=3, DEBUG=4, TRACE=5). Without
+// this, controller-runtime's zap bridge emits all V(n) calls as "debug" in
+// JSON output, which is misleading for V(1)-V(3) (verbose info).
+func LevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	if l >= 0 {
 		zapcore.LowercaseLevelEncoder(l, enc)
 		return
 	}
 
 	switch l {
-	case zapcore.Level(-1 * DEBUG): // -4
+	case zapcore.Level(-1 * DEBUG): // V(4) -> "debug"
 		enc.AppendString("debug")
-	case zapcore.Level(-1 * TRACE): // -5
+	case zapcore.Level(-1 * TRACE): // V(5) -> "trace"
 		enc.AppendString("trace")
 	default:
-		if l >= zapcore.Level(-1*VERBOSE) { // >= -3 (i.e. V(1)-V(3))
+		if l >= zapcore.Level(-1*VERBOSE) { // V(1)-V(3) -> "info"
 			enc.AppendString("info")
-		} else {
+		} else { // V(6+) -> "trace"
 			enc.AppendString("trace")
 		}
 	}
@@ -55,7 +59,7 @@ func customLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 
 func InitSetupLogging() {
 	config := uberzap.NewProductionEncoderConfig()
-	config.EncodeLevel = customLevelEncoder
+	config.EncodeLevel = LevelEncoder
 
 	logger := zap.New(
 		zap.Level(atomicLevel),

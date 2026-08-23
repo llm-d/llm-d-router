@@ -422,9 +422,7 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 	if m.skip {
 		return &fwkrh.ParseResult{
 			SkipResponseProcessing: true,
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
-			},
+			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
 		}, nil
 	}
 	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil

@@ -33,7 +33,6 @@ func newStrategy(cfg Config) (Strategy, error) {
 		return &LASStrategy{
 			weightService:   cfg.LASWeightService,
 			weightHeadWait:  cfg.LASWeightHeadWait,
-			decayFactor:     cfg.LASDecayFactor,
 			halfLifeSeconds: cfg.LASHalfLifeSeconds,
 		}, nil
 	default:

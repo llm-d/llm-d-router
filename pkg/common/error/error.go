@@ -26,7 +26,7 @@ import (
 )
 
 // RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
-// reason a request was dropped by flow control.
+// reason the EPP dropped a request.
 const RequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
 
 // RequestDroppedReason is the reason a request was rejected before dispatch or evicted after dispatch.

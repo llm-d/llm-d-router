@@ -171,7 +171,7 @@ func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
 	required := map[plugin.DataKey]any{
 		pl.prefixMatchDataKey:                attrprefix.PrefixCacheMatchInfo{},
 		pl.inFlightLoadDataKey:               attrconcurrency.InFlightLoad{},
-		tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+		tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{},
 	}
 	// Required (not Optional) because only Required dependencies create DAG
 	// ordering edges; the encoder-cache producer must run before this plugin.
