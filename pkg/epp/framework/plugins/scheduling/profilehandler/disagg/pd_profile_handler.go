@@ -9,7 +9,6 @@ import (
 	"net"
 	"strconv"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -212,7 +211,7 @@ func (h *PdProfileHandler) Pick(ctx context.Context, request *scheduling.Inferen
 	if len(profiles) == len(profileResults) || profileResults[h.decodeProfile] == nil {
 		span.SetAttributes(
 			semconv.LLMDEPPProfileHandlerDecision("complete"),
-			attribute.Bool("llm_d.epp.profile_handler.decode_failed", profileResults[h.decodeProfile] == nil),
+			semconv.LLMDEPPProfileHandlerDecodeFailed(profileResults[h.decodeProfile] == nil),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}

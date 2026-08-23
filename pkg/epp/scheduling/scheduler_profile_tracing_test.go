@@ -143,7 +143,7 @@ func TestScheduleNestsFilterSpansUnderNamedProfiles(t *testing.T) {
 	}
 	profileNameBySpanID := make(map[trace.SpanID]string, len(profileSpans))
 	for _, profileSpan := range profileSpans {
-		profileName := spanAttributes(profileSpan)["llm_d.epp.scheduling.profile.name"].AsString()
+		profileName := spanAttributes(profileSpan)[semconv.LLMDEPPProfileNameKey].AsString()
 		profileNameBySpanID[profileSpan.SpanContext().SpanID()] = profileName
 	}
 
@@ -203,7 +203,7 @@ func TestScheduleEndsProfileSpanWhenFilterPanics(t *testing.T) {
 		t.Errorf("filter_endpoints parent = %v, want profile span %v",
 			filterSpans[0].Parent().SpanID(), profileSpans[0].SpanContext().SpanID())
 	}
-	if got := spanAttributes(profileSpans[0])["llm_d.epp.scheduling.profile.name"].AsString(); got != "decode" {
+	if got := spanAttributes(profileSpans[0])[semconv.LLMDEPPProfileNameKey].AsString(); got != "decode" {
 		t.Errorf("profile name = %q, want decode", got)
 	}
 }
@@ -239,10 +239,10 @@ func TestRunFilterPluginsSingleSpan(t *testing.T) {
 	}
 
 	attrs := spanAttributes(span)
-	if got := attrs["llm_d.epp.filter.candidate_endpoints"].AsInt64(); got != 3 {
+	if got := attrs[semconv.LLMDEPPFilterCandidateEndpointsKey].AsInt64(); got != 3 {
 		t.Errorf("candidate_endpoints = %d, want 3", got)
 	}
-	if got := attrs["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 2 {
+	if got := attrs[semconv.LLMDEPPFilterFilteredEndpointsKey].AsInt64(); got != 2 {
 		t.Errorf("filtered_endpoints = %d, want 2", got)
 	}
 	if got := attrs[semconv.GenAIRequestModelKey].AsString(); got != "m1" {
@@ -281,10 +281,10 @@ func TestRunFilterPluginsChainEmitsOneSpan(t *testing.T) {
 		t.Fatalf("got %d filter_endpoints spans, want 1 for the whole chain", len(spans))
 	}
 	attrs := spanAttributes(spans[0])
-	if got := attrs["llm_d.epp.filter.candidate_endpoints"].AsInt64(); got != 3 {
+	if got := attrs[semconv.LLMDEPPFilterCandidateEndpointsKey].AsInt64(); got != 3 {
 		t.Errorf("candidate_endpoints = %d, want 3", got)
 	}
-	if got := attrs["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 1 {
+	if got := attrs[semconv.LLMDEPPFilterFilteredEndpointsKey].AsInt64(); got != 1 {
 		t.Errorf("filtered_endpoints = %d, want 1", got)
 	}
 }
@@ -314,7 +314,7 @@ func TestRunFilterPluginsDrainBreakStillEndsSpan(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("got %d filter_endpoints spans, want 1 (span must end on drain)", len(spans))
 	}
-	if got := spanAttributes(spans[0])["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 0 {
+	if got := spanAttributes(spans[0])[semconv.LLMDEPPFilterFilteredEndpointsKey].AsInt64(); got != 0 {
 		t.Errorf("filtered_endpoints = %d, want 0", got)
 	}
 	if never.FilterCallCount != 0 {

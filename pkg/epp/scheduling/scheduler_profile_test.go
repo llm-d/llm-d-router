@@ -822,10 +822,10 @@ func TestRunScorerPluginsTracing(t *testing.T) {
 	if parent == nil {
 		t.Fatalf("missing parent span llm_d.epp.scoring; got %d spans", len(spans))
 	}
-	if got := spanInt(t, parent, "llm_d.epp.scorer.count"); got != 2 {
+	if got := spanInt(t, parent, string(semconv.LLMDEPPScorerCountKey)); got != 2 {
 		t.Errorf("parent llm_d.epp.scorer.count = %d, want 2", got)
 	}
-	if got := spanInt(t, parent, "llm_d.epp.scoring.candidate_endpoints"); got != 2 {
+	if got := spanInt(t, parent, string(semconv.LLMDEPPScoringCandidateEndpointsKey)); got != 2 {
 		t.Errorf("parent candidate_endpoints = %d, want 2", got)
 	}
 
@@ -840,20 +840,20 @@ func TestRunScorerPluginsTracing(t *testing.T) {
 		t.Errorf("scorer-a span is not a child of the scoring span")
 	}
 
-	if got := spanFloat(t, childA, "llm_d.epp.scorer.weight"); got != 0.25 {
+	if got := spanFloat(t, childA, string(semconv.LLMDEPPScorerWeightKey)); got != 0.25 {
 		t.Errorf("scorer-a weight = %v, want 0.25", got)
 	}
-	if got := spanInt(t, childA, "llm_d.epp.scorer.candidate_endpoints"); got != 2 {
+	if got := spanInt(t, childA, string(semconv.LLMDEPPScorerCandidateEndpointsKey)); got != 2 {
 		t.Errorf("scorer-a candidate_endpoints = %d, want 2", got)
 	}
 	// scorer-a scores {0.2, 0.8}: max 0.8, avg 0.5.
-	if got := spanFloat(t, childA, "llm_d.epp.scorer.score.max"); got != 0.8 {
+	if got := spanFloat(t, childA, string(semconv.LLMDEPPScorerScoreMaxKey)); got != 0.8 {
 		t.Errorf("scorer-a score.max = %v, want 0.8", got)
 	}
-	if got := spanFloat(t, childA, "llm_d.epp.scorer.score.avg"); got != 0.5 {
+	if got := spanFloat(t, childA, string(semconv.LLMDEPPScorerScoreAvgKey)); got != 0.5 {
 		t.Errorf("scorer-a score.avg = %v, want 0.5", got)
 	}
-	if got := spanInt(t, childA, "llm_d.epp.scorer.endpoints_scored"); got != 2 {
+	if got := spanInt(t, childA, string(semconv.LLMDEPPScorerEndpointsScoredKey)); got != 2 {
 		t.Errorf("scorer-a endpoints_scored = %d, want 2", got)
 	}
 
@@ -922,7 +922,7 @@ func TestRunScorerEmptyCandidateAvg(t *testing.T) {
 		t.Fatal("missing scorer span for empty scorer")
 	}
 	// With no scored endpoints, aggregate attributes are omitted entirely.
-	if spanHasAttr(child, "llm_d.epp.scorer.score.avg") {
+	if spanHasAttr(child, string(semconv.LLMDEPPScorerScoreAvgKey)) {
 		t.Error("empty scorer span should not carry a score.avg attribute")
 	}
 }

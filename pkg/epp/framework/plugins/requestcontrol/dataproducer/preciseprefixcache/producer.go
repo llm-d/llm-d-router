@@ -29,7 +29,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -405,8 +404,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	span.SetAttributes(
-		attribute.Int("llm_d.epp.producer.total_blocks", totalBlocks),
-		attribute.Int("llm_d.epp.producer.max_match_blocks", maxMatch),
+		semconv.LLMDEPPProducerTotalBlocks(totalBlocks),
+		semconv.LLMDEPPProducerMaxMatchBlocks(maxMatch),
 	)
 
 	logger.V(logging.TRACE).Info("Produce completed",

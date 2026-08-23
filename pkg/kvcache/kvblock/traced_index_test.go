@@ -21,6 +21,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/stretchr/testify/require"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -130,16 +131,16 @@ func TestTracedIndexAddAndEvictSpans(t *testing.T) {
 	spans := spanRecorder.Ended()
 	addSpan := spanByName(t, spans, "index_add")
 	addAttrs := spanAttributes(addSpan)
-	require.Equal(t, int64(1), addAttrs["llm_d.kv_cache.index.add.engine_key_count"].AsInt64())
-	require.Equal(t, int64(1), addAttrs["llm_d.kv_cache.index.add.request_key_count"].AsInt64())
-	require.Equal(t, int64(2), addAttrs["llm_d.kv_cache.index.add.pod_entry_count"].AsInt64())
-	require.Equal(t, int64(2), addAttrs["llm_d.kv_cache.index.add.device_tier_count"].AsInt64())
+	require.Equal(t, int64(1), addAttrs[string(semconv.LLMDKVCacheIndexAddEngineKeyCountKey)].AsInt64())
+	require.Equal(t, int64(1), addAttrs[string(semconv.LLMDKVCacheIndexAddRequestKeyCountKey)].AsInt64())
+	require.Equal(t, int64(2), addAttrs[string(semconv.LLMDKVCacheIndexAddPodEntryCountKey)].AsInt64())
+	require.Equal(t, int64(2), addAttrs[string(semconv.LLMDKVCacheIndexAddDeviceTierCountKey)].AsInt64())
 
 	evictSpan := spanByName(t, spans, "index_evict")
 	evictAttrs := spanAttributes(evictSpan)
-	require.Equal(t, "engine", evictAttrs["llm_d.kv_cache.index.evict.key_type"].AsString())
-	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.pod_entry_count"].AsInt64())
-	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.device_tier_count"].AsInt64())
+	require.Equal(t, "engine", evictAttrs[string(semconv.LLMDKVCacheIndexEvictKeyTypeKey)].AsString())
+	require.Equal(t, int64(1), evictAttrs[string(semconv.LLMDKVCacheIndexEvictPodEntryCountKey)].AsInt64())
+	require.Equal(t, int64(1), evictAttrs[string(semconv.LLMDKVCacheIndexEvictDeviceTierCountKey)].AsInt64())
 }
 
 func TestTracedIndexLookupSpan(t *testing.T) {
@@ -168,10 +169,10 @@ func TestTracedIndexLookupSpan(t *testing.T) {
 	spans := spanRecorder.Ended()
 	lookupSpan := spanByName(t, spans, "index_lookup")
 	attrs := spanAttributes(lookupSpan)
-	require.Equal(t, int64(1), attrs["llm_d.kv_cache.index.lookup.block_count"].AsInt64())
-	require.Equal(t, int64(0), attrs["llm_d.kv_cache.lookup.pod_filter_count"].AsInt64())
-	require.Equal(t, true, attrs["llm_d.kv_cache.lookup.cache_hit"].AsBool())
-	require.Equal(t, int64(1), attrs["llm_d.kv_cache.lookup.blocks_found"].AsInt64())
+	require.Equal(t, int64(1), attrs[string(semconv.LLMDKVCacheIndexLookupBlockCountKey)].AsInt64())
+	require.Equal(t, int64(0), attrs[string(semconv.LLMDKVCacheLookupPodFilterCountKey)].AsInt64())
+	require.Equal(t, true, attrs[string(semconv.LLMDKVCacheLookupCacheHitKey)].AsBool())
+	require.Equal(t, int64(1), attrs[string(semconv.LLMDKVCacheLookupBlocksFoundKey)].AsInt64())
 }
 
 func TestTracedIndexLookupSpanCacheMiss(t *testing.T) {
@@ -192,9 +193,9 @@ func TestTracedIndexLookupSpanCacheMiss(t *testing.T) {
 	spans := spanRecorder.Ended()
 	lookupSpan := spanByName(t, spans, "index_lookup")
 	attrs := spanAttributes(lookupSpan)
-	require.Equal(t, int64(1), attrs["llm_d.kv_cache.index.lookup.block_count"].AsInt64())
-	require.Equal(t, false, attrs["llm_d.kv_cache.lookup.cache_hit"].AsBool())
-	require.Equal(t, int64(0), attrs["llm_d.kv_cache.lookup.blocks_found"].AsInt64())
+	require.Equal(t, int64(1), attrs[string(semconv.LLMDKVCacheIndexLookupBlockCountKey)].AsInt64())
+	require.Equal(t, false, attrs[string(semconv.LLMDKVCacheLookupCacheHitKey)].AsBool())
+	require.Equal(t, int64(0), attrs[string(semconv.LLMDKVCacheLookupBlocksFoundKey)].AsInt64())
 }
 
 func TestTracedIndexLookupSpanRecordsError(t *testing.T) {

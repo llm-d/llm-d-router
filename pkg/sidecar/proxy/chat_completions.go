@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -54,7 +55,7 @@ const (
 )
 
 func openAIAPIAttr(apiType APIType) attribute.KeyValue {
-	return attribute.String("llm_d.openai.api", apiType.String())
+	return semconv.LLMDOpenAIAPI(apiType.String())
 }
 
 // disaggregatedPrefillHandler routes OpenAI-style requests: optional encoder (EPD) stage,
@@ -76,10 +77,10 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			requestPath = r.URL.Path
 		}
 		span.SetAttributes(
-			attribute.String("llm_d.pd_proxy.connector", s.config.KVConnector),
-			attribute.String("llm_d.pd_proxy.kv_connector", s.config.KVConnector),
-			attribute.String("llm_d.pd_proxy.ec_connector", s.config.ECConnector),
-			attribute.String("llm_d.pd_proxy.request_path", requestPath),
+			semconv.LLMDPDProxyConnector(s.config.KVConnector),
+			semconv.LLMDPDProxyKVConnector(s.config.KVConnector),
+			semconv.LLMDPDProxyECConnector(s.config.ECConnector),
+			semconv.LLMDPDProxyRequestPath(requestPath),
 			openAIAPIAttr(apiType),
 		)
 
@@ -103,14 +104,14 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		if len(prefillHostPort) == 0 {
 			s.logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())
 			span.SetAttributes(
-				attribute.Bool("llm_d.pd_proxy.disaggregation_used", false),
-				attribute.String("llm_d.pd_proxy.reason", "no_prefill_header"),
+				semconv.LLMDPDProxyDisaggregationUsed(false),
+				semconv.LLMDPDProxyReason("no_prefill_header"),
 			)
 		} else {
 			span.SetAttributes(
-				attribute.Bool("llm_d.pd_proxy.disaggregation_used", true),
-				attribute.String("llm_d.pd_proxy.prefill_target", prefillHostPort),
-				attribute.Int("llm_d.pd_proxy.prefill_candidates", numHosts),
+				semconv.LLMDPDProxyDisaggregationUsed(true),
+				semconv.LLMDPDProxyPrefillTarget(prefillHostPort),
+				semconv.LLMDPDProxyPrefillCandidates(numHosts),
 			)
 		}
 
@@ -122,8 +123,8 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 					"userAgent", r.Header.Get("User-Agent"),
 					"requestPath", r.URL.Path)
 				span.SetAttributes(
-					attribute.String("llm_d.pd_proxy.error", "ssrf_protection_denied"),
-					attribute.String("llm_d.pd_proxy.denied_target", prefillHostPort),
+					semconv.LLMDPDProxyError("ssrf_protection_denied"),
+					semconv.LLMDPDProxyDeniedTarget(prefillHostPort),
 				)
 				span.SetStatus(codes.Error, "SSRF protection: prefill target not in allowlist")
 				http.Error(w, "Forbidden: prefill target not allowed by SSRF protection", http.StatusForbidden)
@@ -150,7 +151,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 			}
 		}
 		if kvCacheSource != "" {
-			span.SetAttributes(attribute.String("llm_d.pd_proxy.kv_cache_source", kvCacheSource))
+			span.SetAttributes(semconv.LLMDPDProxyKVCacheSource(kvCacheSource))
 		}
 
 		encoderHostPorts := r.Header.Values(routing.EncoderEndpointsHeader)
@@ -183,9 +184,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				"encoderCandidates", len(encoderHostPorts),
 				"hasPrefiller", len(prefillHostPort) > 0)
 			span.SetAttributes(
-				attribute.Bool("llm_d.ec_proxy.encode_disaggregation_used", true),
-				attribute.Int("llm_d.ec_proxy.encoder_count", len(allowedEncoders)),
-				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
+				semconv.LLMDECProxyEncodeDisaggregationUsed(true),
+				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
+				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
 			)
 			s.handleECConnector(w, r, prefillHostPort, allowedEncoders)
 			return
@@ -194,9 +195,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 		if len(encoderHostPorts) > 0 && len(allowedEncoders) == 0 {
 			s.logger.Info("SSRF protection: all encoder targets filtered out, falling back to P/D or decoder-only")
 			span.SetAttributes(
-				attribute.Bool("llm_d.ec_proxy.encode_disaggregation_used", false),
-				attribute.Int("llm_d.ec_proxy.encoder_allowed", len(allowedEncoders)),
-				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
+				semconv.LLMDECProxyEncodeDisaggregationUsed(false),
+				semconv.LLMDECProxyEncoderAllowed(len(allowedEncoders)),
+				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
 			)
 		}
 

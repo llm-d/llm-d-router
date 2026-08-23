@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -201,8 +200,8 @@ func (k *Indexer) ScoreTokens(
 		blockHitRatio = float64(blocksFound) / float64(len(blockKeys))
 	}
 	span.SetAttributes(
-		attribute.Float64("llm_d.kv_cache.block_hit_ratio", blockHitRatio),
-		attribute.Int("llm_d.kv_cache.blocks_found", blocksFound),
+		semconv.LLMDKVCacheBlockHitRatio(blockHitRatio),
+		semconv.LLMDKVCacheBlocksFound(blocksFound),
 	)
 
 	podScores, err := k.kvBlockScorer.Score(ctx, blockKeys, keyToPods)

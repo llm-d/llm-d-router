@@ -29,6 +29,25 @@ func TestLLMDSemanticConventions(t *testing.T) {
 		wantKey  string
 		wantType attribute.Type
 	}{
+		// EPP Scheduling & Scoring
+		{
+			name:     "LLMDEPPProfileName",
+			got:      LLMDEPPProfileName("default"),
+			wantKey:  "llm_d.epp.scheduling.profile.name",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDEPPFilterCandidateEndpoints",
+			got:      LLMDEPPFilterCandidateEndpoints(5),
+			wantKey:  "llm_d.epp.filter.candidate_endpoints",
+			wantType: attribute.INT64,
+		},
+		{
+			name:     "LLMDEPPPickerTopScores",
+			got:      LLMDEPPPickerTopScores([]float64{1.0, 0.8}),
+			wantKey:  "llm_d.epp.picker.top_scores",
+			wantType: attribute.FLOAT64SLICE,
+		},
 		{
 			name:     "LLMDEPPScorerType",
 			got:      LLMDEPPScorerType("precise_prefix_cache"),
@@ -41,6 +60,7 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantKey:  "llm_d.epp.scorer.score.max",
 			wantType: attribute.FLOAT64,
 		},
+		// EPP Profile Handler & Disaggregation
 		{
 			name:     "LLMDEPPProfileHandlerDecision",
 			got:      LLMDEPPProfileHandlerDecision("run_decode"),
@@ -54,16 +74,80 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantType: attribute.BOOL,
 		},
 		{
+			name:     "LLMDEPPDisaggReason",
+			got:      LLMDEPPDisaggReason("prefix_cache"),
+			wantKey:  "llm_d.epp.disagg.reason",
+			wantType: attribute.STRING,
+		},
+		// EPP Producer
+		{
+			name:     "LLMDEPPProducerMaxMatchBlocks",
+			got:      LLMDEPPProducerMaxMatchBlocks(8),
+			wantKey:  "llm_d.epp.producer.max_match_blocks",
+			wantType: attribute.INT64,
+		},
+		// KV Cache
+		{
 			name:     "LLMDKVCacheBlockKeysCount",
 			got:      LLMDKVCacheBlockKeysCount(16),
 			wantKey:  "llm_d.kv_cache.block_keys.count",
 			wantType: attribute.INT64,
 		},
 		{
-			name:     "LLMDEPPDisaggReason",
-			got:      LLMDEPPDisaggReason("prefix_cache"),
-			wantKey:  "llm_d.epp.disagg.reason",
+			name:     "LLMDKVCacheBlockHitRatio",
+			got:      LLMDKVCacheBlockHitRatio(0.75),
+			wantKey:  "llm_d.kv_cache.block_hit_ratio",
+			wantType: attribute.FLOAT64,
+		},
+		{
+			name:     "LLMDKVCacheLookupCacheHit",
+			got:      LLMDKVCacheLookupCacheHit(true),
+			wantKey:  "llm_d.kv_cache.lookup.cache_hit",
+			wantType: attribute.BOOL,
+		},
+		{
+			name:     "LLMDKVCacheScorerAlgorithm",
+			got:      LLMDKVCacheScorerAlgorithm("lru"),
+			wantKey:  "llm_d.kv_cache.scorer.algorithm",
 			wantType: attribute.STRING,
+		},
+		// Sidecar / PD Proxy
+		{
+			name:     "LLMDPDProxyConnector",
+			got:      LLMDPDProxyConnector("nixlv2"),
+			wantKey:  "llm_d.pd_proxy.connector",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDPDProxyPrefillTarget",
+			got:      LLMDPDProxyPrefillTarget("10.0.0.1:8080"),
+			wantKey:  "llm_d.pd_proxy.prefill_target",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDPDProxyTotalDurationMs",
+			got:      LLMDPDProxyTotalDurationMs(123.45),
+			wantKey:  "llm_d.pd_proxy.total_duration_ms",
+			wantType: attribute.FLOAT64,
+		},
+		{
+			name:     "LLMDPDProxyDecodeStreaming",
+			got:      LLMDPDProxyDecodeStreaming(true),
+			wantKey:  "llm_d.pd_proxy.decode.streaming",
+			wantType: attribute.BOOL,
+		},
+		{
+			name:     "LLMDPDProxyChunkedDecodeChunks",
+			got:      LLMDPDProxyChunkedDecodeChunks(4),
+			wantKey:  "llm_d.pd_proxy.chunked_decode.chunks",
+			wantType: attribute.INT64,
+		},
+		// EC Proxy
+		{
+			name:     "LLMDECProxyEncodeDisaggregationUsed",
+			got:      LLMDECProxyEncodeDisaggregationUsed(true),
+			wantKey:  "llm_d.ec_proxy.encode_disaggregation_used",
+			wantType: attribute.BOOL,
 		},
 	}
 

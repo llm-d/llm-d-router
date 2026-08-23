@@ -25,9 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -94,8 +94,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	originalMaxTokens := resolveMaxTokens(completionRequest)
 
 	span.SetAttributes(
-		attribute.Int("llm_d.pd_proxy.chunked_decode.chunk_size", s.config.DecodeChunkSize),
-		attribute.Bool("llm_d.pd_proxy.chunked_decode.streaming", streamingEnabled),
+		semconv.LLMDPDProxyChunkedDecodeChunkSize(s.config.DecodeChunkSize),
+		semconv.LLMDPDProxyChunkedDecodeStreaming(streamingEnabled),
 	)
 
 	// If the token budget fits within a single chunk, skip chunking entirely.
@@ -238,9 +238,9 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	span.SetAttributes(
-		attribute.Int("llm_d.pd_proxy.chunked_decode.chunks", chunkIndex),
-		attribute.Int("llm_d.pd_proxy.chunked_decode.total_tokens", totalTokens),
-		attribute.Float64("llm_d.pd_proxy.chunked_decode.duration_ms", float64(time.Since(decodeStart).Milliseconds())),
+		semconv.LLMDPDProxyChunkedDecodeChunks(chunkIndex),
+		semconv.LLMDPDProxyChunkedDecodeTotalTokens(totalTokens),
+		semconv.LLMDPDProxyChunkedDecodeDurationMs(float64(time.Since(decodeStart).Milliseconds())),
 	)
 
 	// Corrected cumulative usage: prompt_tokens from first chunk, completion_tokens summed.

@@ -146,7 +146,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
-	span.SetAttributes(attribute.Int("llm_d.epp.filter.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(semconv.LLMDEPPFilterCandidateEndpoints(len(endpoints)))
 	span.SetAttributes(requestSpanAttributes(request)...)
 
 	for _, filter := range p.filters {
@@ -166,7 +166,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 			break
 		}
 	}
-	span.SetAttributes(attribute.Int("llm_d.epp.filter.filtered_endpoints", len(filteredEndpoints)))
+	span.SetAttributes(semconv.LLMDEPPFilterFilteredEndpoints(len(filteredEndpoints)))
 	logger.V(logutil.VERBOSE).Info("Completed running filter plugins", "remainingEndpoints", len(filteredEndpoints))
 
 	return filteredEndpoints
@@ -190,8 +190,8 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(
-			attribute.Int("llm_d.epp.scorer.count", len(p.scorers)),
-			attribute.Int("llm_d.epp.scoring.candidate_endpoints", len(endpoints)),
+			semconv.LLMDEPPScorerCount(len(p.scorers)),
+			semconv.LLMDEPPScoringCandidateEndpoints(len(endpoints)),
 		)
 		span.SetAttributes(requestSpanAttributes(request)...)
 	}
@@ -321,7 +321,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
+	span.SetAttributes(semconv.LLMDEPPPickerCandidateEndpoints(len(scoredEndpoints)))
 	// The picker almost always returns a single target, so its count carries
 	// little signal. The score distribution across the strongest candidates is
 	// what explains why an endpoint was chosen, so record the highest-scoring
@@ -329,8 +329,8 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	// pickers reorder scoredEndpoints in place.
 	if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
 		span.SetAttributes(
-			attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
-			attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
+			semconv.LLMDEPPPickerTopEndpoints(names),
+			semconv.LLMDEPPPickerTopScores(scores),
 		)
 	}
 	span.SetAttributes(requestSpanAttributes(request)...)

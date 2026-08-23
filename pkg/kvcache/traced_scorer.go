@@ -19,9 +19,9 @@ package kvcache
 import (
 	"context"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -53,8 +53,8 @@ func (t *tracedScorer) Score(
 	defer span.End()
 
 	span.SetAttributes(
-		attribute.String("llm_d.kv_cache.scorer.algorithm", string(t.next.Strategy())),
-		attribute.Int("llm_d.kv_cache.scorer.key_count", len(keys)),
+		semconv.LLMDKVCacheScorerAlgorithm(string(t.next.Strategy())),
+		semconv.LLMDKVCacheScorerKeyCount(len(keys)),
 	)
 
 	scores, err := t.next.Score(ctx, keys, keyToPods)
@@ -76,9 +76,9 @@ func (t *tracedScorer) Score(
 		avgScore := totalScore / float64(len(scores))
 
 		span.SetAttributes(
-			attribute.Float64("llm_d.kv_cache.score.max", maxScore),
-			attribute.Float64("llm_d.kv_cache.score.avg", avgScore),
-			attribute.Int("llm_d.kv_cache.scorer.pods_scored", len(scores)),
+			semconv.LLMDKVCacheScoreMax(maxScore),
+			semconv.LLMDKVCacheScoreAvg(avgScore),
+			semconv.LLMDKVCacheScorerPodsScored(len(scores)),
 		)
 	}
 
