@@ -123,9 +123,9 @@ func main() {
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := run(ctx, srv, cfg.Server); err != nil {
+	err = run(ctx, srv, cfg.Server)
+	stop()
+	if err != nil {
 		log.Error(err, "server error")
 		os.Exit(1)
 	}
