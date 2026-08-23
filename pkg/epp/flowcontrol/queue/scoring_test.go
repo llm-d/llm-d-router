@@ -31,18 +31,43 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 )
 
-// scoredItem adds an item whose score the policy already reports, mirroring the real ordering: a request's
-// score is known to the policy before the queue books it at Add time.
+// genScorer builds a deterministic ScoreFunc keyed on the item's immutable ID. score reports each ID's
+// base value at even generations and gen(base) at odd ones, so a test flips the whole order by a single
+// Bump without mutating any shared state: the func reads only the ID (fixed at Add) and the policy's
+// atomic generation, so it is lock-free even while a rebuild reads it from another goroutine.
+//
+// The base map is written once, before the queue is populated, and only read afterwards. Tests that need
+// no reordering pass a nil gen and leave the map fixed; the two flip tests pass gen to invert it.
+type genScorer struct {
+	policy *mocks.MockScoringOrderingPolicy
+	base   map[string]float64
+	gen    func(base float64) float64
+}
+
+func newGenScorer() *genScorer {
+	return &genScorer{base: make(map[string]float64)}
+}
+
+func (g *genScorer) score(item flowcontrol.QueueItemAccessor) float64 {
+	b := g.base[item.OriginalRequest().ID()]
+	if g.gen != nil && g.policy.Generation()%2 == 1 {
+		return g.gen(b)
+	}
+	return b
+}
+
+// scoredItem records an item's base score and adds it, mirroring the real ordering: a request's score is
+// known to the policy before the queue books it at Add time.
 func scoredItem(
 	t *testing.T,
 	q *priorityQueue,
-	policy *mocks.MockScoringOrderingPolicy,
+	scorer *genScorer,
 	id string,
 	score float64,
 	enqueue time.Time,
 ) *mocks.MockQueueItemAccessor {
 	t.Helper()
-	policy.SetScore(id, score)
+	scorer.base[id] = score
 	item := itemAt(10, id, enqueue)
 	q.Add(item)
 	return item
@@ -70,7 +95,7 @@ func drainIDs(t *testing.T, q *priorityQueue) []string {
 func TestScoringQueue_ModeDetection(t *testing.T) {
 	t.Parallel()
 
-	scoring := newPriorityQueue(mocks.NewMockScoringOrderingPolicy("detect"))
+	scoring := newPriorityQueue(mocks.NewMockScoringOrderingPolicy("detect", newGenScorer().score))
 	assert.NotNil(t, scoring.heap.scoringPolicy, "a scoring policy must put the queue in scoring mode")
 	assert.Nil(t, scoring.heap.policy, "scoring mode must not also populate the static policy field")
 
@@ -83,19 +108,21 @@ func TestScoringQueue_ModeDetection(t *testing.T) {
 // (highest first), ignores score changes until the generation moves, and re-sorts when it does.
 func TestScoringQueue_ReordersOnGenerationBump(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("reorder")
+	scorer := newGenScorer()
+	scorer.gen = func(base float64) float64 { return 4 - base } // odd generations invert 1,2,3 -> 3,2,1
+	policy := mocks.NewMockScoringOrderingPolicy("reorder", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
-	scoredItem(t, q, policy, "a", 1, now)
-	scoredItem(t, q, policy, "b", 2, now.Add(time.Millisecond))
-	scoredItem(t, q, policy, "c", 3, now.Add(2*time.Millisecond))
+	scoredItem(t, q, scorer, "a", 1, now)
+	scoredItem(t, q, scorer, "b", 2, now.Add(time.Millisecond))
+	scoredItem(t, q, scorer, "c", 3, now.Add(2*time.Millisecond))
 
 	require.Equal(t, "c", q.Peek().OriginalRequest().ID(), "highest score must be at the head")
 
-	// Invert the ordering. Without a generation bump the queue must not notice.
-	policy.SetScore("a", 3)
-	policy.SetScore("c", 1)
+	// The scorer would report the inverted order at an odd generation, but until a bump the queue must
+	// keep serving the cached even-generation order.
 	assert.Equal(t, "c", q.Peek().OriginalRequest().ID(), "must not re-sort without a generation bump")
 
 	policy.Bump()
@@ -113,17 +140,18 @@ func TestScoringQueue_ReordersOnGenerationBump(t *testing.T) {
 // rebuild cost of every dispatch cycle under a fairness policy that peeks each queue twice.
 func TestScoringQueue_NoRefreshWithoutGenerationBump(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("throttle")
+	scorer := newGenScorer()
+	policy := mocks.NewMockScoringOrderingPolicy("throttle", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
 	const itemCount = 3
 	for i := range itemCount {
-		scoredItem(t, q, policy, fmt.Sprintf("item-%d", i), 1, now.Add(time.Duration(i)*time.Millisecond))
+		scoredItem(t, q, scorer, fmt.Sprintf("item-%d", i), 1, now.Add(time.Duration(i)*time.Millisecond))
 	}
 	require.EqualValues(t, itemCount, policy.ScoreCalls(), "Add must score each item exactly once")
 
-	policy.SetScore("item-0", 99)
 	for range 10 {
 		q.Peek()
 	}
@@ -142,13 +170,15 @@ func TestScoringQueue_NoRefreshWithoutGenerationBump(t *testing.T) {
 // concurrent Peeks observing one stale generation must together trigger exactly one O(n) rebuild.
 func TestScoringQueue_RefreshIsDeduplicated(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("dedupe")
+	scorer := newGenScorer()
+	policy := mocks.NewMockScoringOrderingPolicy("dedupe", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
 	const itemCount = 200
 	for i := range itemCount {
-		scoredItem(t, q, policy, fmt.Sprintf("item-%d", i), float64(i),
+		scoredItem(t, q, scorer, fmt.Sprintf("item-%d", i), float64(i),
 			now.Add(time.Duration(i)*time.Microsecond))
 	}
 	require.EqualValues(t, itemCount, policy.ScoreCalls())
@@ -179,7 +209,10 @@ func TestScoringQueue_RefreshIsDeduplicated(t *testing.T) {
 // local symptom.
 func TestScoringQueue_RefreshPreservesAccounting(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("accounting")
+	scorer := newGenScorer()
+	scorer.gen = func(base float64) float64 { return -base } // odd generations invert every score
+	policy := mocks.NewMockScoringOrderingPolicy("accounting", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
@@ -187,7 +220,7 @@ func TestScoringQueue_RefreshPreservesAccounting(t *testing.T) {
 	var wantBytes uint64
 	for i := range itemCount {
 		id := fmt.Sprintf("item-%d", i)
-		policy.SetScore(id, float64(i))
+		scorer.base[id] = float64(i)
 		byteSize := uint64(10 + i)
 		item := itemAt(byteSize, id, now.Add(time.Duration(i)*time.Microsecond))
 		q.Add(item)
@@ -197,10 +230,7 @@ func TestScoringQueue_RefreshPreservesAccounting(t *testing.T) {
 	require.Equal(t, wantBytes, q.ByteSize())
 	require.Equal(t, fmt.Sprintf("item-%d", itemCount-1), q.Peek().OriginalRequest().ID())
 
-	// Invert every score so the rebuild must reorder the entire heap.
-	for i := range itemCount {
-		policy.SetScore(fmt.Sprintf("item-%d", i), float64(-i))
-	}
+	// A bump inverts every score, so the rebuild must reorder the entire heap.
 	policy.Bump()
 	require.NotNil(t, q.Peek())
 
@@ -215,13 +245,15 @@ func TestScoringQueue_RefreshPreservesAccounting(t *testing.T) {
 // disagree with the queue's own head for equal-scored items.
 func TestScoringQueue_TieBreakMatchesCompareByScore(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("tiebreak")
+	scorer := newGenScorer()
+	policy := mocks.NewMockScoringOrderingPolicy("tiebreak", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
 	// Added late-first so the tie-break, not insertion order, decides the head.
-	late := scoredItem(t, q, policy, "late", 5, now.Add(time.Second))
-	early := scoredItem(t, q, policy, "early", 5, now)
+	late := scoredItem(t, q, scorer, "late", 5, now.Add(time.Second))
+	early := scoredItem(t, q, scorer, "early", 5, now)
 
 	require.Equal(t, "early", q.Peek().OriginalRequest().ID(),
 		"equal scores must be broken by earlier EnqueueTime")
@@ -234,13 +266,15 @@ func TestScoringQueue_TieBreakMatchesCompareByScore(t *testing.T) {
 // heap requires, so both the queue's cache and CompareByScore normalize it to negative infinity.
 func TestScoringQueue_NaNScoreIsLowestPriority(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("nan")
+	scorer := newGenScorer()
+	policy := mocks.NewMockScoringOrderingPolicy("nan", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
-	nan := scoredItem(t, q, policy, "nan", math.NaN(), now)
-	negInf := scoredItem(t, q, policy, "neg-inf", math.Inf(-1), now.Add(time.Millisecond))
-	finite := scoredItem(t, q, policy, "finite", -1e300, now.Add(2*time.Millisecond))
+	nan := scoredItem(t, q, scorer, "nan", math.NaN(), now)
+	negInf := scoredItem(t, q, scorer, "neg-inf", math.Inf(-1), now.Add(time.Millisecond))
+	finite := scoredItem(t, q, scorer, "finite", -1e300, now.Add(2*time.Millisecond))
 
 	assert.Equal(t, "finite", q.Peek().OriginalRequest().ID(),
 		"a finite score must outrank both NaN and negative infinity")
@@ -260,7 +294,11 @@ func TestScoringQueue_NaNScoreIsLowestPriority(t *testing.T) {
 // does the heap, even though the policy now disagrees with both.
 func TestScoringQueue_RandomizedInterleavings(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("fuzz")
+	// This test runs on a single goroutine, so it mutates the scorer's base map directly (case 2) to model
+	// a score changing without a generation bump -- the situation the cache must ignore until it rebuilds.
+	scorer := newGenScorer()
+	policy := mocks.NewMockScoringOrderingPolicy("fuzz", scorer.score)
+	scorer.policy = policy
 	q := newPriorityQueue(policy)
 	// Fixed seed: a failure must be reproducible from the test output alone.
 	rng := rand.New(rand.NewSource(0xC0FFEE)) //nolint:gosec // deterministic test input, not security-relevant
@@ -274,7 +312,7 @@ func TestScoringQueue_RandomizedInterleavings(t *testing.T) {
 		case 0: // Add an item with a random score.
 			id := fmt.Sprintf("item-%d", nextID)
 			nextID++
-			item := scoredItem(t, q, policy, id, rng.NormFloat64(),
+			item := scoredItem(t, q, scorer, id, rng.NormFloat64(),
 				now.Add(time.Duration(rng.Intn(1000))*time.Microsecond))
 			live = append(live, item)
 		case 1: // Remove a random live item.
@@ -289,7 +327,7 @@ func TestScoringQueue_RandomizedInterleavings(t *testing.T) {
 			if len(live) == 0 {
 				break
 			}
-			policy.SetScore(live[rng.Intn(len(live))].OriginalRequest().ID(), rng.NormFloat64())
+			scorer.base[live[rng.Intn(len(live))].OriginalRequest().ID()] = rng.NormFloat64()
 		case 3: // Bump, then Peek to force the refresh.
 			policy.Bump()
 			q.Peek()
@@ -316,14 +354,19 @@ func TestScoringQueue_RandomizedInterleavings(t *testing.T) {
 // or Cleanup will observe a partially rebuilt heap.
 func TestScoringQueue_Concurrency(t *testing.T) {
 	t.Parallel()
-	policy := mocks.NewMockScoringOrderingPolicy("concurrency")
+	// Score reads the item's immutable byte size, so a concurrently added item carries its score from
+	// construction and no goroutine writes a shared score store: the only concurrency under test is the
+	// queue's own write-lock discipline, not the mock's.
+	byteScore := func(item flowcontrol.QueueItemAccessor) float64 {
+		return float64(item.OriginalRequest().ByteSize())
+	}
+	policy := mocks.NewMockScoringOrderingPolicy("concurrency", byteScore)
 	q := newPriorityQueue(policy)
 	now := time.Now()
 
 	const seeded = 100
 	for i := range seeded {
-		scoredItem(t, q, policy, fmt.Sprintf("seed-%d", i), float64(i),
-			now.Add(time.Duration(i)*time.Microsecond))
+		q.Add(itemAt(uint64(i+1), fmt.Sprintf("seed-%d", i), now.Add(time.Duration(i)*time.Microsecond)))
 	}
 
 	const (
@@ -350,8 +393,7 @@ func TestScoringQueue_Concurrency(t *testing.T) {
 	spawn(func(_, _ int) { policy.Bump() })
 	spawn(func(worker, op int) {
 		id := fmt.Sprintf("added-%d-%d", worker, op)
-		policy.SetScore(id, float64(op))
-		q.Add(itemAt(10, id, now.Add(time.Duration(op)*time.Microsecond)))
+		q.Add(itemAt(uint64(op+1), id, now.Add(time.Duration(op)*time.Microsecond)))
 	})
 	spawn(func(_, _ int) {
 		// Remove roughly half the queue's contents, contending with the rebuild for the write lock.
