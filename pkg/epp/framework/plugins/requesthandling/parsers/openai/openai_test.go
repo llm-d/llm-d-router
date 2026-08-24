@@ -112,7 +112,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: []uint32{1, 2, 3}},
+					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":  "test",
@@ -888,7 +888,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			want: &fwkrh.InferenceRequestBody{
 				Embeddings: &fwkrh.EmbeddingsRequest{
-					Input: fwkrh.EmbeddingsInput{TokenIDs: []uint32{1, 2, 3}},
+					Input: fwkrh.EmbeddingsInput{TokenIDs: [][]uint32{{1, 2, 3}}},
 				},
 				Payload: fwkrh.PayloadMap{
 					"model": "text-embedding-3-small",
