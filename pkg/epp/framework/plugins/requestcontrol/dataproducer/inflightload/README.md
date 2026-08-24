@@ -27,16 +27,22 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. |
-| `outputRatio` | `float` | No | `1.5` | Estimated output-to-input token ratio applied when `addEstimatedOutputTokens` is true: estimated output = round(inputTokens * `outputRatio`). Computed against the full prompt, not the uncached portion. Must be non-negative. |
+| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 
-When `addEstimatedOutputTokens` is true, the estimated output added per request is
-`min(round(inputTokens * outputRatio), clientMaxOutputTokens?, maxEstimatedOutputTokens?)`.
-The client cap is the request's own output limit (`max_tokens` /
-`max_completion_tokens` / `max_output_tokens` depending on the API), applied only
-when the client specified one. This keeps estimates realistic for high-input /
-low-output workloads, where a fixed ratio would otherwise overstate output.
+When `addEstimatedOutputTokens` is true, the estimated output per request is a flat
+value determined by the output-length bucket published by the `outlen-bucket` plugin:
+
+| Output-Length Bucket | Estimated output tokens |
+|------------|------------------------|
+| `LONG` (reasoning chains) | 4 096 |
+| `SHORT` (tool-call JSON) | 100 |
+| `UNKNOWN` (no reliable signal) | 1 000 |
+
+The estimate is then bounded by the client-requested cap (`max_output_tokens` / `max_tokens`)
+and `maxEstimatedOutputTokens`. Ranking invariant: SHORT (100) < UNKNOWN (1 000) < LONG (4 096).
+When the `outlen-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
+logs a one-time warning.
 
 ---
 

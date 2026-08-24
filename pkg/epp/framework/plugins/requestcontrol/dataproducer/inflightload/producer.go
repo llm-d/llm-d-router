@@ -38,6 +38,7 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
 
 const (
@@ -49,12 +50,11 @@ const (
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
-	// the in-flight token counter. Defaults to false.
+	// the in-flight token counter. Defaults to false. The per-request output
+	// estimate comes from the output-length bucket published by the outlen-bucket plugin; enable
+	// that plugin (ordered before this producer) so requests are classified rather
+	// than all estimated as UNKNOWN.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
-	// OutputRatio is the estimated output-to-input token ratio used when
-	// AddEstimatedOutputTokens is true: estimated output = round(inputTokens * OutputRatio).
-	// Must be non-negative. Unset defaults to DefaultOutputRatio.
-	OutputRatio *float64 `json:"outputRatio,omitempty"`
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens added per
 	// request when AddEstimatedOutputTokens is true, regardless of input length or
 	// the client-requested output cap. Must be non-negative. Unset means no cap.
@@ -90,14 +90,6 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		}
 	}
 
-	outputRatio := DefaultOutputRatio
-	if cfg.OutputRatio != nil {
-		if *cfg.OutputRatio < 0 {
-			return nil, fmt.Errorf("outputRatio must be non-negative, got %v", *cfg.OutputRatio)
-		}
-		outputRatio = *cfg.OutputRatio
-	}
-
 	if cfg.MaxEstimatedOutputTokens != nil && *cfg.MaxEstimatedOutputTokens < 0 {
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
@@ -115,7 +107,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
-		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
+		tokenEstimator:           NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
@@ -148,6 +140,10 @@ type InFlightLoadProducer struct {
 	uncachedRequestTokensDk  fwkplugin.DataKey
 	syncCrossReplicaState    bool
 	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
+	// outlenBucketMissingWarn gates a single warning when AddEstimatedOutputTokens is
+	// enabled but no outlen-bucket attribute is present on requests (the outlen-bucket
+	// plugin is not configured or is ordered after this producer).
+	outlenBucketMissingWarn sync.Once
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -414,6 +410,26 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	fairnessID := request.FairnessID
 	priority := strconv.Itoa(request.Objectives.Priority)
 
+	if request.Body != nil {
+		if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
+			// -1 signals "no client cap" so the log renders a value, not a pointer.
+			maxOutputTokens := int64(-1)
+			if request.Body.MaxOutputTokens != nil {
+				maxOutputTokens = *request.Body.MaxOutputTokens
+			}
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen estimate",
+				"requestID", request.RequestID,
+				"bucket", bucket.String(),
+				"maxOutputTokens", maxOutputTokens,
+			)
+		} else if p.addEstimatedOutputTokens {
+			// addEstimatedOutputTokens is on but no outlen-bucket attribute was
+			// published: every request is estimated as UNKNOWN. Warn once so the
+			// misconfiguration is visible without spamming per request.
+			p.warnMissingOutlenBucket(ctx)
+		}
+	}
+
 	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -475,18 +491,28 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		var maxOutputTokens *int64
-		if request != nil && request.Body != nil {
-			maxOutputTokens = request.Body.MaxOutputTokens
-		}
-		// Output tokens are based on the full input, not the cached portion.
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
+		// Add the estimated output tokens from the output-length bucket the outlen-bucket plugin
+		// published; an absent bucket is estimated as UNKNOWN (see PreRequest, which
+		// warns once when that happens with this option enabled).
+		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return tokens
 }
 
+// warnMissingOutlenBucket logs a single warning when AddEstimatedOutputTokens is
+// enabled but no outlen-bucket attribute is present on the request, so every request
+// is estimated as UNKNOWN. This surfaces a missing outlen-bucket plugin without
+// emitting a log line per request.
+func (p *InFlightLoadProducer) warnMissingOutlenBucket(ctx context.Context) {
+	p.outlenBucketMissingWarn.Do(func() {
+		log.FromContext(ctx).V(logutil.DEFAULT).Info(
+			"addEstimatedOutputTokens is enabled but no outlen-bucket attribute is present; " +
+				"every request is estimated as UNKNOWN. Add outlen-bucket to the plugins list in the EndpointPickerConfig to fix this.")
+	})
+}
+
 func (p *InFlightLoadProducer) ResponseBody(
-	_ context.Context,
+	ctx context.Context,
 	request *fwksched.InferenceRequest,
 	resp *requestcontrol.Response,
 	_ *datalayer.EndpointMetadata,
@@ -542,6 +568,15 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
+		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
+			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
+				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",
+					"requestID", request.RequestID,
+					"estimatedBucket", bucket.String(),
+					"actualCompletionTokens", resp.Usage.CompletionTokens,
+				)
+			}
+		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
 		p.PluginState.Touch(request.RequestID)
@@ -655,7 +690,7 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 // Consumes declares TokenizedRequest as required so the data-layer DAG orders a
 // token-producer ahead of this producer and auto-creates one when none is
 // configured; without it the input-token estimate silently reads zero.
-// PrefixCacheMatchInfo is optional — used to discount the already-cached prompt
+// PrefixCacheMatchInfo is optional -- used to discount the already-cached prompt
 // prefix from the prefix producer selected by prefixMatchInfoProducerName
 // (approximate by default, or a precise-prefix-cache producer).
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
