@@ -22,12 +22,18 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/redis/go-redis/v9"
 )
+
+// validAsyncRequestID mirrors the server's x-request-id validation, so the
+// fetch routes accept exactly the ids the inference path can produce.
+var validAsyncRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 
 // resultFetchGraceTTL is the default mailbox expiry applied after a
 // successful fetch delivery, overridable via fetch_grace_seconds. The full
@@ -73,12 +79,35 @@ func (s *AsyncBrokerStep) handleModels(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": models})
 }
 
+// checkFetchParams applies the enqueue path's tenant and id validation to
+// the fetch/delete routes, so the read side never composes a Redis key the
+// write side could not have produced. Writes the 400 itself and reports
+// whether the request may proceed.
+func (s *AsyncBrokerStep) checkFetchParams(w http.ResponseWriter, tenant, id string) bool {
+	if strings.Contains(tenant, ":") {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", api.ErrCodeInvalidRequest,
+			fmt.Sprintf("%s must not contain %q", s.cfg.TenantHeader, ":"))
+		return false
+	}
+	if !validAsyncRequestID.MatchString(id) {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", api.ErrCodeInvalidRequest,
+			"request id must be 1-128 alphanumeric or dash characters")
+		return false
+	}
+	return true
+}
+
 func (s *AsyncBrokerStep) handleFetch(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	tenant := s.tenantOf(r)
+	if !s.checkFetchParams(w, tenant, id) {
+		return
+	}
 	state, res, err := lookupResult(r.Context(), s.rdb, tenant, id)
 	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "LOOKUP_FAILED", err.Error())
+		s.logger.Error(err, "result lookup failed", "id", id)
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "LOOKUP_FAILED",
+			"failed to look up the request")
 		return
 	}
 	switch state {
@@ -92,10 +121,10 @@ func (s *AsyncBrokerStep) handleFetch(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 			if grace := s.cfg.fetchGrace(); grace > 0 {
 				if err := s.rdb.Expire(graceCtx, resultKey(tenant, id), grace).Err(); err != nil {
-					s.logger.Info("failed to shrink result ttl after fetch", "id", id, "error", err)
+					s.logger.Error(err, "failed to shrink result ttl after fetch", "id", id)
 				}
 			} else if err := s.rdb.Del(graceCtx, resultKey(tenant, id)).Err(); err != nil {
-				s.logger.Info("failed to delete result after fetch", "id", id, "error", err)
+				s.logger.Error(err, "failed to delete result after fetch", "id", id)
 			}
 		}
 	case asyncStatePending:
@@ -107,16 +136,23 @@ func (s *AsyncBrokerStep) handleFetch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *AsyncBrokerStep) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.rdb.Del(r.Context(), resultKey(s.tenantOf(r), chi.URLParam(r, "id"))).Err(); err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "DELETE_FAILED", err.Error())
+	id := chi.URLParam(r, "id")
+	tenant := s.tenantOf(r)
+	if !s.checkFetchParams(w, tenant, id) {
+		return
+	}
+	if err := s.rdb.Del(r.Context(), resultKey(tenant, id)).Err(); err != nil {
+		s.logger.Error(err, "failed to delete result", "id", id)
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "DELETE_FAILED",
+			"failed to delete the result")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resultKey is the per-request result destination, scoped by tenant so that
-// fetching a result requires knowing both the tenant and the id: a caller
-// presenting the wrong tenant simply finds nothing. Messages enqueued by the
+// resultKey is the per-request result destination, scoped by tenant so ids
+// cannot collide across tenants. Tenant header is trusted as asserted (see the
+// deployment notes in docs/coordinator_async_broker.md). Messages enqueued by the
 // step set result_queue_name to this key, and the AP's result writer
 // delivers there. Fetch reads are non-destructive: a delivered fetch shrinks
 // the TTL to resultFetchGraceTTL (covering lost-response retries), DELETE
@@ -149,16 +185,12 @@ const (
 // submit until the result is flushed. Both reads are tenant-scoped, so a
 // caller with the wrong tenant sees an unknown id.
 func lookupResult(ctx context.Context, rdb *redis.Client, tenant, id string) (asyncRequestState, *api.ResultMessage, error) {
-	vals, err := rdb.LRange(ctx, resultKey(tenant, id), 0, 0).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return asyncStateUnknown, nil, fmt.Errorf("failed to read result: %w", err)
+	res, err := readMailbox(ctx, rdb, tenant, id)
+	if err != nil {
+		return asyncStateUnknown, nil, err
 	}
-	if len(vals) > 0 {
-		var res api.ResultMessage
-		if err := json.Unmarshal([]byte(vals[0]), &res); err != nil {
-			return asyncStateUnknown, nil, fmt.Errorf("failed to parse stored result: %w", err)
-		}
-		return asyncStateReady, &res, nil
+	if res != nil {
+		return asyncStateReady, res, nil
 	}
 
 	exists, err := rdb.Exists(ctx, api.RequestActiveTokenKey(envelopeID(tenant, id))).Result()
@@ -168,7 +200,33 @@ func lookupResult(ctx context.Context, rdb *redis.Client, tenant, id string) (as
 	if exists > 0 {
 		return asyncStatePending, nil, nil
 	}
+	// The AP can deliver the result and clear the active marker between the
+	// two reads above, which would misread a just-completed request as
+	// unknown: re-read the mailbox once before concluding that.
+	res, err = readMailbox(ctx, rdb, tenant, id)
+	if err != nil {
+		return asyncStateUnknown, nil, err
+	}
+	if res != nil {
+		return asyncStateReady, res, nil
+	}
 	return asyncStateUnknown, nil, nil
+}
+
+// readMailbox returns the stored result, nil when the mailbox is empty.
+func readMailbox(ctx context.Context, rdb *redis.Client, tenant, id string) (*api.ResultMessage, error) {
+	vals, err := rdb.LRange(ctx, resultKey(tenant, id), 0, 0).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("failed to read result: %w", err)
+	}
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	var res api.ResultMessage
+	if err := json.Unmarshal([]byte(vals[0]), &res); err != nil {
+		return nil, fmt.Errorf("failed to parse stored result: %w", err)
+	}
+	return &res, nil
 }
 
 // openAIError is the OpenAI error response envelope.
@@ -195,13 +253,21 @@ func writePending(w http.ResponseWriter, id string) {
 }
 
 // writeResult maps a stored ResultMessage onto the HTTP response. StatusCode
-// > 0 mirrors the upstream status and body verbatim. Error codes map:
+// > 0 mirrors the upstream status and body verbatim (out-of-range codes
+// answer 502 instead). Error codes map:
 // GATE_DROPPED -> 429, DEADLINE_EXCEEDED -> 504, INVALID_REQUEST -> 400,
 // CANCELLED -> 499, everything else -> 502, wrapped in the OpenAI error
 // envelope. Returns the body write error so callers that confirm delivery
 // can act on it; the error-envelope branches always return nil.
 func writeResult(w http.ResponseWriter, res *api.ResultMessage) error {
 	if res.StatusCode > 0 {
+		// The stored result is external data: guard the range rather than
+		// letting WriteHeader panic on a corrupted value.
+		if res.StatusCode < 100 || res.StatusCode > 599 {
+			writeOpenAIError(w, http.StatusBadGateway, "api_error", "MALFORMED_RESULT",
+				fmt.Sprintf("stored result carries invalid status code %d", res.StatusCode))
+			return nil
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(res.StatusCode)
 		_, err := w.Write([]byte(res.Payload))

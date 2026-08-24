@@ -32,7 +32,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -110,7 +109,7 @@ func NewAsyncBrokerStep(_ *gateway.Client, params map[string]any) (pipeline.Step
 		cfg:    cfg,
 		rdb:    rdb,
 		sub:    prod,
-		quota:  &asyncQuotaClassifier{rdb: rdb, cfg: cfg.Quota},
+		quota:  &asyncQuotaClassifier{rdb: rdb, cfg: cfg.Quota, logger: logger},
 		logger: logger,
 	}
 	switch cfg.WakeupMode {
@@ -271,8 +270,9 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
 	if err := s.sub.SubmitRequest(ctx, msg); err != nil {
+		log.FromContext(ctx).WithName(AsyncBrokerStepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", "ENQUEUE_FAILED",
-			fmt.Sprintf("failed to enqueue request: %v", err))
+			"failed to enqueue request")
 		return pipeline.ErrPipelineDone
 	}
 
@@ -303,7 +303,7 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 	// Held connections must outlive the server WriteTimeout, so clear the
 	// write deadline as the streaming path does.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.V(logutil.DEFAULT).Info("could not clear write deadline for held connection", "error", err)
+		logger.Error(err, "could not clear write deadline for held connection")
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, waitCap)
 	defer cancel()
@@ -319,14 +319,21 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 			wake = ch
 			pollEvery = waitBackupPollInterval
 		} else {
-			logger.V(logutil.DEFAULT).Info("wake-up registration failed, polling instead", "error", err)
+			logger.Error(err, "wake-up registration failed, polling instead")
 		}
 	}
 
 	ticker := time.NewTicker(pollEvery)
 	defer ticker.Stop()
+	lookupErrLogged := false
 	for {
 		state, res, err := lookupResult(waitCtx, s.rdb, tenant, id)
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !lookupErrLogged {
+			// Log the first failure only: the loop retries every tick, and a
+			// Redis outage would otherwise repeat this for every held wait.
+			lookupErrLogged = true
+			logger.Error(err, "result lookup failed during wait, retrying until the deadline", "id", id)
+		}
 		if err == nil && state == asyncStateReady {
 			if writeResult(w, res) == nil {
 				// Delivery confirmed on the held connection, the result's only
@@ -336,7 +343,7 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 				delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer delCancel()
 				if err := s.rdb.Del(delCtx, resultKey(tenant, id)).Err(); err != nil {
-					logger.V(logutil.DEFAULT).Info("failed to delete delivered result", "id", id, "error", err)
+					logger.Error(err, "failed to delete delivered result", "id", id)
 				}
 			}
 			return
@@ -346,12 +353,14 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 			if ctx.Err() != nil {
 				// Client disconnected: nobody will fetch this result, so
 				// cancel pre-dispatch (best effort, per the producer's
-				// cancellation contract). A client retry with the same id
-				// re-submits cleanly: SubmitRequest clears stale markers.
+				// cancellation contract). A later retry with the same id is
+				// accepted, since SubmitRequest clears the cancellation
+				// marker on enqueue, though it enqueues a fresh message: if
+				// the original is still queued, both may dispatch.
 				cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancelFn()
 				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
-					logger.V(logutil.DEFAULT).Info("failed to cancel abandoned request", "id", id, "error", err)
+					logger.Error(err, "failed to cancel abandoned request", "id", id)
 				}
 				return
 			}
@@ -361,10 +370,14 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 				// final mailbox check for a boundary arrival.
 				finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer finalCancel()
-				if state, res, err := lookupResult(finalCtx, s.rdb, tenant, id); err == nil && state == asyncStateReady {
+				state, res, err := lookupResult(finalCtx, s.rdb, tenant, id)
+				if err != nil {
+					logger.Error(err, "final result lookup failed, answering 504", "id", id)
+				}
+				if err == nil && state == asyncStateReady {
 					if writeResult(w, res) == nil {
 						if err := s.rdb.Del(finalCtx, resultKey(tenant, id)).Err(); err != nil {
-							logger.V(logutil.DEFAULT).Info("failed to delete delivered result", "id", id, "error", err)
+							logger.Error(err, "failed to delete delivered result", "id", id)
 						}
 					}
 					return

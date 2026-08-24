@@ -29,9 +29,17 @@ import (
 )
 
 // validatePipeline rejects configurations that cannot work before any step runs.
-// The tokens-in format (use_openai_format=false) sends token IDs that only the
-// render step produces, so it requires a render step in the pipeline.
+// The async-broker step must intercept requests before any processing step
+// touches them (queued bodies are stored verbatim, and passthrough stamping
+// must precede routing), so it is only valid in first position. The tokens-in
+// format (use_openai_format=false) sends token IDs that only the render step
+// produces, so it requires a render step in the pipeline.
 func validatePipeline(p config.PipelineConfig) error {
+	for i, s := range p.Steps {
+		if s.Type == steps.AsyncBrokerStepName && i > 0 {
+			return fmt.Errorf("the %q step must be the first pipeline step, found it at position %d", steps.AsyncBrokerStepName, i+1)
+		}
+	}
 	if p.UseOpenAIFormat {
 		return nil
 	}

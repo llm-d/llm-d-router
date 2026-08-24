@@ -28,6 +28,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -128,6 +129,32 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 				p["timeouts"] = map[string]any{"passthrough": map[string]any{"max_seconds": 5}}
 			},
 			wantErr: "timeouts",
+		},
+		{
+			name:    "negative wait_cap_seconds",
+			mutate:  func(p map[string]any) { p["wait_cap_seconds"] = -1 },
+			wantErr: "wait_cap_seconds",
+		},
+		{
+			name: "negative timeout seconds",
+			mutate: func(p map[string]any) {
+				p["timeouts"] = map[string]any{"wait": map[string]any{"default_seconds": -5}}
+			},
+			wantErr: "timeouts.wait",
+		},
+		{
+			name: "negative quota window",
+			mutate: func(p map[string]any) {
+				p["quota"] = map[string]any{"window_seconds": -60}
+			},
+			wantErr: "quota.window_seconds",
+		},
+		{
+			name: "negative quota limit",
+			mutate: func(p map[string]any) {
+				p["quota"] = map[string]any{"limits": map[string]any{"team-a": -1}}
+			},
+			wantErr: "quota.limits.team-a",
 		},
 	}
 	for _, tc := range tests {
@@ -470,10 +497,34 @@ func TestAsyncBrokerRoutes(t *testing.T) {
 	rec = do(http.MethodGet, "/v1/requests/ready-id", "team-b")
 	assert.Equal(t, http.StatusGone, rec.Code)
 
+	// Delete is tenant scoped too: the wrong tenant cannot reclaim the result.
+	rec = do(http.MethodDelete, "/v1/requests/ready-id", "team-b")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	exists, err := rdb.Exists(t.Context(), key).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), exists)
+
+	// The read routes apply the enqueue path's tenant and id validation.
+	rec = do(http.MethodGet, "/v1/requests/bad*id", "team-a")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec = do(http.MethodGet, "/v1/requests/ready-id", "team:a")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec = do(http.MethodDelete, "/v1/requests/ready-id", "team:a")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// A stored result with a status outside the valid HTTP range answers 502
+	// instead of panicking in WriteHeader.
+	badRes, err := json.Marshal(api.ResultMessage{StatusCode: 42, Payload: `{}`})
+	require.NoError(t, err)
+	require.NoError(t, rdb.LPush(t.Context(), resultKey("team-a", "corrupt-id"), string(badRes)).Err())
+	rec = do(http.MethodGet, "/v1/requests/corrupt-id", "team-a")
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "MALFORMED_RESULT")
+
 	// Delete reclaims immediately.
 	rec = do(http.MethodDelete, "/v1/requests/ready-id", "team-a")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	exists, err := rdb.Exists(t.Context(), key).Result()
+	exists, err = rdb.Exists(t.Context(), key).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists)
 
@@ -525,4 +576,27 @@ func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), exists)
 	})
+}
+
+// TestAsyncQuotaFailsOpen covers the Redis-error branch: a limited tenant is
+// classified reserved (with the error surfaced) when the quota check cannot
+// run, so an outage never blocks live traffic.
+func TestAsyncQuotaFailsOpen(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	q := &asyncQuotaClassifier{
+		rdb: rdb,
+		cfg: asyncQuotaConfig{
+			Prefix: "quota:", Attribute: "userid",
+			Limits: map[string]int{"team-a": 1}, WindowSeconds: 60,
+		},
+		logger: logr.Discard(),
+	}
+	mr.Close()
+
+	class, release, err := q.classify(t.Context(), "team-a")
+	require.Error(t, err)
+	assert.Equal(t, asyncClassificationReserved, class)
+	assert.Nil(t, release)
 }

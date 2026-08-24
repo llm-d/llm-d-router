@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-logr/logr"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -38,8 +39,9 @@ const (
 // never blocked). Queued modes are classified by the AP's gates at dequeue,
 // not here.
 type asyncQuotaClassifier struct {
-	rdb *redis.Client
-	cfg asyncQuotaConfig
+	rdb    *redis.Client
+	cfg    asyncQuotaConfig
+	logger logr.Logger
 }
 
 // quotaAcquireScript matches the redis-quota gate's atomic
@@ -87,8 +89,12 @@ func (q *asyncQuotaClassifier) classify(ctx context.Context, tenant string) (asy
 
 	release := func() {
 		// Background context: the release must run even if the request
-		// context is already canceled.
-		_ = quotaReleaseScript.Run(context.Background(), q.rdb, []string{key}, q.cfg.WindowSeconds).Err()
+		// context is already canceled. A failed release leaves the counter
+		// elevated until its window TTL, skewing the tenant toward overflow,
+		// so it must leave a trail.
+		if err := quotaReleaseScript.Run(context.Background(), q.rdb, []string{key}, q.cfg.WindowSeconds).Err(); err != nil {
+			q.logger.Error(err, "quota release failed, counter stays elevated until the window ttl", "tenant", tenant)
+		}
 	}
 	return asyncClassificationReserved, release, nil
 }

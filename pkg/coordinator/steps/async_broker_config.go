@@ -175,7 +175,7 @@ func (c *asyncBrokerConfig) applyDefaults() {
 	if c.Quota.Attribute == "" {
 		c.Quota.Attribute = "userid"
 	}
-	if c.Quota.WindowSeconds <= 0 {
+	if c.Quota.WindowSeconds == 0 {
 		c.Quota.WindowSeconds = 300
 	}
 	if c.WakeupMode == "" {
@@ -206,12 +206,26 @@ func (c *asyncBrokerConfig) validate() error {
 	if c.FetchGraceSeconds != nil && *c.FetchGraceSeconds < 0 {
 		return fmt.Errorf("fetch_grace_seconds must not be negative, got %d", *c.FetchGraceSeconds)
 	}
+	if c.WaitCapSeconds < 0 {
+		return fmt.Errorf("wait_cap_seconds must not be negative, got %d", c.WaitCapSeconds)
+	}
 	for mode, b := range c.Timeouts {
 		if mode != string(asyncModeEnqueue) && mode != string(asyncModeWait) {
 			return fmt.Errorf("timeouts keys must be enqueue or wait, got %q", mode)
 		}
+		if b.DefaultSeconds < 0 || b.MaxSeconds < 0 {
+			return fmt.Errorf("timeouts.%s: seconds must not be negative", mode)
+		}
 		if b.MaxSeconds > 0 && b.DefaultSeconds > b.MaxSeconds {
 			return fmt.Errorf("timeouts.%s: default_seconds %d exceeds max_seconds %d", mode, b.DefaultSeconds, b.MaxSeconds)
+		}
+	}
+	if c.Quota.WindowSeconds < 0 {
+		return fmt.Errorf("quota.window_seconds must not be negative, got %d", c.Quota.WindowSeconds)
+	}
+	for tenant, limit := range c.Quota.Limits {
+		if limit < 0 {
+			return fmt.Errorf("quota.limits.%s must not be negative, got %d", tenant, limit)
 		}
 	}
 	for _, h := range c.ForwardHeaders {
