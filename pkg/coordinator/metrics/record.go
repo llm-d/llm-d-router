@@ -95,7 +95,7 @@ func IncExecutionPath(modelName, path string) {
 }
 
 // IncConditionalDecodeProbes increments conditional_decode_probes_total for
-// one probe outcome ("served" or "deferred").
+// one probe outcome ("served", "deferred", or "error").
 func IncConditionalDecodeProbes(result string) {
 	conditionalDecodeProbesTotal.WithLabelValues(result).Inc()
 }
