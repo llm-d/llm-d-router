@@ -38,8 +38,12 @@ type asyncResultWaiter struct {
 	pubsub *redis.PubSub
 	prefix string // keyspace channel prefix, "__keyspace@<db>__:"
 
-	mu      sync.Mutex
-	waiters map[string]chan struct{} // channel name -> wake signal
+	mu sync.Mutex
+	// waiters holds one wake signal per parked handler. Concurrent waits on
+	// the same key are legal (a client may retry a wait by id), so each
+	// channel name keeps a list and the pub/sub subscription is held until
+	// the last waiter leaves.
+	waiters map[string][]chan struct{}
 }
 
 // asyncNotificationsEnabled reports whether the Redis server's keyspace
@@ -58,7 +62,7 @@ func newAsyncResultWaiter(ctx context.Context, rdb *redis.Client, db int, logger
 	w := &asyncResultWaiter{
 		rdb:     rdb,
 		prefix:  fmt.Sprintf("__keyspace@%d__:", db),
-		waiters: make(map[string]chan struct{}),
+		waiters: make(map[string][]chan struct{}),
 	}
 	w.pubsub = rdb.Subscribe(ctx)
 	go w.receive(ctx, logger)
@@ -78,7 +82,7 @@ func (w *asyncResultWaiter) receive(ctx context.Context, logger logr.Logger) {
 				return
 			}
 			w.mu.Lock()
-			if wake, exists := w.waiters[msg.Channel]; exists {
+			for _, wake := range w.waiters[msg.Channel] {
 				select {
 				case wake <- struct{}{}:
 				default: // waiter already signaled
@@ -97,23 +101,48 @@ func (w *asyncResultWaiter) register(ctx context.Context, key string) (<-chan st
 	channel := w.prefix + key
 	wake := make(chan struct{}, 1)
 	w.mu.Lock()
-	w.waiters[channel] = wake
+	first := len(w.waiters[channel]) == 0
+	w.waiters[channel] = append(w.waiters[channel], wake)
 	w.mu.Unlock()
-	if err := w.pubsub.Subscribe(ctx, channel); err != nil {
-		w.mu.Lock()
-		delete(w.waiters, channel)
-		w.mu.Unlock()
-		return nil, nil, err
+	if first {
+		if err := w.pubsub.Subscribe(ctx, channel); err != nil {
+			w.mu.Lock()
+			w.removeWaiter(channel, wake)
+			w.mu.Unlock()
+			return nil, nil, err
+		}
 	}
 	cleanup := func() {
-		w.mu.Lock()
-		delete(w.waiters, channel)
-		w.mu.Unlock()
 		// Unsubscribe with a fresh context: cleanup runs on request exit,
-		// when the request context may already be canceled.
+		// when the request context may already be canceled. The lock is held
+		// across the unsubscribe so a waiter registering concurrently either
+		// sees remaining waiters (no unsubscribe) or an empty list (it
+		// re-subscribes, ordered after this unsubscribe on the connection).
 		unsubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = w.pubsub.Unsubscribe(unsubCtx, channel)
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.removeWaiter(channel, wake) == 0 {
+			_ = w.pubsub.Unsubscribe(unsubCtx, channel)
+		}
 	}
 	return wake, cleanup, nil
+}
+
+// removeWaiter drops wake from the channel's list and reports how many
+// waiters remain. The caller holds w.mu.
+func (w *asyncResultWaiter) removeWaiter(channel string, wake chan struct{}) int {
+	list := w.waiters[channel]
+	for i, c := range list {
+		if c == wake {
+			list = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(list) == 0 {
+		delete(w.waiters, channel)
+		return 0
+	}
+	w.waiters[channel] = list
+	return len(list)
 }
