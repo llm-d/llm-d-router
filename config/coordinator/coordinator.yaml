@@ -101,10 +101,9 @@ pipeline:
     # into async serving: passthrough labels it (quota classification,
     # objective and fairness headers) and lets the pipeline continue;
     # enqueue answers 202 with the request id; wait holds the connection
-    # until the result lands or the wait cap expires. A request without
-    # the mode header is left completely untouched, which also keeps
-    # AP-dispatched requests inert when they re-enter the pipeline. The
-    # step also serves GET/DELETE /v1/requests/{id} and GET /v1/models.
+    # until the result lands or the wait cap expires. Without the mode
+    # header the step is a no-op. It also serves GET/DELETE
+    # /v1/requests/{id} and GET /v1/models.
     # All params and their defaults are documented in
     # pkg/coordinator/steps/async_broker_config.go.
     # -------------------------------------------------------------------
@@ -135,7 +134,7 @@ pipeline:
     #     # deadline.
     #     # wait_cap_seconds: 55
     #     # fetch_grace_seconds is the mailbox TTL applied after a delivered
-    #     # fetch (default 60). Zero deletes the result on delivery.
+    #     # fetch. Zero deletes the result on delivery.
     #     # fetch_grace_seconds: 60
 
     # -------------------------------------------------------------------

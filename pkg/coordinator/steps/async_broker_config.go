@@ -94,11 +94,7 @@ type asyncQuotaConfig struct {
 }
 
 // asyncBrokerConfig is the async-broker step configuration, decoded from the
-// step's params block. A request only receives async treatment when it
-// carries ModeHeader; without it the step is a no-op, so the coordinator
-// behaves as if the step were not configured. That default is what makes
-// AP-dispatched requests (which never carry the mode header) re-enter the
-// pipeline inertly.
+// step's params block.
 type asyncBrokerConfig struct {
 	RedisURL string `json:"redis_url"`
 
@@ -107,8 +103,8 @@ type asyncBrokerConfig struct {
 	// TenantHeader names the header carrying the tenant key (default X-Team).
 	TenantHeader string `json:"tenant_header,omitempty"`
 	// TimeoutHeader lets clients request a deadline in seconds for the queued
-	// modes (default X-Request-Timeout-Seconds). Clamped per mode only when a
-	// max is configured, unbounded otherwise.
+	// modes (default X-Request-Timeout-Seconds). Requested deadlines are
+	// clamped by the mode's max_seconds.
 	TimeoutHeader string `json:"timeout_header,omitempty"`
 
 	// Timeouts holds the deadline bounds per queued mode ("enqueue", "wait").
@@ -123,8 +119,9 @@ type asyncBrokerConfig struct {
 	// the request deadline.
 	WaitCapSeconds int64 `json:"wait_cap_seconds,omitempty"`
 	// FetchGraceSeconds is the mailbox TTL applied after a delivered fetch,
-	// covering lost-response retries. Unset defaults to 60. Zero deletes the
-	// result on delivery, matching wait mode's eager delete.
+	// covering lost-response retries. Unset falls back to
+	// resultFetchGraceTTL. Zero deletes the result on delivery, matching
+	// wait mode's eager delete.
 	FetchGraceSeconds *int64 `json:"fetch_grace_seconds,omitempty"`
 
 	// Routes select the broker queue and tier per request. The queues must
@@ -248,8 +245,8 @@ func (c *asyncBrokerConfig) validate() error {
 	return nil
 }
 
-// fetchGrace resolves the mailbox TTL applied after a delivered fetch. Unset
-// falls back to resultFetchGraceTTL; zero means delete on delivery.
+// fetchGrace resolves the mailbox TTL applied after a delivered fetch, per
+// FetchGraceSeconds.
 func (c *asyncBrokerConfig) fetchGrace() time.Duration {
 	if c.FetchGraceSeconds == nil {
 		return resultFetchGraceTTL
@@ -257,12 +254,10 @@ func (c *asyncBrokerConfig) fetchGrace() time.Duration {
 	return time.Duration(*c.FetchGraceSeconds) * time.Second
 }
 
-// timeoutBounds resolves the deadline bounds for a queued mode. Each field
-// falls back independently, so a partial timeouts entry (say, only
-// max_seconds) never disturbs the other field's default. An unset default is
-// 60s for wait and 3600s for enqueue. An unset max means no clamp for
-// enqueue; for wait it defaults to 1h, raised to default_seconds when that
-// is configured higher so a deliberate long default is never clamped.
+// timeoutBounds resolves the deadline bounds for a queued mode, applying the
+// fallbacks documented on the Timeouts field. Each field falls back
+// independently, so a partial timeouts entry (say, only max_seconds) never
+// disturbs the other field's default.
 func (c *asyncBrokerConfig) timeoutBounds(m asyncMode) asyncTimeoutBounds {
 	b := c.Timeouts[string(m)]
 	if b.DefaultSeconds <= 0 {

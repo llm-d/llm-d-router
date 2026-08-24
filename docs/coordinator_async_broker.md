@@ -1,6 +1,6 @@
 # Async Broker Step
 
-The async-broker step bridges the coordinator to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker, giving standard OpenAI clients access to request-level queueing through the gateway they already use. Clients opt in per request with a mode header, and requests without the header pass through the step untouched. This also keeps AP-dispatched requests inert when they re-enter the pipeline, since dispatches never carry the mode header.
+The async-broker step bridges the coordinator to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker, giving standard OpenAI clients access to request-level queueing through the gateway they already use. Clients opt in per request with a mode header, and requests without the header pass through the step untouched.
 
 The step is optional and must run first in the pipeline when enabled. Queued requests re-enter the same pipeline on dispatch, so they stay eligible for everything the coordinator does for synchronous requests.
 
@@ -44,7 +44,7 @@ HTTP/1.1 200 OK                    # the model's response, upstream status mirro
 # wrong tenant, expired TTL, or deleted:  410 Gone
 ```
 
-After a successful fetch delivery the result's TTL is shrunk to a grace window (fetch_grace_seconds, 60s default), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
+After a successful fetch delivery the result's TTL is shrunk to a grace window (`fetch_grace_seconds`), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
 
 **Wait** returns the model's response on the original connection with the upstream status mirrored, exactly as if the model server had answered directly, and the delivered result is deleted eagerly. Wake-up is a Redis keyspace notification on the result key, with a polling fallback when notifications are unavailable. The hold runs to the request deadline and answers 504 there, or ends early at `wait_cap_seconds` with the 202 response, leaving the request fetchable. If the client disconnects, the step cancels the request pre-dispatch.
 

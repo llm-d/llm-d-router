@@ -63,10 +63,9 @@ const waitBackupPollInterval = 2 * time.Second
 // request that carries the mode header opts into async serving: passthrough
 // labels it (quota classification, objective and fairness headers) and lets
 // the pipeline continue; enqueue and wait hand it to the async processor via
-// the broker queue and serve the response themselves. A request without the
-// mode header is left completely untouched, which is also what keeps
-// AP-dispatched requests inert on re-entry. The step must run before the
-// pipeline's processing steps, and it registers the result retrieval routes
+// the broker queue and serve the response themselves; without the header the
+// step is a no-op (see Execute). The step must run first in the pipeline
+// (enforced by the builder), and it registers the result retrieval routes
 // (GET/DELETE /v1/requests/{id}, GET /v1/models) on the coordinator listener.
 type AsyncBrokerStep struct {
 	cfg    *asyncBrokerConfig
