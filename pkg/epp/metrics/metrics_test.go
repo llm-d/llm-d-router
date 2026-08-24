@@ -1375,14 +1375,24 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 
 	const pool = "test-pool"
 
-	RecordFlowControlPoolSaturation(pool, 0.5)
-	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool))
+	RecordFlowControlPoolSaturation(pool, "effective", 0.5)
+	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool))
+	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, valNew)
+
+	RecordFlowControlPoolSaturation(pool, "prefill", 0.3)
+	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "prefill"))
+	require.NoError(t, err)
+	require.Equal(t, 0.3, val)
+
+	RecordFlowControlPoolSaturation(pool, "decode", 0.7)
+	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "decode"))
+	require.NoError(t, err)
+	require.Equal(t, 0.7, val)
 }
 
 func TestFlowControlRequestsTotalMetric(t *testing.T) {

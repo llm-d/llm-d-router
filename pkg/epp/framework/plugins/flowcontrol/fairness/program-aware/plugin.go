@@ -30,7 +30,6 @@ type Config struct {
 
 	LASWeightService   float64 `json:"lasWeightService,omitempty"`
 	LASWeightHeadWait  float64 `json:"lasWeightHeadWait,omitempty"`
-	LASDecayFactor     float64 `json:"lasDecayFactor,omitempty"`
 	LASHalfLifeSeconds float64 `json:"lasHalfLifeSeconds,omitempty"`
 }
 
@@ -41,8 +40,7 @@ func DefaultConfig() Config {
 		EvictionSweepSeconds: 300,
 		LASWeightService:     0.8,
 		LASWeightHeadWait:    0.2,
-		LASDecayFactor:       0.99997,
-		LASHalfLifeSeconds:   0,
+		LASHalfLifeSeconds:   60,
 	}
 }
 
@@ -58,9 +56,6 @@ func (c Config) validate() error {
 	}
 	if c.LASWeightHeadWait < 0 {
 		return fmt.Errorf("lasWeightHeadWait must be >= 0, got %v", c.LASWeightHeadWait)
-	}
-	if c.LASDecayFactor <= 0 || c.LASDecayFactor > 1 {
-		return fmt.Errorf("lasDecayFactor must be in (0, 1], got %v", c.LASDecayFactor)
 	}
 	if c.LASHalfLifeSeconds < 0 {
 		return fmt.Errorf("lasHalfLifeSeconds must be >= 0, got %v", c.LASHalfLifeSeconds)
@@ -201,6 +196,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		return nil, nil //nolint:nilnil
 	}
 
+	// IterateQueues visits only active (non-empty) queues. That is sufficient: attained-service
+	// decay is time-anchored inside the strategy, so an idle program's service ages out without its
+	// queue being visited.
 	infos := make(map[string]QueueInfo)
 	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
 		if queue == nil {

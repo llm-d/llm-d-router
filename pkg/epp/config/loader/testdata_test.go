@@ -262,6 +262,25 @@ featureGates:
 flowControl:
   maxBytes: "1024"
   defaultRequestTTL: 1m
+  noEndpointRequestTTL: 5m
+`
+
+// successFlowControlInheritedTTLText covers a config that names only defaultRequestTTL: the no-endpoint budget follows
+// it, so disabling the TTL is not silently narrowed to the regime where the pool has endpoints.
+const successFlowControlInheritedTTLText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates:
+- flowControl
+flowControl:
+  defaultRequestTTL: 0s
 `
 
 const successflowControlConfigDisabledText = `
@@ -417,6 +436,27 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
   - pluginRef: secondParser
+`
+
+// successExplicitPassthroughConfigText configures a fallback explicitly under a
+// custom name, alongside a claimed-path parser.
+const successExplicitPassthroughConfigText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+- name: myFallback
+  type: passthrough-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: myFallback
 `
 
 // successDataLayerAutoDefaultText has the datalayer enabled without data config.

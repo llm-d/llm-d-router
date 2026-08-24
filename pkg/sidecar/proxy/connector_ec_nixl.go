@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // fanoutEncoderCollect fans out per-image encoder requests and merges

@@ -27,7 +27,9 @@ The EPP acts as the routing intelligence engine. Its resource usage scales prima
   of the inflight-request sizing above. The global `flowControl.maxRequests` / `maxBytes` caps
   default to unlimited, so set a global `maxBytes` under the container memory limit: at the per-band
   default, a handful of bands clears the sizing guidance below before any band cap engages. Lower
-  these limits (or set a shorter `defaultRequestTTL`) to trade queueing for earlier shedding.
+  these limits (or set a shorter `defaultRequestTTL`) to trade queueing for earlier shedding. A
+  `noEndpointRequestTTL` sized for a cold start holds bodies for that whole budget while the pool is
+  empty, so the band caps, not the budget, become what bounds queue memory during a scale-from-zero.
 - **Sizing Guidelines**:
   - For a request rate of 50 to 100 requests/second with 1k output tokens, EPP requires between **4 GiB and 6 GiB** of memory.
   - For workloads with longer output lengths (such as 5k output tokens), memory usage can reach **20+ GiB** due to the accumulation of state for concurrent inflight requests.

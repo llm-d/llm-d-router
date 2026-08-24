@@ -414,14 +414,17 @@ func TestDirector_HandleRequest(t *testing.T) {
 		initialTargetModelName  string // Initial target model in the reqCtx.
 		parser                  fwkrh.Parser
 		wantErrCode             string                   // Expected errcommon code string
+		wantDroppedReason       string                   // If non-empty, expected x-llm-d-request-dropped-reason header on the error
 		wantReqCtx              *handlers.RequestContext // Fields to check in the returned RequestContext
 		targetModelName         string                   // Expected model name after target model resolution
 		admitRequestDenialError error                    // Expected denial error from admission plugin
 		dataProducerPlugin      *mockDataProducerPlugin
 		screener                *mockScreener
+		emptyEndpoints          bool // If true, the director locates no endpoint candidates.
 		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
@@ -452,6 +455,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"model":  model,
 				"prompt": "critical prompt",
 			},
+			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -582,9 +586,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 			preRequestPlugins: []*mockPreRequestPlugin{{
 				name: "test-pre-request-plugin",
 				modifyFn: func(request *fwksched.InferenceRequest) {
-					if payloadMap, ok := request.Body.Payload.(fwkrh.PayloadMap); ok {
-						payloadMap["new_key"] = "new_value"
-					}
+					request.Body.MutatePayloadMap(func(m fwkrh.PayloadMap) {
+						m["new_key"] = "new_value"
+					})
 				},
 			}},
 		},
@@ -927,6 +931,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			inferenceObjectiveName:  "food-review-1",
+			wantRawBodyUnchanged:    true,
 		},
 		{
 			name: "request rejected by admission controller",
@@ -992,7 +997,21 @@ func TestDirector_HandleRequest(t *testing.T) {
 			screener: &mockScreener{name: "eliminate-all", screen: func([]fwksched.Endpoint) []fwksched.Endpoint {
 				return nil
 			}},
-			wantErrCode: errcommon.ServiceUnavailable,
+			wantErrCode:       errcommon.ServiceUnavailable,
+			wantDroppedReason: string(errcommon.RequestDroppedReasonNoEndpoints),
+		},
+		{
+			name: "no endpoint candidates located",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			initialTargetModelName:  model,
+			inferenceObjectiveName:  objectiveName,
+			emptyEndpoints:          true,
+			wantErrCode:             errcommon.ServiceUnavailable,
+			wantDroppedReason:       string(errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
 			name: "scheduler returns error",
@@ -1005,6 +1024,30 @@ func TestDirector_HandleRequest(t *testing.T) {
 				m.scheduleErr = errors.New("simulated scheduler failure")
 			},
 			wantErrCode:            errcommon.ResourceExhausted,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			// The typed error inside a joined scheduler error, including its
+			// drop-reason header, must reach the caller instead of the
+			// untyped-error fallback.
+			name: "scheduler returns joined error with typed capacity rejection",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "prompt that causes scheduling drain",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleErr = errors.Join(
+					errors.New("failed to run scheduler profile 'default'"),
+					fmt.Errorf("profile %q: %w", "default", errcommon.Error{
+						Code:    errcommon.ResourceExhausted,
+						Msg:     "no endpoints available for the given request",
+						Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+					}),
+				)
+			},
+			wantErrCode:            errcommon.ResourceExhausted,
+			wantDroppedReason:      string(errcommon.RequestDroppedReasonSaturated),
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -1068,6 +1111,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 				config := NewConfig()
 				if test.dataProducerPlugin != nil {
+					datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{test.dataProducerPlugin})
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
 				if test.screener != nil {
@@ -1087,6 +1131,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
+				if test.emptyEndpoints {
+					director.endpointCandidates = &mockEndpointCandidates{}
+				}
 				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
@@ -1110,6 +1157,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Error parsing the reqBodyMap, err is %v", err)
 				}
+				originalRawBody := append([]byte(nil), reqCtx.Request.RawBody...)
 
 				// Add appropriate path header based on request body content for path-based API detection
 				if _, hasPrompt := test.reqBodyMap["prompt"]; hasPrompt {
@@ -1136,6 +1184,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					var e errcommon.Error
 					if assert.ErrorAs(t, err, &e, "Error should be of type errcommon.Error") {
 						assert.Equal(t, test.wantErrCode, e.Code, "Error code mismatch")
+						if test.wantDroppedReason != "" {
+							assert.Equal(t, test.wantDroppedReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey], "drop-reason header mismatch")
+						}
 					}
 					return
 				}
@@ -1167,6 +1218,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
 					}
+				}
+				if test.wantRawBodyUnchanged {
+					assert.Equal(t, originalRawBody, returnedReqCtx.Request.RawBody,
+						"reqCtx.Request.RawBody should be byte-identical to the input when no rewrite applies")
 				}
 				assert.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 			})
@@ -1648,7 +1703,10 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
+	// Each dispatch snapshots the accumulator, so every invocation carries the total at call time.
+	reqCtx.StreamedEvents = 5
 	director.HandleResponseBody(ctx, reqCtx, false)
+	reqCtx.StreamedEvents = 6
 	director.HandleResponseBody(ctx, reqCtx, false)
 
 	// Intermediate chunks (endOfStream=false) run asynchronously, wait for them.
@@ -1659,6 +1717,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "async response body plugins should have been called for intermediate chunks")
 
 	// Final chunk (endOfStream=true) runs synchronously (drains queue first).
+	reqCtx.StreamedEvents = 7
 	director.HandleResponseBody(ctx, reqCtx, true)
 
 	ps1.mu.Lock()
@@ -1674,6 +1733,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		assert.Equal(t, "test-req-id-for-streaming", resp.RequestID)
 		assert.Equal(t, reqCtx.Response.Headers, resp.Headers)
 		assert.Equal(t, "namespace1/test-pod-name", targetPods[i])
+		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
 		if i < 2 {
 			assert.False(t, resp.EndOfStream, "EndOfStream should be false for chunk %d", i)
 		} else {
@@ -1696,7 +1756,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const numChunks = 50
-	reqCtx := newResponseBodyTestRequestContext("ordering-test-request", 0)
+	reqCtx := newResponseBodyTestRequestContext("ordering-test-request")
 
 	for i := range numChunks {
 		reqCtx.Usage = fwkrh.Usage{CompletionTokens: i}
@@ -1727,8 +1787,8 @@ func TestDirector_HandleResponseBody_DuplicateRequestIDQueuesAreIndependent(t *t
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const requestID = "duplicate-request-id"
-	firstReqCtx := newResponseBodyTestRequestContext(requestID, 0)
-	secondReqCtx := newResponseBodyTestRequestContext(requestID, 0)
+	firstReqCtx := newResponseBodyTestRequestContext(requestID)
+	secondReqCtx := newResponseBodyTestRequestContext(requestID)
 
 	director.HandleResponseBody(ctx, firstReqCtx, false)
 	require.Eventually(t, func() bool {
@@ -1955,7 +2015,7 @@ func (p *blockingResponseStreamingPlugin) release() {
 	close(p.releaseCh)
 }
 
-func newResponseBodyTestRequestContext(requestID string, completionTokens int) *handlers.RequestContext {
+func newResponseBodyTestRequestContext(requestID string) *handlers.RequestContext {
 	return &handlers.RequestContext{
 		Request: &handlers.Request{
 			Headers: map[string]string{
@@ -1966,7 +2026,6 @@ func newResponseBodyTestRequestContext(requestID string, completionTokens int) *
 			Headers: map[string]string{},
 		},
 		TargetPod: &fwkdl.EndpointMetadata{},
-		Usage:     fwkrh.Usage{CompletionTokens: completionTokens},
 	}
 }
 
@@ -2216,4 +2275,64 @@ func TestRunPreRequestPlugins_AggregatesErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), `PreRequest "third/mock" failed`)
 	assert.Equal(t, []string{"first", "second", "third"}, invoked,
 		"every plugin must run; a failure in one must not short-circuit the rest")
+}
+
+func TestDirector_HandleResponseBody_TerminationCause(t *testing.T) {
+	testCases := []struct {
+		name     string
+		recorded fwkrc.TerminationCause
+		want     fwkrc.TerminationCause
+	}{
+		{
+			name: "a stream that reached its end completed naturally",
+			want: fwkrc.TerminationCauseNatural,
+		},
+		{
+			name:     "a recorded cause survives to the record",
+			recorded: fwkrc.TerminationCauseEvicted,
+			want:     fwkrc.TerminationCauseEvicted,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := newTestResponseStreaming("ps")
+			ctx := logutil.NewTestLoggerIntoContext(context.Background())
+			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+				NewConfig().WithResponseStreamingPlugins(ps))
+
+			reqCtx := newResponseBodyTestRequestContext("test-req-id")
+			reqCtx.TerminationCause = tc.recorded
+
+			director.HandleResponseBody(ctx, reqCtx, true)
+
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+			require.Len(t, ps.respsOnStreaming, 1)
+			assert.Equal(t, tc.want, ps.respsOnStreaming[0].TerminationCause)
+		})
+	}
+}
+
+func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps))
+
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	reqCtx.TerminationCause = fwkrc.TerminationCauseClientDisconnect
+
+	director.HandleResponseBody(ctx, reqCtx, false)
+
+	require.Eventually(t, func() bool {
+		ps.mu.Lock()
+		defer ps.mu.Unlock()
+		return len(ps.respsOnStreaming) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	assert.Empty(t, ps.respsOnStreaming[0].TerminationCause,
+		"mid-stream chunks carry no cause: the stream has not ended")
 }
