@@ -55,7 +55,7 @@ After a successful fetch delivery the result's TTL is shrunk to a grace window (
 The step registers three routes on the coordinator listener:
 
 - `GET /v1/requests/{id}` fetches a queued result, tenant scoped and non-destructive
-- `DELETE /v1/requests/{id}` reclaims a result early
+- `DELETE /v1/requests/{id}` cancels a still queued request and reclaims its result. A request already dispatched runs to completion, and its result then sits out the mailbox TTL
 - `GET /v1/models` serves the model list derived from the configured routes
 
 ## Broker state
@@ -108,7 +108,7 @@ To enable the step, add this block as the first entry under `steps:` in the coor
 | `default_queue` | `request-sortedset` | queue for requests matching no route |
 | `objectives` | none | InferenceObjective names stamped per tier, selected by quota classification |
 | `quota` | prefix `quota:`, attribute `userid`, window 300s | reserved concurrency limits per tenant, counters shared with the AP's redis-quota gate. Tenants without an entry are always classified reserved |
-| `timeouts` | wait 60s, enqueue 1h | deadline bounds per queued mode. `max_seconds` caps client requested deadlines |
+| `timeouts` | wait 60s (max 1h), enqueue 1h (no max) | deadline bounds per queued mode. `max_seconds` caps client requested deadlines |
 | `wait_cap_seconds` | none | bounds held wait connections, ending the hold with the 202 response |
 | `fetch_grace_seconds` | 60 | mailbox TTL applied after a delivered fetch. Zero deletes the result on delivery |
 | `wakeup_mode` | `auto` | `notify`, `poll`, or `auto` which probes for keyspace notification support |
@@ -122,7 +122,7 @@ All params and their defaults are documented in `pkg/coordinator/steps/async_bro
 | :---- | :---- | :---- | :---- | :---- |
 | Wait deadline | request accepted → result written to Redis | 60s | step param `timeouts.wait.default_seconds`, `X-Request-Timeout-Seconds` per request | hold answers 504 DEADLINE_EXCEEDED |
 | Enqueue deadline | request accepted (202) → result written to Redis | 1h | step param `timeouts.enqueue.default_seconds`, `X-Request-Timeout-Seconds` per request | fetch returns 504 DEADLINE_EXCEEDED |
-| Deadline clamp | applied once at admission, not a running clock | none | step param `timeouts.<mode>.max_seconds` | silently caps the requested deadline |
+| Deadline clamp | applied once at admission, not a running clock | wait 1h, enqueue none | step param `timeouts.<mode>.max_seconds` | silently caps the requested deadline |
 | Wait hold cap | request accepted → result written to Redis or deadline | none | step param `wait_cap_seconds` | hold ends with 202 pending, still fetchable by id |
 | Per-dispatch attempt | AP worker sends the request → full response read back | 5m | AP flag `--request-timeout` | 504 DEADLINE_EXCEEDED, not retried |
 | Result TTL | result written to Redis → first fetch, expiry, or DELETE | none | AP queue config `result_ttl_seconds` | result deleted + fetch returns 410 Gone |

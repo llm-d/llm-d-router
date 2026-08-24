@@ -392,6 +392,16 @@ func TestAsyncBrokerDeadlineClamping(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 		assert.InDelta(t, time.Now().Add(3600*time.Second).Unix(), readDeadline(t, rdb), 5)
 	})
+
+	t.Run("wait max defaults to one hour", func(t *testing.T) {
+		cfg := &asyncBrokerConfig{}
+		assert.Equal(t, int64(defaultWaitMaxSecs), cfg.timeoutBounds(asyncModeWait).MaxSeconds)
+		// A default configured above the fallback max raises the max with it.
+		cfg.Timeouts = map[string]asyncTimeoutBounds{"wait": {DefaultSeconds: 7200}}
+		assert.Equal(t, int64(7200), cfg.timeoutBounds(asyncModeWait).MaxSeconds)
+		// Enqueue stays unclamped.
+		assert.Equal(t, int64(0), cfg.timeoutBounds(asyncModeEnqueue).MaxSeconds)
+	})
 }
 
 func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
@@ -527,6 +537,14 @@ func TestAsyncBrokerRoutes(t *testing.T) {
 	exists, err = rdb.Exists(t.Context(), key).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists)
+
+	// Deleting a still queued request stamps its cancellation marker (the
+	// cancel script copies the active token, so only in-flight ids cancel).
+	rec = do(http.MethodDelete, "/v1/requests/pending-id", "team-a")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	cancelled, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "pending-id"))).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), cancelled)
 
 	// Result error codes map onto client statuses.
 	res, err = json.Marshal(api.ResultMessage{ErrorCode: api.ErrCodeDeadlineExceeded, ErrorMessage: "too slow"})

@@ -48,6 +48,10 @@ const (
 
 	defaultAsyncTimeoutSecs   = 60
 	defaultEnqueueTimeoutSecs = 3600
+	// defaultWaitMaxSecs bounds client-requested wait deadlines when no
+	// max_seconds is configured: every wait holds a live connection, so an
+	// arbitrarily large requested deadline must not pin one for days.
+	defaultWaitMaxSecs = 3600
 )
 
 // asyncRoute maps a request to a broker queue and tier. Empty Model or Tenant
@@ -110,7 +114,9 @@ type asyncBrokerConfig struct {
 	// Timeouts holds the deadline bounds per queued mode ("enqueue", "wait").
 	// Each field falls back independently when unset: default_seconds to 60
 	// for wait and 3600 for enqueue (deferred work legitimately outlives any
-	// connection), max_seconds to no clamp.
+	// connection). An unset max_seconds means no clamp for enqueue, but wait
+	// holds a live connection per request, so its max defaults to 3600 (or
+	// default_seconds when that is configured higher).
 	Timeouts map[string]asyncTimeoutBounds `json:"timeouts,omitempty"`
 	// WaitCapSeconds, when > 0, bounds how long wait mode holds a connection
 	// before falling back to the enqueue response. Unset, the hold runs to
@@ -254,7 +260,9 @@ func (c *asyncBrokerConfig) fetchGrace() time.Duration {
 // timeoutBounds resolves the deadline bounds for a queued mode. Each field
 // falls back independently, so a partial timeouts entry (say, only
 // max_seconds) never disturbs the other field's default. An unset default is
-// 60s for wait and 3600s for enqueue; an unset max means no clamp.
+// 60s for wait and 3600s for enqueue. An unset max means no clamp for
+// enqueue; for wait it defaults to 1h, raised to default_seconds when that
+// is configured higher so a deliberate long default is never clamped.
 func (c *asyncBrokerConfig) timeoutBounds(m asyncMode) asyncTimeoutBounds {
 	b := c.Timeouts[string(m)]
 	if b.DefaultSeconds <= 0 {
@@ -262,6 +270,12 @@ func (c *asyncBrokerConfig) timeoutBounds(m asyncMode) asyncTimeoutBounds {
 			b.DefaultSeconds = defaultEnqueueTimeoutSecs
 		} else {
 			b.DefaultSeconds = defaultAsyncTimeoutSecs
+		}
+	}
+	if m == asyncModeWait && b.MaxSeconds == 0 {
+		b.MaxSeconds = defaultWaitMaxSecs
+		if b.DefaultSeconds > b.MaxSeconds {
+			b.MaxSeconds = b.DefaultSeconds
 		}
 	}
 	return b

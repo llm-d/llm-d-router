@@ -141,6 +141,13 @@ func (s *AsyncBrokerStep) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.checkFetchParams(w, tenant, id) {
 		return
 	}
+	// Cancel first so a still-queued request is dropped pre-dispatch instead
+	// of running to completion and recreating the mailbox this handler just
+	// deleted. Best effort: a request already dispatched runs to completion,
+	// and its result then sits out the mailbox TTL.
+	if err := s.sub.CancelRequests(r.Context(), []string{envelopeID(tenant, id)}); err != nil {
+		s.logger.Error(err, "failed to cancel request on delete", "id", id)
+	}
 	if err := s.rdb.Del(r.Context(), resultKey(tenant, id)).Err(); err != nil {
 		s.logger.Error(err, "failed to delete result", "id", id)
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "DELETE_FAILED",
