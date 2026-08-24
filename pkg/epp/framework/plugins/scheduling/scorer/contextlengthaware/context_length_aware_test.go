@@ -13,8 +13,12 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
+
+const testReusableTokensProducerName = "p2p-source"
 
 // Helper functions
 
@@ -36,6 +40,17 @@ func createRequest() *scheduling.InferenceRequest {
 	}
 }
 
+func createHundredTokenRequest() *scheduling.InferenceRequest {
+	return &scheduling.InferenceRequest{
+		RequestID: "test-request",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 100)}},
+			},
+		},
+	}
+}
+
 func TestFactory(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -54,6 +69,12 @@ func TestFactory(t *testing.T) {
 			pluginName: "empty-label",
 			jsonParams: `{"label": ""}`,
 			expectErr:  true,
+		},
+		{
+			name:       "reusable tokens producer enables cache subtraction",
+			pluginName: "ctx-aware",
+			jsonParams: `{"reusableTokensProducerName": "p2p-source"}`,
+			expectErr:  false,
 		},
 		{
 			name:       "malformed JSON should error",
@@ -80,6 +101,153 @@ func TestFactory(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConsumesReusableTokensOnlyWhenConfigured(t *testing.T) {
+	defaultPlugin := NewContextLengthAware("default", &contextLengthAwareParameters{
+		Label: DefaultContextLengthLabel,
+	})
+	defaultDependencies := defaultPlugin.Consumes()
+	require.Len(t, defaultDependencies.Required, 1)
+	assert.Contains(t, defaultDependencies.Required, tokenproducer.TokenizedPromptDataKey)
+
+	producerName := "session-p2p-source"
+	configuredPlugin := NewContextLengthAware("configured", &contextLengthAwareParameters{
+		Label:                      DefaultContextLengthLabel,
+		ReusableTokensProducerName: producerName,
+	})
+	configuredDependencies := configuredPlugin.Consumes()
+	require.Len(t, configuredDependencies.Required, 2)
+	expectedKey := p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName)
+	assert.Equal(t, p2psource.ReusablePrefixTokens(0), configuredDependencies.Required[expectedKey])
+}
+
+func TestFactoryConfiguresReusableTokensProducer(t *testing.T) {
+	producerName := "session-p2p-source"
+	created, err := Factory("cache-aware", fwkplugin.StrictDecoder([]byte(
+		`{"reusableTokensProducerName": "session-p2p-source"}`)), nil)
+	require.NoError(t, err)
+	configured := created.(*ContextLengthAware)
+
+	assert.Equal(t, producerName, configured.reusableTokensProducerName)
+	expectedKey := p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName)
+	assert.Equal(t, expectedKey, configured.reusableTokensDataKey)
+	assert.Contains(t, configured.Consumes().Required, expectedKey)
+}
+
+func TestReusableTokensFilter(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-50"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "51-100"}),
+	}
+
+	t.Run("disabled configuration keeps total length", func(t *testing.T) {
+		plugin := NewContextLengthAware("default", &contextLengthAwareParameters{
+			Label:           DefaultContextLengthLabel,
+			EnableFiltering: true,
+		})
+		request := createHundredTokenRequest()
+		request.PutAttribute(
+			p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(testReusableTokensProducerName),
+			p2psource.ReusablePrefixTokens(60),
+		)
+
+		filtered := plugin.Filter(ctx, request, endpoints)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "long", filtered[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("configured producer subtracts reusable tokens", func(t *testing.T) {
+		producerName := testReusableTokensProducerName
+		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+			Label:                      DefaultContextLengthLabel,
+			EnableFiltering:            true,
+			ReusableTokensProducerName: producerName,
+		})
+		request := createHundredTokenRequest()
+		request.PutAttribute(
+			p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+			p2psource.ReusablePrefixTokens(60),
+		)
+
+		filtered := plugin.Filter(ctx, request, endpoints)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "short", filtered[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("missing runtime attribute keeps total length", func(t *testing.T) {
+		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+			Label:                      DefaultContextLengthLabel,
+			EnableFiltering:            true,
+			ReusableTokensProducerName: testReusableTokensProducerName,
+		})
+
+		filtered := plugin.Filter(ctx, createHundredTokenRequest(), endpoints)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "long", filtered[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("wrong runtime attribute type keeps total length", func(t *testing.T) {
+		producerName := testReusableTokensProducerName
+		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+			Label:                      DefaultContextLengthLabel,
+			EnableFiltering:            true,
+			ReusableTokensProducerName: producerName,
+		})
+		request := createHundredTokenRequest()
+		request.PutAttribute(
+			p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+			"invalid",
+		)
+
+		filtered := plugin.Filter(ctx, request, endpoints)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "long", filtered[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("reusable tokens are clamped to total length", func(t *testing.T) {
+		producerName := testReusableTokensProducerName
+		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+			Label:                      DefaultContextLengthLabel,
+			EnableFiltering:            true,
+			ReusableTokensProducerName: producerName,
+		})
+		request := createHundredTokenRequest()
+		request.PutAttribute(
+			p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+			p2psource.ReusablePrefixTokens(120),
+		)
+
+		filtered := plugin.Filter(ctx, request, endpoints)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "short", filtered[0].GetMetadata().ID.Name)
+	})
+}
+
+func TestReusableTokensScore(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-50"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "51-100"}),
+	}
+	producerName := testReusableTokensProducerName
+	plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+		Label:                      DefaultContextLengthLabel,
+		ReusableTokensProducerName: producerName,
+	})
+	request := createHundredTokenRequest()
+	request.PutAttribute(
+		p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+		p2psource.ReusablePrefixTokens(60),
+	)
+
+	scores := plugin.Score(ctx, request, endpoints)
+	assert.Greater(t, scores[endpoints[0]], scores[endpoints[1]])
 }
 
 func TestContextLengthAwareFilter(t *testing.T) {

@@ -14,10 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package p2psource emits the KV cache source header: a candidate pod
-// within one block of the most cached prefix KV blocks for the request, for
-// the routing sidecar to pull from over the P2P connector instead of
-// recomputing them.
+// Package p2psource selects a peer within one block of the most cached prompt
+// prefix, publishes a request-wide reusable-prefix floor for scheduling, and
+// emits the selected peer in the KV cache source header after scheduling.
 package p2psource
 
 import (
@@ -50,6 +49,14 @@ const (
 	defaultMinCachedTokenDelta = 1
 )
 
+// ReusablePrefixTokensDataKey identifies the request-wide reusable prefix
+// token floor published by a p2p-source-producer instance.
+var ReusablePrefixTokensDataKey = plugin.NewDataKey("ReusablePrefixTokensDataKey", PluginType)
+
+// ReusablePrefixTokens is a floor on the prompt tokens every valid destination
+// can reuse either locally or by pulling from the sampled source.
+type ReusablePrefixTokens int
+
 // Config configures the p2p-source-producer.
 type Config struct {
 	// PrefixMatchInfoProducerName is the name of the data producer that
@@ -72,16 +79,18 @@ var (
 )
 
 // Producer stashes a pull-source candidate holding within one block of the
-// most cached prefix tokens during Produce, and in PreRequest sets
-// routing.KVCacheSourceHeader to that peer when it out-caches the pod
-// computing the prefix (the prefill endpoint under P/D disaggregation, the
-// primary endpoint otherwise) by at least minCachedTokenDelta tokens.
+// most cached prefix tokens and publishes a reusable-prefix floor during
+// Produce. In PreRequest it sets routing.KVCacheSourceHeader to that peer when
+// it out-caches the pod computing the prefix (the prefill endpoint under P/D
+// disaggregation, the primary endpoint otherwise) by at least
+// minCachedTokenDelta tokens.
 type Producer struct {
-	typedName           plugin.TypedName
-	prefixMatchDataKey  plugin.DataKey
-	minCachedTokenDelta int
-	prefillProfile      string
-	attrKeyValue        plugin.DataKey
+	typedName                   plugin.TypedName
+	prefixMatchDataKey          plugin.DataKey
+	reusablePrefixTokensDataKey plugin.DataKey
+	minCachedTokenDelta         int
+	prefillProfile              string
+	attrKeyValue                plugin.DataKey
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -106,21 +115,27 @@ func New(name string, cfg Config) *Producer {
 	if prefillProfile == "" {
 		prefillProfile = defaultPrefillProfile
 	}
+	minCachedTokenDelta := cfg.MinCachedTokenDelta
+	if minCachedTokenDelta < 1 {
+		minCachedTokenDelta = defaultMinCachedTokenDelta
+	}
 	return &Producer{
-		typedName:           plugin.TypedName{Type: PluginType, Name: name},
-		prefixMatchDataKey:  attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
-		minCachedTokenDelta: cfg.MinCachedTokenDelta,
-		prefillProfile:      prefillProfile,
-		attrKeyValue:        plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
+		typedName:                   plugin.TypedName{Type: PluginType, Name: name},
+		prefixMatchDataKey:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
+		reusablePrefixTokensDataKey: ReusablePrefixTokensDataKey.WithNonEmptyProducerName(name),
+		minCachedTokenDelta:         minCachedTokenDelta,
+		prefillProfile:              prefillProfile,
+		attrKeyValue:                plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
 	}
 }
 
 // TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName { return p.typedName }
 
-// Produces declares no produced data keys; the best-match result is carried
-// as a request attribute consumed by this plugin's own PreRequest.
-func (p *Producer) Produces() map[plugin.DataKey]any { return map[plugin.DataKey]any{} }
+// Produces declares the request-wide reusable prefix token floor.
+func (p *Producer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.reusablePrefixTokensDataKey: ReusablePrefixTokens(0)}
+}
 
 // Consumes declares the PrefixCacheMatchInfo dependency so the data-layer
 // DAG orders the producing plugin before this one.
@@ -145,9 +160,10 @@ func (p *Producer) attrKey() plugin.DataKey {
 	return p.attrKeyValue
 }
 
-// Produce reads each candidate's PrefixCacheMatchInfo and stashes the chosen
-// source on the request: among the endpoints within one block of the most
-// cached prompt tokens, one is sampled with probability proportional to
+// Produce reads each candidate's PrefixCacheMatchInfo, stashes the chosen
+// source, and publishes its request-wide reusable-prefix floor. Among the
+// endpoints within one block of the most cached prompt tokens, one is sampled
+// with probability proportional to
 // 1/(1+waiting queue), using a request-ID hash as the sampling coordinate.
 // Load-blind argmax alone would send every consumer of a widely-replicated
 // prefix to the same peer (equal counts lose to iteration order),
@@ -220,6 +236,11 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	}
 	if best.cachedTokens > 0 {
 		request.PutAttribute(p.attrKey(), &best)
+		reusableTokens := best.cachedTokens - p.minCachedTokenDelta + 1
+		if reusableTokens < 0 {
+			reusableTokens = 0
+		}
+		request.PutAttribute(p.reusablePrefixTokensDataKey, ReusablePrefixTokens(reusableTokens))
 	}
 	log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE).Info("Produce completed",
 		"requestID", request.RequestID, "endpoints", len(endpoints),
