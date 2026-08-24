@@ -276,7 +276,8 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		respBody := readErrorBody(resp.Body)
+		return nil, "", upstreamError(ReplaceMediaURLsStepName, resp.StatusCode, respBody)
 	}
 
 	if resp.ContentLength > s.maxDownloadSize {
