@@ -661,9 +661,12 @@ batches are unchanged.
 | Connector | Flag | Env var | Default | Description |
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
+| `sglang` | — | `SGLANG_BOOTSTRAP_HOST` | Selected prefill host | Host shared by the SGLang prefill ranks for bootstrap registration and lookup. Set this to the rank-zero Service for a multi-node prefill group. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. For the Rust frontend, set this to the rank-zero HTTP port. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode leg so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
+
+External DP routing to SGLang Rust rank listeners requires prefill servers to use `--load-balance-method round_robin`. Each selected rank then registers the request's bootstrap room with the shared registry, and decode resolves the actual prefill rank from that registration. The sidecar does not derive a rank from the selected port.
 
 ---
 

@@ -21,13 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -39,12 +36,15 @@ import (
 )
 
 var (
+	sglangBootstrapHost string
 	sglangBootstrapPort int
 	// The prefill leg must finish before buffered decode output can be committed.
 	sglangPrefillWaitTimeout = 5 * time.Minute
 )
 
 func init() {
+	sglangBootstrapHost = os.Getenv("SGLANG_BOOTSTRAP_HOST")
+
 	// Default SGLang bootstrap port
 	sglangBootstrapPort = 8998
 
@@ -246,12 +246,9 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 		modifiedRequest[k] = v
 	}
 
-	// Generate bootstrap host from prefill host
-	bootstrapHost := extractHost(prefillHostPort)
-
-	prefillRank, prefillDPSize, hasPrefillRank := s.sglangPrefillRank(prefillHostPort)
-	if hasPrefillRank {
-		roomID = alignSGLangRoom(roomID, prefillRank, prefillDPSize)
+	bootstrapHost := sglangBootstrapHost
+	if bootstrapHost == "" {
+		bootstrapHost = extractHost(prefillHostPort)
 	}
 
 	// Add bootstrap information
@@ -265,38 +262,6 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 		"bootstrap_room", roomID)
 
 	return modifiedRequest
-}
-
-func (s *Server) sglangPrefillRank(prefillHostPort string) (int, int, bool) {
-	dpSize := s.config.DataParallelSize
-	if dpSize <= 1 {
-		return 0, dpSize, false
-	}
-
-	prefillHostPort, _ = strings.CutPrefix(prefillHostPort, "http://")
-	_, portString, err := net.SplitHostPort(prefillHostPort)
-	if err != nil {
-		return 0, dpSize, false
-	}
-	prefillPort, err := strconv.Atoi(portString)
-	if err != nil {
-		return 0, dpSize, false
-	}
-	rank := prefillPort - sglangBootstrapPort
-	if rank < 0 || rank >= dpSize {
-		return 0, dpSize, false
-	}
-	return rank, dpSize, true
-}
-
-func alignSGLangRoom(roomID int64, rank, dpSize int) int64 {
-	size := int64(dpSize)
-	base := roomID - roomID%size
-	rankOffset := int64(rank)
-	if base > math.MaxInt64-rankOffset {
-		base -= size
-	}
-	return base + rankOffset
 }
 
 func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, error) {

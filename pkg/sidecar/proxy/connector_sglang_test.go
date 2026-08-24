@@ -19,7 +19,6 @@ package proxy
 import (
 	"bytes"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,22 +40,28 @@ var _ = Describe("SGLang Connector", func() {
 		testInfo = sidecarConnectionTestSetup(KVConnectorSGLang)
 	})
 
-	It("should use the rank-zero bootstrap authority and align the room to the selected prefill rank", func() {
+	It("should use the configured bootstrap authority without deriving the prefill rank", func() {
+		previousHost := sglangBootstrapHost
 		previousPort := sglangBootstrapPort
 		DeferCleanup(func() {
+			sglangBootstrapHost = previousHost
 			sglangBootstrapPort = previousPort
 		})
 
+		sglangBootstrapHost = "prefill-bootstrap.example"
 		sglangBootstrapPort = 8000
-		testInfo.proxy.config.DataParallelSize = 4
 
 		request := testInfo.proxy.addSGLangBootstrapInfo(map[string]interface{}{}, "10.0.0.8:8002", 9)
 
-		Expect(request[requestFieldBootstrapHost]).To(Equal("10.0.0.8"))
+		Expect(request[requestFieldBootstrapHost]).To(Equal("prefill-bootstrap.example"))
 		Expect(request[requestFieldBootstrapPort]).To(Equal(8000))
-		Expect(request[requestFieldBootstrapRoom]).To(Equal(int64(10)))
+		Expect(request[requestFieldBootstrapRoom]).To(Equal(int64(9)))
 		Expect(request).ToNot(HaveKey("disagg_prefill_dp_rank"))
-		Expect(alignSGLangRoom(math.MaxInt64, 4, 5)).To(Equal(int64(math.MaxInt64 - 3)))
+
+		sglangBootstrapHost = ""
+		request = testInfo.proxy.addSGLangBootstrapInfo(map[string]interface{}{}, "10.0.0.8:8002", 10)
+		Expect(request[requestFieldBootstrapHost]).To(Equal("10.0.0.8"))
+		Expect(request[requestFieldBootstrapRoom]).To(Equal(int64(10)))
 	})
 
 	It("should claim only the native generate path for the configured protocol", func() {
