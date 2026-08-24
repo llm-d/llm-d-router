@@ -19,6 +19,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -73,7 +74,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello, Claude"},
 					},
@@ -108,7 +109,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -141,7 +142,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system":     "You are a helpful assistant.",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -176,7 +177,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system": []any{
 						map[string]any{"type": "text", "text": "You are a helpful assistant."},
 					},
@@ -230,7 +231,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -281,7 +282,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"tools": []any{
 						map[string]any{
 							"name":        "get_weather",
@@ -314,7 +315,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"stream":     true,
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -344,7 +345,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"cache_salt": "test-salt-123",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -371,7 +372,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
 					},
@@ -455,6 +456,17 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestAnthropicParser_RejectsTrailingJSON(t *testing.T) {
+	_, err := NewAnthropicParser().ParseRequest(
+		context.Background(),
+		[]byte(`{"model":"test","max_tokens":1,"messages":[{"role":"user","content":"hello"}]}{"extra":true}`),
+		map[string]string{":path": "/v1/messages"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unexpected trailing data") {
+		t.Fatalf("ParseRequest() error = %v, want unexpected trailing data", err)
 	}
 }
 

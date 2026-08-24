@@ -19,6 +19,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -116,7 +117,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":  "test",
-					"prompt": []any{float64(1), float64(2), float64(3)},
+					"prompt": []any{json.Number("1"), json.Number("2"), json.Number("3")},
 				},
 			},
 		},
@@ -892,7 +893,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model": "text-embedding-3-small",
-					"input": []any{float64(1), float64(2), float64(3)},
+					"input": []any{json.Number("1"), json.Number("2"), json.Number("3")},
 				},
 			},
 		},
@@ -975,12 +976,12 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					"model":               "test-image-model",
 					"prompt":              "a cat wearing a spacesuit",
 					"negative_prompt":     "blurry",
-					"n":                   float64(2),
+					"n":                   json.Number("2"),
 					"size":                "1024x1024",
 					"response_format":     "b64_json",
-					"num_inference_steps": float64(30),
-					"guidance_scale":      7.5,
-					"seed":                float64(42),
+					"num_inference_steps": json.Number("30"),
+					"guidance_scale":      json.Number("7.5"),
+					"seed":                json.Number("42"),
 				},
 			},
 		},
@@ -1062,6 +1063,57 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
+	const seed = json.Number("9007199254740993")
+
+	result, err := NewOpenAIParser().ParseRequest(
+		context.Background(),
+		[]byte(`{"model":"test","prompt":"hello","seed":9007199254740993}`),
+		map[string]string{":path": "/v1/completions"},
+	)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+
+	payload, ok := result.Body.Payload.(fwkrh.PayloadMap)
+	if !ok {
+		t.Fatalf("Payload type = %T, want requesthandling.PayloadMap", result.Body.Payload)
+	}
+	if got, ok := payload["seed"].(json.Number); !ok || got != seed {
+		t.Fatalf("parsed seed = %v (%T), want %s (json.Number)", payload["seed"], payload["seed"], seed)
+	}
+
+	result.Body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
+		payload["model"] = "backend-model"
+	})
+	repackaged, err := payload.Marshal()
+	if err != nil {
+		t.Fatalf("PayloadMap.Marshal() error = %v", err)
+	}
+
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(repackaged, &got); err != nil {
+		t.Fatalf("unmarshal repackaged payload: %v", err)
+	}
+	if string(got["model"]) != `"backend-model"` {
+		t.Errorf("repackaged model = %s, want %q", got["model"], "backend-model")
+	}
+	if string(got["seed"]) != seed.String() {
+		t.Errorf("repackaged seed = %s, want %s", got["seed"], seed)
+	}
+}
+
+func TestOpenAIParser_RejectsTrailingJSON(t *testing.T) {
+	_, err := NewOpenAIParser().ParseRequest(
+		context.Background(),
+		[]byte(`{"model":"test","prompt":"hello"}{"extra":true}`),
+		map[string]string{":path": "/v1/completions"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unexpected trailing data") {
+		t.Fatalf("ParseRequest() error = %v, want unexpected trailing data", err)
 	}
 }
 

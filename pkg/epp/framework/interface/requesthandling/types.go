@@ -156,10 +156,10 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 // from a decoded JSON request body. The keys are tried in order and the first one
 // holding a valid value wins, so callers express per-API precedence (e.g. chat
 // completions: max_completion_tokens then the legacy max_tokens). JSON numbers
-// decode as float64; json.Number is also accepted. A present key whose value is
-// the wrong type, negative, or non-integral is treated as absent and the next key
-// is tried. An explicit non-negative whole number (including 0) is returned; if no
-// key holds a valid value the result is nil ("no cap").
+// may decode as float64 or json.Number; both are accepted. A present key whose
+// value is the wrong type, negative, or non-integral is treated as absent and the
+// next key is tried. An explicit non-negative whole number (including 0) is
+// returned; if no key holds a valid value the result is nil ("no cap").
 func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 	for _, k := range keys {
 		v, ok := m[k]
