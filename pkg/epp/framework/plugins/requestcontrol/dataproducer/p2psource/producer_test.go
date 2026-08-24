@@ -29,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -56,6 +57,11 @@ func decodeOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 			"decode": {TargetEndpoints: []scheduling.Endpoint{ep}},
 		},
 	}
+}
+
+func readReusablePrefixTokens(request *scheduling.InferenceRequest, producerName string) (ReusablePrefixTokens, bool) {
+	key := ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName)
+	return scheduling.ReadRequestAttribute[ReusablePrefixTokens](request, key)
 }
 
 // Factory defaults: token delta 1, default PrefixCacheMatchInfo producer.
@@ -88,6 +94,21 @@ func TestPluginFactory_RejectsZeroDelta(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNew_DefaultsMinCachedTokenDelta(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{})
+	req := &scheduling.InferenceRequest{RequestID: "req-new-default"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 4),
+	}))
+
+	assert.Equal(t, defaultMinCachedTokenDelta, p.minCachedTokenDelta)
+	got, ok := readReusablePrefixTokens(req, "test")
+	require.True(t, ok)
+	assert.Equal(t, ReusablePrefixTokens(4*testBlockSize), got)
+}
+
 // Produce stashes the endpoint holding the most cached prompt tokens.
 func TestProduce_StashesBestMatchPeer(t *testing.T) {
 	ctx := utils.NewTestContext(t)
@@ -104,6 +125,102 @@ func TestProduce_StashesBestMatchPeer(t *testing.T) {
 	require.True(t, ok, "expected best-match attribute to be stashed")
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 	assert.Equal(t, 48, best.cachedTokens)
+}
+
+func TestProduce_PublishesReusablePrefixTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		cached     int
+		delta      int
+		wantTokens ReusablePrefixTokens
+	}{
+		{name: "delta one", cached: 4, delta: 1, wantTokens: 4 * testBlockSize},
+		{name: "delta equals source", cached: 4, delta: 4 * testBlockSize, wantTokens: 1},
+		{name: "delta exceeds source", cached: 4, delta: 4*testBlockSize + 1, wantTokens: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			p := New("test", Config{MinCachedTokenDelta: tt.delta})
+			req := &scheduling.InferenceRequest{RequestID: "req-floor-" + tt.name}
+
+			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+				endpoint(p, "pod-a", "10.0.0.1", tt.cached),
+			}))
+
+			got, ok := readReusablePrefixTokens(req, "test")
+			require.True(t, ok)
+			assert.Equal(t, tt.wantTokens, got)
+		})
+	}
+}
+
+func TestProduce_NoSource_NoReusablePrefixTokens(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-no-floor"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 0),
+	}))
+
+	_, ok := readReusablePrefixTokens(req, "test")
+	assert.False(t, ok)
+}
+
+func TestProduce_ReusablePrefixTokensUsesSampledSource(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	eps := []scheduling.Endpoint{
+		endpointWithLoad(p, "pod-ahead", "10.0.0.1", 4, 20),
+		endpointWithLoad(p, "pod-short", "10.0.0.2", 3, 0),
+	}
+
+	foundShort := false
+	for i := 0; i < 400; i++ {
+		req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("floor-band-%d", i)}
+		require.NoError(t, p.Produce(ctx, req, eps))
+		best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+		require.True(t, ok)
+		if best.hostPort != "10.0.0.2:8080" {
+			continue
+		}
+
+		got, ok := readReusablePrefixTokens(req, "test")
+		require.True(t, ok)
+		assert.Equal(t, ReusablePrefixTokens(3*testBlockSize), got)
+		foundShort = true
+		break
+	}
+	assert.True(t, foundShort, "expected the one-block-short source to be sampled")
+}
+
+func TestProduce_ReusablePrefixTokensKeyUsesInstanceName(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("custom", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-custom-key"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 2),
+	}))
+
+	got, ok := readReusablePrefixTokens(req, "custom")
+	require.True(t, ok)
+	assert.Equal(t, ReusablePrefixTokens(2*testBlockSize), got)
+	_, ok = scheduling.ReadRequestAttribute[ReusablePrefixTokens](req, ReusablePrefixTokensDataKey)
+	assert.False(t, ok)
+}
+
+func TestProduces_DeclaresReusablePrefixTokens(t *testing.T) {
+	p := New("custom", Config{MinCachedTokenDelta: 1})
+	key := ReusablePrefixTokensDataKey.WithNonEmptyProducerName("custom")
+
+	produced := p.Produces()
+	require.Len(t, produced, 1)
+	assert.Equal(t, ReusablePrefixTokens(0), produced[key])
+	assert.IsType(t, ReusablePrefixTokens(0), produced[key])
+	assert.Equal(t, plugin.NewDataKey("ReusablePrefixTokensDataKey", "custom").String(), key.String())
 }
 
 // No candidate holds any cached block: nothing to pull, no attribute.
@@ -522,6 +639,19 @@ func TestProduce_GPUOnlySource_NotChosen(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 	assert.Equal(t, 3*testBlockSize, best.cachedTokens)
+}
+
+func TestProduce_GPUOnlySource_NoReusablePrefixTokens(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-gpu-only-floor"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		tierEndpoint(p, "pod-gpu", "10.0.0.1", 10, map[string]int{"gpu": 10}),
+	}))
+
+	_, ok := readReusablePrefixTokens(req, "test")
+	assert.False(t, ok)
 }
 
 // Speculative entries must not make an endpoint a pull source.
