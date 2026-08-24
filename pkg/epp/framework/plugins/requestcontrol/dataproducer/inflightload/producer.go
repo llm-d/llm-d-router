@@ -492,9 +492,10 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 
 	// In P/D disaggregation the load is role-specific:
-	//   prefill-only endpoint -> ISL (it processes the input, not the output)
-	//   decode-only endpoint  -> OSL_est (it generates the output, ISL was handled by prefill)
-	//   monolithic / combined -> ISL + OSL_est (existing behavior, no P/D split)
+	//   prefill-only endpoint -> input tokens (it processes the prompt, not the output)
+	//   decode-only endpoint  -> estimated output tokens (it generates the output; the
+	//                            input was already handled by the prefill worker)
+	//   monolithic / combined -> input + estimated output (existing behavior, no P/D split)
 	// The split is derived from the pod-role label and only activates with known roles.
 	if endpointHasPrefillOnlyRole(endpoint) {
 		return adjustedInput
@@ -505,8 +506,8 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 		// plugin published; an absent bucket is estimated as UNKNOWN (see PreRequest,
 		// which warns once when that happens with this option enabled).
 		if endpointHasDecodeOnlyRole(endpoint) {
-			// Decode-only endpoint: ISL was already accounted for by the prefill
-			// worker, so charge only the estimated output it will generate.
+			// Decode-only endpoint: the input tokens were already accounted for by
+			// the prefill worker, so charge only the estimated output it will generate.
 			return p.tokenEstimator.EstimateOutputFromRequest(request)
 		}
 		// Monolithic or combined-role: include both input and estimated output.
