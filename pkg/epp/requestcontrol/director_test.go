@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -46,6 +45,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -53,7 +53,6 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
@@ -2029,188 +2028,6 @@ func newResponseBodyTestRequestContext(requestID string) *handlers.RequestContex
 	}
 }
 
-// ── Conditional-decode gate (Prefer: if-available) ─────────────────────────
-
-// wrongTypeAttr is a Cloneable that is NOT *attrprefix.PrefixCacheMatchInfo,
-// used to exercise the type-assertion failure branch.
-type wrongTypeAttr struct{}
-
-func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
-
-func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
-	endpointWith := func(matched, total int) fwksched.Endpoint {
-		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey,
-			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, attrs,
-		)
-	}
-	endpointBare := func() fwksched.Endpoint {
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, fwkdl.NewAttributes(),
-		)
-	}
-	endpointWithWrongType := func() fwksched.Endpoint {
-		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey, wrongTypeAttr{})
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, attrs,
-		)
-	}
-	resultWith := func(eps ...fwksched.Endpoint) *fwksched.SchedulingResult {
-		return &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode": {TargetEndpoints: eps},
-			},
-		}
-	}
-
-	tests := []struct {
-		name string
-		in   *fwksched.SchedulingResult
-		want bool
-	}{
-		{"nil result", nil, false},
-		{"empty profile results", &fwksched.SchedulingResult{PrimaryProfileName: "decode"}, false},
-		{"primary profile missing", &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{"other": {TargetEndpoints: []fwksched.Endpoint{endpointWith(2, 4)}}},
-		}, false},
-		{"primary profile nil", &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": nil},
-		}, false},
-		{"primary has no endpoints", resultWith(), false},
-		{"endpoint has no match info", resultWith(endpointBare()), false},
-		{"wrong type in attribute", resultWith(endpointWithWrongType()), false},
-		{"zero match blocks", resultWith(endpointWith(0, 4)), false},
-		{"some match blocks", resultWith(endpointWith(2, 4)), true},
-		{"full match", resultWith(endpointWith(4, 4)), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, primaryEndpointHasCachedPrefix(logr.Discard(), tt.in))
-		})
-	}
-}
-
-// newConditionalDecodeDirector builds a minimal Director suitable for
-// exercising the conditional-decode gate end-to-end.
-func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.SchedulingResult) (*Director, context.Context) {
-	t.Helper()
-	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-
-	period := time.Second
-	epf := datalayer.NewTestRuntime(t, period)
-	ds := datastore.NewDatastore(t.Context(), epf)
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	pool := &v1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
-		Spec: v1.InferencePoolSpec{
-			TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
-			Selector: v1.LabelSelector{
-				MatchLabels: map[v1.LabelKey]v1.LabelValue{"app": "inference"},
-			},
-		},
-	}
-	if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)); err != nil {
-		t.Fatalf("PoolSet: %v", err)
-	}
-	_ = ds.PodUpdateOrAddIfNotExist(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: map[string]string{"app": "inference"}},
-		Status: corev1.PodStatus{
-			PodIP:      "192.168.1.100",
-			Phase:      corev1.PodRunning,
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-		},
-	})
-
-	mockSched := &mockScheduler{scheduleResults: scheduleResult}
-	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
-	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
-	dir := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, candidates, cfg)
-	return dir, ctx
-}
-
-func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
-	scheduleResultWith := func(matched, total int) *fwksched.SchedulingResult {
-		attrs := fwkdl.NewAttributes()
-		if matched >= 0 {
-			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey,
-				attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
-		}
-		return &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode": {TargetEndpoints: []fwksched.Endpoint{
-					fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-						Address:     "192.168.1.100",
-						Port:        "8000",
-						MetricsHost: "192.168.1.100:8000",
-						ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
-					}, nil, attrs),
-				}},
-			},
-		}
-	}
-
-	tests := []struct {
-		name        string
-		preferValue string // empty == no Prefer header
-		matched     int    // -1 == no PrefixCacheMatchInfo at all
-		total       int
-		wantErrCode string
-	}{
-		{"prefer if-available + cache hit forwards", "if-available", 2, 4, ""},
-		{"prefer if-available + zero match returns 412", "if-available", 0, 4, errcommon.PreconditionFailed},
-		{"prefer if-available + no match info returns 412", "if-available", -1, 0, errcommon.PreconditionFailed},
-		{"absent Prefer header proceeds even with no cache", "", -1, 0, ""},
-		{"unrelated Prefer token proceeds even with no cache", "return=minimal", -1, 0, ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir, ctx := newConditionalDecodeDirector(t, scheduleResultWith(tt.matched, tt.total))
-
-			reqCtx := &handlers.RequestContext{
-				Request: &handlers.Request{
-					Headers: map[string]string{
-						reqcommon.RequestIDHeaderKey: "test-req-id",
-						":path":                      "/v1/completions",
-					},
-				},
-			}
-			if tt.preferValue != "" {
-				reqCtx.Request.Headers["prefer"] = tt.preferValue
-			}
-			body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
-			require.NoError(t, err)
-			reqCtx.Request.RawBody = body
-
-			reqCtx.Parser = openai.NewOpenAIParser()
-			parseResult, err := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
-			require.NoError(t, err)
-
-			_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
-			if tt.wantErrCode == "" {
-				assert.NoError(t, err)
-				return
-			}
-			require.Error(t, err)
-			var e errcommon.Error
-			require.ErrorAs(t, err, &e)
-			assert.Equal(t, tt.wantErrCode, e.Code)
-		})
-	}
-}
-
 // TestRunPreRequestPlugins_NoPlugins verifies that runPreRequestPlugins returns
 // nil when no PreRequest plugins are registered.
 func TestRunPreRequestPlugins_NoPlugins(t *testing.T) {
@@ -2335,4 +2152,91 @@ func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testin
 	defer ps.mu.Unlock()
 	assert.Empty(t, ps.respsOnStreaming[0].TerminationCause,
 		"mid-stream chunks carry no cause: the stream has not ended")
+}
+
+// TestPrepareRequest_ConditionalDecodeDefaultDeny pins the director's
+// default-deny for "Prefer: if-available" requests: after PreRequest plugins
+// run, if no plugin marked ConditionalDecodeHandledAttributeKey, the request
+// is rejected with 412. Requests either without the header or where a plugin
+// claimed the header pass through.
+func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	scheduleResult := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address: "192.168.1.100",
+							Port:    "8000",
+							ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "decode",
+	}
+
+	claimingPlugin := &mockPreRequestPlugin{
+		name: "claimer",
+		modifyFn: func(r *fwksched.InferenceRequest) {
+			r.PutAttribute(fwkrc.ConditionalDecodeHandledAttributeKey, true)
+		},
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		plugins     []fwkrc.PreRequest
+		wantErrCode string
+	}{
+		{
+			name:    "no Prefer header is unaffected",
+			headers: map[string]string{},
+		},
+		{
+			name:        "conditional-decode with no plugin registered → 412",
+			headers:     map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins:     nil,
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name:    "conditional-decode with a plugin that does not claim → 412",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrc.PreRequest{
+				&mockPreRequestPlugin{name: "noop"},
+			},
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name:    "conditional-decode with a plugin that claims → forward",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrc.PreRequest{claimingPlugin},
+		},
+		{
+			name:    "unrelated Prefer token is not a conditional-decode → unaffected",
+			headers: map[string]string{routing.PreferHeader: "return=minimal"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(tt.plugins...)}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req-" + tt.name, Headers: tt.headers},
+			}
+
+			_, err := dir.prepareRequest(ctx, reqCtx, scheduleResult)
+
+			if tt.wantErrCode == "" {
+				assert.NoError(t, err)
+				return
+			}
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
+	}
 }

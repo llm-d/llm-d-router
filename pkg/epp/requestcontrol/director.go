@@ -29,7 +29,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -49,7 +48,6 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -62,51 +60,6 @@ const (
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
 )
-
-// primaryEndpointHasCachedPrefix reports whether the primary profile's chosen
-// endpoint has at least one matching prefix block in its KV cache, as observed
-// by a precise/approximate-prefix scorer during the decode profile run. It
-// returns false when the result is missing, the primary profile produced no
-// endpoint, the endpoint carries no PrefixCacheMatchInfo attribute, or the
-// recorded match has zero blocks. False-return reasons are logged at
-// V(logutil.DEBUG) to disambiguate misconfiguration (no scorer attached) from
-// a real cache miss.
-func primaryEndpointHasCachedPrefix(logger logr.Logger, result *fwksched.SchedulingResult) bool {
-	debug := logger.V(logutil.DEBUG)
-	if result == nil {
-		debug.Info("conditional-decode: scheduling result is nil")
-		return false
-	}
-	primary, ok := result.ProfileResults[result.PrimaryProfileName]
-	if !ok || primary == nil {
-		debug.Info("conditional-decode: primary profile result missing", "primary", result.PrimaryProfileName)
-		return false
-	}
-	if len(primary.TargetEndpoints) == 0 {
-		debug.Info("conditional-decode: primary profile produced no endpoints", "primary", result.PrimaryProfileName)
-		return false
-	}
-	endpoint := primary.TargetEndpoints[0]
-	if endpoint == nil {
-		debug.Info("conditional-decode: primary endpoint is nil")
-		return false
-	}
-	raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
-	if !ok || raw == nil {
-		debug.Info("conditional-decode: endpoint has no prefix-cache match attribute (no scorer attached?)")
-		return false
-	}
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok {
-		debug.Info("conditional-decode: prefix-cache attribute has unexpected type", "type", fmt.Sprintf("%T", raw))
-		return false
-	}
-	if info.MatchBlocks() == 0 {
-		debug.Info("conditional-decode: prefix-cache match has zero blocks")
-		return false
-	}
-	return true
-}
 
 // Datastore defines the interface required by the Director.
 type Datastore interface {
@@ -345,23 +298,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, errcommon.Error{Code: errcommon.ResourceExhausted, Msg: fmt.Errorf("failed to find target endpoint: %w", err).Error()}
 	}
 
-	// Conditional-decode gate (RFC 7240 "Prefer: if-available"). The coordinator
-	// uses this header to mark a speculative early-decode attempt: forward to a
-	// decode worker only if its KV cache already covers the prompt, otherwise
-	// surface 412 Precondition Failed so the coordinator restarts the pipeline
-	// at encode/prefill/decode. Lives in the director (not in a profile handler)
-	// so it fires regardless of which profile handler is configured.
-	if routing.IsConditionalDecode(reqCtx.Request.Headers) {
-		if !primaryEndpointHasCachedPrefix(logger, result) {
-			logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has no cached prefix, returning 412")
-			return reqCtx, errcommon.Error{
-				Code: errcommon.PreconditionFailed,
-				Msg:  "no decode worker has the requested KV cache",
-			}
-		}
-		logger.V(logutil.DEBUG).Info("conditional-decode: chosen decode worker has cached prefix, forwarding")
-	}
-
 	reqCtx.SchedulingRequest.SchedulingResult = result
 
 	// Prepare Request (Populates RequestContext and call PreRequest plugins)
@@ -534,6 +470,18 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 			}
 		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: err.Error()}
+	}
+
+	// Default-deny for "Prefer: if-available" when no PreRequest plugin
+	// claimed the header. Ensures a missing gate plugin surfaces as a 412 so
+	// the coordinator's cache-miss fallback runs, instead of a silent forward.
+	if routing.IsConditionalDecode(reqCtx.SchedulingRequest.Headers) {
+		if _, handled := reqCtx.SchedulingRequest.GetAttribute(fwkrc.ConditionalDecodeHandledAttributeKey); !handled {
+			return reqCtx, errcommon.Error{
+				Code: errcommon.PreconditionFailed,
+				Msg:  "conditional-decode request received but no gate plugin is configured",
+			}
+		}
 	}
 
 	if d.requestEvictor != nil {
