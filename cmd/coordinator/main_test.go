@@ -95,7 +95,10 @@ func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 // the coordinator server; run's returned error surfaces the metrics-server
 // failure, and the coordinator socket must no longer accept connections.
 func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
-	blocker, err := fwknet.ReserveListener()
+	// Bind the wildcard the same way serveMetrics does so the collision is
+	// guaranteed on macOS as well as Linux. fwknet.ReserveListener binds only
+	// 127.0.0.1, which does not shadow [::]:<port> on macOS.
+	blocker, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = blocker.Close() })
 	blockedPort := blocker.Addr().(*net.TCPAddr).Port
