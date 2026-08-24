@@ -343,6 +343,38 @@ func TestExecute_ExecutionPathTable(t *testing.T) {
 	}
 }
 
+func TestExecute_ExecutionPathRecordedOnDecodeFailure(t *testing.T) {
+	// Regular decode fails after running: path totals must still record the
+	// request as prefill-decode.
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
+			return &UpstreamStreamedError{Step: "decode", StatusCode: http.StatusServiceUnavailable}
+		}},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+	require.InDelta(t, 1.0, pathCount(t, reg, "m", coordmetrics.PathPrefillDecode), 1e-9)
+}
+
+func TestExecute_ExecutionPathRecordedOnConditionalDecodeFailure(t *testing.T) {
+	// Conditional-decode probe fails (transport error / worker 4xx/5xx):
+	// the request was routed via decode-only and must record that.
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "conditional-decode", fn: func(_ context.Context, _ *RequestContext) error {
+			return &UpstreamStreamedError{Step: "conditional-decode", Cause: errors.New("connection reset")}
+		}},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+	require.InDelta(t, 1.0, pathCount(t, reg, "m", coordmetrics.PathDecodeOnly), 1e-9)
+}
+
 func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
 	reg := newMetricsRegistry(t)
 	// A pipeline that aborts before decode-ish must not record any path.

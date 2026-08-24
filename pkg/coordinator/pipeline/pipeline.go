@@ -98,6 +98,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
 
 	timings := make([]stepTiming, len(p.steps))
+	started := map[string]bool{}
 	executed := map[string]bool{}
 	defer func() {
 		stats := make([]any, 0, (len(timings)+1)*2)
@@ -109,7 +110,10 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		}
 		logger.V(logutil.DEFAULT).Info("pipeline step timings", stats...)
 
-		if path, ok := classifyExecutionPath(executed); ok {
+		// Classify path from steps that ran, success or failure, so a
+		// request that reached decode and failed there still contributes
+		// to path totals.
+		if path, ok := classifyExecutionPath(started); ok {
 			coordmetrics.IncExecutionPath(reqCtx.Model, path)
 		}
 		// Render populates TokenIDs on every success path (including a valid
@@ -125,11 +129,11 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			return fmt.Errorf("pipeline cancelled: %w", err)
 		}
 		name := step.Name()
+		started[name] = true
 		logger.V(logutil.TRACE).Info("step starting", "step", name)
 		if err := p.runStep(ctx, reqCtx, step, idx, timings); err != nil {
 			if errors.Is(err, ErrPipelineDone) {
-				// Clean early exit (e.g. conditional-decode cache hit); not an
-				// error, and the step's work counts toward the execution path.
+				// Clean early exit (e.g. conditional-decode cache hit); not an error.
 				executed[name] = true
 				return nil
 			}
@@ -170,12 +174,13 @@ func (p *Pipeline) runStep(
 	return step.Execute(ctx, reqCtx)
 }
 
-// classifyExecutionPath maps the set of successfully-executed steps to the
-// execution_path_total label. Returns false when no decode-ish step ran, so
-// pipelines aborted before decode do not spuriously record a path. Step-name
-// strings are hardcoded here because the pipeline package cannot import the
-// steps package without introducing a dependency cycle. They match each step
-// file's own StepName constant by contract; keep the two in sync.
+// classifyExecutionPath maps the set of steps that ran (success or failure)
+// to the execution_path_total label. Returns false when no decode-ish step
+// started, so pipelines aborted before decode do not spuriously record a
+// path. Step-name strings are hardcoded here because the pipeline package
+// cannot import the steps package without introducing a dependency cycle.
+// They match each step file's own StepName constant by contract; keep the
+// two in sync.
 func classifyExecutionPath(executed map[string]bool) (string, bool) {
 	decodeIsh := executed["decode"] || executed["conditional-decode"]
 	if !decodeIsh {
