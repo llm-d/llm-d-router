@@ -21,10 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -37,6 +40,8 @@ import (
 
 var (
 	sglangBootstrapPort int
+	// The prefill leg must finish before buffered decode output can be committed.
+	sglangPrefillWaitTimeout = 5 * time.Minute
 )
 
 func init() {
@@ -83,10 +88,11 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 
 func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
 	tracer := tracing.Tracer(tracerScope)
-	ctx := r.Context()
+	parentCtx := r.Context()
+	dispatchCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
 
-	// Prefill Stage - async
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
+	prefillCtx, prefillSpan := tracer.Start(dispatchCtx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -94,14 +100,6 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
 		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
 	)
-	prefillStart := time.Now()
-
-	// Create separate requests for prefill and decode
-	// Use context.WithoutCancel for prefillReq to prevent it from being aborted
-	// if the main HTTP handler (which serves decodeReq) finishes first.
-	prefillReq := cloneRequestWithBody(context.WithoutCancel(r.Context()), r, body)
-	decodeReq := cloneRequestWithBody(r.Context(), r, body)
-
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
 		prefillSpan.SetStatus(codes.Error, "failed to create prefill handler")
@@ -112,56 +110,121 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Send prefill request asynchronously
+	prefillReq := cloneRequestWithBody(prefillCtx, r, body)
+	decodeCtx, decodeSpan := tracer.Start(dispatchCtx, "decode",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	decodeSpan.SetAttributes(
+		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
+		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
+		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
+	)
+	decodeReq := cloneRequestWithBody(decodeCtx, r, body)
+
+	var prefillResponse *bufferedResponseWriter
+	prefillDone := make(chan struct{})
+	prefillStart := time.Now()
 	go func() {
+		defer close(prefillDone)
 		defer prefillSpan.End()
 		defer func() {
 			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
 				s.logger.Error(fmt.Errorf("panic: %v", rec), "panic in prefill request")
+				cancel()
 			}
 		}()
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, prefillReq)
+		prefillResponse = pw
 		prefillDuration := time.Since(prefillStart)
 		prefillSpan.SetAttributes(
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 		)
-		if pw.statusCode < 200 || pw.statusCode >= 300 {
+		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
 		s.logger.V(logging.TRACE).Info("prefill request completed", "status", pw.statusCode)
 	}()
 
-	// Decode Stage - sync
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	defer decodeSpan.End()
-
-	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
-	)
+	decodeWriter := newDeferredCommitWriter(w)
+	decodeDone := make(chan struct{})
+	var decodePanic any
 	decodeStart := time.Now()
+	go func() {
+		defer close(decodeDone)
+		defer decodeSpan.End()
+		defer func() {
+			decodePanic = recover()
+			decodeSpan.SetAttributes(
+				attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(time.Since(decodeStart).Milliseconds())),
+			)
+			if decodePanic != nil {
+				decodeSpan.SetStatus(codes.Error, "decode request aborted")
+			}
+		}()
+		s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	}()
 
-	// Send decode request synchronously
-	decodeReq = decodeReq.WithContext(ctx)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	timer := time.NewTimer(sglangPrefillWaitTimeout)
+	defer timer.Stop()
+	prefillSucceeded := false
+	prefillTimedOut := false
 
+	select {
+	case <-prefillDone:
+		prefillSucceeded = prefillResponse != nil && !isHTTPError(prefillResponse.statusCode)
+		if prefillSucceeded {
+			decodeWriter.commit()
+		} else {
+			decodeWriter.abort()
+			cancel()
+		}
+	case <-timer.C:
+		prefillTimedOut = true
+		decodeWriter.abort()
+		cancel()
+	case <-parentCtx.Done():
+		decodeWriter.abort()
+		cancel()
+		<-decodeDone
+		return
+	}
+
+	<-decodeDone
 	decodeDuration := time.Since(decodeStart)
-	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
-	)
+
+	switch {
+	case prefillSucceeded:
+		if decodePanic != nil {
+			panic(decodePanic)
+		}
+	case prefillTimedOut:
+		w.WriteHeader(http.StatusGatewayTimeout)
+		if _, err := w.Write([]byte(`{"error":"SGLang prefill did not complete before the wait timeout"}`)); err != nil {
+			s.logger.Error(err, "failed to send SGLang prefill timeout to client")
+		}
+	default:
+		status := http.StatusBadGateway
+		if prefillResponse != nil {
+			status = prefillResponse.statusCode
+			for key, values := range prefillResponse.Header() {
+				w.Header()[key] = append([]string(nil), values...)
+			}
+		}
+		w.WriteHeader(status)
+		if prefillResponse != nil {
+			if _, err := w.Write(prefillResponse.bodyBytes()); err != nil {
+				s.logger.Error(err, "failed to send SGLang prefill error to client")
+			}
+		}
+	}
 
 	// Calculate end-to-end P/D timing metrics for concurrent P/D.
-	// True TTFT captures time from gateway request start to decode start.
-	// In SGLang's concurrent mode, prefill duration is tracked in the async prefill span.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
+	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration
 		var trueTTFT time.Duration
-		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
+		if requestStartValue := parentCtx.Value(requestStartTimeKey); requestStartValue != nil {
 			if requestStart, ok := requestStartValue.(time.Time); ok {
 				totalDuration = time.Since(requestStart)
 				trueTTFT = decodeStart.Sub(requestStart)
@@ -186,6 +249,11 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	// Generate bootstrap host from prefill host
 	bootstrapHost := extractHost(prefillHostPort)
 
+	prefillRank, prefillDPSize, hasPrefillRank := s.sglangPrefillRank(prefillHostPort)
+	if hasPrefillRank {
+		roomID = alignSGLangRoom(roomID, prefillRank, prefillDPSize)
+	}
+
 	// Add bootstrap information
 	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
 	modifiedRequest[requestFieldBootstrapPort] = sglangBootstrapPort
@@ -197,6 +265,38 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 		"bootstrap_room", roomID)
 
 	return modifiedRequest
+}
+
+func (s *Server) sglangPrefillRank(prefillHostPort string) (int, int, bool) {
+	dpSize := s.config.DataParallelSize
+	if dpSize <= 1 {
+		return 0, dpSize, false
+	}
+
+	prefillHostPort, _ = strings.CutPrefix(prefillHostPort, "http://")
+	_, portString, err := net.SplitHostPort(prefillHostPort)
+	if err != nil {
+		return 0, dpSize, false
+	}
+	prefillPort, err := strconv.Atoi(portString)
+	if err != nil {
+		return 0, dpSize, false
+	}
+	rank := prefillPort - sglangBootstrapPort
+	if rank < 0 || rank >= dpSize {
+		return 0, dpSize, false
+	}
+	return rank, dpSize, true
+}
+
+func alignSGLangRoom(roomID int64, rank, dpSize int) int64 {
+	size := int64(dpSize)
+	base := roomID - roomID%size
+	rankOffset := int64(rank)
+	if base > math.MaxInt64-rankOffset {
+		base -= size
+	}
+	return base + rankOffset
 }
 
 func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, error) {
@@ -214,5 +314,5 @@ func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, er
 }
 
 func (s *Server) generateSGLangRoomID() int64 {
-	return time.Now().UnixNano() + int64(rand.IntN(1000))
+	return rand.Int64()
 }

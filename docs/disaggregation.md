@@ -540,17 +540,17 @@ In `prefill-first` mode, prefill runs first without requiring a PD decider, and 
 
 ## Sidecar Configuration
 
-The decode sidecar proxy is responsible for coordinating KV cache transfers between vLLM instances during disaggregated inference. It must be configured with the correct connector protocol matching the vLLM `kv_connector` used on the serving pods.
+The decode sidecar proxy coordinates disaggregated inference between model servers. It must use the request protocol expected by the serving engine.
 
 ### KV Connector (`--kv-connector`)
 
-Specifies which KV transfer protocol the sidecar uses to coordinate prefill/decode disaggregation. This flag corresponds to the vLLM-side `kv_connector` value set in `--kv-transfer-config` on the serving pods, but uses its own naming convention.
+Specifies how the sidecar constructs and coordinates prefill and decode requests. The vLLM values correspond to the engine-side `kv_connector`. The `sglang` value selects SGLang's bootstrap request protocol; SGLang independently selects its transfer backend with `--disaggregation-transfer-backend`.
 
 | `--kv-connector` value | vLLM `kv_connector` | Description |
 |---|---|---|
 | `nixlv2` (default) | `NixlConnector` | NIXL-based KV transfer using RDMA/GPU-direct |
 | `shared-storage` | `SharedStorageConnector` | KV transfer via shared filesystem |
-| `sglang` | — | SGLang disaggregation protocol |
+| `sglang` | — | SGLang bootstrap request protocol, with NIXL or Mooncake selected inside SGLang |
 | `mooncake` | `MooncakeConnector` | [Mooncake](https://github.com/kvcache-ai/Mooncake) KV transfer using RDMA |
 | `offloading` | `OffloadingConnector` | KV transfer over the vLLM CPU offloading tier. The decoder pulls KV from the prefiller via the `p2p` secondary tier. |
 
@@ -661,7 +661,7 @@ batches are unchanged.
 | Connector | Flag | Env var | Default | Description |
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
-| `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
+| `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. For the Rust frontend, set this to the rank-zero HTTP port. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode leg so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 

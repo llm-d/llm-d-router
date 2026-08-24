@@ -23,10 +23,10 @@ const (
 	// KVConnectorSharedStorage enables the P/D KV Shared Storage protocol
 	KVConnectorSharedStorage = "shared-storage"
 
-	// KVConnectorSGLang enables SGLang the P/D KV disaggregation protocol
+	// KVConnectorSGLang selects the SGLang P/D request protocol
 	KVConnectorSGLang = "sglang"
 
-	// KVConnectorMooncake enables mooncake the P/D KV disaggregation protocol
+	// KVConnectorMooncake enables the vLLM MooncakeConnector P/D protocol
 	KVConnectorMooncake = "mooncake"
 
 	// KVConnectorOffloading enables the OffloadingConnector P/D KV disaggregation protocol
