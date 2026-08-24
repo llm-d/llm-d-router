@@ -405,6 +405,60 @@ func TestHandleInference_MalformedBodyRecordsBadRequestWithUnknownModel(t *testi
 		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": coordmetrics.ModelUnknown, "error_code": coordmetrics.ErrorCodeBadRequest})),
 		1e-9,
 	)
+	// request_size_bytes covers the malformed branch under the unknown label.
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on invalid-JSON path, got %d", hc)
+	}
+}
+
+func TestHandleInference_NullBodyRecordsRequestSize(t *testing.T) {
+	// JSON null returns nil parsed; the size histogram must still be observed
+	// under the unknown label so the family is consistent across early returns.
+	reg := newMetricsRegistry(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("null"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on null-body path, got %d", hc)
+	}
+}
+
+// erroringReader returns some bytes and then fails, so a test can drive the
+// io.ReadAll error branch without racing on connection resets.
+type erroringReader struct {
+	prefix []byte
+	pos    int
+}
+
+func (e *erroringReader) Read(p []byte) (int, error) {
+	if e.pos < len(e.prefix) {
+		n := copy(p, e.prefix[e.pos:])
+		e.pos += n
+		return n, nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestHandleInference_ReadErrorRecordsPartialRequestSize(t *testing.T) {
+	// A partial-read failure must still observe the size histogram; the value
+	// recorded is what was read before the error, not the promised size.
+	reg := newMetricsRegistry(t)
+
+	partial := []byte(`{"mod`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", &erroringReader{prefix: partial})
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on read-error path, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hs != float64(len(partial)) {
+		t.Fatalf("expected partial-read length %d recorded on read-error path, got %v", len(partial), hs)
+	}
 }
 
 // blockingReader gates the first Read call on unblock, so a test can catch
@@ -484,6 +538,10 @@ func TestHandleInference_OversizeBodyBalancesGauge(t *testing.T) {
 		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
 		1e-9, "gauge must be back at 0 for the unknown label after 413",
 	)
+	// request_size_bytes covers the 413 branch under the unknown label.
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on 413 path, got %d", hc)
+	}
 }
 
 func TestHandleInference_ParsedModelSwapsLabel(t *testing.T) {
@@ -580,6 +638,24 @@ func histogramCount(t *testing.T, reg *prometheus.Registry, name string, labels 
 		for _, m := range mf.GetMetric() {
 			if labelsMatch(m.GetLabel(), labels) {
 				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	t.Fatalf("histogram %s%v not present", name, labels)
+	return 0
+}
+
+func histogramSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				return m.GetHistogram().GetSampleSum()
 			}
 		}
 	}

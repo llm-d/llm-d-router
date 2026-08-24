@@ -58,6 +58,12 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// from "unknown" to the parsed model when they differ.
 	inflightModel := ""
 	coordmetrics.IncRequestRunning(inflightModel)
+	// body is declared before the defer so RecordRequestSize can observe its
+	// final length even when an early validation branch returns. Read
+	// failures land here with the partial length; 413/invalid-JSON/null
+	// branches land here with the full length. Success lands here with the
+	// parsed model.
+	var body []byte
 	defer func() {
 		// A pipeline panic bypasses the err-branch call to IncRequestErrorTotal
 		// below; recovering here records the panic under error_code=internal
@@ -68,6 +74,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		}
 		coordmetrics.IncRequestTotal(model)
 		coordmetrics.RecordRequestDuration(model, time.Since(receivedAt))
+		coordmetrics.RecordRequestSize(model, len(body))
 		coordmetrics.DecRequestRunning(inflightModel)
 		if r != nil {
 			panic(r)
@@ -75,7 +82,8 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	parseStart := time.Now()
-	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
+	var err error
+	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -104,7 +112,6 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
 	}
-	coordmetrics.RecordRequestSize(model, len(body))
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
 		coordmetrics.IncRequestRunning(model)
