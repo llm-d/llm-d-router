@@ -108,7 +108,7 @@ To enable the step, add this block as the first entry under `steps:` in the coor
 | `default_queue` | `request-sortedset` | queue for requests matching no route |
 | `objectives` | none | InferenceObjective names stamped per tier, selected by quota classification |
 | `quota` | prefix `quota:`, attribute `userid`, window 300s | reserved concurrency limits per tenant, counters shared with the AP's redis-quota gate. Tenants without an entry are always classified reserved |
-| `timeouts` | wait 60s (max 1h), enqueue 1h (no max) | deadline bounds per queued mode. `max_seconds` caps client requested deadlines |
+| `timeouts` | wait 60s, enqueue 1h | deadline bounds per queued mode. `max_seconds` caps client requested deadlines |
 | `wait_cap_seconds` | none | bounds held wait connections, ending the hold with the 202 response |
 | `fetch_grace_seconds` | 60 | mailbox TTL applied after a delivered fetch. Zero deletes the result on delivery |
 | `wakeup_mode` | `auto` | `notify`, `poll`, or `auto` which probes for keyspace notification support |
