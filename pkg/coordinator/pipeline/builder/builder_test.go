@@ -35,17 +35,27 @@ func TestValidatePipeline(t *testing.T) {
 	}{
 		{
 			name:    "openai format needs no render",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{decode}},
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, DPSize: 1, Steps: []config.StepConfig{decode}},
 			wantErr: false,
 		},
 		{
 			name:    "tokens-in with render",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{render, decode}},
+			cfg:     config.PipelineConfig{UseOpenAIFormat: false, DPSize: 1, Steps: []config.StepConfig{render, decode}},
 			wantErr: false,
 		},
 		{
 			name:    "tokens-in without render is rejected",
-			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
+			cfg:     config.PipelineConfig{UseOpenAIFormat: false, DPSize: 1, Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "non-positive dp_size is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, DPSize: 0, Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "negative dp_size is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, DPSize: -1, Steps: []config.StepConfig{decode}},
 			wantErr: true,
 		},
 	}

@@ -31,7 +31,13 @@ import (
 // validatePipeline rejects configurations that cannot work before any step runs.
 // The tokens-in format (use_openai_format=false) sends token IDs that only the
 // render step produces, so it requires a render step in the pipeline.
+// pipeline.dp_size must be a positive integer: mergeConnectorDefaults treats
+// dpSize<=0 as "unset" and falls back to the per-step default, so a non-positive
+// value here would otherwise be silently discarded rather than rejected.
 func validatePipeline(p config.PipelineConfig) error {
+	if p.DPSize < 1 {
+		return fmt.Errorf("pipeline.dp_size must be a positive integer, got %d", p.DPSize)
+	}
 	if p.UseOpenAIFormat {
 		return nil
 	}
