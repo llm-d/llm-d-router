@@ -184,13 +184,26 @@ func serveMetrics(ctx context.Context, port int) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	// Shutdown fires when ctx cancels (normal path) or when the local
+	// cancel below is invoked after ListenAndServe returns (bind failure).
+	shutdownCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	shutdownDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		defer close(shutdownDone)
+		<-shutdownCtx.Done()
+		graceCtx, cancelGrace := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		defer cancelGrace()
+		_ = srv.Shutdown(graceCtx)
 	}()
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+
+	err := srv.ListenAndServe()
+	cancel()
+	<-shutdownDone
+
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("metrics server: %w", err)
 	}
 	return nil
