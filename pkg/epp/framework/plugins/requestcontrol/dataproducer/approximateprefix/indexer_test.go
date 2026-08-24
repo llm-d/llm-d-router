@@ -26,8 +26,8 @@ import (
 
 func TestIndexer_AddAndGet(t *testing.T) {
 	pod := server{
-		ServerID:       ServerID{Namespace: "default", Name: "server1"},
-		NumOfGPUBlocks: 2,
+		ServerID:          ServerID{Namespace: "default", Name: "server1"},
+		LRUCapacityBlocks: 2,
 	}
 	i := newIndexer(context.Background(), 3, "test-name", "test-type").(*indexer) // Initialize with an lruSize greater than server.numOfGPUBlocks to verify server-defined limits take precedence.
 

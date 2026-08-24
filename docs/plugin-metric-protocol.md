@@ -86,6 +86,40 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | — |
 | trtllm-serve | `trtllm_kv_cache_max_blocks` | — |
 
+Note on trtllm-serve with host offloading (`kv_cache_config.host_cache_size`): under the default
+(legacy) KV cache manager, `trtllm_kv_cache_max_blocks` already counts GPU plus host blocks, so
+the auto-tuned capacity covers the offload-extended cache with no further configuration. Under
+the opt-in `use_kv_cache_manager_v2` (also the default for some hybrid-Mamba model families),
+the same gauge is GPU-only and the host tier is not observable via Prometheus; on such
+deployments disable the `approx-prefix-cache-producer`'s `autoTune` and set
+`lruCapacityPerServer` explicitly to avoid under-reporting prefix matches.
+
+### TotalKVCacheTokens (optional)
+
+The total effective KV cache capacity in tokens across all memory tiers (GPU HBM plus host/CPU
+offload). When reported, it takes precedence over NumGPUBlocks for auto-tuning the approximate
+prefix cache, so prefix-match estimates cover the offload-extended cache.
+
+- **Type:** Gauge (the maximum across the configured per-tier gauges is used)
+- **Required by:** `prefix-cache-scorer`, `prefix-cache-affinity-filter` (via `approximate-prefix` when `AutoTune` is enabled)
+
+| Model server | Metric | Notes |
+| --- | --- | --- |
+| SGLang | `sglang:hicache_host_total_tokens`, `sglang:max_total_num_tokens` | The hicache host pool (SGLang v0.5.10+, hierarchical cache enabled) is an inclusive superset of the device pool under the default `write_through` policy, so the effective total is the max of the two gauges, not their sum. On older SGLang versions only the device gauge exists; disable `autoTune` and set `lruCapacityPerServer` to `hicache-ratio x device tokens / page size` to account for the host tier. |
+| vLLM | — | Not reported. vLLM exposes no offload-tier capacity metric (`num_cpu_blocks` is always `None` on V1). See KVCacheOffloadDetection below. |
+| trtllm-serve | — | Not needed under the legacy KV cache manager (NumGPUBlocks already includes host blocks); not available under the V2 manager. |
+
+### KVCacheOffloadDetection (optional)
+
+Metrics whose presence indicates the model server offloads KV cache to a tier whose capacity is
+not reported. Detection does not change auto-tuned capacity by itself; it drives an operator
+warning that prefix matches will be under-reported unless `autoTune` is disabled and
+`lruCapacityPerServer` is set.
+
+| Model server | Signal |
+| --- | --- |
+| vLLM | Presence of any `vllm:kv_offload_*` OffloadingConnector series (registered at startup, before traffic), or a numeric `kv_offloading_size` label (GiB) on `vllm:cache_config_info` (only populated by the built-in `--kv-offloading-size` flag; hand-written `--kv-transfer-config` deployments leave it `None`). `vllm:external_prefix_cache_*` is deliberately not used: it is registered even without a connector. |
+
 ## LoRA Adapter Serving
 
 **Required by:** `lora-affinity-scorer`

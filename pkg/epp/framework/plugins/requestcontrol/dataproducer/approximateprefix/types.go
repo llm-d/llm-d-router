@@ -46,8 +46,30 @@ type blockHash = prefixhash.BlockHash
 // server contains information about a specific server/pod and its cache capacity.
 type server struct {
 	ServerID
-	NumOfGPUBlocks int
+	// LRUCapacityBlocks is the routing-side LRU capacity for this pod in
+	// model-server-native blocks, covering all KV cache tiers when the model
+	// server reports total capacity (GPU HBM only otherwise).
+	LRUCapacityBlocks int
+	// CapacitySource records how LRUCapacityBlocks was derived, for logging.
+	CapacitySource capacitySource
 }
+
+// capacitySource identifies how a server's LRU capacity was derived.
+type capacitySource string
+
+const (
+	// capacitySourceTotalTokens: total token capacity metric across tiers, divided by block size.
+	capacitySourceTotalTokens capacitySource = "total-token-capacity-metric"
+	// capacitySourceGPUBlocks: GPU block count from metrics (no offload tier).
+	capacitySourceGPUBlocks capacitySource = "gpu-blocks"
+	// capacitySourceGPUBlocksUndercount: GPU block count although offload was
+	// detected; the real cache is larger and matches will be under-reported.
+	capacitySourceGPUBlocksUndercount capacitySource = "gpu-blocks-offload-unaccounted"
+	// capacitySourceConfigured: the lruCapacityPerServer configuration value.
+	capacitySourceConfigured capacitySource = "configured-lru-capacity"
+	// capacitySourceDefault: the built-in defaultLRUCapacityPerServer.
+	capacitySourceDefault capacitySource = "default-lru-capacity"
+)
 
 // ServerID is a unique identifier for a server, based on its NamespacedName.
 type ServerID k8stypes.NamespacedName

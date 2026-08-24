@@ -195,6 +195,32 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	// Extract total KV cache capacity in tokens as the maximum across the
+	// configured tier gauges. Absent metrics are skipped, not errors: tier
+	// gauges (e.g. SGLang's hicache host pool) only exist when the feature is
+	// enabled and on engine versions that export them.
+	if len(mapping.TotalCacheTokens) > 0 {
+		maxTokens := 0
+		for _, spec := range mapping.TotalCacheTokens {
+			metric, err := spec.getLatestMetric(families)
+			if err != nil {
+				continue
+			}
+			if v := int(extractValue(metric)); v > maxTokens {
+				maxTokens = v
+			}
+		}
+		if maxTokens > 0 {
+			clone.KvCacheMaxTokenCapacity = maxTokens
+			updated = true
+		}
+	}
+
+	if detected, checked := detectOffload(mapping, families); checked && detected != clone.KvCacheOffloadDetected {
+		clone.KvCacheOffloadDetected = detected
+		updated = true
+	}
+
 	for _, custom := range mapping.CustomMetrics {
 		metric, err := custom.Spec.getLatestMetric(families)
 		if err != nil {
@@ -224,6 +250,34 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// detectOffload reports whether the scrape indicates KV cache offloading with
+// unreported capacity: any OffloadDetection metric is present, or the
+// OffloadSizeLabel on the CacheInfo metric parses to a value greater than zero.
+// The second return value is false when the mapping has no detection configured.
+func detectOffload(mapping *Mapping, families sourcemetrics.PrometheusMetricMap) (bool, bool) {
+	if len(mapping.OffloadDetection) == 0 && mapping.OffloadSizeLabel == "" {
+		return false, false
+	}
+	for _, spec := range mapping.OffloadDetection {
+		if _, err := spec.getLatestMetric(families); err == nil {
+			return true, true
+		}
+	}
+	if mapping.OffloadSizeLabel != "" && mapping.CacheInfo != nil {
+		if metric, err := mapping.CacheInfo.getLatestMetric(families); err == nil {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() != mapping.OffloadSizeLabel {
+					continue
+				}
+				if v, err := strconv.ParseFloat(label.GetValue(), 64); err == nil && v > 0 {
+					return true, true
+				}
+			}
+		}
+	}
+	return false, true
 }
 
 // getEngineTypeFromEndpoint extracts the engine type from endpoint metadata labels.
