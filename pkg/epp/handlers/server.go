@@ -259,6 +259,22 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCau
 	}
 }
 
+func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.TerminationCause {
+	if trailers == nil || trailers.GetTrailers() == nil {
+		return ""
+	}
+
+	for _, header := range trailers.GetTrailers().GetHeaders() {
+		if header.Key == "grpc-status" {
+			if grpcStatus := string(header.RawValue); grpcStatus != "" && grpcStatus != "0" {
+				return fwkrc.TerminationCauseError
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	if reqCtx == nil {
 		return metadata.DefaultFairnessID, "0"
@@ -568,9 +584,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
-			// For HTTP, the response trailer is not sent. Thus, this case will not be triggered.
-			// For gRPC(over HTTP2), the protocol relies on responseTrailers to determine whether a response is complete.
+			// A non-zero grpc-status indicates a gRPC error. Record the error cause before
+			// finishResponse marks the response complete so the end-of-stream record is not
+			// reported as a natural termination.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
+			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
+				reqCtx.TerminationCause = cause
+			}
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{

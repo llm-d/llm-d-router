@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
@@ -161,6 +162,57 @@ func TestTerminationCause(t *testing.T) {
 			t.Parallel()
 			reqCtx := &RequestContext{requestState: tt.state}
 			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
+		})
+	}
+}
+
+func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   fwkrc.TerminationCause
+	}{
+		{
+			name:   "OK",
+			status: "0",
+			want:   "",
+		},
+		{
+			name:   "internal error",
+			status: "13",
+			want:   fwkrc.TerminationCauseError,
+		},
+		{
+			name:   "cancelled",
+			status: "1",
+			want:   fwkrc.TerminationCauseError,
+		},
+		{
+			name: "missing grpc status",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trailers := &extProcPb.HttpTrailers{
+				Trailers: &corev3.HeaderMap{},
+			}
+
+			if tt.status != "" {
+				trailers.Trailers.Headers = []*corev3.HeaderValue{
+					{
+						Key:      "grpc-status",
+						RawValue: []byte(tt.status),
+					},
+				}
+			}
+
+			assert.Equal(
+				t,
+				tt.want,
+				terminationCauseFromGRPCTrailers(trailers),
+			)
 		})
 	}
 }
