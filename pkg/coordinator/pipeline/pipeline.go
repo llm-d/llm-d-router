@@ -86,14 +86,17 @@ func New(steps []Step) *Pipeline {
 	return &Pipeline{steps: steps}
 }
 
+// stepTiming holds one step's per-request timing for the summary log line
+// emitted by Execute.
+type stepTiming struct {
+	name     string
+	duration time.Duration
+}
+
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
 
-	type stepTiming struct {
-		name     string
-		duration time.Duration
-	}
 	timings := make([]stepTiming, len(p.steps))
 	executed := map[string]bool{}
 	defer func() {
@@ -123,28 +126,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		}
 		name := step.Name()
 		logger.V(logutil.TRACE).Info("step starting", "step", name)
-		coordmetrics.IncStepRunning(name)
-		start := time.Now()
-		var err error
-		func() {
-			// defer covers all three step-observability signals on every exit
-			// path (normal return, error return, panic). On panic recovery,
-			// step_errors_total records the failure under error_code=internal
-			// and the panic re-propagates into the chi Recoverer at the
-			// server edge.
-			defer func() {
-				d := time.Since(start)
-				coordmetrics.RecordStepDuration(name, d)
-				coordmetrics.DecStepRunning(name)
-				timings[idx] = stepTiming{name: name, duration: d}
-				if r := recover(); r != nil {
-					coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)
-					panic(r)
-				}
-			}()
-			err = step.Execute(ctx, reqCtx)
-		}()
-		if err != nil {
+		if err := p.runStep(ctx, reqCtx, step, idx, timings); err != nil {
 			if errors.Is(err, ErrPipelineDone) {
 				// Clean early exit (e.g. conditional-decode cache hit); not an
 				// error, and the step's work counts toward the execution path.
@@ -158,6 +140,34 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		logger.V(logutil.TRACE).Info("step complete", "step", name)
 	}
 	return nil
+}
+
+// runStep executes one step with per-iteration observability. The defer
+// covers all three step-observability signals on every exit path (normal
+// return, error return, panic). On panic recovery, step_errors_total
+// records the failure under error_code=internal and the panic
+// re-propagates into the chi Recoverer at the server edge.
+func (p *Pipeline) runStep(
+	ctx context.Context,
+	reqCtx *RequestContext,
+	step Step,
+	idx int,
+	timings []stepTiming,
+) error {
+	name := step.Name()
+	coordmetrics.IncStepRunning(name)
+	start := time.Now()
+	defer func() {
+		d := time.Since(start)
+		coordmetrics.RecordStepDuration(name, d)
+		coordmetrics.DecStepRunning(name)
+		timings[idx] = stepTiming{name: name, duration: d}
+		if r := recover(); r != nil {
+			coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)
+			panic(r)
+		}
+	}()
+	return step.Execute(ctx, reqCtx)
 }
 
 // classifyExecutionPath maps the set of successfully-executed steps to the
