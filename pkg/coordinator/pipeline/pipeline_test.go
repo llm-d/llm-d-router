@@ -385,6 +385,20 @@ func TestExecute_InputTokensRecordedOnlyWhenPopulated(t *testing.T) {
 	}
 	_ = New(steps2).Execute(context.Background(), &RequestContext{Model: "m"})
 	require.Equal(t, uint64(0), inputTokensCount(t, reg2, "m"))
+
+	// A render that succeeds with a zero-length prompt (e.g. completions
+	// empty array) is a valid observation and must be recorded.
+	reg3 := newMetricsRegistry(t)
+	steps3 := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.TokenIDs = []int{}
+			return nil
+		}},
+	}
+	if err := New(steps3).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), inputTokensCount(t, reg3, "m"))
 }
 
 // mustGauge finds a gauge series matching all of labels in reg and returns

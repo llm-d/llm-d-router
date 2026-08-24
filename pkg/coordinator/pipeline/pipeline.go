@@ -112,11 +112,11 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		if path, ok := classifyExecutionPath(executed); ok {
 			coordmetrics.IncExecutionPath(reqCtx.Model, path)
 		}
-		// Render populates TokenIDs on success (chat, completions, and generate
-		// paths); recording only when non-empty keeps failed-before-render
-		// requests out of the histogram.
-		if n := len(reqCtx.TokenIDs); n > 0 {
-			coordmetrics.RecordRequestInputTokens(reqCtx.Model, n)
+		// Render populates TokenIDs on every success path (including a valid
+		// empty prompt array in the completions branch), so gate on the step
+		// having run rather than on len > 0.
+		if executed["render"] {
+			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
 	}()
 
