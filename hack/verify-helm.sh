@@ -107,6 +107,34 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   echo "Test case ${key} passed validation."
 done
 
+echo "Verifying GKE Gateway monitoring defaults to Prometheus Operator..."
+gke_monitoring_render_output="${TEMP_DIR}/llm-d-router-gateway-gke-monitoring-render.yaml"
+gke_monitoring_render_command="${HELM} template gke-monitoring ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false > ${gke_monitoring_render_output}"
+echo "Executing: ${gke_monitoring_render_command}"
+eval "${gke_monitoring_render_command}"
+if ! grep -q -- '^kind: ServiceMonitor$' "${gke_monitoring_render_output}"; then
+  echo "GKE Gateway monitoring did not render a ServiceMonitor when the monitoring provider was unset"
+  exit 1
+fi
+if grep -q -- '^kind: PodMonitoring$' "${gke_monitoring_render_output}"; then
+  echo "GKE Gateway monitoring unexpectedly rendered PodMonitoring when the monitoring provider was unset"
+  exit 1
+fi
+
+echo "Verifying explicit GMP monitoring renders PodMonitoring..."
+gmp_monitoring_render_output="${TEMP_DIR}/llm-d-router-gateway-gmp-monitoring-render.yaml"
+gmp_monitoring_render_command="${HELM} template gmp-monitoring ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.provider.name=gmp --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=true > ${gmp_monitoring_render_output}"
+echo "Executing: ${gmp_monitoring_render_command}"
+eval "${gmp_monitoring_render_command}"
+if ! grep -q -- '^kind: PodMonitoring$' "${gmp_monitoring_render_output}"; then
+  echo "Explicit GMP monitoring did not render PodMonitoring"
+  exit 1
+fi
+if grep -q -- '^kind: ServiceMonitor$' "${gmp_monitoring_render_output}"; then
+  echo "Explicit GMP monitoring unexpectedly rendered ServiceMonitor"
+  exit 1
+fi
+
 declare -A test_cases_llm_d_router_standalone
 
 # llm_d_router_standalone Helm Chart test cases

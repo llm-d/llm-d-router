@@ -388,13 +388,15 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "flow_control_pool_saturation",
 			Help: metricsutil.HelpMsgWithStability(
-				"Pool saturation signal gating Flow Control dispatch. 1.0 is the gating set point; values above 1.0 "+
-					"indicate the magnitude of oversubscription past it. An empty pool reads as 1.0. With the default "+
-					"utilization detector, endpoints with missing or stale metrics score as fully saturated "+
+				"Pool saturation signal gating Flow Control dispatch. The stage label partitions by pipeline role: "+
+					"'prefill' and 'decode' are per-stage signals, 'effective' is max(prefill, decode) and is the "+
+					"value used for gating. 1.0 is the gating set point; values above 1.0 indicate the magnitude of "+
+					"oversubscription past it. An empty pool reads as 1.0. With the default utilization detector, "+
+					"endpoints with missing or stale metrics score as fully saturated "+
 					"(fail-closed; see flow_control_stale_endpoints).",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"inference_pool", "stage"},
 	)
 
 	llmdFlowControlStaleEndpoints = prometheus.NewGaugeVec(
@@ -405,7 +407,10 @@ var (
 				"Number of candidate endpoints whose metrics are missing or older than the staleness threshold, as of "+
 					"the most recent saturation evaluation. Recorded by the utilization saturation detector, which scores "+
 					"these endpoints as fully saturated in flow_control_pool_saturation (fail-closed): a nonzero value "+
-					"during a dispatch stall indicates a metrics collection problem rather than genuine overload.",
+					"during a dispatch stall indicates a metrics collection problem rather than genuine overload. "+
+					"This gauge carries no stage label and is written on every detector call, so it reflects the most "+
+					"recently evaluated stage; a reading of 0 does not rule out stale metrics in another stage. "+
+					"Per-stage stale accounting is tracked in #2475.",
 				compbasemetrics.ALPHA),
 		},
 		[]string{"detector"},
