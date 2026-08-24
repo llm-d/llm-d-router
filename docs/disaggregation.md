@@ -275,12 +275,13 @@ plugins:
         - key: "role"
           operator: In
           values: ["decode"]
-  - type: prefix-cache-scorer
+  - type: approx-prefix-cache-producer
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
+  - type: prefix-cache-scorer
   - type: max-score-picker
   - type: prefix-based-pd-decider
     parameters:
@@ -338,12 +339,13 @@ plugins:
         - key: "role"
           operator: In
           values: ["decode"]
-  - type: prefix-cache-scorer
+  - type: approx-prefix-cache-producer
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
+  - type: prefix-cache-scorer
   - type: max-score-picker
   - type: always-disagg-multimodal-decider
   - type: prefix-based-pd-decider
@@ -463,12 +465,15 @@ The `disagg-profile-handler` plugin is the entry point for all disaggregation to
 
 ### Parameters
 
+- `stageOrder` (optional, default: `decode-first`): order of execution for disaggregation stages.
+  - `decode-first`: Decode runs first, followed by Encode (optional) and Prefill (optional). The PD decider inspects the chosen decode pod's cache state to determine whether prefill should be disaggregated.
+  - `prefill-first`: Prefill runs first, followed by Encode (optional) and Decode. When the prefill profile is configured, prefill always runs, and the chosen prefill pod is published so the decode stage can apply topology affinity constraints (e.g., co-locating decode on the same rack).
 - `profiles` (optional): names of the scheduling profiles to use.
   - `decode` (default: `decode`)
   - `prefill` (default: `prefill`)
   - `encode` (default: `encode`)
 - `deciders` (optional): decider plugins that control whether each stage runs.
-  - `prefill`: enables P/D disaggregation when set.
+  - `prefill`: enables P/D disaggregation when set (used in `decode-first` mode).
   - `encode`: enables E disaggregation when set.
 
 ### Examples
@@ -481,7 +486,7 @@ No deciders are configured -- all requests are handled by the decode profile alo
 - type: disagg-profile-handler
 ```
 
-#### P/D (Prefill/Decode)
+#### P/D (Prefill/Decode, Decode-First)
 
 ```yaml
 - type: disagg-profile-handler
@@ -500,6 +505,16 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
       prefill: my-prefill
     deciders:
       prefill: prefix-based-pd-decider
+```
+
+#### P/D (Prefill/Decode, Prefill-First)
+
+In `prefill-first` mode, prefill runs first without requiring a PD decider, and publishes the selected prefill endpoint so subsequent decode scheduling can match against it (e.g., via topology affinity).
+
+```yaml
+- type: disagg-profile-handler
+  parameters:
+    stageOrder: prefill-first
 ```
 
 #### E/PD (Encode/Prefill-Decode)
@@ -539,9 +554,30 @@ Specifies which KV transfer protocol the sidecar uses to coordinate prefill/deco
 | `mooncake` | `MooncakeConnector` | [Mooncake](https://github.com/kvcache-ai/Mooncake) KV transfer using RDMA |
 | `offloading` | `OffloadingConnector` | KV transfer over the vLLM CPU offloading tier. The decoder pulls KV from the prefiller via the `p2p` secondary tier. |
 
-With `offloading`, the sidecar dispatches prefill and decode concurrently. It injects role-keyed `kv_transfer_params`: the prefiller receives `{"decode": {"kv_request_id": <id>}}` (no peer address), and the decoder receives `{"prefill": {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port": <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host comes from the `x-prefiller-host-port` header; the port is `--p2p-connector-port`.
+With `offloading`, the sidecar dispatches prefill and decode concurrently. It
+injects role-keyed `kv_transfer_params`, each key named for the remote party it
+describes: the prefiller receives `{"remote_decoder": {"kv_request_id": <id>}}`
+(no peer address), and the decoder receives `{"remote_prefiller":
+{"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port":
+<p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host
+comes from the `x-prefiller-host-port` header; the port is
+`--p2p-connector-port`.
 
-When the request also carries the `x-kv-cache-source-host-port` header (set by the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod computing the prefix), the sidecar injects an additional `p2p` key so vLLM pulls that cached prefix over the P2P tier instead of recomputing it. Under disaggregation the prefiller leg carries `{"decode": {...}, "p2p": {"kv_request_id": <own id>, "remote_host": <source host>, "remote_port": <p2p-connector-port>}}` (the only supported multi-key combination); without a prefiller the decoder-only request carries `{"p2p": {...}}` alone. A malformed or disallowed source header is ignored and the request proceeds unchanged, as is any source header on a connector that cannot pull over the P2P tier: only `offloading`, or NIXLv2 with `--enable-p2p-pull`, honors it. For the pulled blocks to be servable, the source pod must offload its generated (decode-phase) KV: set `offload_prompt_only: false` in its `kv_connector_extra_config` (the default `true` offloads only prefill blocks).
+When the request also carries the `x-kv-cache-source-host-port` header (set by
+the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod
+computing the prefix), the sidecar injects an additional `remote_kv_source` key
+so vLLM pulls that cached prefix over the P2P tier instead of recomputing it.
+Under disaggregation the prefiller leg carries `{"remote_decoder": {...},
+"remote_kv_source": {"kv_request_id": <own id>, "remote_host": <source host>,
+"remote_port": <p2p-connector-port>}}` (the only supported multi-key
+combination); without a prefiller the decoder-only request carries
+`{"remote_kv_source": {...}}` alone. A malformed or disallowed source header is
+ignored and the request proceeds unchanged, as is any source header on a
+connector that cannot pull over the P2P tier: only `offloading`, or NIXLv2 with
+`--enable-p2p-pull`, honors it. For the pulled blocks to be servable, the source
+pod must offload its generated (decode-phase) KV: set `offload_prompt_only:
+false` in its `kv_connector_extra_config` (the default `true` offloads only
+prefill blocks).
 
 Both prefill and decode pods require the following `--kv-transfer-config`:
 
@@ -557,9 +593,59 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 }
 ```
 
-`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
+`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`) when each pod is a complete DP group; wide-EP worker pods instead set the compensated `P2P_BASE` (see the wide-EP paragraph below). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
-**Restriction:** `--kv-connector=offloading` requires `--data-parallel-size=1`. Wide-EP pods (DP > 1) are rejected at startup: every DP rank would bind the same `POD_IP:<p2p-connector-port>`. DP-aware support is not yet implemented.
+**Data parallelism:** the P2P tier supports `--data-parallel-size` N > 1 when
+each pod is a complete DP group (the per-pod DP deployment), or a multi-pod
+(wide-EP) group with compensated socket bases (below).
+
+- vLLM gives each DP replica its own P2P listener and offload region:
+  replica `i` serves on `<p2p-connector-port>+i`, where `i` is the
+  **global** `data_parallel_index`
+  ([PR #47636](https://github.com/vllm-project/vllm/pull/47636),
+  [PR #47987](https://github.com/vllm-project/vllm/pull/47987)). Engines
+  without those changes bind every replica to the same
+  `POD_IP:<p2p-connector-port>`, and DP > 1 fails at engine startup.
+- The sidecar serves rank `r` on its own port + `r`, so the routed
+  endpoint's port names the target rank. The sidecar injects
+  `remote_port` = `--p2p-connector-port` + `r`; a port outside the rank
+  range falls back to rank 0.
+- The endpoint port encodes the pod-local rank, which matches the global
+  index only when the pod is a whole DP group. Multi-pod DP groups (for
+  example LWS wide-EP, where pod `k`'s replicas hold global indices
+  `k*N..k*N+N-1` behind the same serving ports) must compensate the
+  configured socket base ports per pod; see the wide-EP example below.
+- Every replica maps its own offload region, so the pod's `/dev/shm` must
+  exceed N x `cpu_bytes_to_use`.
+
+**Wide-EP (multi-pod DP groups):** vLLM adds the **global**
+`data_parallel_index` to the configured P2P and KV-events base ports, while
+the router addresses an engine by pod IP plus **pod-local** rank. Each pod
+must therefore subtract its global start rank from both configured bases so
+every pod binds the same pod-local ranges and the serving-port offset again
+names the target rank. In an LWS template with `DP_SIZE_LOCAL` ranks per
+pod:
+
+```bash
+START_RANK=$(( ${LWS_WORKER_INDEX:-0} * DP_SIZE_LOCAL ))
+P2P_BASE=$((7777 - START_RANK))
+KV_EVENTS_BASE=$((5557 - START_RANK))
+```
+
+`P2P_BASE` is the P2P secondary tier port:
+
+```json
+"secondary_tiers": [{"type": "p2p", "host": "${POD_IP}", "port": ${P2P_BASE}}]
+```
+
+`KV_EVENTS_BASE` is the KV-events publisher endpoint
+(`"endpoint": "tcp://*:${KV_EVENTS_BASE}"`), so the EPP's per-rank
+subscribers (`precise-prefix-cache-producer` dials
+`podDiscoveryConfig.socketPort` + rank index) reach each rank's socket.
+With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
+`5557-5564`, and serving `8000-8007`. Only the socket bases are
+compensated; `data_parallel_index` and the global rank carried in KV-event
+batches are unchanged.
 
 ### General Sidecar Flags
 
@@ -576,7 +662,7 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
-| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port, injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode leg so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---

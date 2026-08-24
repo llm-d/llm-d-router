@@ -94,7 +94,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 
 	var positive, negative, noPrediction []fwksched.Endpoint
 	for _, ep := range endpoints {
-		raw, ok := ep.Get(p.latencyPredictionInfoDataKey.String())
+		raw, ok := ep.Get(p.latencyPredictionInfoDataKey)
 		if !ok {
 			noPrediction = append(noPrediction, ep)
 			continue

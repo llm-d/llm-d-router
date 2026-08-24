@@ -21,6 +21,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+)
+
+var (
+	keyA = fwkplugin.NewDataKey("a", "test-producer")
+	keyB = fwkplugin.NewDataKey("b", "test-producer")
 )
 
 type dummy struct {
@@ -42,9 +49,9 @@ func (d *anotherDummy) Clone() Cloneable {
 func TestExpectPutThenGetToMatch(t *testing.T) {
 	attrs := NewAttributes()
 	original := &dummy{"foo"}
-	attrs.Put("a", original)
+	attrs.Put(keyA, original)
 
-	got, ok := attrs.Get("a")
+	got, ok := attrs.Get(keyA)
 	assert.True(t, ok, "expected key to exist")
 	assert.NotSame(t, original, got, "expected Get to return a clone, not original")
 
@@ -52,28 +59,31 @@ func TestExpectPutThenGetToMatch(t *testing.T) {
 	assert.True(t, ok, "expected value to be of type *dummy")
 	assert.Equal(t, "foo", dv.Text)
 
-	_, ok = attrs.Get("b")
+	_, ok = attrs.Get(keyB)
 	assert.False(t, ok, "expected key not to exist")
 }
 
 func TestExpectKeysToMatchAdded(t *testing.T) {
 	attrs := NewAttributes()
-	attrs.Put("x", &dummy{"1"})
-	attrs.Put("y", &dummy{"2"})
+	keyX := fwkplugin.NewDataKey("x", "test-producer")
+	keyY := fwkplugin.NewDataKey("y", "test-producer")
+	attrs.Put(keyX, &dummy{"1"})
+	attrs.Put(keyY, &dummy{"2"})
 
 	keys := attrs.Keys()
 	assert.Len(t, keys, 2)
-	assert.ElementsMatch(t, keys, []string{"x", "y"})
+	assert.ElementsMatch(t, keys, []fwkplugin.DataKey{keyX, keyY})
 }
 
 func TestCloneReturnsCopy(t *testing.T) {
 	original := NewAttributes()
-	original.Put("k", &dummy{"value"})
+	keyK := fwkplugin.NewDataKey("k", "test-producer")
+	original.Put(keyK, &dummy{"value"})
 
 	cloned := original.Clone()
 
-	kOrig, _ := original.Get("k")
-	kClone, _ := cloned.Get("k")
+	kOrig, _ := original.Get(keyK)
+	kClone, _ := cloned.Get(keyK)
 
 	assert.NotSame(t, kOrig, kClone, "expected cloned value to be a different instance")
 	if diff := cmp.Diff(kOrig, kClone); diff != "" {
@@ -85,22 +95,36 @@ func TestReadAttribute(t *testing.T) {
 	// successful retrieval
 	attrs := NewAttributes()
 	original := &dummy{"foo"}
-	attrs.Put("a", original)
+	attrs.Put(keyA, original)
 
-	got, ok := ReadAttribute[*dummy](attrs, "a")
+	got, ok := ReadAttribute[*dummy](attrs, keyA)
 	assert.True(t, ok, "expected key to exist and value to be of type *dummy")
 	assert.NotSame(t, original, got, "expected Get to return a clone, not original")
 	assert.Equal(t, "foo", got.Text)
 
 	// missing key
-	_, ok = ReadAttribute[*dummy](attrs, "b")
+	_, ok = ReadAttribute[*dummy](attrs, keyB)
 	assert.False(t, ok, "expected key not to exist")
 
 	// type mismatch
-	other, ok := ReadAttribute[*anotherDummy](attrs, "a")
+	other, ok := ReadAttribute[*anotherDummy](attrs, keyA)
 	assert.False(t, ok, "expected type mismatch")
 	assert.Nil(t, other) // zero value of pointer is nil
 
+}
+
+func TestKeysWithDifferentProducersAreDistinct(t *testing.T) {
+	attrs := NewAttributes()
+	attrs.Put(keyA, &dummy{"foo"})
+
+	other := keyA.WithNonEmptyProducerName("other-producer")
+	_, ok := attrs.Get(other)
+	assert.False(t, ok, "expected key with a different producer name to be a distinct entry")
+
+	attrs.Put(other, &dummy{"bar"})
+	got, ok := attrs.Get(keyA)
+	assert.True(t, ok)
+	assert.Equal(t, "foo", got.(*dummy).Text, "expected the original entry to be untouched")
 }
 
 func TestDynamicAttribute(t *testing.T) {
@@ -113,10 +137,11 @@ func TestDynamicAttribute(t *testing.T) {
 		},
 	}
 
-	attrs.Put("dynamic_key", dynamic)
+	dynamicKey := fwkplugin.NewDataKey("dynamic", "test-producer")
+	attrs.Put(dynamicKey, dynamic)
 
 	// First read
-	got, ok := attrs.Get("dynamic_key")
+	got, ok := attrs.Get(dynamicKey)
 	assert.True(t, ok)
 	assert.Equal(t, "live", got.(*dummy).Text)
 
@@ -124,7 +149,7 @@ func TestDynamicAttribute(t *testing.T) {
 	val.Text = "changed"
 
 	// Second read should reflect change
-	got2, ok := attrs.Get("dynamic_key")
+	got2, ok := attrs.Get(dynamicKey)
 	assert.True(t, ok)
 	assert.Equal(t, "changed", got2.(*dummy).Text)
 }

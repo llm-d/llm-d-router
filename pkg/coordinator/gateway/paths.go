@@ -23,7 +23,7 @@ const (
 	PathCompletions     = "/v1/completions"
 	DefaultGeneratePath = "/inference/v1/generate"
 
-	EPPPhaseHeader    = "EPP-Phase"
+	EPPProfileHeader  = "EPP-Profile"
 	ContentTypeHeader = "Content-Type"
 	ContentTypeJSON   = "application/json"
 

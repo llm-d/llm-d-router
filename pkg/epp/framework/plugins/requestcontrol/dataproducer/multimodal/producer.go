@@ -250,12 +250,12 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
 // is configured; multimodal features come from the tokenizer output.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
@@ -283,9 +283,9 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		if metadata == nil {
 			continue
 		}
-		matchedItems := p.matchedItemsForPod(metadata.NamespacedName.String(), requestItems)
+		matchedItems := p.matchedItemsForPod(metadata.ID.String(), requestItems)
 		p.recordHitRatio(len(matchedItems), len(requestItems))
-		endpoint.Put(p.dk.String(), attrmm.NewEncoderCacheMatchInfo(
+		endpoint.Put(p.dk, attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
 			requestItems,
 		))
@@ -297,16 +297,18 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
 // derived from the tokenized prompt's multimodal features.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil || request.Body.TokenizedPrompt == nil {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return nil
 	}
 
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, feature := range request.Body.TokenizedPrompt.MultiModalFeatures {
-		if feature.Hash == "" {
-			continue
+	for _, p := range request.Body.TokenizedRequest.Prompts {
+		for _, feature := range p.MultiModalFeatures {
+			if feature.Hash == "" {
+				continue
+			}
+			addItem(itemsByHash, feature.Hash, string(feature.Modality))
 		}
-		addItem(itemsByHash, feature.Hash, string(feature.Modality))
 	}
 	return itemSlice(itemsByHash)
 }
@@ -399,12 +401,12 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 		return nil
 	}
 	metadata := event.Endpoint.GetMetadata()
-	if metadata == nil || metadata.NamespacedName.Name == "" {
+	if metadata == nil || metadata.ID.Name == "" {
 		return nil
 	}
-	p.removePod(metadata.NamespacedName.String())
+	p.removePod(metadata.ID.String())
 	log.FromContext(ctx).V(logging.DEBUG).Info("Removed stale pod from multimodal encoder-cache state",
-		"pod", metadata.NamespacedName.String())
+		"pod", metadata.ID.String())
 	return nil
 }
 

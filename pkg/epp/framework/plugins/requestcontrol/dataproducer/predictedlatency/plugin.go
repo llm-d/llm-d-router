@@ -41,6 +41,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	latencyproducerconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -76,6 +77,7 @@ type PredictedLatency struct {
 	config                       Config
 	prefixMatchDataKey           plugin.DataKey
 	inFlightLoadDataKey          plugin.DataKey
+	encoderCacheDataKey          plugin.DataKey
 	latencyPredictionInfoDataKey plugin.DataKey
 }
 
@@ -85,7 +87,7 @@ type PredictedLatency struct {
 // flight and Requests the active request count. Returns false when the
 // attribute is absent (e.g. an endpoint added before the producer injected it).
 func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*attrconcurrency.InFlightLoad, bool) {
-	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey.String()); ok {
+	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load, true
 		}
@@ -225,7 +227,10 @@ func (pl *PredictedLatency) readInFlightLoad(endpoint fwksched.Endpoint) inFligh
 }
 
 type Config struct {
-	SamplingMean                       float64       `json:"samplingMean,omitempty"`
+	// Deprecated: no longer used. Mid-stream TPOT predictions were removed;
+	// the value is accepted for config compatibility and ignored.
+	SamplingMean float64 `json:"samplingMean,omitempty"`
+	// Deprecated: no longer used. Accepted for config compatibility and ignored.
 	MaxDecodeTokenSamplesForPrediction int           `json:"maxDecodeTokenSamplesForPrediction,omitempty"`
 	SLOBufferFactor                    float64       `json:"sloBufferFactor,omitempty"`
 	ContextTTL                         time.Duration `json:"contextTTL,omitempty"`
@@ -241,6 +246,16 @@ type Config struct {
 	// load to read for the prefill-tokens-in-flight and active-request-count
 	// features. Empty defaults to the auto-created producer.
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
+	// UseEncoderCacheFeatures enables the multimodal encoder-cache features
+	// (encoder_input_size, encoder_matched_size). When true, the multimodal
+	// encoder-cache match data is consumed as a required dependency, so a
+	// producer is auto-created when none is configured. When false, both
+	// features are always 0. Default: false.
+	UseEncoderCacheFeatures bool `json:"useEncoderCacheFeatures,omitempty"`
+	// EncoderCacheMatchInfoProducerName selects which multimodal encoder-cache
+	// producer's match data to read. Empty defaults to the auto-created producer.
+	// Ignored unless UseEncoderCacheFeatures is true.
+	EncoderCacheMatchInfoProducerName string `json:"encoderCacheMatchInfoProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -267,6 +282,9 @@ func PredictedLatencyFactory(name string, rawParameters *json.Decoder, handle pl
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
+	if parameters.SamplingMean != DefaultConfig.SamplingMean || parameters.MaxDecodeTokenSamplesForPrediction != DefaultConfig.MaxDecodeTokenSamplesForPrediction {
+		log.FromContext(handle.Context()).Info("Deprecated: samplingMean and maxDecodeTokenSamplesForPrediction are ignored; mid-stream TPOT predictions were removed")
+	}
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
@@ -281,14 +299,6 @@ func PredictedLatencyFactory(name string, rawParameters *json.Decoder, handle pl
 
 func (c *Config) validate() error {
 	var errs []error
-
-	if c.SamplingMean <= 0 {
-		errs = append(errs, fmt.Errorf("samplingMean must be > 0, got %f", c.SamplingMean))
-	}
-
-	if c.MaxDecodeTokenSamplesForPrediction < 0 {
-		errs = append(errs, fmt.Errorf("maxDecodeTokenSamplesForPrediction must be >= 0, got %d", c.MaxDecodeTokenSamplesForPrediction))
-	}
 
 	if c.SLOBufferFactor <= 0 {
 		errs = append(errs, fmt.Errorf("sloBufferFactor must be > 0, got %f", c.SLOBufferFactor))
@@ -307,6 +317,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		encoderCacheDataKey:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(config.EncoderCacheMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
@@ -370,13 +381,18 @@ type predictedLatencyCtx struct {
 	predictedTTFT             float64
 	avgTPOT                   float64
 	avgPredictedTPOT          float64
-	decodeTokenSampler        *decodeTokenSampler
-	tpotObservations          []float64
 	predictedTPOTObservations []float64
 
 	inputTokenCount int
 
 	prefixCacheScoresForEndpoints map[string]float64
+
+	// encoderInputSize is the request's total multimodal encoder item size;
+	// encoderMatchedSizeForEndpoints is the per-endpoint portion likely present
+	// in that endpoint's encoder cache, keyed by endpoint name. Both stay 0
+	// when encoder-cache features are disabled or the request is text-only.
+	encoderInputSize               int
+	encoderMatchedSizeForEndpoints map[string]int
 
 	// inFlightLoadForEndpoints holds the in-flight load captured for every
 	// candidate endpoint during Produce, keyed by NamespacedName.String().
@@ -401,17 +417,18 @@ type predictedLatencyCtx struct {
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
 	if request.Body != nil {
-		if tp := request.Body.TokenizedPrompt; tp != nil {
+		if tp := request.Body.TokenizedRequest; tp != nil {
 			inputTokenCount = tp.TokenCount()
 		}
 	}
 	return &predictedLatencyCtx{
-		schedulingRequest:             *request,
-		inputTokenCount:               inputTokenCount,
-		lastSeenMetrics:               make(map[string]*fwkdl.Metrics),
-		prefixCacheScoresForEndpoints: make(map[string]float64),
-		inFlightLoadForEndpoints:      make(map[string]inFlightLoadSnapshot),
-		predictionsForScheduling:      make(map[string]endpointPredictionResult),
+		schedulingRequest:              *request,
+		inputTokenCount:                inputTokenCount,
+		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
+		prefixCacheScoresForEndpoints:  make(map[string]float64),
+		encoderMatchedSizeForEndpoints: make(map[string]int),
+		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
+		predictionsForScheduling:       make(map[string]endpointPredictionResult),
 	}
 }
 
@@ -470,7 +487,7 @@ func (pl *PredictedLatency) parseSLOHeaders(ctx context.Context, request *fwksch
 // --- Running request queue helpers ---
 
 func (pl *PredictedLatency) getEndpointMinTPOTSLO(endpoint fwksched.Endpoint) float64 {
-	endpointName := endpoint.GetMetadata().NamespacedName
+	endpointName := endpoint.GetMetadata().ID
 	if runningReqs := pl.getRunningRequestList(endpointName); runningReqs != nil && runningReqs.GetSize() > 0 {
 		if min := runningReqs.Peek(); min != nil {
 			return min.tpot
@@ -480,7 +497,7 @@ func (pl *PredictedLatency) getEndpointMinTPOTSLO(endpoint fwksched.Endpoint) fl
 }
 
 func (pl *PredictedLatency) getEndpointRunningRequestCount(endpoint fwksched.Endpoint) int {
-	endpointName := endpoint.GetMetadata().NamespacedName
+	endpointName := endpoint.GetMetadata().ID
 	if runningReqs := pl.getRunningRequestList(endpointName); runningReqs != nil {
 		return runningReqs.GetSize()
 	}
@@ -508,8 +525,8 @@ func (pl *PredictedLatency) removeRequestFromQueue(requestID string, ctx *predic
 		return
 	}
 	endpointName := types.NamespacedName{
-		Name:      ctx.targetMetadata.NamespacedName.Name,
-		Namespace: ctx.targetMetadata.NamespacedName.Namespace,
+		Name:      ctx.targetMetadata.ID.Name,
+		Namespace: ctx.targetMetadata.ID.Namespace,
 	}
 	pl.removeRequestFromEndpoint(endpointName, requestID)
 }

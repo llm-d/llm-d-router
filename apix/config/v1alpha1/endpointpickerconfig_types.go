@@ -34,8 +34,9 @@ type EndpointPickerConfig struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// +optional
-	// FeatureGates is a set of flags that enable various experimental features with the EPP.
-	// If omitted none of these experimental features will be enabled.
+	// FeatureGates is a set of flags that toggle optional EPP features. Each entry is a gate name,
+	// optionally suffixed with "=true" or "=false" (a bare name means "=true"). Gates carry
+	// per-gate defaults that apply when omitted; some default to enabled.
 	FeatureGates FeatureGates `json:"featureGates,omitempty"`
 
 	// +required
@@ -186,7 +187,8 @@ func (sp SchedulingPlugin) String() string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
-// FeatureGates is a set of flags that enable various experimental features with the EPP
+// FeatureGates is a set of flags that toggle optional EPP features ("name", "name=true", or
+// "name=false"); omitted gates use their registered defaults.
 type FeatureGates []string
 
 func (fg FeatureGates) String() string {
@@ -238,13 +240,29 @@ type DataLayerConfig struct {
 	// endpoints. This enables running the EPP without a Kubernetes cluster.
 	// If omitted, the EPP uses the default Kubernetes-based discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
+	// +optional
+	// PeerDiscovery specifies which PeerDiscovery plugin to use for discovering
+	// peer EPP replicas. If omitted, peer discovery is disabled.
+	PeerDiscovery *PeerDiscoveryConfig `json:"peerDiscovery,omitempty"`
+	// +optional
+	// CrossReplicaSyncerPluginRef names the plugin instance to use as the cross-EPP
+	// cross-replica syncer. The reference is to the name of an entry in the
+	// top-level Plugins section. If omitted, no cross-replica syncer is used
+	// and plugins that read cross-replica state fall back to local data.
+	CrossReplicaSyncerPluginRef string `json:"crossReplicaSyncerPluginRef,omitempty"`
+	// +optional
+	// CrossReplicaSyncInterval is the cadence at which each replica publishes
+	// its local per-endpoint state to the cross-replica syncer. It is rounded
+	// to a multiple of the datalayer base tick. If omitted, a default is used.
+	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v}", dlc.Sources, dlc.Discovery)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, PeerDiscovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
+		dlc.Sources, dlc.Discovery, dlc.PeerDiscovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
 }
 
 // DiscoveryConfig references the EndpointDiscovery plugin to use.
@@ -261,6 +279,22 @@ func (dc *DiscoveryConfig) String() string {
 		return nilString
 	}
 	return fmt.Sprintf("{PluginRef: %s}", dc.PluginRef)
+}
+
+// PeerDiscoveryConfig references the PeerDiscovery plugin to use.
+type PeerDiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements PeerDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (pdc *PeerDiscoveryConfig) String() string {
+	if pdc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", pdc.PluginRef)
 }
 
 // DataLayerSource contains the configuration of a DataSource of the DataLayer feature
@@ -351,7 +385,7 @@ type FlowControlConfig struct {
 	// levels. If this limit is exceeded, new requests will be rejected even if their specific
 	// priority band has capacity.
 	// Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
-	// If omitted, no global byte limit is enforced.
+	// If omitted or "0", no global byte limit is enforced.
 	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
 
 	// +optional
@@ -359,16 +393,38 @@ type FlowControlConfig struct {
 	// levels. If this limit is exceeded, new requests will be rejected even if their specific
 	// priority band has capacity.
 	// Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
-	// If omitted, no global request limit is enforced.
+	// If omitted or "0", no global request limit is enforced.
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
-	// DefaultRequestTTL serves as a fallback timeout for requests that do not specify their own
-	// deadline.
-	// It ensures that requests do not hang indefinitely in the queue.
-	// If 0 or omitted, it defaults to the client context deadline, meaning requests may wait
-	// indefinitely unless cancelled by the client.
+	// DefaultRequestTTL bounds how long a request may wait in the queue while the candidate pool has
+	// endpoints; NoEndpointRequestTTL bounds that wait while it has none.
+	// If omitted, it defaults to 60s. This is a queue-wait budget: a request that cannot dispatch
+	// within it is shed with a retryable backpressure error rather than served late, and with no
+	// client or gateway deadline it is the only bound on waiting against a pool that has endpoints.
+	// Where such deadlines exist and fire sooner, they evict the request first (client disconnect).
+	// An explicit "0s" disables eviction while the pool has endpoints, and, unless NoEndpointRequestTTL
+	// overrides it, while the pool is empty as well: such requests then wait until client disconnect or
+	// controller shutdown.
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
+
+	// +optional
+	// NoEndpointRequestTTL bounds queue wait while the candidate pool has no endpoints, replacing
+	// DefaultRequestTTL for as long as that holds. The two regimes want opposite budgets: with no
+	// endpoint to dispatch to, waiting is the only path to success and the budget should cover a cold
+	// start (image pull plus weight load), whereas a saturated pool should shed early enough to keep
+	// time-to-first-token within an SLO. A request that exhausts this budget is evicted as genuine
+	// unavailability rather than as backpressure.
+	// The budget in force is re-evaluated while the request is queued, so a pool that scales from zero
+	// moves its queued requests onto DefaultRequestTTL, and each regime change starts a fresh budget.
+	// Total queue wait stays bounded by the longer of the two budgets, plus a short expiry-sweep margin;
+	// a regime change grants a fresh budget but does not extend that bound, so a request that changes
+	// regime near the bound may be evicted before the fresh budget elapses.
+	// If omitted, it follows DefaultRequestTTL, so splitting the regimes is opt-in and a configuration that
+	// sets only DefaultRequestTTL keeps that bound in both; it defaults to 60s when neither is set. An
+	// explicit "0s" disables eviction while the pool is empty: requests then wait until an endpoint
+	// appears, the client disconnects, or the controller shuts down.
+	NoEndpointRequestTTL *metav1.Duration `json:"noEndpointRequestTTL,omitempty"`
 
 	// +optional
 	// DefaultPriorityBand allows you to define a template for handling traffic with priority levels
@@ -382,7 +438,10 @@ type FlowControlConfig struct {
 	// +optional
 	// DefaultNegativePriorityBand allows you to define a separate template for priority levels
 	// strictly below zero. This enables designating negative-priority traffic as sheddable by
-	// setting lower capacity limits (e.g., maxBytes: "0" to drop immediately).
+	// setting lower capacity limits (e.g., a small maxRequests, so that under saturation the band
+	// fills quickly and subsequent requests are rejected immediately rather than queued).
+	// Note that a value of "0" is treated as unset and receives the system default, not zero
+	// capacity.
 	// If not specified, negative priorities fall back to DefaultPriorityBand.
 	DefaultNegativePriorityBand *PriorityBandConfig `json:"defaultNegativePriorityBand,omitempty"`
 
@@ -401,6 +460,14 @@ type FlowControlConfig struct {
 	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
 	// Flow Control. If omitted, "utilization-detector" is used by default.
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
+
+	// +optional
+	// EnableEviction enables demand-driven in-flight eviction. When higher-priority requests are
+	// blocked by pool saturation, lower-priority in-flight requests (priority < 0) may be
+	// terminated to reclaim capacity. Pacing and sizing self-configure from the selected
+	// saturation detector. See docs/flow-control-eviction.md.
+	// Defaults to false.
+	EnableEviction bool `json:"enableEviction,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {
@@ -425,6 +492,10 @@ func (fcc *FlowControlConfig) String() string {
 		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", fcc.DefaultRequestTTL.Duration))
 	}
 
+	if fcc.NoEndpointRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("NoEndpointRequestTTL: %s", fcc.NoEndpointRequestTTL.Duration))
+	}
+
 	if fcc.DefaultPriorityBand != nil {
 		parts = append(parts, fmt.Sprintf("DefaultPriorityBand: %v", fcc.DefaultPriorityBand))
 	}
@@ -445,6 +516,10 @@ func (fcc *FlowControlConfig) String() string {
 		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", fcc.SaturationDetector))
 	}
 
+	if fcc.EnableEviction {
+		parts = append(parts, "EnableEviction: true")
+	}
+
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
@@ -457,13 +532,15 @@ type PriorityBandConfig struct {
 	// +optional
 	// MaxBytes is the maximum number of bytes allowed for this priority band.
 	// Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
-	// If omitted, the system default is used.
+	// If omitted or "0", the system default (1G) is used. Per-band limits are always bounded; to
+	// effectively remove the bound, set an explicit large value.
 	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
 
 	// +optional
 	// MaxRequests is the maximum number of concurrent requests allowed for this priority band.
 	// Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
-	// If omitted, no request limit is enforced.
+	// If omitted or "0", the system default (5000) is used. Per-band limits are always bounded; to
+	// effectively remove the bound, set an explicit large value.
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional

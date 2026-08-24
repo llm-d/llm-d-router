@@ -1,0 +1,26 @@
+# EPP configuration for the soft-reflective-ceiling usage limit policy.
+#
+# The policy applies a graduated, priority-aware dispatch ceiling: the
+# highest-priority band is never gated, and progressively lower-priority
+# bands are gated first as pool saturation rises. Gated items remain in
+# their queues; the ceiling controls dispatch, not admission.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: prefix-cache-scorer
+- type: soft-reflective-ceiling-policy
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
+    weight: 2.0
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 2.0
+  - pluginRef: prefix-cache-scorer
+    weight: 3.0
+flowControl:
+  usageLimitPolicyPluginRef: soft-reflective-ceiling-policy

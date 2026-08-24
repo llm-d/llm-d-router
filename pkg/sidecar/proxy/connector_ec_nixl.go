@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 

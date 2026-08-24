@@ -143,6 +143,43 @@ type dispatchResult struct {
 	err     error
 }
 
+// fillQueue enqueues n requests of byteSize bytes that stay queued (the caller supplies a
+// detector that blocks dispatch) and waits until settled reports the fill is observable in
+// registry stats. Sending overflow traffic only after the fill is observable is what makes a
+// subsequent capacity rejection deterministic; a fixed enqueue stagger would race with goroutine
+// scheduling under CI load. The returned release func cancels the queued requests' context,
+// drains their results, and asserts none was rejected for capacity.
+func (h *integrationHarness) fillQueue(
+	t *testing.T, key flowcontrol.FlowKey, n int, byteSize uint64, settled func() bool,
+) (release func()) {
+	t.Helper()
+	queuedCtx, queuedCancel := context.WithCancel(h.ctx)
+	t.Cleanup(queuedCancel)
+	queued := make(chan dispatchResult, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("queued-req-%d", i)
+		go func() {
+			req := &testRequest{id: id, key: key, byteSize: byteSize, ttl: 5 * time.Minute}
+			outcome, err := h.fc.EnqueueAndWait(queuedCtx, req)
+			queued <- dispatchResult{id: id, outcome: outcome, err: err}
+		}()
+	}
+	require.Eventually(t, settled, time.Second, time.Millisecond,
+		"%d filling requests should be observably queued before proceeding", n)
+	return func() {
+		queuedCancel()
+		for i := 0; i < n; i++ {
+			select {
+			case r := <-queued:
+				require.NotEqual(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
+					"queued request %s should have been admitted, not capacity-rejected", r.id)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timed out waiting for queued request %d after cancellation", i)
+			}
+		}
+	}
+}
+
 // --- Producer and Detector ---
 
 type producerAndDetector struct {
@@ -173,7 +210,7 @@ func newProducerAndDetector(ctx context.Context, t *testing.T, maxConcurrency in
 	det := detectorPlugin.(flowcontrol.SaturationDetector)
 
 	epMeta := &datalayer.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		ID: types.NamespacedName{Name: "pod-1", Namespace: "default"},
 	}
 	ep := datalayer.NewEndpoint(epMeta, datalayer.NewMetrics())
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
@@ -273,7 +310,10 @@ func newHarness(t *testing.T, opts harnessOpts) *integrationHarness {
 	controllerCfg := opts.controllerCfg
 	if controllerCfg == nil {
 		controllerCfg = &controller.Config{
-			DefaultRequestTTL:        5 * time.Minute,
+			DefaultRequestTTL: 5 * time.Minute,
+			// Matching the saturation budget leaves the two unavailability regimes indistinguishable, as they are
+			// under the shipped defaults. Tests that exercise the split configure the budgets apart.
+			NoEndpointRequestTTL:     5 * time.Minute,
 			ExpiryCleanupInterval:    10 * time.Millisecond,
 			EnqueueChannelBufferSize: 100,
 		}

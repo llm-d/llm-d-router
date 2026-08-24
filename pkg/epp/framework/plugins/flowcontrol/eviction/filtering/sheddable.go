@@ -28,10 +28,6 @@ import (
 // This uses the project-wide definition of sheddable from requtil.IsSheddable.
 const SheddableFilterType = "sheddable-eviction-filter"
 
-func init() {
-	plugin.Register(SheddableFilterType, SheddableFilterFactory)
-}
-
 // SheddableFilterFactory creates a SheddableFilter plugin.
 func SheddableFilterFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	f := &SheddableFilter{name: SheddableFilterType}

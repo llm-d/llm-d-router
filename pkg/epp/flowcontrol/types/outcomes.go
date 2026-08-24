@@ -60,6 +60,13 @@ const (
 	// The associated error will wrap `ErrTTLExpired` (and `ErrEvicted`).
 	QueueOutcomeEvictedTTL
 
+	// QueueOutcomeEvictedNoEndpoints indicates eviction from a queue because the queue-wait budget expired while the
+	// candidate pool had no endpoints. It is distinguished from `QueueOutcomeEvictedTTL` so the admission layer can
+	// surface genuine unavailability (HTTP 503) instead of backpressure (HTTP 429), and so the two unavailability
+	// regimes remain separable on dashboards.
+	// The associated error will wrap `ErrTTLExpired` and `ErrNoEndpoints` (and `ErrEvicted`).
+	QueueOutcomeEvictedNoEndpoints
+
 	// QueueOutcomeEvictedContextCancelled indicates eviction from a queue because the request's own context (from
 	// `FlowControlRequest.Context()`) was cancelled.
 	// The associated error will wrap `ErrContextCancelled` (which may further wrap the underlying `context.Canceled` or
@@ -71,6 +78,11 @@ const (
 	// The specific underlying cause can be determined from the associated error (e.g., controller shutdown while the item
 	// was queued), which will be wrapped by `ErrEvicted`.
 	QueueOutcomeEvictedOther
+
+	// NumQueueOutcomes is a sentinel that equals the total number of QueueOutcome values.
+	// It is not a valid outcome; it exists to size arrays indexed by QueueOutcome and to allow tests to detect
+	// when new values are added without a corresponding update to dependent code.
+	NumQueueOutcomes
 )
 
 // String returns a human-readable string representation of the QueueOutcome.
@@ -88,6 +100,8 @@ func (o QueueOutcome) String() string {
 		return "RejectedOther"
 	case QueueOutcomeEvictedTTL:
 		return "EvictedTTL"
+	case QueueOutcomeEvictedNoEndpoints:
+		return "EvictedNoEndpoints"
 	case QueueOutcomeEvictedContextCancelled:
 		return "EvictedContextCancelled"
 	case QueueOutcomeEvictedOther:

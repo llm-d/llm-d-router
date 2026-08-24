@@ -881,6 +881,60 @@ func TestSchedulerE2ELatency(t *testing.T) {
 	}
 }
 
+func TestRequestProcessingLatency(t *testing.T) {
+	Reset()
+	durations := []time.Duration{
+		200 * time.Microsecond,
+		800 * time.Microsecond,
+		1500 * time.Microsecond,
+		3 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		30 * time.Millisecond,
+		75 * time.Millisecond,
+		150 * time.Millisecond,
+	}
+	for _, duration := range durations {
+		RecordRequestProcessingLatency(duration)
+	}
+
+	want, err := os.Open("testdata/llm_d_request_processing_duration_seconds_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_request_processing_duration_seconds"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestResponseProcessingLatency(t *testing.T) {
+	Reset()
+	durations := []time.Duration{
+		200 * time.Microsecond,
+		800 * time.Microsecond,
+		1500 * time.Microsecond,
+		3 * time.Millisecond,
+		8 * time.Millisecond,
+		15 * time.Millisecond,
+		30 * time.Millisecond,
+		75 * time.Millisecond,
+		150 * time.Millisecond,
+	}
+	for _, duration := range durations {
+		RecordResponseProcessingLatency(duration)
+	}
+
+	want, err := os.Open("testdata/llm_d_response_processing_duration_seconds_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want, "llm_d_epp_response_processing_duration_seconds"); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestFlowControlDispatchCycleLengthMetric(t *testing.T) {
 	Reset()
 	scenarios := []struct {
@@ -1043,9 +1097,9 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 					TargetEndpoints: []fwksched.Endpoint{
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
-								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
-								PodName:        "pod-1",
-								Port:           "8080",
+								ID:   k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
+								Name: "pod-1",
+								Port: "8080",
 							},
 							nil, nil,
 						),
@@ -1068,17 +1122,17 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 					TargetEndpoints: []fwksched.Endpoint{
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
-								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
-								PodName:        "pod-1",
-								Port:           "8080",
+								ID:   k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
+								Name: "pod-1",
+								Port: "8080",
 							},
 							nil, nil,
 						),
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
-								NamespacedName: k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
-								PodName:        "pod-2",
-								Port:           "9090",
+								ID:   k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
+								Name: "pod-2",
+								Port: "9090",
 							},
 							nil, nil,
 						),
@@ -1101,9 +1155,9 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 					TargetEndpoints: []fwksched.Endpoint{
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
-								NamespacedName: k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
-								PodName:        "pod-1",
-								Port:           "8080",
+								ID:   k8stypes.NamespacedName{Name: "pod-1", Namespace: "ns-1"},
+								Name: "pod-1",
+								Port: "8080",
 							},
 							nil, nil,
 						),
@@ -1118,9 +1172,9 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 					TargetEndpoints: []fwksched.Endpoint{
 						fwksched.NewEndpoint(
 							&fwkdl.EndpointMetadata{
-								NamespacedName: k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
-								PodName:        "pod-2",
-								Port:           "9090",
+								ID:   k8stypes.NamespacedName{Name: "pod-2", Namespace: "ns-2"},
+								Name: "pod-2",
+								Port: "9090",
 							},
 							nil, nil,
 						),
@@ -1321,14 +1375,24 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 
 	const pool = "test-pool"
 
-	RecordFlowControlPoolSaturation(pool, 0.5)
-	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool))
+	RecordFlowControlPoolSaturation(pool, "effective", 0.5)
+	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool))
+	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, valNew)
+
+	RecordFlowControlPoolSaturation(pool, "prefill", 0.3)
+	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "prefill"))
+	require.NoError(t, err)
+	require.Equal(t, 0.3, val)
+
+	RecordFlowControlPoolSaturation(pool, "decode", 0.7)
+	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "decode"))
+	require.NoError(t, err)
+	require.Equal(t, 0.7, val)
 }
 
 func TestFlowControlRequestsTotalMetric(t *testing.T) {
@@ -1388,7 +1452,7 @@ func TestRecordRequestTPOT(t *testing.T) {
 		received := timeBaseline
 		firstToken := timeBaseline.Add(500 * time.Millisecond)
 		complete := timeBaseline.Add(2000 * time.Millisecond)
-		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", received, firstToken, complete, 11))
+		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, received, firstToken, complete, 11))
 
 		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3")
 		require.NoError(t, err)
@@ -1396,24 +1460,31 @@ func TestRecordRequestTPOT(t *testing.T) {
 		require.InDelta(t, 0.15, h.GetSampleSum(), 0.001)
 	})
 
+	t.Run("non-streaming skipped without error log", func(t *testing.T) {
+		received := timeBaseline
+		firstToken := timeBaseline.Add(500 * time.Millisecond)
+		// Non-streaming: the whole body arrives at once, so complete == firstToken.
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", false, received, firstToken, firstToken, 11))
+	})
+
 	t.Run("single token skipped", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 1))
 	})
 
 	t.Run("zero tokens skipped", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(100*time.Millisecond), timeBaseline.Add(200*time.Millisecond), 0))
 	})
 
 	t.Run("zero first token timestamp", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, time.Time{}, timeBaseline.Add(200*time.Millisecond), 10))
 	})
 
 	t.Run("first token before received", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline.Add(100*time.Millisecond), timeBaseline, timeBaseline.Add(200*time.Millisecond), 10))
 	})
 
 	t.Run("complete before first token", func(t *testing.T) {
-		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
+		require.False(t, RecordRequestTPOT(ctx, "m10", "t10", "tenant-a", "3", true, timeBaseline, timeBaseline.Add(200*time.Millisecond), timeBaseline.Add(100*time.Millisecond), 10))
 	})
 }
 
@@ -1459,4 +1530,58 @@ func TestInferenceModelRewriteDecisionsTotalMetric(t *testing.T) {
 	valNew, err := testutil.GetCounterMetricValue(llmdInferenceModelRewriteDecisionsTotal.WithLabelValues("rewrite-rule-1", "model-a", "model-b"))
 	require.NoError(t, err)
 	require.Equal(t, 1.0, valNew)
+}
+
+func TestFlowControlEvictionMetrics(t *testing.T) {
+	RecordFlowControlRevocationsIssued("pool-evict", "10", 2)
+	RecordFlowControlRevocations("pool-evict", RevocationOutcomeConfirmed, 1)
+	RecordFlowControlRevocations("pool-evict", RevocationOutcomeTimedOut, 1)
+	RecordFlowControlReclaimTarget("pool-evict", 0.1)
+	RecordFlowControlPendingReclaim("pool-evict", 0.05)
+	RecordFlowControlRevocationConfirmationDuration("pool-evict", 5*time.Millisecond)
+
+	for name, testdata := range map[string]string{
+		"llm_d_epp_flow_control_revocations_issued_total": "testdata/llm_d_flow_control_revocations_issued_metric",
+		"llm_d_epp_flow_control_revocations_total":        "testdata/llm_d_flow_control_revocations_metric",
+		"llm_d_epp_flow_control_reclaim_target":           "testdata/llm_d_flow_control_reclaim_target_metric",
+		"llm_d_epp_flow_control_pending_reclaim":          "testdata/llm_d_flow_control_pending_reclaim_metric",
+	} {
+		want, err := os.Open(testdata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer want.Close()
+		if err := promtestutil.GatherAndCompare(metrics.Registry, want, name); err != nil {
+			t.Error(err)
+		}
+	}
+
+	if got := promtestutil.CollectAndCount(llmdFlowControlRevocationConfirmationDuration,
+		"llm_d_epp_flow_control_revocation_confirmation_seconds"); got != 1 {
+		t.Errorf("confirmation duration histogram series = %d, want 1", got)
+	}
+}
+
+func TestRecordPluginDataScopeViolation(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	for i := 0; i < 2; i++ {
+		RecordPluginDataScopeViolation("Filter", "test-filter", "f1", DataScopeAccessWrite)
+	}
+	for i := 0; i < 3; i++ {
+		RecordPluginDataScopeViolation("Filter", "test-filter", "f1", DataScopeAccessRead)
+	}
+	RecordPluginDataScopeViolation("DataProducer", "test-producer", "p1", DataScopeAccessWrite)
+
+	want, err := os.Open("testdata/llm_d_plugin_data_scope_violations_total_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want,
+		"llm_d_epp_plugin_data_scope_violations_total"); err != nil {
+		t.Error(err)
+	}
 }

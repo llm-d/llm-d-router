@@ -177,10 +177,10 @@ const DefaultTestPodPort = "8000"
 func createEndpoint(nsn k8stypes.NamespacedName, ipaddr, port string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: nsn,
-			Address:        ipaddr,
-			Port:           port,
-			Labels:         labels,
+			ID:      nsn,
+			Address: ipaddr,
+			Port:    port,
+			Labels:  labels,
 		},
 		nil,
 		fwkdl.NewAttributes(),
@@ -223,7 +223,7 @@ func createRequest(prompt string) *scheduling.InferenceRequest {
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{Raw: prompt},
 			},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
 		},
 	}
 }
@@ -337,7 +337,7 @@ func TestPdProfileHandler_Pick(t *testing.T) {
 			for profileName, profileRes := range tt.profileResults {
 				if profileName == defaultDecodeProfile && profileRes != nil {
 					for _, pod := range profileRes.TargetEndpoints {
-						pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+						pod.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 							attrprefix.NewPrefixCacheMatchInfo(tt.cachedTokens, inputTokens, 1))
 					}
 				}
@@ -439,7 +439,7 @@ func TestPdProfileHandler_PickSeries(t *testing.T) {
 				for profileName, profileRes := range profileResults {
 					if profileName == defaultDecodeProfile && profileRes != nil {
 						for _, endpoint := range profileRes.TargetEndpoints {
-							endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
+							endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey,
 								attrprefix.NewPrefixCacheMatchInfo(innerTest.cachedTokens, inputTokens, 1))
 						}
 					}

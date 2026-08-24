@@ -39,32 +39,32 @@ var _ requestcontrol.ResponseBodyProcessor = &PredictedLatency{}
 
 // --- RequestControl Hooks ---
 
-func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) {
+func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	logger := log.FromContext(ctx)
 	if request == nil {
 		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: request is nil, skipping")
-		return
+		return nil
 	}
 
 	if schedulingResult == nil || len(schedulingResult.ProfileResults) == 0 {
 		logger.V(logutil.TRACE).Info("PredictedLatency: Skipping PreRequest because no scheduling result was provided.")
-		return
+		return nil
 	}
 
 	targetMetadata := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName].TargetEndpoints[0].GetMetadata()
 	if !pl.checkPredictor(logger, targetMetadata) {
-		return
+		return nil
 	}
 
 	endpointName := types.NamespacedName{
-		Name:      targetMetadata.NamespacedName.Name,
-		Namespace: targetMetadata.NamespacedName.Namespace,
+		Name:      targetMetadata.ID.Name,
+		Namespace: targetMetadata.ID.Namespace,
 	}
 
 	logger.V(logutil.TRACE).Info("request ID for SLO tracking", "requestID", request.Headers[reqcommon.RequestIDHeaderKey], "endpointName", endpointName)
 	if request.Headers[reqcommon.RequestIDHeaderKey] == "" {
 		logger.V(logutil.DEBUG).Error(errors.New("missing request ID"), "PredictedLatency.PreRequest: Request is missing request ID header")
-		return
+		return nil
 	}
 
 	id := request.Headers[reqcommon.RequestIDHeaderKey]
@@ -76,7 +76,7 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 	if err != nil {
 		id := request.Headers[reqcommon.RequestIDHeaderKey]
 		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: Failed to get SLO context for request", "error", err, "requestID", id)
-		return
+		return nil
 	}
 
 	added := endpointRequestList.Add(id, predictedLatencyCtx.avgTPOTSLO)
@@ -91,7 +91,7 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 		prefillEndpoint = prefillResult.TargetEndpoints[0]
 		prefillMetadata := prefillEndpoint.GetMetadata()
 		predictedLatencyCtx.prefillTargetMetadata = prefillMetadata
-		logger.V(logutil.DEBUG).Info("Prefill target identified for request", "requestID", id, "prefillEndpoint", prefillMetadata.NamespacedName.String())
+		logger.V(logutil.DEBUG).Info("Prefill target identified for request", "requestID", id, "prefillEndpoint", prefillMetadata.ID.String())
 	} else {
 		logger.V(logutil.DEBUG).Info("No prefill target identified for request", "requestID", id)
 	}
@@ -105,12 +105,12 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 	// PreRequest hooks have no defined order, re-reading it here would make the
 	// training features depend on hook ordering. Produce is DAG-ordered, so the
 	// value captured there is well defined and matches the prediction features.
-	if snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[decodeEndpoint.GetMetadata().NamespacedName.String()]; ok {
+	if snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[decodeEndpoint.GetMetadata().ID.String()]; ok {
 		predictedLatencyCtx.prefillTokensAtDispatch = snapshot.tokens
 		predictedLatencyCtx.requestsAtDispatch = snapshot.requests
 	}
 	if prefillEndpoint != nil {
-		if snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[prefillEndpoint.GetMetadata().NamespacedName.String()]; ok {
+		if snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[prefillEndpoint.GetMetadata().ID.String()]; ok {
 			predictedLatencyCtx.prefillTokensAtDispatchOnPrefill = snapshot.tokens
 			predictedLatencyCtx.requestsAtDispatchOnPrefill = snapshot.requests
 		}
@@ -118,6 +118,7 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 	predictedLatencyCtx.decodeTokensAtDispatch = 0
 
 	processPreRequestForLatencyPrediction(ctx, predictedLatencyCtx)
+	return nil
 }
 
 func (pl *PredictedLatency) ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *requestcontrol.Response, targetMetadata *fwkdl.EndpointMetadata) {
@@ -149,15 +150,15 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 
 	if predictedLatencyCtx.ttft == 0 {
 		if pl.config.StreamingMode && !response.EndOfStream {
-			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
+			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
 	} else {
-		processTokenForLatencyPrediction(ctx, pl.typedName.Name, pl.typedName.Type, pl.latencypredictor, pl.config.EndpointRoleLabel, predictedLatencyCtx, targetMetadata, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
+		processTokenForLatencyPrediction(ctx, predictedLatencyCtx, now)
 	}
 
 	if response.EndOfStream {
 		if !pl.config.StreamingMode {
-			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now, pl.config.SamplingMean, pl.config.MaxDecodeTokenSamplesForPrediction)
+			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
 
 		if predictedLatencyCtx.ttft > 0 {
@@ -194,6 +195,8 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 					now,
 					0,
 					0,
+					0,
+					0,
 				)
 				entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatch
 				entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
@@ -225,9 +228,9 @@ func (pl *PredictedLatency) checkPredictor(logger logr.Logger, metadata *fwkdl.E
 // processPreRequestForLatencyPrediction looks up the stored prediction for the target endpoint.
 func processPreRequestForLatencyPrediction(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx) {
 	logger := log.FromContext(ctx)
-	targetName := predictedLatencyCtx.targetMetadata.NamespacedName.Name
+	targetName := predictedLatencyCtx.targetMetadata.ID.Name
 	if m := predictedLatencyCtx.prefillTargetMetadata; m != nil {
-		targetName = m.NamespacedName.Name
+		targetName = m.ID.Name
 	}
 	if storedPred, ok := predictedLatencyCtx.predictionsForScheduling[targetName]; ok {
 		logger.V(logutil.DEBUG).Info("PreRequest TTFT from stored prediction", "value_ms", storedPred.TTFT, "endpoint", targetName)
@@ -247,24 +250,22 @@ func processFirstTokenForLatencyPrediction(
 	endpointRoleLabel string,
 	predictedLatencyCtx *predictedLatencyCtx,
 	now time.Time,
-	samplingMean float64,
-	maxDecodeTokenSamplesForPrediction int,
 ) {
 	logger := log.FromContext(ctx)
 
-	initializeSampler(ctx, predictedLatencyCtx, samplingMean, maxDecodeTokenSamplesForPrediction)
 	predictedLatencyCtx.ttft = float64(now.Sub(predictedLatencyCtx.requestReceivedTimestamp).Milliseconds())
 	predictedLatencyCtx.generatedTokenCount = 1
 
 	if prefillTargetMetadata := predictedLatencyCtx.prefillTargetMetadata; prefillTargetMetadata != nil {
 		prefillMetrics, err := getLatestMetricsForProfile(predictedLatencyCtx, ExperimentalDefaultPrefillProfile)
 		if err == nil {
-			prefillPrefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[prefillTargetMetadata.NamespacedName.Name]
+			prefillPrefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[prefillTargetMetadata.ID.Name]
+			prefillEncoderMatchedSize := predictedLatencyCtx.encoderMatchedSizeForEndpoints[prefillTargetMetadata.ID.Name]
 			logger.V(logutil.DEBUG).Info("Recording prefill TTFT training data",
 				"ttft_ms", predictedLatencyCtx.ttft,
-				"prefillPod", prefillTargetMetadata.NamespacedName.Name,
+				"prefillPod", prefillTargetMetadata.ID.Name,
 				"prefixCacheScore", prefillPrefixCacheScore)
-			recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, prefillMetrics, prefillTargetMetadata, now, prefillPrefixCacheScore)
+			recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, prefillMetrics, prefillTargetMetadata, now, prefillPrefixCacheScore, prefillEncoderMatchedSize)
 		}
 	} else {
 		m, err := getLatestMetricsForProfile(predictedLatencyCtx, "")
@@ -273,9 +274,10 @@ func processFirstTokenForLatencyPrediction(
 			return
 		}
 		targetEndpointMetadata := predictedLatencyCtx.targetMetadata
-		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[targetEndpointMetadata.NamespacedName.Name]
+		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[targetEndpointMetadata.ID.Name]
+		encoderMatchedSize := predictedLatencyCtx.encoderMatchedSizeForEndpoints[targetEndpointMetadata.ID.Name]
 		logger.V(logutil.DEBUG).Info("Recording TTFT training data", "ttft_ms", predictedLatencyCtx.ttft, "predicted_ttft_ms", predictedLatencyCtx.predictedTTFT, "prefixCacheScore", prefixCacheScore)
-		recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, m, targetEndpointMetadata, now, prefixCacheScore)
+		recordTTFTTrainingData(ctx, predictor, endpointRoleLabel, predictedLatencyCtx, m, targetEndpointMetadata, now, prefixCacheScore, encoderMatchedSize)
 	}
 
 	if streamingMode {
@@ -286,18 +288,9 @@ func processFirstTokenForLatencyPrediction(
 	refreshLastSeenMetrics(ctx, predictedLatencyCtx)
 }
 
-func initializeSampler(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx, samplingMean float64, maxDecodeTokenSamplesForPrediction int) {
-	if predictedLatencyCtx.decodeTokenSampler == nil {
-		logger := log.FromContext(ctx)
-		requestID := predictedLatencyCtx.schedulingRequest.Headers[reqcommon.RequestIDHeaderKey]
-		predictedLatencyCtx.decodeTokenSampler = newDecodeTokenSampler(requestID, samplingMean, maxDecodeTokenSamplesForPrediction)
-		logger.V(logutil.DEBUG).Info("Initialized token sampler for first token", "request_id", requestID, "next_prediction_token", predictedLatencyCtx.decodeTokenSampler.getNextSampleToken())
-	}
-}
-
 func predictFirstTPOT(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx) {
 	logger := log.FromContext(ctx)
-	targetName := predictedLatencyCtx.targetMetadata.NamespacedName.Name
+	targetName := predictedLatencyCtx.targetMetadata.ID.Name
 	if storedPred, ok := predictedLatencyCtx.predictionsForScheduling[targetName]; ok {
 		logger.V(logutil.DEBUG).Info("first TPOT from stored prediction", "value_ms", storedPred.TPOT)
 		predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, storedPred.TPOT)
@@ -309,67 +302,20 @@ func predictFirstTPOT(ctx context.Context, predictedLatencyCtx *predictedLatency
 	}
 }
 
-// processTokenForLatencyPrediction records actual inter-token latency, sampled predictions, and advances timestamp.
+// processTokenForLatencyPrediction records the actual TPOT for the token and advances the timestamp.
 func processTokenForLatencyPrediction(
 	ctx context.Context,
-	pluginName, pluginType string,
-	predictor latencypredictor.PredictorInterface,
-	endpointRoleLabel string,
 	predictedLatencyCtx *predictedLatencyCtx,
-	targetEndpointMetadata *fwkdl.EndpointMetadata,
 	now time.Time,
-	samplingMean float64,
-	maxDecodeTokenSamplesForPrediction int,
 ) {
 	logger := log.FromContext(ctx)
-
-	if predictedLatencyCtx.decodeTokenSampler == nil {
-		requestID := predictedLatencyCtx.schedulingRequest.Headers[reqcommon.RequestIDHeaderKey]
-		predictedLatencyCtx.decodeTokenSampler = newDecodeTokenSampler(requestID, samplingMean, maxDecodeTokenSamplesForPrediction)
-		logger.V(logutil.DEBUG).Info("Initialized token sampler for subsequent tokens", "request_id", requestID, "next_prediction_token", predictedLatencyCtx.decodeTokenSampler.getNextSampleToken())
-	}
 
 	latencyMs := float64(now.Sub(predictedLatencyCtx.lastTokenTimestamp).Milliseconds())
 	predictedLatencyCtx.generatedTokenCount++
 
-	if predictedLatencyCtx.generatedTokenCount == 2 || predictedLatencyCtx.decodeTokenSampler.shouldPredict(predictedLatencyCtx.generatedTokenCount) {
-		predictedLatencyCtx.tpotObservations = append(predictedLatencyCtx.tpotObservations, latencyMs)
-	}
 	if predictedLatencyCtx.generatedTokenCount == 2 {
 		logger.V(logutil.DEBUG).Info("First inter-token latency observed",
-			"actual_tpot_ms", latencyMs,
-			"predicted_tpot_ms", predictedLatencyCtx.avgPredictedTPOT)
-	}
-
-	m, err := getLatestMetricsForProfile(predictedLatencyCtx, "")
-	if err != nil {
-		logger.V(logutil.DEBUG).Info("Skipping TPOT prediction due to missing metrics or schedulingResult", "error", err)
-		return
-	}
-
-	if predictedLatencyCtx.decodeTokenSampler.shouldPredict(predictedLatencyCtx.generatedTokenCount) {
-		in := buildPredictionRequest(
-			endpointRoleLabel,
-			targetEndpointMetadata,
-			m,
-			predictedLatencyCtx.inputTokenCount,
-			predictedLatencyCtx.generatedTokenCount,
-			0,
-		)
-		start := time.Now()
-		p, err := predictor.Predict(ctx, in)
-		dur := time.Since(start)
-		if err != nil || p == nil {
-			logger.V(logutil.DEBUG).Error(err, "TPOT predict failed", "duration_ms", dur.Milliseconds())
-			predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, 0)
-			predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, 0, len(predictedLatencyCtx.predictedTPOTObservations))
-		} else {
-			logger.V(logutil.DEBUG).Info("TPOT predict succeeded", "value_ms", p.TPOT, "duration_ms", dur.Milliseconds())
-			predictedLatencyCtx.predictedTPOTObservations = append(predictedLatencyCtx.predictedTPOTObservations, p.TPOT)
-			predictedLatencyCtx.avgPredictedTPOT = calculateRunningAverage(predictedLatencyCtx.avgPredictedTPOT, p.TPOT, len(predictedLatencyCtx.predictedTPOTObservations))
-		}
-		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyCtx.schedulingRequest.TargetModel, predictedLatencyCtx.incomingModelName, dur.Seconds())
-		predictedLatencyCtx.decodeTokenSampler.recordPrediction(predictedLatencyCtx.generatedTokenCount)
+			"actual_tpot_ms", latencyMs)
 	}
 
 	predictedLatencyCtx.lastTokenTimestamp = now

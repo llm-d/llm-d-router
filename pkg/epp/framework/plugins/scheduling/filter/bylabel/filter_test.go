@@ -142,9 +142,9 @@ func TestFactoryInvalidJSON(t *testing.T) {
 func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: nsn,
-			Address:        ipaddr,
-			Labels:         labels,
+			ID:      nsn,
+			Address: ipaddr,
+			Labels:  labels,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -252,7 +252,7 @@ func TestByLabelFiltering(t *testing.T) {
 
 			actualEndpointNames := make([]string, len(filteredEndpoints))
 			for idx, endpoint := range filteredEndpoints {
-				actualEndpointNames[idx] = endpoint.GetMetadata().NamespacedName.Name
+				actualEndpointNames[idx] = endpoint.GetMetadata().ID.Name
 			}
 
 			assert.ElementsMatch(t, tt.expectedPods, actualEndpointNames,

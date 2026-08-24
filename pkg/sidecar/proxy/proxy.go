@@ -26,7 +26,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -95,11 +97,13 @@ const (
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
 	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
-	// nesting key: "decode" on the prefiller leg, "prefill" on the decoder leg.
-	requestFieldP2PDecodeParams  = "decode"
-	requestFieldP2PPrefillParams = "prefill"
-	requestFieldP2PParams        = "p2p"
-	requestFieldKVRequestID      = "kv_request_id"
+	// nesting key, named for the remote party it describes: "remote_decoder" on
+	// the prefiller leg, "remote_prefiller" on the decoder leg, "remote_kv_source"
+	// for a symmetric cached-prefix pull.
+	requestFieldRemoteDecoder   = "remote_decoder"
+	requestFieldRemotePrefiller = "remote_prefiller"
+	requestFieldRemoteKVSource  = "remote_kv_source"
+	requestFieldKVRequestID     = "kv_request_id"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
@@ -206,11 +210,20 @@ type Config struct {
 	// CertPath is the path to TLS certificates for the sidecar server.
 	CertPath string
 
+	// MetricsPort is the port for the Prometheus /metrics endpoint. 0 (the
+	// default) disables it; when > 0 the sidecar serves the shared metrics
+	// registry (carrying the moriio_dns_* counters) at /metrics on that port,
+	// on a separate address from the data-plane proxy port. Takes precedence
+	// over the MORIIO_METRICS_ADDR env var (kept for backward compatibility).
+	MetricsPort int
+
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
 
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
 	// injected as remote_port on the decode leg so the decoder can pull KV from it.
+	// With data parallelism it is the rank-0 port: rank r's tier listens on
+	// P2PConnectorPort+r and the injected port is offset by the target's rank.
 	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
 	P2PConnectorPort int
 
@@ -243,15 +256,22 @@ type Config struct {
 	MoRIIODecodeNotifyPort int
 	// MoRIIODecodeHandshakePort is the decode pod's base MoRI-IO handshake port.
 	MoRIIODecodeHandshakePort int
-	// MoRIIODecodePodIP is decode's routable pod IP, used as the prefill leg's
+	// MoRIIODecodePodIP is decode's routable address, used as the prefill leg's
 	// remote_host so prefill handshakes with decode (not itself). Must not be
-	// localhost; typically the POD_IP downward-API value.
+	// localhost; typically the POD_IP downward-API value. May be set to a
+	// Kubernetes DNS name (e.g., an LWS pod name), which is resolved to an IP at
+	// startup in Complete(); raw IPs are passed through unchanged.
 	MoRIIODecodePodIP string
 
 	// MoRIIOParallelDispatch fires the prefill and decode legs concurrently,
 	// synthesising decode's kv_transfer_params from config instead of reading
 	// them from the prefill response. Requires MoRIIOWriteMode.
 	MoRIIOParallelDispatch bool
+	// MoRIIOParallelDecodeWaitTimeout bounds how long the parallel WRITE
+	// dispatch waits for the prefill outcome before cancelling decode, so a
+	// hung or failed prefill cannot make decode wait for KV that never
+	// arrives. Zero falls back to defaultMoRIIOParallelDecodeWaitTimeout.
+	MoRIIOParallelDecodeWaitTimeout time.Duration
 	// MoRIIOPrefillHandshakePort is the prefill pod's base MoRI-IO handshake port.
 	MoRIIOPrefillHandshakePort int
 	// MoRIIOPrefillNotifyPort is the prefill pod's base MoRI-IO notify port.
@@ -275,7 +295,18 @@ type Config struct {
 	// MoRIIODecodeHosts is the decode-side counterpart of MoRIIORemoteHosts,
 	// emitted as the prefill leg's remote_hosts. A multi-pod deployment sets
 	// both; the lists must use opposite sides or every cross-pod handshake hangs.
+	// DNS names (e.g., LWS pod names) are automatically resolved to IPs at startup.
 	MoRIIODecodeHosts []string
+
+	// MoRIIORemoteHostSpecs / MoRIIODecodeHostSpecs / MoRIIODecodePodIPSpec hold
+	// the ORIGINAL host specs (DNS names or raw IPs) exactly as supplied on the
+	// CLI, captured in Complete() before one-shot resolution rewrites the
+	// resolved fields above. The request path re-resolves these specs through a
+	// short-TTL hostResolver so a peer pod that restarts with a new IP is picked
+	// up without a router restart. Raw-IP specs pass through unchanged.
+	MoRIIORemoteHostSpecs []string
+	MoRIIODecodeHostSpecs []string
+	MoRIIODecodePodIPSpec string
 }
 
 // MarshalJSON implements json.Marshaler for Config.
@@ -333,7 +364,79 @@ type Server struct {
 
 	prefillSamplerFn func(n int) int // allow test override
 
+	// dpBasePort is the rank-0 proxy port. Rank clones override config.Port
+	// (data_parallel.go), so rank derivation from a routed endpoint's port
+	// needs the pre-clone base. 0 disables derivation.
+	dpBasePort int
+
+	// hostResolver re-resolves MoRI-IO peer DNS specs to IPs on a short TTL so
+	// peer pod restarts are picked up on the request path. Lazily initialized
+	// via resolverOnce (clone-safe; each Server gets its own).
+	resolverOnce sync.Once
+	hostResolver *hostResolver
+
 	config Config
+}
+
+// resolver lazily initializes and returns the request-path host resolver.
+// Initialization is deferred so it can use s.logger (populated in Start) and
+// so Clone'd servers each get their own instance.
+func (s *Server) resolver() *hostResolver {
+	s.resolverOnce.Do(func() {
+		s.hostResolver = newHostResolver(s.logger, resolveTTLFromEnv())
+		s.seedResolver(s.hostResolver)
+	})
+	return s.hostResolver
+}
+
+// seedResolver primes the request-path resolver with the spec->IP mappings that
+// Complete() already resolved at startup, so the first request does not repeat
+// those lookups and a request-time DNS failure still serves the startup IP
+// instead of the raw hostname (which would hang the MoRI-IO handshake). Specs
+// and their resolved IPs are captured positionally in Complete(); a length
+// mismatch (e.g. a Config built directly in tests) skips seeding for that list.
+func (s *Server) seedResolver(r *hostResolver) {
+	seedPairs := func(specs, ips []string) {
+		if len(specs) != len(ips) {
+			return
+		}
+		for i := range specs {
+			r.seed(specs[i], ips[i])
+		}
+	}
+	seedPairs(s.config.MoRIIODecodeHostSpecs, s.config.MoRIIODecodeHosts)
+	seedPairs(s.config.MoRIIORemoteHostSpecs, s.config.MoRIIORemoteHosts)
+	r.seed(s.config.MoRIIODecodePodIPSpec, s.config.MoRIIODecodePodIP)
+}
+
+// currentDecodeHosts returns the decode-side peer IPs for the current request,
+// re-resolving the original specs through the short-TTL resolver. The request
+// context bounds any cold-start lookup so a cancelled/timed-out request cancels
+// the DNS lookup. Falls back to the boot-resolved config field when no specs
+// were captured (e.g. tests that build Config directly).
+func (s *Server) currentDecodeHosts(ctx context.Context) []string {
+	if len(s.config.MoRIIODecodeHostSpecs) == 0 {
+		return s.config.MoRIIODecodeHosts
+	}
+	return s.resolver().resolve(ctx, s.config.MoRIIODecodeHostSpecs)
+}
+
+// currentRemoteHosts is the prefill-side counterpart of currentDecodeHosts.
+func (s *Server) currentRemoteHosts(ctx context.Context) []string {
+	if len(s.config.MoRIIORemoteHostSpecs) == 0 {
+		return s.config.MoRIIORemoteHosts
+	}
+	return s.resolver().resolve(ctx, s.config.MoRIIORemoteHostSpecs)
+}
+
+// currentDecodePodIP returns decode's advertised remote_host for the current
+// request, re-resolving the original spec through the short-TTL resolver. The
+// request context bounds any cold-start lookup.
+func (s *Server) currentDecodePodIP(ctx context.Context) string {
+	if s.config.MoRIIODecodePodIPSpec == "" {
+		return s.config.MoRIIODecodePodIP
+	}
+	return s.resolver().resolveOne(ctx, s.config.MoRIIODecodePodIPSpec)
 }
 
 // NewProxy creates a new routing reverse proxy from the given Config.
@@ -353,6 +456,9 @@ func NewProxy(config Config) *Server {
 		dataParallelProxies: map[string]http.Handler{},
 		forwardDataParallel: true,
 		prefillSamplerFn:    rand.IntN,
+	}
+	if basePort, err := strconv.Atoi(config.Port); err == nil {
+		server.dpBasePort = basePort
 	}
 
 	server.setKVConnector()
@@ -400,6 +506,9 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startHTTP(ctx)
 	})
 
+	// Opt-in Prometheus /metrics endpoint (MORIIO_METRICS_ADDR); no-op when unset.
+	s.maybeStartMetrics(ctx, grp)
+
 	return grp.Wait()
 }
 
@@ -422,6 +531,7 @@ func (s *Server) Clone() *Server {
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
+		dpBasePort:          s.dpBasePort,
 		config:              s.config,
 	}
 }

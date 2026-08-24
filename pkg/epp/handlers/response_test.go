@@ -33,6 +33,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -290,7 +291,7 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 		TargetModelName:           "target-model",
 		Priority:                  3,
 		RequestReceivedTimestamp:  timeBaseline,
-		ResponseCompleteTimestamp: timeBaseline.Add(time.Second),
+		responseCompleteTimestamp: timeBaseline.Add(time.Second),
 		Response: &Response{
 			Headers: map[string]string{},
 		},
@@ -414,6 +415,74 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	}
 }
 
+// The Anthropic streaming format reports prompt tokens in message_start and completion
+// tokens in a message_delta that reaches the EPP in a later chunk.
+func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	chunks := [][]byte{
+		[]byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":800}}}` + "\n\n"),
+		[]byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}` + "\n\n"),
+		[]byte(`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":200}}` + "\n\n"),
+		[]byte(`event: message_stop` + "\n" + `data: {"type":"message_stop"}`),
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Request: &Request{
+			Headers: map[string]string{
+				":path": "/v1/messages",
+			},
+		},
+		Response: &Response{
+			Headers: map[string]string{
+				"content-type": "text/event-stream",
+			},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+	}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	for i, chunk := range chunks {
+		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
+	}
+
+	wantUsage := fwkrh.Usage{
+		PromptTokens:       1000,
+		CompletionTokens:   200,
+		TotalTokens:        1200,
+		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
+	}
+	assert.Equal(t, wantUsage, reqCtx.Usage, "message_delta must not discard the usage reported by message_start")
+
+	labels := map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       metadata.DefaultFairnessID,
+		"priority":          "0",
+	}
+	// Each token count belongs to one request, so accumulating usage across chunks must not
+	// turn into a second observation on the chunk that completes it.
+	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
+	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
+	require.Equal(t, float64(1000), inputTokens.GetSampleSum())
+
+	cachedTokens := findHistogramMetric(t, "llm_d_epp_request_cached_tokens", labels)
+	require.Equal(t, uint64(1), cachedTokens.GetSampleCount())
+	require.Equal(t, float64(800), cachedTokens.GetSampleSum())
+
+	outputTokens := findHistogramMetric(t, "llm_d_epp_request_output_tokens", labels)
+	require.Equal(t, uint64(1), outputTokens.GetSampleCount())
+	require.Equal(t, float64(200), outputTokens.GetSampleSum())
+}
+
 func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	server := &StreamingServer{}
 	reqCtx := &RequestContext{
@@ -450,6 +519,7 @@ func TestRewriteModelName(t *testing.T) {
 		targetModel   string
 		incomingModel string
 		want          string
+		wantMutated   bool
 	}{
 		{
 			name:          "non-streaming response with model rewrite",
@@ -457,6 +527,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"id":"cmpl-123","model":"gpt-4-proxy","choices":[]}`,
+			wantMutated:   true,
 		},
 		{
 			name:          "streaming SSE chunk with model rewrite",
@@ -464,6 +535,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `data: {"id":"cmpl-123","model":"gpt-4-proxy","choices":[]}` + "\n\n",
+			wantMutated:   true,
 		},
 		{
 			name:          "no rewrite when names are the same",
@@ -471,6 +543,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "same-model",
 			incomingModel: "same-model",
 			want:          `{"model":"same-model"}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "no rewrite when target is empty",
@@ -478,6 +551,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"model":"some-model"}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "no rewrite when incoming is empty",
@@ -485,6 +559,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "some-model",
 			incomingModel: "",
 			want:          `{"model":"some-model"}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "model field with space after colon",
@@ -492,6 +567,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"model": "gpt-4-proxy"}`,
+			wantMutated:   true,
 		},
 		{
 			name:          "body without model field is unchanged",
@@ -499,6 +575,7 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          `{"id":"cmpl-123","choices":[]}`,
+			wantMutated:   false,
 		},
 		{
 			name:          "DONE marker is not affected",
@@ -506,13 +583,15 @@ func TestRewriteModelName(t *testing.T) {
 			targetModel:   "vllm-backend-01",
 			incomingModel: "gpt-4-proxy",
 			want:          "data: [DONE]\n",
+			wantMutated:   false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rewriteModelName([]byte(tc.body), tc.targetModel, tc.incomingModel)
+			got, mutated := rewriteModelName([]byte(tc.body), tc.targetModel, tc.incomingModel)
 			assert.Equal(t, tc.want, string(got))
+			assert.Equal(t, tc.wantMutated, mutated)
 		})
 	}
 }
@@ -563,7 +642,66 @@ func TestResponseSizeAccumulation(t *testing.T) {
 				endOfStream := i == len(tt.chunks)-1
 				server.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 			}
-			assert.Equal(t, tt.wantResponseSize, reqCtx.ResponseSize)
+			assert.Equal(t, tt.wantResponseSize, reqCtx.responseSize)
+		})
+	}
+}
+
+func TestStreamedEventAccumulation(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	tests := []struct {
+		name               string
+		headers            map[string]string
+		chunks             [][]byte
+		wantStreamedEvents int
+	}{
+		{
+			name:    "events accumulate across chunks",
+			headers: map[string]string{"content-type": "text/event-stream"},
+			chunks: [][]byte{
+				[]byte(`data: {"choices":[{"text":"He"}]}` + "\n" + `data: {"choices":[{"text":"llo"}]}` + "\n"),
+				[]byte(`data: {"choices":[{"text":"!"}]}` + "\n" + `data: [DONE]`),
+			},
+			wantStreamedEvents: 3,
+		},
+		{
+			name:               "a truncated stream keeps the count it reached",
+			headers:            map[string]string{"content-type": "text/event-stream"},
+			chunks:             [][]byte{[]byte(`data: {"choices":[{"text":"He"}]}` + "\n")},
+			wantStreamedEvents: 1,
+		},
+		{
+			name:    "an event cut after the prefix at a chunk boundary counts once",
+			headers: map[string]string{"content-type": "text/event-stream"},
+			chunks: [][]byte{
+				[]byte(`data: {"choices":[{"text":"He"}]}` + "\n" + `data: {"cho`),
+				[]byte(`ices":[{"text":"llo"}]}` + "\n" + `data: [DONE]`),
+			},
+			wantStreamedEvents: 2,
+		},
+		{
+			name:               "a non-streamed response counts nothing",
+			headers:            map[string]string{"content-type": "application/json"},
+			chunks:             [][]byte{[]byte(body)},
+			wantStreamedEvents: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response:          &Response{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+			}
+			for i, chunk := range tt.chunks {
+				server.HandleResponseBody(ctx, reqCtx, chunk, i == len(tt.chunks)-1)
+			}
+			assert.Equal(t, tt.wantStreamedEvents, reqCtx.StreamedEvents)
 		})
 	}
 }

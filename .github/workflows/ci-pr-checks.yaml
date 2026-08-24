@@ -259,6 +259,7 @@ jobs:
           push: 'false'
           buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
           commit-sha: ${{ github.sha }}
+          build-ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Pull ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'pull' }}
@@ -322,6 +323,7 @@ jobs:
           push: 'false'
           buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
           commit-sha: ${{ github.sha }}
+          build-ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Pull ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'pull' }}

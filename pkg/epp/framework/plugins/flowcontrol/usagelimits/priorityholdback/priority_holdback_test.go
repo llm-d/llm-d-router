@@ -178,7 +178,7 @@ func TestComputeLimit_EmptyPriorities(t *testing.T) {
 		maxCeiling: 1.0,
 	})
 
-	ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{})
+	ceilings := computeLimits(t, policy, 0.5, []int{})
 	assert.Empty(t, ceilings)
 	assert.NotNil(t, ceilings, "should return empty slice, not nil")
 }
@@ -205,7 +205,7 @@ func TestComputeLimit_SinglePriority(t *testing.T) {
 				minCeiling: 0.5,
 				maxCeiling: tc.cMax,
 			})
-			ceilings := policy.ComputeLimit(t.Context(), 0.5, []int{10})
+			ceilings := computeLimits(t, policy, 0.5, []int{10})
 			require.Len(t, ceilings, 1)
 			assert.Equal(t, tc.cMax, ceilings[0], "single priority should bypass holdback with cMax")
 		})
@@ -218,7 +218,7 @@ func TestComputeLimit_SinglePriority(t *testing.T) {
 
 func TestStepwiseSpread_TwoPriorities(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitStepwiseSpread(0.5, 1.0, []int{100, 10})
+	ceilings := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, []int{100, 10})
 	require.Len(t, ceilings, 2)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9, "highest priority gets cMax")
 	assert.InDelta(t, 0.5, ceilings[1], 1e-9, "lowest priority gets cMin")
@@ -226,7 +226,7 @@ func TestStepwiseSpread_TwoPriorities(t *testing.T) {
 
 func TestStepwiseSpread_ThreePriorities(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitStepwiseSpread(0.5, 1.0, []int{100, 50, 10})
+	ceilings := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, []int{100, 50, 10})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.75, ceilings[1], 1e-9)
@@ -235,7 +235,7 @@ func TestStepwiseSpread_ThreePriorities(t *testing.T) {
 
 func TestStepwiseSpread_FourPriorities(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitStepwiseSpread(0.5, 1.0, []int{100, 75, 50, 10})
+	ceilings := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, []int{100, 75, 50, 10})
 	require.Len(t, ceilings, 4)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.8333333, ceilings[1], 1e-6)
@@ -248,8 +248,8 @@ func TestStepwiseSpread_IgnoresNumericalValues(t *testing.T) {
 
 	// Stepwise should produce the same ceilings regardless of priority values,
 	// as long as the count and order are the same.
-	ceilingsA := computeLimitStepwiseSpread(0.5, 1.0, []int{100, 50, 10})
-	ceilingsB := computeLimitStepwiseSpread(0.5, 1.0, []int{1000, 2, 1})
+	ceilingsA := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, []int{100, 50, 10})
+	ceilingsB := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, []int{1000, 2, 1})
 
 	require.Len(t, ceilingsA, 3)
 	require.Len(t, ceilingsB, 3)
@@ -261,7 +261,7 @@ func TestStepwiseSpread_IgnoresNumericalValues(t *testing.T) {
 
 func TestStepwiseSpread_MonotonicallyDecreasing(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitStepwiseSpread(0.2, 0.9, []int{50, 40, 30, 20, 10})
+	ceilings := runSpread(computeLimitStepwiseSpread, 0.2, 0.9, []int{50, 40, 30, 20, 10})
 	for i := 1; i < len(ceilings); i++ {
 		assert.Greater(t, ceilings[i-1], ceilings[i],
 			"ceiling[%d] (%f) should be greater than ceiling[%d] (%f)", i-1, ceilings[i-1], i, ceilings[i])
@@ -270,14 +270,14 @@ func TestStepwiseSpread_MonotonicallyDecreasing(t *testing.T) {
 
 func TestStepwiseSpread_BoundaryValues(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitStepwiseSpread(0.0, 1.0, []int{10, 5, 1})
+	ceilings := runSpread(computeLimitStepwiseSpread, 0.0, 1.0, []int{10, 5, 1})
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9, "highest priority gets cMax")
 	assert.InDelta(t, 0.0, ceilings[len(ceilings)-1], 1e-9, "lowest priority gets cMin")
 }
 
 func TestStepwiseSpread_NarrowRange(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitStepwiseSpread(0.8, 0.9, []int{10, 5, 1})
+	ceilings := runSpread(computeLimitStepwiseSpread, 0.8, 0.9, []int{10, 5, 1})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 0.9, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.85, ceilings[1], 1e-9)
@@ -290,7 +290,7 @@ func TestStepwiseSpread_NarrowRange(t *testing.T) {
 
 func TestLinearProportional_TwoPriorities(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{100, 10})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{100, 10})
 	require.Len(t, ceilings, 2)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9, "highest priority gets cMax")
 	assert.InDelta(t, 0.5, ceilings[1], 1e-9, "lowest priority gets cMin")
@@ -299,7 +299,7 @@ func TestLinearProportional_TwoPriorities(t *testing.T) {
 func TestLinearProportional_ThreePriorities_EvenSpacing(t *testing.T) {
 	t.Parallel()
 	// Priorities {90, 50, 10}: 50 is equidistant from both endpoints.
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{90, 50, 10})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{90, 50, 10})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.75, ceilings[1], 1e-9)
@@ -309,7 +309,7 @@ func TestLinearProportional_ThreePriorities_EvenSpacing(t *testing.T) {
 func TestLinearProportional_ThreePriorities_SkewedLow(t *testing.T) {
 	t.Parallel()
 	// Priorities {100, 50, 10}: 50 is numerically closer to 10 than to 100.
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{100, 50, 10})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{100, 50, 10})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.7222222, ceilings[1], 1e-6)
@@ -319,7 +319,7 @@ func TestLinearProportional_ThreePriorities_SkewedLow(t *testing.T) {
 func TestLinearProportional_SkewedDistribution(t *testing.T) {
 	t.Parallel()
 	// Priorities {1, 2, 100}: 2 is nearly indistinguishable from 1.
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{100, 2, 1})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{100, 2, 1})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.505050, ceilings[1], 1e-5, "priority 2 should be close to cMin")
@@ -329,7 +329,7 @@ func TestLinearProportional_SkewedDistribution(t *testing.T) {
 func TestLinearProportional_DuplicatePriorities(t *testing.T) {
 	t.Parallel()
 	// All same value: pRange = 0, should return cMax for all.
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{10, 10, 10})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{10, 10, 10})
 	require.Len(t, ceilings, 3)
 	for i, c := range ceilings {
 		assert.InDelta(t, 1.0, c, 1e-9, "ceiling[%d] should be cMax when all priorities are equal", i)
@@ -339,7 +339,7 @@ func TestLinearProportional_DuplicatePriorities(t *testing.T) {
 func TestLinearProportional_TwoDuplicatePriorities(t *testing.T) {
 	t.Parallel()
 	// Two same values at the bottom.
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{100, 10, 10})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{100, 10, 10})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9)
 	assert.InDelta(t, 0.5, ceilings[1], 1e-9, "duplicate lowest priorities get cMin")
@@ -348,7 +348,7 @@ func TestLinearProportional_TwoDuplicatePriorities(t *testing.T) {
 
 func TestLinearProportional_MonotonicallyDecreasing(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitLinearProportional(0.2, 0.9, []int{50, 40, 30, 20, 10})
+	ceilings := runSpread(computeLimitLinearProportional, 0.2, 0.9, []int{50, 40, 30, 20, 10})
 	for i := 1; i < len(ceilings); i++ {
 		assert.GreaterOrEqual(t, ceilings[i-1], ceilings[i],
 			"ceiling[%d] (%f) should be >= ceiling[%d] (%f)", i-1, ceilings[i-1], i, ceilings[i])
@@ -357,7 +357,7 @@ func TestLinearProportional_MonotonicallyDecreasing(t *testing.T) {
 
 func TestLinearProportional_NegativePriorities(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitLinearProportional(0.5, 1.0, []int{10, -5, -20})
+	ceilings := runSpread(computeLimitLinearProportional, 0.5, 1.0, []int{10, -5, -20})
 	require.Len(t, ceilings, 3)
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9, "highest priority gets cMax")
 	assert.InDelta(t, 0.5, ceilings[2], 1e-9, "lowest priority gets cMin")
@@ -367,7 +367,7 @@ func TestLinearProportional_NegativePriorities(t *testing.T) {
 
 func TestLinearProportional_BoundaryValues(t *testing.T) {
 	t.Parallel()
-	ceilings := computeLimitLinearProportional(0.0, 1.0, []int{10, 5, 1})
+	ceilings := runSpread(computeLimitLinearProportional, 0.0, 1.0, []int{10, 5, 1})
 	assert.InDelta(t, 1.0, ceilings[0], 1e-9, "highest priority gets cMax")
 	assert.InDelta(t, 0.0, ceilings[len(ceilings)-1], 1e-9, "lowest priority gets cMin")
 }
@@ -381,8 +381,8 @@ func TestDomains_ConvergeOnEvenSpacing(t *testing.T) {
 	// When priorities are evenly distributed relative to their range, both domains
 	// should produce the same ceilings.
 	priorities := []int{100, 55, 10}
-	rank := computeLimitStepwiseSpread(0.5, 1.0, priorities)
-	value := computeLimitLinearProportional(0.5, 1.0, priorities)
+	rank := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, priorities)
+	value := runSpread(computeLimitLinearProportional, 0.5, 1.0, priorities)
 
 	require.Len(t, rank, 3)
 	require.Len(t, value, 3)
@@ -397,8 +397,8 @@ func TestDomains_DivergeOnSkewedSpacing(t *testing.T) {
 	// When priorities are skewed, value domain should give the middle priority a different
 	// ceiling than rank domain.
 	priorities := []int{100, 2, 1}
-	rank := computeLimitStepwiseSpread(0.5, 1.0, priorities)
-	value := computeLimitLinearProportional(0.5, 1.0, priorities)
+	rank := runSpread(computeLimitStepwiseSpread, 0.5, 1.0, priorities)
+	value := runSpread(computeLimitLinearProportional, 0.5, 1.0, priorities)
 
 	// Endpoints should be the same.
 	assert.InDelta(t, rank[0], value[0], 1e-9, "highest priority should match")
@@ -516,3 +516,23 @@ func TestBuildConfig_ValidConfigs(t *testing.T) {
 
 func ptrStr(s string) *string     { return &s }
 func ptrFloat(f float64) *float64 { return &f }
+
+// computeLimits invokes ComputeLimit with a framework-style output buffer (pre-filled with 1.0,
+// sized to priorities) and returns the filled ceilings.
+func computeLimits(t *testing.T, p *priorityHoldbackPolicy, saturation float64, priorities []int) []float64 {
+	t.Helper()
+	ceilings := make([]float64, len(priorities))
+	for i := range ceilings {
+		ceilings[i] = 1.0
+	}
+	p.ComputeLimit(t.Context(), saturation, priorities, ceilings)
+	return ceilings
+}
+
+// runSpread applies a fill-style compute function to a fresh buffer, mirroring the framework's
+// contract, and returns the filled ceilings.
+func runSpread(fn func(cMin, cMax float64, priorities []int, ceilings []float64), cMin, cMax float64, priorities []int) []float64 {
+	ceilings := make([]float64, len(priorities))
+	fn(cMin, cMax, priorities, ceilings)
+	return ceilings
+}

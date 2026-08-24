@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../components/vllm-encode/
+- ../../../components/vllm-prefill/
+- ../../../components/vllm-decode/
+
+# patch-decode.yaml removes the routing-sidecar that proxies 8000->8200 for
+# connector-based P/D disaggregation, which the coordinator's own pipeline
+# orchestration doesn't use. Mirrors deploy/environments/dev/epd/, the router's
+# own no-disaggregation scenario.
+#
+# The vLLM workers' extra args (including the raised --max-model-len that the
+# multimodal pipeline needs) are injected through ${VLLM_EXTRA_ARGS_*} by the
+# e2e suite; see allSubstitutions in test/coordinator/e2e/coordinator/setup_test.go.
+patches:
+- path: patch-decode.yaml
+
+components:
+- ../../../components/overlays/simulator/

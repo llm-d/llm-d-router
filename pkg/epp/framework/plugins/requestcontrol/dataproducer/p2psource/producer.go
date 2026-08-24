@@ -14,15 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package p2psource emits the KV cache source header: the candidate pod
-// holding the most cached prefix KV blocks for the request, for the routing
-// sidecar to pull from over the P2P connector instead of recomputing them.
+// Package p2psource emits the KV cache source header: a candidate pod
+// within one block of the most cached prefix KV blocks for the request, for
+// the routing sidecar to pull from over the P2P connector instead of
+// recomputing them.
 package p2psource
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -69,17 +71,17 @@ var (
 	_ requestcontrol.PreRequest   = &Producer{}
 )
 
-// Producer stashes the candidate endpoint holding the most cached prefix
-// tokens during Produce, and in PreRequest sets routing.KVCacheSourceHeader
-// to that peer when it out-caches the pod computing the prefix (the prefill
-// endpoint under P/D disaggregation, the primary endpoint otherwise) by at
-// least minCachedTokenDelta tokens.
+// Producer stashes a pull-source candidate holding within one block of the
+// most cached prefix tokens during Produce, and in PreRequest sets
+// routing.KVCacheSourceHeader to that peer when it out-caches the pod
+// computing the prefix (the prefill endpoint under P/D disaggregation, the
+// primary endpoint otherwise) by at least minCachedTokenDelta tokens.
 type Producer struct {
 	typedName           plugin.TypedName
 	prefixMatchDataKey  plugin.DataKey
 	minCachedTokenDelta int
 	prefillProfile      string
-	attrKeyValue        string
+	attrKeyValue        plugin.DataKey
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -109,7 +111,7 @@ func New(name string, cfg Config) *Producer {
 		prefixMatchDataKey:  attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		minCachedTokenDelta: cfg.MinCachedTokenDelta,
 		prefillProfile:      prefillProfile,
-		attrKeyValue:        fmt.Sprintf("%s/%s/best-match", PluginType, name),
+		attrKeyValue:        plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
 	}
 }
 
@@ -128,9 +130,10 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 	}
 }
 
-// bestMatchPeer is the candidate endpoint holding the most cached prompt
-// tokens for the request, stashed as a request attribute so PreRequest can
-// compare it against the scheduled endpoint.
+// bestMatchPeer is the pull-source candidate chosen during Produce, stashed
+// as a request attribute so PreRequest can compare it against the scheduled
+// endpoint. cachedTokens is the chosen peer's own count, which may be one
+// block below the pool maximum.
 type bestMatchPeer struct {
 	hostPort     string
 	cachedTokens int
@@ -138,24 +141,80 @@ type bestMatchPeer struct {
 
 // attrKey returns the request-attribute key carrying the best-match peer,
 // name-bound to this plugin instance.
-func (p *Producer) attrKey() string {
+func (p *Producer) attrKey() plugin.DataKey {
 	return p.attrKeyValue
 }
 
-// Produce reads each candidate's PrefixCacheMatchInfo and stashes the
-// endpoint holding the most cached prompt tokens on the request. No-op when
-// no candidate holds any cached block.
+// Produce reads each candidate's PrefixCacheMatchInfo and stashes the chosen
+// source on the request: among the endpoints within one block of the most
+// cached prompt tokens, one is sampled with probability proportional to
+// 1/(1+waiting queue), using a request-ID hash as the sampling coordinate.
+// Load-blind argmax alone would send every consumer of a widely-replicated
+// prefix to the same peer (equal counts lose to iteration order),
+// concentrating pull traffic on one source. A hard minimum-queue rule would
+// too: metrics refresh once per scrape interval, so a stale one-request
+// difference would herd a whole window of requests onto the single "idle"
+// peer. The one-block band keeps exact-count argmax from re-concentrating
+// the moment one replica drifts a block ahead: a peer one block short costs
+// the destination a single block of recompute, noise next to a queue-depth
+// difference on the source. Proportional weights spread ties uniformly,
+// mildly prefer a one-request-shorter queue, and starve deeply-queued
+// sources. No-op when no candidate holds any cached block.
 func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
-	best := bestMatchPeer{}
+	// Endpoints without metadata cannot serve as sources (no address to
+	// join), so they must not pin the pool maximum either: an inflated
+	// maximum would exclude every real endpoint below.
+	type sourceMatch struct {
+		ep        scheduling.Endpoint
+		cached    int
+		blockSize int
+	}
+	maxCached := 0
+	var matches []sourceMatch
 	for _, ep := range endpoints {
-		md := ep.GetMetadata()
-		if md == nil {
+		if ep.GetMetadata() == nil {
 			continue
 		}
-		if cached := p.cachedTokenCount(ep); cached > best.cachedTokens {
+		cached, blockSize := p.sourceCachedTokens(ep)
+		if cached == 0 {
+			continue
+		}
+		matches = append(matches, sourceMatch{ep: ep, cached: cached, blockSize: blockSize})
+		if cached > maxCached {
+			maxCached = cached
+		}
+	}
+
+	best := bestMatchPeer{}
+	if maxCached > 0 {
+		var candidates []scheduling.Endpoint
+		var cachedCounts []int
+		var weights []float64
+		total := 0.0
+		for _, m := range matches {
+			if m.cached+m.blockSize < maxCached {
+				continue
+			}
+			w := 1.0 / (1.0 + float64(waitingQueueSize(m.ep)))
+			candidates = append(candidates, m.ep)
+			cachedCounts = append(cachedCounts, m.cached)
+			weights = append(weights, w)
+			total += w
+		}
+		if len(candidates) > 0 {
+			target := requestSpreadFraction(request.RequestID) * total
+			chosen := len(candidates) - 1
+			for i, w := range weights {
+				if target < w {
+					chosen = i
+					break
+				}
+				target -= w
+			}
+			md := candidates[chosen].GetMetadata()
 			best = bestMatchPeer{
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
-				cachedTokens: cached,
+				cachedTokens: cachedCounts[chosen],
 			}
 		}
 	}
@@ -168,17 +227,36 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	return nil
 }
 
+// waitingQueueSize returns the endpoint's waiting-queue depth, or 0 when
+// metrics are absent so metric-less endpoints keep the delta-only behavior.
+func waitingQueueSize(ep scheduling.Endpoint) int {
+	m := ep.GetMetrics()
+	if m == nil {
+		return 0
+	}
+	return m.WaitingQueueSize
+}
+
+// requestSpreadFraction maps a request ID onto [0, 1) so weighted source
+// sampling is uniform across requests while staying deterministic per
+// request.
+func requestSpreadFraction(requestID string) float64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(requestID))
+	return float64(h.Sum32()) / float64(1<<32)
+}
+
 // PreRequest sets routing.KVCacheSourceHeader to the best-match peer stashed
 // by Produce when it out-caches the pod computing the prefix by at least
 // minCachedTokenDelta tokens. Any inbound value of the header is removed.
-func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE)
 	delete(request.Headers, routing.KVCacheSourceHeader)
 
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](request, p.attrKey())
 	if !ok {
 		logger.Info("no best-match peer stashed", "requestID", request.RequestID)
-		return
+		return nil
 	}
 
 	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
@@ -186,12 +264,12 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		computing = pr
 	}
 	if computing == nil || len(computing.TargetEndpoints) == 0 {
-		return
+		return nil
 	}
 	endpoint := computing.TargetEndpoints[0]
 	md := endpoint.GetMetadata()
 	if md == nil {
-		return
+		return nil
 	}
 	computingHostPort := net.JoinHostPort(md.Address, md.Port)
 	computingCached := p.cachedTokenCount(endpoint)
@@ -202,10 +280,10 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	// with the delta check below while minCachedTokenDelta >= 1 (a self-match
 	// is delta 0), but explicit against a future lower floor.
 	if best.hostPort == computingHostPort {
-		return
+		return nil
 	}
 	if best.cachedTokens-computingCached < p.minCachedTokenDelta {
-		return
+		return nil
 	}
 
 	if request.Headers == nil {
@@ -213,19 +291,49 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	}
 	request.Headers[routing.KVCacheSourceHeader] = best.hostPort
 	logger.Info("set KV cache source header", "requestID", request.RequestID, "value", best.hostPort)
+	return nil
 }
 
-// cachedTokenCount returns the endpoint's cached prompt tokens (unweighted
-// cached-block count times the block size) from its PrefixCacheMatchInfo,
-// or 0 when absent.
-func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
-	raw, ok := ep.Get(p.prefixMatchDataKey.String())
-	if !ok {
-		return 0
+// cpuDeviceTier is the CachedBlocksByTier key for the CPU tier (device tiers
+// are lowercased by the KV-event pipeline).
+const cpuDeviceTier = "cpu"
+
+// sourceCachedTokens returns the prompt tokens the endpoint can serve a P2P
+// pull from, and its block size. Pulls are served from the source's CPU tier,
+// so with per-tier data only the contiguous CPU-tier prefix counts; producers
+// without tier data are trusted as-is - the configured producer instance must
+// approximate the pull-servable (CPU) tier.
+func (p *Producer) sourceCachedTokens(ep scheduling.Endpoint) (tokens, blockSize int) {
+	info := p.matchInfo(ep)
+	if info == nil {
+		return 0, 0
 	}
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok {
+	if byTier := info.CachedBlocksByTier(); byTier != nil {
+		return byTier[cpuDeviceTier] * info.BlockSizeTokens(), info.BlockSizeTokens()
+	}
+	return info.CachedBlockCount() * info.BlockSizeTokens(), info.BlockSizeTokens()
+}
+
+// cachedTokenCount returns the endpoint's cached prompt tokens across all
+// tiers, or 0 when its PrefixCacheMatchInfo is absent. Local blocks need no
+// pull whatever their tier, so the computing side stays tier-blind.
+func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
+	info := p.matchInfo(ep)
+	if info == nil {
 		return 0
 	}
 	return info.CachedBlockCount() * info.BlockSizeTokens()
+}
+
+// matchInfo returns the endpoint's PrefixCacheMatchInfo, or nil when absent.
+func (p *Producer) matchInfo(ep scheduling.Endpoint) *attrprefix.PrefixCacheMatchInfo {
+	raw, ok := ep.Get(p.prefixMatchDataKey)
+	if !ok {
+		return nil
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok {
+		return nil
+	}
+	return info
 }

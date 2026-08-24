@@ -40,7 +40,7 @@ func TestRoleFilterDecodeRole(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
-		names[i] = ep.GetMetadata().NamespacedName.Name
+		names[i] = ep.GetMetadata().ID.Name
 	}
 
 	assert.ElementsMatch(t, []string{
@@ -76,7 +76,7 @@ func TestRoleFilterPrefillRole(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
-		names[i] = ep.GetMetadata().NamespacedName.Name
+		names[i] = ep.GetMetadata().ID.Name
 	}
 
 	assert.ElementsMatch(t, []string{
@@ -107,7 +107,7 @@ func TestRoleFilterEncodeRole(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
-		names[i] = ep.GetMetadata().NamespacedName.Name
+		names[i] = ep.GetMetadata().ID.Name
 	}
 
 	assert.ElementsMatch(t, []string{

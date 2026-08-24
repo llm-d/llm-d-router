@@ -2,9 +2,9 @@
 
 **Type:** `p2p-source-producer`
 
-Sets the `x-kv-cache-source-host-port` header to the endpoint holding the most cached prompt prefix, so the routing sidecar can pull those blocks over the P2P connector instead of recomputing them. Runs in the request handling's `DataProducer` phase before scheduling, then emits the header in `PreRequest` after the scheduling decision.
+Sets the `x-kv-cache-source-host-port` header to an endpoint within one block of the most cached prompt prefix, so the routing sidecar can pull those blocks over the P2P connector instead of recomputing them. Runs in the request handling's `DataProducer` phase before scheduling, then emits the header in `PreRequest` after the scheduling decision.
 
-For each request the plugin consumes the per-endpoint `PrefixCacheMatchInfo` produced by a prefix-cache producer (`approx-prefix-cache-producer` or `precise-prefix-cache-producer`), finds the candidate endpoint caching the most prompt tokens, and stashes it on the request. After scheduling it compares that best-match peer against the pod that will compute the prefix — the `prefill` profile target under P/D disaggregation, otherwise the primary target — and sets the header only when the peer out-caches the computing pod by at least `minCachedTokenDelta` tokens. Any inbound value of the header is removed. When no peer out-caches the computing pod, the request proceeds unchanged.
+For each request the plugin consumes the per-endpoint `PrefixCacheMatchInfo` of a prefix-cache producer (`approx-prefix-cache-producer` or `precise-prefix-cache-producer`) and picks a source among the endpoints caching within one block of the most prompt tokens, weighted by `1/(1+waiting queue)` with a request-ID hash as the sampling coordinate; when the producer supplies per-tier data, only CPU-tier blocks count, since pulls are served from the source's CPU tier. Sampling within the one-block band, rather than argmax, keeps pull traffic from concentrating on a single replica of a widely-cached prefix. After scheduling, the header is set only when the chosen peer out-caches the computing pod by at least `minCachedTokenDelta` tokens; any inbound header value is removed.
 
 **Parameters:**
 

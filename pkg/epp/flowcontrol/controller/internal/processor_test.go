@@ -41,13 +41,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 const (
-	testTTL         = 1 * time.Minute
-	testShortTTL    = 20 * time.Millisecond
-	testCleanupTick = 10 * time.Millisecond
-	testWaitTimeout = 1 * time.Second
+	testTTL = 1 * time.Minute
+	// testNoEndpointTTL matches testTTL so that harness defaults leave the two regimes indistinguishable; tests that
+	// exercise the split set processor.noEndpointRequestTTL explicitly.
+	testNoEndpointTTL = 1 * time.Minute
+	testShortTTL      = 20 * time.Millisecond
+	testCleanupTick   = 10 * time.Millisecond
+	testWaitTimeout   = 1 * time.Second
 )
 
 var testFlow = flowcontrol.FlowKey{ID: "flow-a", Priority: 10}
@@ -140,9 +144,11 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		h.endpointCandidates,
 		usagelimits.DefaultPolicy(),
 		h.clock,
+		testNoEndpointTTL,
 		expiryCleanupInterval,
 		100,
-		h.logger)
+		h.logger,
+		nil)
 	require.NotNil(t, h.processor, "NewProcessor should not return nil")
 
 	t.Cleanup(func() { h.Stop() })
@@ -620,7 +626,7 @@ func TestProcessor(t *testing.T) {
 						h.addQueue(testFlow)
 						// Pool scaled to zero: the queue acts as a scale-from-zero waiting room.
 						h.endpointCandidates.Candidates = nil
-						// Prime poolEmpty via a dispatch cycle, mirroring the Run loop's periodic dispatch.
+						// Prime the regime via a dispatch cycle, mirroring the Run loop's periodic dispatch.
 						h.processor.dispatchCycle(context.Background())
 						h.StatsFunc = func() contracts.AggregateStats {
 							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
@@ -1102,6 +1108,226 @@ func TestProcessor(t *testing.T) {
 			})
 		})
 
+		t.Run("partitionEndpoints", func(t *testing.T) {
+			t.Parallel()
+
+			makeEndpoint := func(labels map[string]string) fwkdl.Endpoint {
+				return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Labels: labels}, nil)
+			}
+
+			t.Run("should classify endpoints by role label", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefill}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleDecode}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleBoth}), //nolint:staticcheck // testing backward compat
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefillDecode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Len(t, prefill, 2, "prefill should contain RolePrefill and RoleEncodePrefill")
+				assert.Len(t, decode, 1, "decode should contain RoleDecode")
+				assert.Len(t, interleaved, 3, "interleaved should contain RolePrefillDecode, RoleBoth, RoleEncodePrefillDecode")
+			})
+
+			t.Run("should default unlabeled endpoints to decode", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(nil),                                 // no labels map
+					makeEndpoint(map[string]string{}),                 // empty labels
+					makeEndpoint(map[string]string{"other": "value"}), // unrelated label
+					fwkdl.NewEndpoint(nil, nil),                       // nil metadata gets defaulted by NewEndpoint
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Len(t, decode, 4, "all unlabeled endpoints should land in decode")
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude unrecognized role from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: "unknown-role"}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude encode-only endpoints from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should skip nil endpoints", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					nil,
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Len(t, prefill, 1)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should return empty slices for empty input", func(t *testing.T) {
+				t.Parallel()
+				prefill, decode, interleaved := partitionEndpoints(nil)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+		})
+
+		t.Run("stage-aware saturation gating", func(t *testing.T) {
+			t.Parallel()
+
+			makeEndpoint := func(role string) fwkdl.Endpoint {
+				return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					Labels: map[string]string{bylabel.RoleLabel: role},
+				}, nil)
+			}
+
+			t.Run("should gate on highest stage saturation", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					for _, ep := range endpoints {
+						if ep.GetMetadata().Labels[bylabel.RoleLabel] != bylabel.RolePrefill {
+							// Any mixed or decode set reads healthy: the flat average is
+							// diluted by idle decode workers.
+							return 0.3
+						}
+					}
+					return 1.5 // homogeneous prefill subset: stage saturated
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.False(t, dispatched, "should block when any stage is saturated")
+			})
+
+			t.Run("should not gate when all stages are healthy", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+					return 0.3
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "should dispatch when all stages are healthy")
+			})
+
+			t.Run("should skip empty partitions", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				// Only decode endpoints, no prefill. Empty prefill partition should
+				// be skipped, not treated as saturated (detector returns 1.0 for empty slices).
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					if len(endpoints) == 0 {
+						return 1.0 // Would block if not skipped.
+					}
+					return 0.2
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "should dispatch when only non-empty partitions are healthy")
+			})
+
+			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+					makeEndpoint(bylabel.RolePrefillDecode), // interleaved
+				}
+
+				// Track which endpoints each Saturation call receives.
+				var calls [][]string
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					roles := make([]string, 0, len(endpoints))
+					for _, ep := range endpoints {
+						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
+					}
+					calls = append(calls, roles)
+					return 0.2
+				}
+
+				h.processor.dispatchCycle(context.Background())
+
+				require.Len(t, calls, 2, "detector should be called once per stage")
+				// Prefill pool: prefill + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RolePrefill, bylabel.RolePrefillDecode}, calls[0])
+				// Decode pool: decode + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RoleDecode, bylabel.RolePrefillDecode}, calls[1])
+			})
+
+			t.Run("should behave like monolithic when no role labels exist", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				// Unlabeled endpoints all land in decode, behaving like the pre-change single-pool path.
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					fwkdl.NewEndpoint(nil, nil),
+					fwkdl.NewEndpoint(nil, nil),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+					return 0.4
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "monolithic deployment should dispatch normally")
+			})
+		})
+
 		t.Run("dispatchItem", func(t *testing.T) {
 			t.Parallel()
 
@@ -1191,6 +1417,10 @@ func TestProcessor(t *testing.T) {
 				assert.Equal(t, types.QueueOutcomeEvictedContextCancelled, finalState.Outcome,
 					"Outcome should be EvictedContextCancelled")
 				assert.ErrorIs(t, finalState.Err, types.ErrContextCancelled, "Error should be ErrContextCancelled")
+
+				// Verify the sweep path recorded the drop.
+				assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load(),
+					"Drop should be recorded for EvictedContextCancelled")
 			})
 
 			t.Run("should not sweep items not finalized", func(t *testing.T) {
@@ -1445,5 +1675,337 @@ func TestProcessor(t *testing.T) {
 				assert.Nil(t, item.FinalState(), "Item should not be finalized by the processor")
 			})
 		})
+	})
+}
+
+// TestProcessor_DropSummary verifies the periodic drop-count accounting introduced in #2101.
+func TestProcessor_DropSummary(t *testing.T) {
+	t.Parallel()
+
+	// Verify that the dropCounts array is large enough to hold every QueueOutcome value.
+	// If new outcomes are added in the future, this check will catch them at compile time.
+	var _ = [types.NumQueueOutcomes]struct{}{}
+
+	t.Run("capacity rejection increments counter", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Force capacity-full: band has 1 slot already used, CapacityRequests=1.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+
+		item := h.newTestItem("req-cap", testFlow, testTTL)
+		h.processor.enqueue(item)
+
+		outcome, _ := h.waitForFinalization(item)
+		require.Equal(t, types.QueueOutcomeRejectedCapacity, outcome)
+
+		count := h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load()
+		assert.Equal(t, uint64(1), count, "RejectedCapacity counter should be 1 after one capacity rejection")
+	})
+
+	t.Run("counters reset after flush", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Force capacity-full.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+
+		item := h.newTestItem("req-flush", testFlow, testTTL)
+		h.processor.enqueue(item)
+		h.waitForFinalization(item) //nolint:errcheck
+
+		require.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load())
+
+		// Flushing should zero out all counters.
+		h.processor.flushDropSummary()
+		assert.Equal(t, uint64(0), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load(),
+			"Counter should be 0 after flush")
+	})
+
+	t.Run("multiple outcome types are counted independently", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+
+		// Reject via capacity: band has 1 slot already used, CapacityRequests=1.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 1, Len: 1},
+				},
+			}
+		}
+		for i := range 2 {
+			item := h.newTestItem(fmt.Sprintf("req-multi-cap-%d", i), testFlow, testTTL)
+			h.processor.enqueue(item)
+			h.waitForFinalization(item) //nolint:errcheck
+		}
+
+		// Reject via configuration error (RejectedOther): pass capacity, fail priority band lookup.
+		h.StatsFunc = func() contracts.AggregateStats {
+			return contracts.AggregateStats{
+				TotalCapacityBytes: 1e9,
+				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
+					testFlow.Priority: {CapacityRequests: 100, Len: 0},
+				},
+			}
+		}
+		h.PriorityBandAccessorFunc = func(priority int) (flowcontrol.PriorityBandAccessor, error) {
+			return nil, errors.New("forced priority band failure")
+		}
+		item := h.newTestItem("req-multi-other", testFlow, testTTL)
+		h.processor.enqueue(item)
+		h.waitForFinalization(item) //nolint:errcheck
+
+		assert.Equal(t, uint64(2), h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load(),
+			"RejectedCapacity counter should be 2")
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedOther].Load(),
+			"RejectedOther counter should be 1")
+	})
+
+	t.Run("shutdown eviction counts unfinalized queued items exactly once", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		mockQueue := h.addQueue(testFlow)
+
+		item := h.newTestItem("req-evict-shutdown", testFlow, testTTL)
+		require.NoError(t, mockQueue.Add(item))
+		require.Nil(t, item.FinalState(), "item must not be finalized before evictAll")
+
+		// evictAll runs on shutdown to drain all queues.
+		h.processor.evictAll()
+
+		h.waitForFinalization(item) //nolint:errcheck
+
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedOther].Load(),
+			"evictAll should count the unfinalized queued item exactly once")
+	})
+}
+
+// TestProcessor_QueueWaitBudget verifies that the queue-wait budget tracks the unavailability regime: the saturation
+// budget while the pool has endpoints, the no-endpoint budget while it does not, re-evaluated as the request waits
+// rather than fixed at admission.
+func TestProcessor_QueueWaitBudget(t *testing.T) {
+	t.Parallel()
+
+	const (
+		saturationTTL = 100 * time.Millisecond
+		noEndpointTTL = 2 * time.Second
+	)
+
+	t.Run("budget in force", func(t *testing.T) {
+		t.Parallel()
+
+		base := time.Now()
+		testCases := []struct {
+			name string
+			// itemTTL and noEndpointTTL default to the constants above when zero; use disabled to request an explicit
+			// zero, which is what disables eviction in that regime.
+			itemTTL       time.Duration
+			noEndpointTTL time.Duration
+			poolEmpty     bool
+			// regimeAfter is how long after enqueue the regime last changed; zero means it never has.
+			regimeAfter time.Duration
+			elapsed     time.Duration
+			wantOutcome types.QueueOutcome
+			wantExpired bool
+		}{
+			{
+				name:        "SaturatedPool_HoldsWithinSaturationBudget",
+				elapsed:     saturationTTL - time.Millisecond,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: false,
+			},
+			{
+				name:        "SaturatedPool_ShedsAtSaturationBudget",
+				elapsed:     saturationTTL,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: true,
+			},
+			{
+				name:        "EmptyPool_HoldsPastSaturationBudget",
+				poolEmpty:   true,
+				elapsed:     noEndpointTTL - time.Millisecond,
+				wantOutcome: types.QueueOutcomeEvictedNoEndpoints,
+				wantExpired: false,
+			},
+			{
+				name:        "EmptyPool_ShedsAtNoEndpointBudget",
+				poolEmpty:   true,
+				elapsed:     noEndpointTTL,
+				wantOutcome: types.QueueOutcomeEvictedNoEndpoints,
+				wantExpired: true,
+			},
+			{
+				name:          "EmptyPool_ZeroBudgetWaitsIndefinitely",
+				noEndpointTTL: -1, // Sentinel for an explicit zero; see the field comment.
+				poolEmpty:     true,
+				elapsed:       time.Hour,
+				wantOutcome:   types.QueueOutcomeEvictedNoEndpoints,
+				wantExpired:   false,
+			},
+			{
+				name:        "SaturatedPool_ZeroBudgetWaitsIndefinitely",
+				itemTTL:     -1, // Sentinel for an explicit zero; see the field comment.
+				elapsed:     time.Hour,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: false,
+			},
+			{
+				// The pool comes up long after the saturation budget would have elapsed. Charging against an already
+				// spent budget would shed the request the instant it became dispatchable.
+				name:        "PoolCameUp_StartsFreshSaturationBudget",
+				regimeAfter: noEndpointTTL / 2,
+				elapsed:     noEndpointTTL/2 + saturationTTL - time.Millisecond,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: false,
+			},
+			{
+				name:        "PoolCameUp_ShedsAfterFreshSaturationBudget",
+				regimeAfter: noEndpointTTL / 2,
+				elapsed:     noEndpointTTL/2 + saturationTTL,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: true,
+			},
+			{
+				// A regime change before the request arrived must not extend its budget.
+				name:        "RegimeChangeBeforeEnqueue_DoesNotExtendBudget",
+				regimeAfter: -saturationTTL,
+				elapsed:     saturationTTL,
+				wantOutcome: types.QueueOutcomeEvictedTTL,
+				wantExpired: true,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				itemTTL := saturationTTL
+				if tc.itemTTL != 0 {
+					itemTTL = max(tc.itemTTL, 0)
+				}
+				noEndpoint := noEndpointTTL
+				if tc.noEndpointTTL != 0 {
+					noEndpoint = max(tc.noEndpointTTL, 0)
+				}
+				var regimeSince time.Time
+				if tc.regimeAfter != 0 {
+					regimeSince = base.Add(tc.regimeAfter)
+				}
+
+				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base)
+				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
+				outcome, expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
+
+				assert.Equal(t, tc.wantOutcome, outcome, "expiry should be attributed to the regime in force")
+				assert.Equal(t, tc.wantExpired, expired, "the budget in force decides whether the request is shed")
+			})
+		}
+	})
+
+	t.Run("sweep holds a queued request across a scale-from-zero", func(t *testing.T) {
+		t.Parallel()
+		// --- ARRANGE ---
+		h := newTestHarness(t, testCleanupTick)
+		h.processor.noEndpointRequestTTL = noEndpointTTL
+		h.processor.regime.Store(&regimeSample{empty: true})
+
+		item := h.newTestItem("req-cold-start", testFlow, testShortTTL)
+		q := h.addQueue(testFlow)
+		require.NoError(t, q.Add(item), "Failed to add item to queue")
+
+		// --- ACT & ASSERT ---
+		// Well past the saturation budget, but the pool is empty, so the cold-start budget governs.
+		h.clock.Step(2 * testShortTTL)
+		h.processor.sweepFinalizedItems()
+		assert.Nil(t, item.FinalState(), "an empty pool must not shed against the saturation budget")
+		assert.Equal(t, 1, q.Len(), "the item should still be queued")
+
+		// The pool comes up. The request only now became dispatchable, so it gets a fresh saturation budget.
+		h.processor.regime.Store(&regimeSample{empty: false, since: h.clock.Now()})
+		h.processor.sweepFinalizedItems()
+		assert.Nil(t, item.FinalState(), "a request must not be shed the moment it becomes dispatchable")
+
+		h.clock.Step(testShortTTL)
+		h.processor.sweepFinalizedItems()
+		require.NotNil(t, item.FinalState(), "the fresh saturation budget should have elapsed")
+		assert.Equal(t, types.QueueOutcomeEvictedTTL, item.FinalState().Outcome,
+			"a shed under a non-empty pool is backpressure, not unavailability")
+		assert.Equal(t, 0, q.Len(), "the evicted item should be swept from the queue")
+	})
+
+	t.Run("sweep sheds an empty-pool request as unavailability", func(t *testing.T) {
+		t.Parallel()
+		// --- ARRANGE ---
+		h := newTestHarness(t, testCleanupTick)
+		h.processor.noEndpointRequestTTL = testShortTTL
+		h.processor.regime.Store(&regimeSample{empty: true})
+
+		// The saturation budget is long; only the no-endpoint budget can shed this request.
+		item := h.newTestItem("req-no-endpoints", testFlow, testTTL)
+		q := h.addQueue(testFlow)
+		require.NoError(t, q.Add(item), "Failed to add item to queue")
+
+		// --- ACT ---
+		h.clock.Step(testShortTTL)
+		h.processor.sweepFinalizedItems()
+
+		// --- ASSERT ---
+		require.NotNil(t, item.FinalState(), "the no-endpoint budget should have elapsed")
+		finalState := item.FinalState()
+		assert.Equal(t, types.QueueOutcomeEvictedNoEndpoints, finalState.Outcome,
+			"Outcome should be EvictedNoEndpoints")
+		assert.ErrorIs(t, finalState.Err, types.ErrEvicted, "Error should wrap ErrEvicted")
+		assert.ErrorIs(t, finalState.Err, types.ErrTTLExpired, "Error should wrap ErrTTLExpired")
+		assert.ErrorIs(t, finalState.Err, types.ErrNoEndpoints, "Error should wrap ErrNoEndpoints")
+		assert.Equal(t, 0, q.Len(), "the evicted item should be swept from the queue")
+		assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedNoEndpoints].Load(),
+			"Drop should be recorded for EvictedNoEndpoints")
+	})
+
+	t.Run("dispatch cycle timestamps the regime change", func(t *testing.T) {
+		t.Parallel()
+		// --- ARRANGE ---
+		h := newTestHarness(t, testCleanupTick)
+		h.addQueue(testFlow)
+		ctx := context.Background()
+
+		// --- ACT & ASSERT ---
+		// The harness pool is non-empty; the first cycle establishes the regime without recording a change.
+		h.processor.dispatchCycle(ctx)
+		assert.False(t, h.processor.regime.Load().empty, "the harness pool starts non-empty")
+		assert.Zero(t, h.processor.regime.Load().since, "settling on the initial regime is not a change")
+
+		// The pool scales to zero.
+		h.clock.Step(testShortTTL)
+		h.endpointCandidates.Candidates = nil
+		h.processor.dispatchCycle(ctx)
+		require.True(t, h.processor.regime.Load().empty, "the pool should now read as empty")
+		scaledDown := h.processor.regime.Load().since
+		assert.Equal(t, h.clock.Now(), scaledDown, "the regime change should be timestamped")
+
+		// A cycle that does not change the regime leaves the timestamp alone, so the budget keeps running.
+		h.clock.Step(testShortTTL)
+		h.processor.dispatchCycle(ctx)
+		assert.Equal(t, scaledDown, h.processor.regime.Load().since,
+			"an unchanged regime must not restart the budget")
 	})
 }

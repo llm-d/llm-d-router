@@ -35,7 +35,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	receivedPhases := []string{}
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		phase := r.Header.Get(gateway.EPPProfileHeader)
 		mu.Lock()
 		receivedPhases = append(receivedPhases, phase)
 		mu.Unlock()
@@ -70,7 +70,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 				"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
 			})
 		default:
-			t.Errorf("unexpected EPP-Phase: %s", phase)
+			t.Errorf("unexpected EPP-Profile: %s", phase)
 			http.Error(w, "unexpected phase", 404)
 		}
 	}))
@@ -132,7 +132,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 		t.Fatalf("decode failed: %v", err)
 	}
 
-	// --- Validate EPP-Phase headers ---
+	// --- Validate EPP-Profile headers ---
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -148,7 +148,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 
 	for i, expected := range expectedPhases {
 		if receivedPhases[i] != expected {
-			t.Errorf("request %d: expected EPP-Phase %q, got %q", i, expected, receivedPhases[i])
+			t.Errorf("request %d: expected EPP-Profile %q, got %q", i, expected, receivedPhases[i])
 		}
 	}
 }
@@ -162,7 +162,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 		receivedPaths = append(receivedPaths, r.URL.Path)
 		mu.Unlock()
 
-		phase := r.Header.Get(gateway.EPPPhaseHeader)
+		phase := r.Header.Get(gateway.EPPProfileHeader)
 		switch phase {
 		case gateway.PhaseEncode:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -229,7 +229,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		receivedPhase = r.Header.Get(gateway.EPPPhaseHeader)
+		receivedPhase = r.Header.Get(gateway.EPPProfileHeader)
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{}}})
 	}))
 	defer gwServer.Close()
@@ -262,6 +262,6 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 		t.Fatalf("expected /v1/completions, got %s", receivedPath)
 	}
 	if receivedPhase != gateway.PhaseDecode {
-		t.Fatalf("expected EPP-Phase: decode, got %q", receivedPhase)
+		t.Fatalf("expected EPP-Profile: decode, got %q", receivedPhase)
 	}
 }

@@ -21,9 +21,9 @@ import (
 func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: nsn,
-			Address:        ipaddr,
-			Labels:         labels,
+			ID:      nsn,
+			Address: ipaddr,
+			Labels:  labels,
 		},
 		nil,
 		nil,
@@ -112,7 +112,7 @@ func TestContextLengthAwareFilter(t *testing.T) {
 
 	gotNames := make([]string, len(filteredEndpoints))
 	for i, endpoint := range filteredEndpoints {
-		gotNames[i] = endpoint.GetMetadata().NamespacedName.Name
+		gotNames[i] = endpoint.GetMetadata().ID.Name
 	}
 
 	expectedEndpoints := []string{"short-range", "wide-range", "no-label"}
@@ -241,10 +241,10 @@ func TestCalculateRangeScoreFallback(t *testing.T) {
 	})
 }
 
-// TokenizedPrompt tests — plugin reads tokens from InferenceRequestBody.TokenizedPrompt
+// TokenizedRequest tests — plugin reads tokens from InferenceRequestBody.TokenizedRequest
 // as populated by the tokenizer DataProducer plugin.
 
-func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
+func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	tokenCount := 42
@@ -273,19 +273,19 @@ func TestContextLengthAwareWithTokenizedPromptOnRequest(t *testing.T) {
 		RequestID:   "test-request",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
 		},
 	}
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
-	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().ID.Name)
 }
 
-func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
+func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
-	// Without TokenizedPrompt the context length is 0 (unknown); no protocol structs are read.
+	// Without TokenizedRequest the context length is 0 (unknown); no protocol structs are read.
 	endpoints := []scheduling.Endpoint{
 		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "matching-range"},
 			"10.0.0.1",
@@ -309,5 +309,5 @@ func TestContextLengthAwareNilTokenizedPromptIsZero(t *testing.T) {
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
-	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().ID.Name)
 }

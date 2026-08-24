@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -49,7 +50,12 @@ import (
 
 // ExtProcServerRunner provides methods to manage an external process server.
 type ExtProcServerRunner struct {
-	GrpcPort                         int
+	GrpcPort int
+	// GrpcListener is an optional pre-bound listener for the ext_proc server.
+	// When set, GrpcPort is ignored. Reserving the port in advance of this
+	// runnable starting closes the window in which another process can take a
+	// port that was selected but not yet bound.
+	GrpcListener                     net.Listener
 	GKNN                             common.GKNN
 	ControllerCfg                    ControllerConfig
 	Datastore                        datastore.Datastore
@@ -57,6 +63,8 @@ type ExtProcServerRunner struct {
 	HealthChecking                   bool
 	CertPath                         string
 	EnableCertReload                 bool
+	TLSMinVersion                    uint16
+	TLSCipherSuites                  []uint16
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
@@ -66,6 +74,11 @@ type ExtProcServerRunner struct {
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
 	EnableGRPCStreamMetrics          bool
+	EmitEndpointScores               bool
+
+	// EvictChannelLookup, when set, enables the ext_proc server to terminate in-flight requests
+	// selected for eviction by flow control. See docs/flow-control-eviction.md.
+	EvictChannelLookup handlers.EvictChannelLookup
 }
 
 // NewDefaultExtProcServerRunner creates a runner with default values.
@@ -177,17 +190,21 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 				if err != nil {
 					return fmt.Errorf("failed to create cert reloader: %w", err)
 				}
-				creds = credentials.NewTLS(&tls.Config{
+				tlsCfg := &tls.Config{
 					GetCertificate: func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 						return reloader.Get(), nil
 					},
 					NextProtos: []string{"h2"},
-				})
+				}
+				r.applyTLSOverrides(tlsCfg)
+				creds = credentials.NewTLS(tlsCfg)
 			} else {
-				creds = credentials.NewTLS(&tls.Config{
+				tlsCfg := &tls.Config{
 					Certificates: []tls.Certificate{cert},
 					NextProtos:   []string{"h2"},
-				})
+				}
+				r.applyTLSOverrides(tlsCfg)
+				creds = credentials.NewTLS(tlsCfg)
 			}
 		}
 
@@ -214,6 +231,10 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			poolCap = 4 * 1024 * 1024 // gRPC default 4MB
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
+		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
+		if r.EvictChannelLookup != nil {
+			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
+		}
 		extProcPb.RegisterExternalProcessorServer(srv, extProcServer)
 
 		if r.HealthChecking {
@@ -227,6 +248,19 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 
 		// Forward to the gRPC runnable.
+		if r.GrpcListener != nil {
+			return runnable.GRPCServerOnListener("ext-proc", srv, r.GrpcListener).Start(ctx)
+		}
 		return runnable.GRPCServer("ext-proc", srv, r.GrpcPort).Start(ctx)
 	}))
+}
+
+// applyTLSOverrides sets MinVersion and CipherSuites on cfg when configured.
+func (r *ExtProcServerRunner) applyTLSOverrides(cfg *tls.Config) {
+	if r.TLSMinVersion != 0 {
+		cfg.MinVersion = r.TLSMinVersion
+	}
+	if len(r.TLSCipherSuites) > 0 {
+		cfg.CipherSuites = r.TLSCipherSuites
+	}
 }

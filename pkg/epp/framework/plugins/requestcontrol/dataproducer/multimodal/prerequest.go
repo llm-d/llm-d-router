@@ -27,23 +27,23 @@ import (
 )
 
 // PreRequest records the selected endpoint(s) for each hash in the current request.
-func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	logger := log.FromContext(ctx).V(logging.DEBUG)
 	if request == nil || request.RequestID == "" {
-		return
+		return nil
 	}
 	defer p.pluginState.Delete(request.RequestID)
 
 	state, err := plugin.ReadPluginStateKey[*requestState](p.pluginState, request.RequestID, plugin.StateKey(ProducerType))
 	if err != nil || len(state.items) == 0 {
 		logger.Info("No multimodal request state found, skipping encoder-cache update")
-		return
+		return nil
 	}
 
 	targets := targetEndpoints(schedulingResult)
 	if len(targets) == 0 {
 		logger.Info("No target endpoints found, skipping encoder-cache update")
-		return
+		return nil
 	}
 
 	items := state.items
@@ -56,12 +56,13 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 			if metadata == nil {
 				continue
 			}
-			podCache := p.getOrCreatePodCache(metadata.NamespacedName.String())
+			podCache := p.getOrCreatePodCache(metadata.ID.String())
 			for _, item := range items {
 				podCache.Add(item.Hash, struct{}{})
 			}
 		}
 	})
+	return nil
 }
 
 func targetEndpoints(schedulingResult *scheduling.SchedulingResult) []scheduling.Endpoint {

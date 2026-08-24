@@ -17,10 +17,12 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"slices"
@@ -48,12 +50,13 @@ const (
 	// fail with a clear error message directing users to wait for the feature
 	// to be officially released.
 	//
-	// TODO(AMD-MoRI-IO): Set to true once CI tests and production validation
-	// are complete in a future release candidate.
-	MoRIIOFeatureEnabled = false
+	// AMD-MoRI-IO: Feature enabled for 1P1D (DP=EP=8) intra-node Wide-EP
+	// and 2P2D (DP=EP=16) inter-node Wide-EP with LeaderWorkerSet support.
+	MoRIIOFeatureEnabled = true
 
 	// Flags
 	port                      = "port"
+	modelServerPort           = "model-server-port"
 	vllmPort                  = "vllm-port"
 	dataParallelSize          = "data-parallel-size"
 	kvConnector               = "kv-connector"
@@ -76,6 +79,7 @@ const (
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
 	tracingFlag               = "tracing"
+	metricsPort               = "metrics-port"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
@@ -90,6 +94,13 @@ const (
 	defaultMooncakeBootstrapPort = 8998
 	defaultP2PConnectorPort      = 7777
 
+	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
+	// dispatch: it bounds how long the decode leg waits on the prefill outcome
+	// (and thus KV) before being cancelled, so a hung/failed prefill fails the
+	// request instead of hanging. Prefill in parallel dispatch is capped to one
+	// token, so it normally resolves well within this window.
+	defaultMoRIIOParallelDecodeWaitTimeout = 30 * time.Second
+
 	// TLS stages
 	prefillStage = "prefiller"
 	decodeStage  = "decoder"
@@ -99,6 +110,7 @@ const (
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
 	Port                    int      `json:"port,omitempty"`
+	ModelServerPort         int      `json:"model-server-port,omitempty"`
 	VLLMPort                int      `json:"vllm-port,omitempty"`
 	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
 	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
@@ -119,6 +131,7 @@ type yamlConfiguration struct {
 	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
 	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
 	Tracing                 *bool    `json:"tracing,omitempty"`
+	MetricsPort             int      `json:"metrics-port,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -130,7 +143,9 @@ type Options struct {
 	// Fields with direct CLI flags are bound here via embedding; derived fields are set in Complete().
 	Config
 
-	// vllmPort is the port vLLM is listening on; used to compute Config.DecoderURL in Complete().
+	// modelServerPort is the port the model server (vLLM, SGLang, etc.) is listening on; used to compute Config.DecoderURL in Complete().
+	modelServerPort string
+	// vllmPort is the deprecated alias for modelServerPort; migrated in Complete().
 	vllmPort string
 	// enableTLS is the list of stages to enable TLS for; used to compute Config.UseTLSFor* in Complete().
 	enableTLS []string
@@ -212,15 +227,17 @@ func NewOptions() *Options {
 			Tracing:                 false,
 			// MoRI-IO defaults: off, preserving existing NIXLv2 behaviour.
 			// Port defaults match vLLM's MoRI-IO connector defaults.
-			MoRIIOWriteMode:            false,
-			MoRIIODecodeNotifyPort:     61005,
-			MoRIIODecodeHandshakePort:  6301,
-			MoRIIODecodePodIP:          os.Getenv("POD_IP"),
-			MoRIIOParallelDispatch:     false,
-			MoRIIOPrefillHandshakePort: 6301,
-			MoRIIOPrefillNotifyPort:    61005,
-			MoRIIOTPSize:               1,
-			MoRIIODPSize:               1,
+			MoRIIOWriteMode:           false,
+			MoRIIODecodeNotifyPort:    61005,
+			MoRIIODecodeHandshakePort: 6301,
+			MoRIIODecodePodIP:         os.Getenv("POD_IP"),
+			MoRIIOParallelDispatch:    false,
+
+			MoRIIOParallelDecodeWaitTimeout: defaultMoRIIOParallelDecodeWaitTimeout,
+			MoRIIOPrefillHandshakePort:      6301,
+			MoRIIOPrefillNotifyPort:         61005,
+			MoRIIOTPSize:                    1,
+			MoRIIODPSize:                    1,
 			// Wide-EP multi-pod: empty disables fan-out (single-pod fallback).
 			MoRIIORemoteHosts: nil,
 			MoRIIODPSizeLocal: 0,
@@ -243,8 +260,11 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	// Add Go flags to pflag (for zap options compatibility)
 	fs.AddGoFlagSet(goFlagSet)
 	fs.StringVar(&opts.Port, port, opts.Port, "the port the sidecar is listening on")
-	fs.StringVar(&opts.vllmPort, vllmPort, opts.vllmPort, "the port vLLM is listening on")
-	fs.IntVar(&opts.DataParallelSize, dataParallelSize, opts.DataParallelSize, "the vLLM DATA-PARALLEL-SIZE value")
+	fs.StringVar(&opts.modelServerPort, modelServerPort, opts.modelServerPort,
+		fmt.Sprintf("the port the model server is listening on (default %s)", defaultVLLMPort))
+	fs.StringVar(&opts.vllmPort, vllmPort, opts.vllmPort, "the port the model server is listening on")
+	_ = fs.MarkDeprecated(vllmPort, "use --model-server-port instead; --vllm-port will be removed after the deprecation period")
+	fs.IntVar(&opts.DataParallelSize, dataParallelSize, opts.DataParallelSize, "the model server's data-parallel size")
 	fs.StringVar(&opts.KVConnector, kvConnector, opts.KVConnector,
 		"the KV protocol between prefiller and decoder. Supported: "+supportedKVConnectorNamesStr)
 	fs.StringVar(&opts.ECConnector, ecConnector, opts.ECConnector,
@@ -252,7 +272,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
 	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
-		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg (used with --kv-connector=offloading or --enable-p2p-pull)")
+		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
@@ -262,6 +282,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
+	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
 	// against vLLM engines running MoRI-IO in WRITE mode.
@@ -270,7 +291,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MoRIIODecodeNotifyPort, "moriio-decode-notify-port", opts.MoRIIODecodeNotifyPort,
 		"Base MoRI-IO notify port on the decode pod.")
 	fs.StringVar(&opts.MoRIIODecodePodIP, "moriio-local-pod-ip", opts.MoRIIODecodePodIP,
-		"Decode pod's routable IP, used as the prefill leg's remote_host. "+
+		"Decode pod's routable address, used as the prefill leg's remote_host. "+
+			"A Kubernetes DNS name (e.g., 'pod-name.namespace.svc.cluster.local') "+
+			"is resolved to an IP at startup; a literal IP is used as-is. "+
 			"Defaults to the POD_IP env var. Required with --moriio-write-mode.")
 	fs.IntVar(&opts.MoRIIODecodeHandshakePort, "moriio-decode-handshake-port", opts.MoRIIODecodeHandshakePort,
 		"Base MoRI-IO handshake port on the decode pod.")
@@ -278,7 +301,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	// Concurrent-dispatch flags: synthesise decode's kv_transfer_params from
 	// config so prefill and decode dispatch can overlap.
 	fs.BoolVar(&opts.MoRIIOParallelDispatch, "moriio-parallel-dispatch", opts.MoRIIOParallelDispatch,
-		"Fire prefill and decode concurrently. Requires --moriio-write-mode.")
+		"Fire prefill and decode concurrently. OFF by default (serial dispatch via handleNIXLV2 is the SLA-safe path); opt-in only. Requires --moriio-write-mode.")
+	fs.DurationVar(&opts.MoRIIOParallelDecodeWaitTimeout, "moriio-parallel-decode-wait-timeout", opts.MoRIIOParallelDecodeWaitTimeout,
+		"Backstop timeout for parallel dispatch: how long decode may wait on the prefill outcome/KV before being cancelled so the request fails instead of hanging. Only used with --moriio-parallel-dispatch.")
 	fs.IntVar(&opts.MoRIIOPrefillHandshakePort, "moriio-prefill-handshake-port", opts.MoRIIOPrefillHandshakePort,
 		"Prefill pod's base MoRI-IO handshake port, used to build the decode leg in parallel-dispatch mode.")
 	fs.IntVar(&opts.MoRIIOPrefillNotifyPort, "moriio-prefill-notify-port", opts.MoRIIOPrefillNotifyPort,
@@ -290,18 +315,23 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"Set to the engine DP size for Wide-EP (TP=1, DP>1); default 1 leaves the wire unchanged.")
 
 	// Wide-EP multi-pod fan-out. Optional: empty preserves single-pod behaviour.
-	// remote_hosts carries the opposite side's pod IPs (decode IPs on the prefill
+	// remote_hosts carries the opposite side's pod DNS names (decode on the prefill
 	// leg and vice versa); dp-size-local maps a global DP rank to a pod via
 	// pod_idx = dp_rank / dp_size_local.
+	// DNS names are resolved to IPs at startup (LWS-compatible).
 	fs.StringSliceVar(&opts.MoRIIORemoteHosts, "moriio-remote-hosts", opts.MoRIIORemoteHosts,
-		"Wide-EP: comma-separated remote (prefill-side) pod IPs for per-DP-rank fan-out. "+
+		"Wide-EP: comma-separated remote (prefill-side) pod hosts for per-DP-rank fan-out. "+
+			"Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
+			"are resolved to IPs at startup; literal IPs are used as-is. "+
 			"Pair with --moriio-dp-size-local.")
 	fs.IntVar(&opts.MoRIIODPSizeLocal, "moriio-dp-size-local", opts.MoRIIODPSizeLocal,
 		"Wide-EP: per-pod DP size used to map a global DP rank to a pod index. "+
 			"Must satisfy --moriio-dp-size = dp-size-local * len(hosts).")
 	fs.StringSliceVar(&opts.MoRIIODecodeHosts, "moriio-decode-hosts", opts.MoRIIODecodeHosts,
-		"Wide-EP: comma-separated decode-side pod IPs, emitted as the prefill leg's "+
-			"remote_hosts. Pair with --moriio-dp-size-local.")
+		"Wide-EP: comma-separated decode-side pod hosts, emitted as the prefill leg's "+
+			"remote_hosts. Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
+			"are resolved to IPs at startup; literal IPs are used as-is. "+
+			"Pair with --moriio-dp-size-local.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -310,7 +340,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
 	fs.IntVar(&opts.PrefillMaxRetries, prefillMaxRetries, opts.PrefillMaxRetries, "max retry attempts when a prefill request fails with a 5xx error; 0 means no retries (default)")
 	fs.DurationVar(&opts.PrefillRetryBackoff, prefillRetryBackoff, opts.PrefillRetryBackoff, "delay between prefill retry attempts")
-	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, vllm-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
+	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, model-server-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
 	fs.StringVar(&opts.fileConfiguration, configurationFile, "", "Path to file which contains sidecar configuration in YAML. Example `--configuration-file=/etc/config/sidecar-config.yaml`. Inline configuration and file configuration are mutually exclusive.")
 }
 
@@ -333,6 +363,13 @@ func (opts *Options) Complete() error {
 		return err
 	}
 
+	// Resolve the effective model server port with flag-over-config precedence:
+	//   --model-server-port flag > --vllm-port flag > model-server-port YAML > vllm-port YAML > default.
+	// The deprecated --vllm-port flag must still override a YAML model-server-port.
+	if (opts.isFlagSet(vllmPort) && !opts.isFlagSet(modelServerPort)) || opts.modelServerPort == "" {
+		opts.modelServerPort = opts.vllmPort
+	}
+
 	// Parse inferencePool field (namespace/name or just name) into Config.
 	if opts.inferencePool != "" {
 		parts := strings.SplitN(opts.inferencePool, "/", 2)
@@ -353,13 +390,13 @@ func (opts *Options) Complete() error {
 	opts.InsecureSkipVerifyForEncoder = slices.Contains(opts.tlsInsecureSkipVerify, encodeStage)
 	opts.InsecureSkipVerifyForDecoder = slices.Contains(opts.tlsInsecureSkipVerify, decodeStage)
 
-	// Compute Config.DecoderURL from vllmPort and decoder TLS setting
+	// Compute Config.DecoderURL from modelServerPort and decoder TLS setting
 	scheme := "http"
 	if opts.UseTLSForDecoder {
 		scheme = schemeHTTPS
 	}
 	var err error
-	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.vllmPort)
+	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.modelServerPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)
 	}
@@ -397,9 +434,48 @@ func (opts *Options) Complete() error {
 		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
 		return err
 	}
-	return validateWideEPHosts(
+	if err := validateWideEPHosts(
 		"--moriio-decode-hosts", opts.MoRIIODecodeHosts,
-		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal)
+		opts.MoRIIODPSize, opts.MoRIIODPSizeLocal); err != nil {
+		return err
+	}
+
+	// Capture the ORIGINAL host specs before one-shot resolution rewrites the
+	// resolved fields. The request-path hostResolver re-resolves these on a
+	// short TTL so peer pod restarts (new IP) are eventually picked up. Literal
+	// IPs stored here pass through the resolver unchanged.
+	opts.MoRIIORemoteHostSpecs = append([]string(nil), opts.MoRIIORemoteHosts...)
+	opts.MoRIIODecodeHostSpecs = append([]string(nil), opts.MoRIIODecodeHosts...)
+	opts.MoRIIODecodePodIPSpec = opts.MoRIIODecodePodIP
+
+	// LWS-compatible DNS resolution: resolve hostnames to IPs at startup. This
+	// aligns with Kubernetes LeaderWorkerSet patterns where pod addresses are
+	// DNS names (e.g., "moriio-prefill-0-0.namespace.svc"); a literal IP is
+	// used as-is.
+	resolvedRemote, remoteErr := resolveHostsToIPs(opts.MoRIIORemoteHosts)
+	if remoteErr != nil {
+		return fmt.Errorf("resolving --moriio-remote-hosts: %w", remoteErr)
+	}
+	opts.MoRIIORemoteHosts = resolvedRemote
+
+	resolvedDecode, decodeErr := resolveHostsToIPs(opts.MoRIIODecodeHosts)
+	if decodeErr != nil {
+		return fmt.Errorf("resolving --moriio-decode-hosts: %w", decodeErr)
+	}
+	opts.MoRIIODecodeHosts = resolvedDecode
+
+	// Single-host counterpart: --moriio-local-pod-ip is decode's advertised
+	// remote_host on the prefill leg. Resolve it the same way so it can be an
+	// LWS DNS name (a literal IP passes through unchanged).
+	if opts.MoRIIODecodePodIP != "" {
+		resolved, podIPErr := resolveHostsToIPs([]string{opts.MoRIIODecodePodIP})
+		if podIPErr != nil {
+			return fmt.Errorf("resolving --moriio-local-pod-ip: %w", podIPErr)
+		}
+		opts.MoRIIODecodePodIP = resolved[0]
+	}
+
+	return nil
 }
 
 // hasMoRIIOFlagsSet returns true if any --moriio-* flag is set to a non-default
@@ -456,6 +532,44 @@ func validateWideEPHosts(flag string, hosts []string, dpSize, dpLocal int) error
 	return nil
 }
 
+// resolveHostsToIPs resolves DNS names (e.g., "pod-name.namespace.svc") to IPs
+// at startup, preferring IPv4. A literal IP (e.g., "10.0.0.1") is used as-is.
+// Resolution happens once at startup.
+func resolveHostsToIPs(hosts []string) ([]string, error) {
+	if len(hosts) == 0 {
+		return hosts, nil
+	}
+	resolved := make([]string, len(hosts))
+	for i, host := range hosts {
+		// A literal IP is used as-is (no lookup).
+		if ip := net.ParseIP(host); ip != nil {
+			resolved[i] = host
+			continue
+		}
+		// Resolve DNS name to IP (IPv4-preferred)
+		ip, err := resolveSingleHost(host)
+		if err != nil {
+			return nil, err
+		}
+		resolved[i] = ip
+	}
+	return resolved, nil
+}
+
+// resolveSingleHost resolves one DNS name to a single IP string, preferring
+// IPv4 and falling back to the first returned address. Callers must handle raw
+// IP passthrough before calling this. The lookup is bounded by a context
+// timeout sourced from resolveTimeoutFromEnv() (default defaultResolveTimeout),
+// the same bound the request-path resolver uses, so a slow or hanging resolver
+// cannot stall startup indefinitely. Shares lookupIPv4Preferred with the
+// request-path TTL resolver so both apply identical bounding and
+// IPv4-preference semantics.
+func resolveSingleHost(host string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeoutFromEnv())
+	defer cancel()
+	return lookupIPv4Preferred(ctx, net.DefaultResolver.LookupIPAddr, host)
+}
+
 // Validate checks the Options for invalid or conflicting values.
 // Complete must be called before Validate.
 func (opts *Options) Validate() error {
@@ -472,12 +586,16 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--port %w", err)
 	}
 
-	vllmPort, err := strconv.Atoi(opts.vllmPort)
-	if err != nil {
-		return fmt.Errorf("--vllm-port must be a valid integer, got %q", opts.vllmPort)
+	portFlagName := "--" + modelServerPort
+	if opts.isFlagSet(vllmPort) && !opts.isFlagSet(modelServerPort) {
+		portFlagName = "--" + vllmPort
 	}
-	if err := validatePortRange(vllmPort, opts.DataParallelSize); err != nil {
-		return fmt.Errorf("--vllm-port %w", err)
+	msPort, err := strconv.Atoi(opts.modelServerPort)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid integer, got %q", portFlagName, opts.modelServerPort)
+	}
+	if err := validatePortRange(msPort, opts.DataParallelSize); err != nil {
+		return fmt.Errorf("%s %w", portFlagName, err)
 	}
 
 	// Validate KV connector
@@ -532,11 +650,11 @@ func (opts *Options) Validate() error {
 	if opts.P2PConnectorPort < 1 || opts.P2PConnectorPort > 65535 {
 		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
 	}
-
-	// offloading does not support wide-EP: every DP rank would bind the same
-	// POD_IP:<p2p-connector-port>. DP-aware support is not yet implemented.
-	if opts.KVConnector == KVConnectorOffloading && opts.DataParallelSize > 1 {
-		return fmt.Errorf("--kv-connector=offloading does not support --data-parallel-size > 1 (got %d)", opts.DataParallelSize)
+	// The injected port is offset by the target's DP rank, so the highest
+	// rank's port must stay in range too.
+	if opts.DataParallelSize > 1 && opts.P2PConnectorPort+opts.DataParallelSize-1 > 65535 {
+		return fmt.Errorf("--p2p-connector-port %d plus data-parallel rank %d exceeds 65535",
+			opts.P2PConnectorPort, opts.DataParallelSize-1)
 	}
 
 	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
@@ -575,35 +693,12 @@ func validatePortRange(startPort, rangeSize int) error {
 	return nil
 }
 
-// customLevelEncoder maps negative Zap levels to human-readable names that
-// match the project's verbosity constants (VERBOSE=3, DEBUG=4, TRACE=5).
-// Without this, controller-runtime's zap bridge emits all V(n) calls as
-// "debug" in JSON output, which is misleading for V(1)–V(3) (verbose info).
-func customLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-	if l >= 0 {
-		zapcore.LowercaseLevelEncoder(l, enc)
-		return
-	}
-	switch l {
-	case zapcore.Level(-1 * logutil.DEBUG): // V(4) → "debug"
-		enc.AppendString("debug")
-	case zapcore.Level(-1 * logutil.TRACE): // V(5) → "trace"
-		enc.AppendString("trace")
-	default:
-		if l >= zapcore.Level(-1*logutil.VERBOSE) { // V(1)–V(3) → "info"
-			enc.AppendString("info")
-		} else { // V(6+) → "trace"
-			enc.AppendString("trace")
-		}
-	}
-}
-
 // NewLogger returns a logger configured from the Options logging flags,
 // with a custom level encoder that maps verbosity levels to their semantic
 // names instead of always rendering V(n) as "debug".
 func (opts *Options) NewLogger() logr.Logger {
 	config := uberzap.NewProductionEncoderConfig()
-	config.EncodeLevel = customLevelEncoder
+	config.EncodeLevel = logutil.LevelEncoder
 	return zap.New(
 		zap.UseFlagOptions(&opts.loggingOptions),
 		zap.Encoder(zapcore.NewJSONEncoder(config)),
@@ -649,6 +744,10 @@ func (opts *Options) extractYAMLConfiguration() error {
 func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	if cfg.Port != 0 && !opts.isFlagSet(port) {
 		opts.Port = strconv.Itoa(cfg.Port)
+	}
+	// If both keys may be present, Complete() resolves precedence: modelServerPort wins.
+	if cfg.ModelServerPort != 0 && !opts.isFlagSet(modelServerPort) {
+		opts.modelServerPort = strconv.Itoa(cfg.ModelServerPort)
 	}
 	if cfg.VLLMPort != 0 && !opts.isFlagSet(vllmPort) {
 		opts.vllmPort = strconv.Itoa(cfg.VLLMPort)
@@ -717,6 +816,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.DecodeChunkSize != 0 && !opts.isFlagSet(decodeChunkSize) {
 		opts.DecodeChunkSize = cfg.DecodeChunkSize
+	}
+	if cfg.MetricsPort != 0 && !opts.isFlagSet(metricsPort) {
+		opts.MetricsPort = cfg.MetricsPort
 	}
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing

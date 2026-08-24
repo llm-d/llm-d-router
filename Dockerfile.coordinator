@@ -6,7 +6,7 @@
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 
 # Go build stage
-FROM --platform=${BUILDPLATFORM} golang:1.26.5 AS builder
+FROM --platform=${BUILDPLATFORM} golang:1.26.6 AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -25,10 +25,11 @@ RUN go mod download
 # Copy the go source
 COPY cmd/ cmd/
 COPY pkg/ pkg/
+COPY version/ version/
 COPY config/coordinator/ config/coordinator/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-    -ldflags="${LDFLAGS}" \
+    -ldflags="${LDFLAGS} -X github.com/llm-d/llm-d-router/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/llm-d-router/version.BuildRef=${BUILD_REF}" \
     -o bin/coordinator ./cmd/coordinator/...
 
 # Runtime stage

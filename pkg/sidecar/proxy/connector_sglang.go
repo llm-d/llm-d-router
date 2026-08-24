@@ -31,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
@@ -52,7 +53,7 @@ func init() {
 }
 
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
-	s.logger.V(4).Info("running SGLang protocol", "url", prefillPodHostPort)
+	s.logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
 	// Make Request
 	requestData, err := s.parseSGLangRequest(r)
@@ -132,7 +133,7 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
-		s.logger.V(5).Info("prefill request completed", "status", pw.statusCode)
+		s.logger.V(logging.TRACE).Info("prefill request completed", "status", pw.statusCode)
 	}()
 
 	// Decode Stage - sync
@@ -194,7 +195,7 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	modifiedRequest[requestFieldBootstrapPort] = sglangBootstrapPort
 	modifiedRequest[requestFieldBootstrapRoom] = roomID
 
-	s.logger.V(5).Info("bootstrap info added",
+	s.logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)

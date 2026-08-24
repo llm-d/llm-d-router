@@ -24,10 +24,11 @@ type AlwaysDisaggMultimodalDecider struct {
 // AlwaysDisaggMulimodalDeciderPluginFactory defines the factory function for creating
 // a new instance of the AlwaysDisaggEncodeDecider.
 func AlwaysDisaggMulimodalDeciderPluginFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	return newAlwaysDisaggEncodeDecider().WithName(name), nil
+	return NewAlwaysDisaggEncodeDecider().WithName(name), nil
 }
 
-func newAlwaysDisaggEncodeDecider() *AlwaysDisaggMultimodalDecider {
+// NewAlwaysDisaggEncodeDecider creates a new AlwaysDisaggMultimodalDecider.
+func NewAlwaysDisaggEncodeDecider() *AlwaysDisaggMultimodalDecider {
 	return &AlwaysDisaggMultimodalDecider{
 		typedName: plugin.TypedName{Type: AlwaysDisaggMulimodalPluginType},
 	}

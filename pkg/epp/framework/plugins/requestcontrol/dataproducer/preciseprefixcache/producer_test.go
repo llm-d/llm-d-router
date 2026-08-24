@@ -106,15 +106,15 @@ func (f *fakeKVBlockScorer) Score(ctx context.Context, keys []kvblock.BlockHash,
 var testEndpoints = []scheduling.Endpoint{
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-			Address:        "10.0.0.1",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-a"},
+			Address: "10.0.0.1",
+			Port:    "8080",
 		}, nil, nil),
 	scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-			Address:        "10.0.0.2",
-			Port:           "8080",
+			ID:      k8stypes.NamespacedName{Name: "pod-b"},
+			Address: "10.0.0.2",
+			Port:    "8080",
 		}, nil, nil),
 }
 
@@ -124,15 +124,15 @@ func freshEndpoints() []scheduling.Endpoint {
 	return []scheduling.Endpoint{
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-a"},
-				Address:        "10.0.0.1",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-a"},
+				Address: "10.0.0.1",
+				Port:    "8080",
 			}, nil, nil),
 		scheduling.NewEndpoint(
 			&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-b"},
-				Address:        "10.0.0.2",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-b"},
+				Address: "10.0.0.2",
+				Port:    "8080",
 			}, nil, nil),
 	}
 }
@@ -150,7 +150,7 @@ func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer, scorer kvca
 }
 
 // Tokens present → Produce hashes and writes per-endpoint match info.
-func TestProduce_UsesTokenizedPrompt(t *testing.T) {
+func TestProduce_UsesTokenizedRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	tokens := []uint32{10, 20, 30, 40, 50}
@@ -183,26 +183,28 @@ func TestProduce_UsesTokenizedPrompt(t *testing.T) {
 		RequestID:   "req-1",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
 		},
 	}
 
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
 	require.Equal(t, tokens, capturedTokens)
 
-	raw, ok := testEndpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := testEndpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 1, info.MatchBlocks())
 	assert.Equal(t, 1, info.TotalBlocks())
 	assert.Equal(t, 16, info.BlockSizeTokens())
+	assert.Nil(t, info.MM(), "text-only request must leave MM untracked")
 
-	raw2, ok := testEndpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw2, ok := testEndpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info2 := raw2.(*attrprefix.PrefixCacheMatchInfo)
 	assert.Equal(t, 0, info2.MatchBlocks())
 	assert.Equal(t, 1, info2.TotalBlocks())
+	assert.Nil(t, info2.MM(), "text-only request must leave MM untracked")
 }
 
 // No tokens → no-op (no prompt-string fallback).
@@ -228,7 +230,7 @@ func TestProduce_NoTokens_NoOp(t *testing.T) {
 }
 
 // Empty TokenIDs → no-op.
-func TestProduce_EmptyTokenizedPrompt_NoOp(t *testing.T) {
+func TestProduce_EmptyTokenizedRequest_NoOp(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	idx := &fakeKVCacheIndexer{
 		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
@@ -243,8 +245,8 @@ func TestProduce_EmptyTokenizedPrompt_NoOp(t *testing.T) {
 		RequestID:   "req-3",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "p"}},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{{}}},
+			Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "p"}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{}}}},
 		},
 	}
 	require.NoError(t, p.Produce(ctx, req, testEndpoints))
@@ -285,8 +287,8 @@ func TestProduce_MultiPromptEmptyBlockKeys_NoOp(t *testing.T) {
 		RequestID:   "req-multi-empty",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{promptA, promptB},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: promptA}, {TokenIDs: promptB}},
 			},
 		},
 	}
@@ -294,7 +296,7 @@ func TestProduce_MultiPromptEmptyBlockKeys_NoOp(t *testing.T) {
 	require.NoError(t, p.Produce(ctx, req, endpoints))
 	require.Equal(t, [][]uint32{promptA, promptB}, computeCalls)
 
-	_, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	_, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	assert.False(t, ok)
 }
 
@@ -343,8 +345,8 @@ func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
 		RequestID:   "req-multi-mixed",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{shortPrompt, fullPrompt},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: shortPrompt}, {TokenIDs: fullPrompt}},
 			},
 		},
 	}
@@ -353,14 +355,14 @@ func TestProduce_MultiPromptSkipsEmptyPromptKeys(t *testing.T) {
 	require.Equal(t, [][]uint32{shortPrompt, fullPrompt}, computeCalls)
 	require.Equal(t, [][]kvblock.BlockHash{{wantKey}}, lookupCalls)
 
-	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 1, info.MatchBlocks())
 	assert.Equal(t, 1, info.TotalBlocks())
 
-	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -416,15 +418,18 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 		RequestID:   "req-by-tier",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{promptA, promptB},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: promptA},
+					{TokenIDs: promptB},
+				},
 			},
 		},
 	}
 
 	require.NoError(t, p.Produce(ctx, req, endpoints))
 
-	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
@@ -432,13 +437,77 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	// gpu: 2 (prompt A) + 1 (prompt B); cpu: 1 (prompt A) + 1 (prompt B).
 	assert.Equal(t, map[string]int{"gpu": 3, "cpu": 2}, info.CachedBlocksByTier())
 
-	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test").String())
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 0, info.CachedBlockCount())
 	assert.NotNil(t, info.CachedBlocksByTier())
 	assert.Empty(t, info.CachedBlocksByTier())
+}
+
+// MM match uses cachedBlocks (literal), not matchLen (tier-weighted score).
+func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 4*testBlockSize)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+	keys := []kvblock.BlockHash{0xAA, 0xBB, 0xCC, 0xDD}
+	const addr = "10.0.0.1:8080"
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return keys, nil
+		},
+		index: &fakeKVBlockIndex{
+			lookup: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+				out := map[kvblock.BlockHash][]kvblock.PodEntry{}
+				for _, k := range keys {
+					out[k] = []kvblock.PodEntry{{PodIdentifier: addr}}
+				}
+				return out, nil
+			},
+		},
+	}
+	// Weighted score 3.2 gives matchLen=3, while all 4 blocks are cached.
+	scorer := &fakeKVBlockScorer{
+		score: func(_ context.Context, _ []kvblock.BlockHash, _ map[kvblock.BlockHash][]kvblock.PodEntry) (map[string]float64, error) {
+			return map[string]float64{addr: 3.2}, nil
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx, scorer)
+	endpoints := freshEndpoints()
+
+	// MM at block index 3: caught by cachedBlocks=4, missed by matchLen=3.
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-mm-weighted",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs: tokens,
+					MultiModalFeatures: []fwkrh.MultiModalFeature{
+						{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 48, Length: 16},
+					},
+				}},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+
+	assert.Equal(t, 3, info.MatchBlocks())
+	assert.Equal(t, 4, info.CachedBlockCount())
+	require.NotNil(t, info.MM())
+	assert.Equal(t, 1, info.MM().MatchBlocks, "must use cachedBlocks, not matchLen")
 }
 
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
@@ -470,11 +539,11 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 		RequestID:   "req-mm",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{tokens},
-				MultiModalFeatures: []fwkrh.MultiModalFeature{
-					{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4},
-				},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs:           tokens,
+					MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+				}},
 			},
 		},
 	}
@@ -526,10 +595,9 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 				RequestID:   "req-salt",
 				TargetModel: "test-model",
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{
-						PerPromptTokens:    [][]uint32{tokens},
-						MultiModalFeatures: tc.mm,
-						CacheSalt:          "s3cr3t",
+					TokenizedRequest: &fwkrh.TokenizedRequest{
+						Prompts:   []fwkrh.PromptTokens{{TokenIDs: tokens, MultiModalFeatures: tc.mm}},
+						CacheSalt: "s3cr3t",
 					},
 				},
 			}
@@ -564,7 +632,7 @@ func TestProduce_NoCacheSalt_NoExtraFeatures(t *testing.T) {
 		RequestID:   "req-nosalt",
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
 		},
 	}
 
@@ -610,7 +678,7 @@ func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	require.True(t, ok)
 }
 
-func TestConsumes_DeclaresTokenizedPrompt(t *testing.T) {
+func TestConsumes_DeclaresTokenizedRequest(t *testing.T) {
 	p := &Producer{typedName: plugin.TypedName{Type: PluginType, Name: "x"}}
 	expected := plugin.NewDataKey("TokenizedPrompt", "token-producer")
 	_, ok := p.Consumes().Required[expected]
@@ -653,20 +721,20 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 				tokens[i] = uint32(i + 1)
 			}
 			endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-				NamespacedName: k8stypes.NamespacedName{Name: "pod-x"},
-				Address:        "10.0.0.9",
-				Port:           "8080",
+				ID:      k8stypes.NamespacedName{Name: "pod-x"},
+				Address: "10.0.0.9",
+				Port:    "8080",
 			}, nil, nil)
 			req := &scheduling.InferenceRequest{
 				RequestID:   "r",
 				TargetModel: "m",
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}},
+					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
 				},
 			}
 			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
 
-			raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name).String())
+			raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name))
 			require.True(t, ok)
 			info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 			require.True(t, ok, "expected *PrefixCacheMatchInfo, got %T", raw)
@@ -676,12 +744,36 @@ func TestNew_BlockSizeFlowsViaTokenProcessor(t *testing.T) {
 	}
 }
 
-type fakeSubscriberManager struct {
-	ids       []string
-	endpoints []string
+func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "unsupported"
+
+	_, err = New(ctx, "unsupported-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
 }
 
-func (f *fakeSubscriberManager) EnsureSubscriber(_ context.Context, _, _, _ string, _ bool) error {
+type fakeSubscriberManager struct {
+	ids             []string
+	sourceEndpoints []string
+	endpoints       []string
+}
+
+func (f *fakeSubscriberManager) EnsureSubscriber(
+	_ context.Context,
+	id, sourceEndpoint, endpoint, _, _ string,
+	_ bool,
+) error {
+	f.ids = append(f.ids, id)
+	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
+	f.endpoints = append(f.endpoints, endpoint)
 	return nil
 }
 func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}

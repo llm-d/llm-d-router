@@ -154,10 +154,13 @@ func TestBuildRegistryConfig(t *testing.T) {
 			apiConfig: nil,
 			assertion: func(t *testing.T, cfg *registry.Config) {
 				assert.Equal(t, uint64(0), cfg.MaxBytes, "Default global limit should be 0 (unlimited)")
+				assert.Equal(t, uint64(0), cfg.MaxRequests, "Default global request limit should be 0 (unlimited)")
 				require.NotNil(t, cfg.DefaultPriorityBand,
 					"Default priority band template should be initialized automatically")
 				assert.Equal(t, uint64(1_000_000_000) /* registry default: 1 GB */, cfg.DefaultPriorityBand.MaxBytes,
 					"Default template should use system default capacity")
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.DefaultPriorityBand.MaxRequests,
+					"Default template should use the system default request-count capacity")
 			},
 		},
 
@@ -205,6 +208,49 @@ func TestBuildRegistryConfig(t *testing.T) {
 				require.NotNil(t, cfg.DefaultPriorityBand)
 				assert.Equal(t, uint64(1_000_000_000) /* registry default: 1 GB */, cfg.DefaultPriorityBand.MaxBytes,
 					"Explicit 0 in DefaultPriorityBand template should be treated as 'Use Default'")
+			},
+		},
+		{
+			name: "ShouldApplyDefault_WhenBandMaxRequestsIsNilOrZero",
+			apiConfig: &configapi.FlowControlConfig{
+				PriorityBands: []configapi.PriorityBandConfig{
+					{
+						Priority: 1,
+						// MaxRequests omitted
+					},
+					{
+						Priority:    2,
+						MaxRequests: ptr.To(resource.MustParse("0")), // Explicitly zero
+					},
+					{
+						Priority:    3,
+						MaxRequests: ptr.To(resource.MustParse("250")),
+					},
+				},
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				require.Contains(t, cfg.PriorityBands, 1)
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.PriorityBands[1].MaxRequests,
+					"Omitted MaxRequests (nil) should result in the system default (5000)")
+				require.Contains(t, cfg.PriorityBands, 2)
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.PriorityBands[2].MaxRequests,
+					"Explicit MaxRequests (0) should be treated as 'Use Default' (5000)")
+				require.Contains(t, cfg.PriorityBands, 3)
+				assert.Equal(t, uint64(250), cfg.PriorityBands[3].MaxRequests,
+					"Explicit MaxRequests should be preserved")
+			},
+		},
+		{
+			name: "ShouldApplyDefault_WhenNegativeBandTemplateMaxRequestsIsZero",
+			apiConfig: &configapi.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+					MaxRequests: ptr.To(resource.MustParse("0")), // Explicitly zero
+				},
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				require.NotNil(t, cfg.DefaultNegativePriorityBand)
+				assert.Equal(t, uint64(5000) /* registry default */, cfg.DefaultNegativePriorityBand.MaxRequests,
+					"Explicit 0 in the negative band template should be treated as 'Use Default', not zero capacity")
 			},
 		},
 
@@ -299,37 +345,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 
 		// --- MaxRequests: Defaulting Logic ---
-		{
-			name: "ShouldDefaultToZero_WhenMaxRequestsIsNil",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
-					{
-						Priority: 1,
-					},
-				},
-			},
-			assertion: func(t *testing.T, cfg *registry.Config) {
-				require.Contains(t, cfg.PriorityBands, 1)
-				assert.Equal(t, uint64(0), cfg.PriorityBands[1].MaxRequests,
-					"Omitted MaxRequests should default to 0 (no request limit)")
-			},
-		},
-		{
-			name: "ShouldDefaultToZero_WhenMaxRequestsIsZero",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
-					{
-						Priority:    1,
-						MaxRequests: ptr.To(resource.MustParse("0")),
-					},
-				},
-			},
-			assertion: func(t *testing.T, cfg *registry.Config) {
-				require.Contains(t, cfg.PriorityBands, 1)
-				assert.Equal(t, uint64(0), cfg.PriorityBands[1].MaxRequests,
-					"Explicit MaxRequests=0 should remain 0 (no request limit)")
-			},
-		},
+		// Nil and explicit-zero band MaxRequests defaulting is covered by
+		// ShouldApplyDefault_WhenBandMaxRequestsIsNilOrZero above.
 
 		// --- MaxRequests: Validation Errors ---
 		{
@@ -431,13 +448,12 @@ func TestBuildFlowControlConfig(t *testing.T) {
 	handle := newFlowControlTestHandle(t)
 
 	const funcPolicyName = "func-policy"
-	handle.AddPlugin(funcPolicyName, usagelimits.NewPolicyFunc(funcPolicyName, func(_ context.Context, _ float64, priorities []int) []float64 {
-		result := make([]float64, len(priorities))
-		for i := range result {
-			result[i] = 0.8
-		}
-		return result
-	}))
+	handle.AddPlugin(funcPolicyName, usagelimits.NewPolicyFunc(funcPolicyName,
+		func(_ context.Context, _ float64, _ []int, ceilings []float64) {
+			for i := range ceilings {
+				ceilings[i] = 0.8
+			}
+		}))
 
 	const structPolicyName = "struct-policy"
 	handle.AddPlugin(structPolicyName, &constantPointEightPolicy{})
@@ -473,7 +489,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			apiConfig: nil,
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be resolved even when not explicitly configured")
-				ceilings := cfg.UsageLimitPolicy.ComputeLimit(context.Background(), 0.5, []int{0})
+				ceilings := computeLimits(t, cfg.UsageLimitPolicy, 0.5, []int{0})
 				assert.Equal(t, []float64{1.0}, ceilings, "Default noop policy should return 1.0 (no gating)")
 			},
 		},
@@ -484,7 +500,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be resolved from the handle")
-				ceilings := cfg.UsageLimitPolicy.ComputeLimit(context.Background(), 0.5, []int{0})
+				ceilings := computeLimits(t, cfg.UsageLimitPolicy, 0.5, []int{0})
 				assert.Equal(t, []float64{1.0}, ceilings, "Noop policy should return 1.0 (no gating)")
 			},
 		},
@@ -495,7 +511,6 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy)
-				ctx := context.Background()
 				for _, tc := range []struct {
 					name       string
 					priority   int
@@ -505,7 +520,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 					{"half saturation", 1, 0.5},
 					{"full saturation", 5, 1.0},
 				} {
-					assert.Equal(t, []float64{0.8}, cfg.UsageLimitPolicy.ComputeLimit(ctx, tc.saturation, []int{tc.priority}),
+					assert.Equal(t, []float64{0.8}, computeLimits(t, cfg.UsageLimitPolicy, tc.saturation, []int{tc.priority}),
 						"func-based policy should return 0.8 at %s", tc.name)
 				}
 			},
@@ -517,7 +532,6 @@ func TestBuildFlowControlConfig(t *testing.T) {
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
 				require.NotNil(t, cfg.UsageLimitPolicy)
-				ctx := context.Background()
 				for _, tc := range []struct {
 					name       string
 					priority   int
@@ -527,7 +541,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 					{"half saturation", 1, 0.5},
 					{"full saturation", 5, 1.0},
 				} {
-					assert.Equal(t, []float64{0.8}, cfg.UsageLimitPolicy.ComputeLimit(ctx, tc.saturation, []int{tc.priority}),
+					assert.Equal(t, []float64{0.8}, computeLimits(t, cfg.UsageLimitPolicy, tc.saturation, []int{tc.priority}),
 						"struct-based policy should return 0.8 at %s", tc.name)
 				}
 			},
@@ -591,12 +605,22 @@ func (p *constantPointEightPolicy) TypedName() fwkplugin.TypedName {
 	}
 }
 
-func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int) []float64 {
-	result := make([]float64, len(priorities))
-	for i := range result {
-		result[i] = 0.8
+func (p *constantPointEightPolicy) ComputeLimit(_ context.Context, _ float64, _ []int, ceilings []float64) {
+	for i := range ceilings {
+		ceilings[i] = 0.8
 	}
-	return result
 }
 
 var _ fwkfc.UsageLimitPolicy = (*constantPointEightPolicy)(nil)
+
+// computeLimits invokes a UsageLimitPolicy with a framework-style output buffer (pre-filled with
+// 1.0, sized to priorities) and returns the filled ceilings.
+func computeLimits(t *testing.T, p fwkfc.UsageLimitPolicy, saturation float64, priorities []int) []float64 {
+	t.Helper()
+	ceilings := make([]float64, len(priorities))
+	for i := range ceilings {
+		ceilings[i] = 1.0
+	}
+	p.ComputeLimit(context.Background(), saturation, priorities, ceilings)
+	return ceilings
+}

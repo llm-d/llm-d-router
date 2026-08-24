@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // hashTokens hashes a token block the way the scorer's HashBlock does: uint32s
@@ -57,7 +58,7 @@ func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
 		Generate: &fwkrh.GenerateRequest{TokenIDs: in},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, in, tp.PerPromptTokens[0])
+	assert.Equal(t, in, tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
@@ -68,7 +69,7 @@ func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: in}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, in, tp.PerPromptTokens[0], "token IDs must pass through, not be byte-estimated")
+	assert.Equal(t, in, tp.Prompts[0].TokenIDs, "token IDs must pass through, not be byte-estimated")
 }
 
 // TestEstimateBackend_EmbeddingsTokenIDsPassthrough asserts token-ID embeddings
@@ -79,7 +80,7 @@ func TestEstimateBackend_EmbeddingsTokenIDsPassthrough(t *testing.T) {
 		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: in}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, in, tp.PerPromptTokens[0])
+	assert.Equal(t, in, tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
@@ -92,10 +93,10 @@ func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), body("hello world"))
 	require.NoError(t, err)
-	assert.Equal(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "same prompt produced different tokens")
+	assert.Equal(t, hashTokens(a.Prompts[0].TokenIDs), hashTokens(b.Prompts[0].TokenIDs), "same prompt produced different tokens")
 	c, err := estimateBackend{}.produce(context.Background(), body("hello there"))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(c.PerPromptTokens[0]), "distinct prompts produced identical tokens")
+	assert.NotEqual(t, hashTokens(a.Prompts[0].TokenIDs), hashTokens(c.Prompts[0].TokenIDs), "distinct prompts produced identical tokens")
 }
 
 // pngBase64Raw is a 64x32 RGBA PNG (bare base64 payload), yielding
@@ -120,13 +121,14 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	}
 	tp, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
-	require.Len(t, tp.MultiModalFeatures, 1)
-	f := tp.MultiModalFeatures[0]
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	f := tp.Prompts[0].MultiModalFeatures[0]
 	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
 	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16), f.Hash)
 	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
 	assert.GreaterOrEqual(t, f.Offset, 0)
-	tokens := tp.PerPromptTokens[0]
+	tokens := tp.Prompts[0].TokenIDs
 	assert.LessOrEqual(t, f.Offset+f.Length, len(tokens), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tokens))
 	// Placeholder tokens are the URL hash repeated; verify the span carries weight.
 	for i := f.Offset; i < f.Offset+f.Length; i++ {
@@ -152,8 +154,8 @@ func TestEstimateBackend_ChatModalityLabels(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tp, err := estimateBackend{}.produce(context.Background(), chat(tc.block))
 			require.NoError(t, err)
-			require.Len(t, tp.MultiModalFeatures, 1)
-			require.Equal(t, tc.want, tp.MultiModalFeatures[0].Modality)
+			require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+			require.Equal(t, tc.want, tp.Prompts[0].MultiModalFeatures[0].Modality)
 		})
 	}
 }
@@ -172,10 +174,10 @@ func TestEstimateBackend_ChatImageWeightingDistinct(t *testing.T) {
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	def, err := estimateBackend{}.produce(context.Background(), chat("https://example.com/a.png"))
 	require.NoError(t, err)
-	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/imageTokenFactor, def.MultiModalFeatures[0].Length, "default image length")
+	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/imageTokenFactor, def.Prompts[0].MultiModalFeatures[0].Length, "default image length")
 	small, err := estimateBackend{}.produce(context.Background(), chat(pngBase64DataURL))
 	require.NoError(t, err)
-	assert.NotEqual(t, def.MultiModalFeatures[0].Length, small.MultiModalFeatures[0].Length, "different images yielded identical placeholder counts")
+	assert.NotEqual(t, def.Prompts[0].MultiModalFeatures[0].Length, small.Prompts[0].MultiModalFeatures[0].Length, "different images yielded identical placeholder counts")
 }
 
 // chatImageBody builds a chat request carrying a single image_url block.
@@ -193,8 +195,9 @@ func TestImageEstimator_StaticMode(t *testing.T) {
 	b := estimateBackend{img: newImageEstimator(&estimateConfig{Image: &imageEstimateConfig{Mode: imageModeStatic, Static: &staticImageConfig{StaticToken: 7}}})}
 	tp, err := b.produce(context.Background(), chatImageBody(pngBase64DataURL))
 	require.NoError(t, err)
-	require.Len(t, tp.MultiModalFeatures, 1)
-	assert.Equal(t, 7, tp.MultiModalFeatures[0].Length, "static image length")
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, 7, tp.Prompts[0].MultiModalFeatures[0].Length, "static image length")
 }
 
 // TestImageEstimator_CustomFactor asserts the dynamic factor knob changes the
@@ -204,7 +207,7 @@ func TestImageEstimator_CustomFactor(t *testing.T) {
 	// Non-decodable URL falls back to the default 640x360 resolution.
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
 	require.NoError(t, err)
-	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/2048, tp.MultiModalFeatures[0].Length, "custom-factor image length")
+	assert.Equal(t, (defaultImageWidth*defaultImageHeight)/2048, tp.Prompts[0].MultiModalFeatures[0].Length, "custom-factor image length")
 }
 
 // TestImageEstimator_CustomDefaultResolution asserts the default-resolution knob
@@ -215,7 +218,293 @@ func TestImageEstimator_CustomDefaultResolution(t *testing.T) {
 	}})}
 	tp, err := b.produce(context.Background(), chatImageBody("https://example.com/a.png"))
 	require.NoError(t, err)
-	assert.Equal(t, (1024*1024)/imageTokenFactor, tp.MultiModalFeatures[0].Length, "custom default-resolution length")
+	assert.Equal(t, (1024*1024)/imageTokenFactor, tp.Prompts[0].MultiModalFeatures[0].Length, "custom default-resolution length")
+}
+
+// chatVideoBody builds a chat request carrying a single video_url block.
+func chatVideoBody(url string) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+		Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+			{Type: "video_url", VideoURL: fwkrh.VideoBlock{URL: url}},
+		}}}},
+	}}
+}
+
+// TestVideoEstimator_Default asserts the zero-config estimator uses sampled
+// frames (duration*sampleFPS) and dynamic tokens-per-frame (w*h/factor).
+func TestVideoEstimator_Default(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	frames := defaultVideoDuration * defaultVideoSampleFPS
+	tpf := (defaultVideoWidth * defaultVideoHeight) / videoTokenFactor
+	assert.Equal(t, frames*tpf, tp.Prompts[0].MultiModalFeatures[0].Length, "default video length")
+}
+
+// TestVideoEstimator_StaticTokensPerFrame asserts static mode emits a constant
+// per-frame count.
+func TestVideoEstimator_StaticTokensPerFrame(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 100}},
+	}})}
+	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	frames := defaultVideoDuration * defaultVideoSampleFPS
+	assert.Equal(t, frames*100, tp.Prompts[0].MultiModalFeatures[0].Length, "static tokens-per-frame video length")
+}
+
+// TestVideoEstimator_DynamicFactor asserts the dynamic factor knob changes the
+// per-frame count for the default resolution.
+func TestVideoEstimator_DynamicFactor(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeDynamic, Dynamic: &tokensPerFrameDynamicMode{Factor: 2048}},
+	}})}
+	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	frames := defaultVideoDuration * defaultVideoSampleFPS
+	tpf := (defaultVideoWidth * defaultVideoHeight) / 2048
+	assert.Equal(t, frames*tpf, tp.Prompts[0].MultiModalFeatures[0].Length, "custom-factor video length")
+}
+
+// TestVideoEstimator_SampledFrames asserts sampled frames scale with sampleFPS
+// and defaultDuration.
+func TestVideoEstimator_SampledFrames(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		DefaultDuration: 8,
+		Frames:          &framesConfig{Mode: videoFramesModeSampled, Sampled: &framesSampledMode{SampleFPS: 2}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 10}},
+	}})}
+	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 8*2*10, tp.Prompts[0].MultiModalFeatures[0].Length, "sampled-frames video length")
+}
+
+// TestVideoEstimator_StridedFramesCapped asserts strided frames apply the
+// stride divisor and the maxFrames cap.
+func TestVideoEstimator_StridedFramesCapped(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		DefaultDuration: 10,
+		Frames:          &framesConfig{Mode: videoFramesModeStrided, MaxFrames: 16, Strided: &framesStridedMode{DefaultSourceFPS: 24, FrameStride: 4}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 100}},
+	}})}
+	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	// duration*sourceFPS/stride = 10*24/4 = 60, capped to 16; 16*100 tokens.
+	assert.Equal(t, 16*100, tp.Prompts[0].MultiModalFeatures[0].Length, "strided-frames video length")
+}
+
+// TestVideoEstimator_StridedFramesFloored asserts strided frames apply the
+// minFrames floor when the strided count falls below it.
+func TestVideoEstimator_StridedFramesFloored(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		DefaultDuration: 1,
+		Frames:          &framesConfig{Mode: videoFramesModeStrided, MinFrames: 8, Strided: &framesStridedMode{DefaultSourceFPS: 24, FrameStride: 4}},
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 100}},
+	}})}
+	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	// duration*sourceFPS/stride = 1*24/4 = 6, floored to 8; 8*100 tokens.
+	assert.Equal(t, 8*100, tp.Prompts[0].MultiModalFeatures[0].Length, "strided-frames floored video length")
+}
+
+// TestVideoEstimator_MaxVideoTokens asserts the overall cap bounds the total
+// placeholder count.
+func TestVideoEstimator_MaxVideoTokens(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		MaxVideoTokens: 500,
+	}})}
+	tp, err := b.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	// Default frames*tpf = 10*225 = 2250, capped to 500.
+	assert.Equal(t, 500, tp.Prompts[0].MultiModalFeatures[0].Length, "max-video-tokens cap")
+}
+
+// TestVideoEstimator_Qwen3AndGemma4 asserts the two documented model shapes
+// compute the expected placeholder counts.
+func TestVideoEstimator_Qwen3AndGemma4(t *testing.T) {
+	qwen3 := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		DefaultResolution: &resolution{Width: 640, Height: 480},
+		DefaultDuration:   10,
+		TokensPerFrame:    &tokensPerFrameConfig{Mode: videoTPFModeDynamic, Dynamic: &tokensPerFrameDynamicMode{Factor: 1024}},
+		Frames:            &framesConfig{Mode: videoFramesModeSampled, Sampled: &framesSampledMode{SampleFPS: 2}},
+		MaxVideoTokens:    100000,
+	}})}
+	tp, err := qwen3.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	// frames = 10*2 = 20, tpf = 640*480/1024 = 300, tokens = 6000.
+	assert.Equal(t, 20*((640*480)/1024), tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3-shaped video length")
+
+	gemma4 := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		DefaultDuration: 10,
+		TokensPerFrame:  &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 256}},
+		Frames:          &framesConfig{Mode: videoFramesModeStrided, MaxFrames: 16, Strided: &framesStridedMode{DefaultSourceFPS: 24, FrameStride: 4}},
+	}})}
+	tp, err = gemma4.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	// frames = min(10*24/4, 16) = 16, tokens = 16*256.
+	assert.Equal(t, 16*256, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped video length")
+}
+
+// TestParseVideoMetadataHeaders covers full, partial, missing, and malformed
+// header sets, and the accepted resolution formats.
+func TestParseVideoMetadataHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		want    videoMetadata
+	}{
+		{
+			name: "all present",
+			headers: map[string]string{
+				metadata.VideoFPSHeaderKey:        "30",
+				metadata.VideoDurationHeaderKey:   "12.5",
+				metadata.VideoResolutionHeaderKey: "1920x1080",
+			},
+			want: videoMetadata{width: 1920, height: 1080, duration: 12.5, fps: 30},
+		},
+		{
+			name:    "resolution only",
+			headers: map[string]string{metadata.VideoResolutionHeaderKey: "640x360"},
+			want:    videoMetadata{width: 640, height: 360},
+		},
+		{
+			name:    "uppercase separator",
+			headers: map[string]string{metadata.VideoResolutionHeaderKey: "1280X720"},
+			want:    videoMetadata{width: 1280, height: 720},
+		},
+		{
+			name:    "spaces trimmed",
+			headers: map[string]string{metadata.VideoResolutionHeaderKey: " 800 x 600 "},
+			want:    videoMetadata{width: 800, height: 600},
+		},
+		{
+			name:    "empty",
+			headers: map[string]string{},
+			want:    videoMetadata{},
+		},
+		{
+			name: "malformed values ignored",
+			headers: map[string]string{
+				metadata.VideoFPSHeaderKey:        "abc",
+				metadata.VideoDurationHeaderKey:   "",
+				metadata.VideoResolutionHeaderKey: "not-a-res",
+			},
+			want: videoMetadata{},
+		},
+		{
+			name: "non-positive ignored",
+			headers: map[string]string{
+				metadata.VideoFPSHeaderKey:        "-1",
+				metadata.VideoDurationHeaderKey:   "0",
+				metadata.VideoResolutionHeaderKey: "0x0",
+			},
+			want: videoMetadata{},
+		},
+		{
+			name:    "partial resolution ignored",
+			headers: map[string]string{metadata.VideoResolutionHeaderKey: "1920x"},
+			want:    videoMetadata{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseVideoMetadataHeaders(tc.headers))
+		})
+	}
+}
+
+// videoCtx returns a context carrying the given video metadata, as the tokenizer
+// plugin sets from the x-llm-d-video-* request headers.
+func videoCtx(v videoMetadata) context.Context {
+	return withMMMetadata(context.Background(), mmMetadata{video: v})
+}
+
+// TestMMMetadataContextRoundTrip asserts the metadata survives the context hop and
+// that an unset context yields the zero value.
+func TestMMMetadataContextRoundTrip(t *testing.T) {
+	meta := mmMetadata{video: videoMetadata{width: 1280, height: 720, duration: 4, fps: 25}}
+	assert.Equal(t, meta, mmMetadataFromContext(withMMMetadata(context.Background(), meta)))
+	assert.Equal(t, mmMetadata{}, mmMetadataFromContext(context.Background()), "unset context must yield the zero value")
+}
+
+// TestVideoEstimator_HeaderMetadataOverridesDefaults asserts header-provided
+// duration and resolution override the defaults in the zero-config estimator.
+func TestVideoEstimator_HeaderMetadataOverridesDefaults(t *testing.T) {
+	ctx := videoCtx(videoMetadata{width: 320, height: 240, duration: 3})
+	withMeta, err := estimateBackend{}.produce(ctx, chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	// sampled frames = duration(3)*sampleFPS(2) = 6; dynamic tpf = 320*240/1024 = 75.
+	assert.Equal(t, 6*((320*240)/videoTokenFactor), withMeta.Prompts[0].MultiModalFeatures[0].Length)
+
+	def, err := estimateBackend{}.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.NotEqual(t, def.Prompts[0].MultiModalFeatures[0].Length, withMeta.Prompts[0].MultiModalFeatures[0].Length, "header metadata must change the count")
+}
+
+// TestVideoEstimator_HeaderFPSStridedMode asserts header source FPS and duration
+// drive strided frame counting.
+func TestVideoEstimator_HeaderFPSStridedMode(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		Frames:         &framesConfig{Mode: videoFramesModeStrided, Strided: &framesStridedMode{FrameStride: 2}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 1}},
+	}})}
+	// strided frames = int(duration(3)*fps(30))/2 = 45.
+	tp, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 30}), chatVideoBody("https://cdn.example.com/movie.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 45, tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestVideoEstimator_SampledIgnoresHeaderFPS asserts sampled mode honors the
+// header duration but not the header source FPS (sampleFPS is authoritative).
+func TestVideoEstimator_SampledIgnoresHeaderFPS(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		Frames:         &framesConfig{Mode: videoFramesModeSampled, Sampled: &framesSampledMode{SampleFPS: 2}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 1}},
+	}})}
+	// Same 3s duration, different source fps: both must yield 3*2 = 6.
+	fps30, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 30}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	fps60, err := b.produce(videoCtx(videoMetadata{duration: 3, fps: 60}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 6, fps30.Prompts[0].MultiModalFeatures[0].Length)
+	assert.Equal(t, fps30.Prompts[0].MultiModalFeatures[0].Length, fps60.Prompts[0].MultiModalFeatures[0].Length, "sampled mode must ignore header source fps")
+}
+
+// TestVideoEstimator_NoHeadersUseDefaults asserts that without header metadata the
+// estimator falls back to the built-in defaults.
+func TestVideoEstimator_NoHeadersUseDefaults(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	frames := defaultVideoDuration * defaultVideoSampleFPS
+	tpf := (defaultVideoWidth * defaultVideoHeight) / videoTokenFactor
+	assert.Equal(t, frames*tpf, tp.Prompts[0].MultiModalFeatures[0].Length, "default video length")
+}
+
+// TestVideoEstimator_TemporalMergeAndMinFrames asserts sampled frames are floored
+// by minFrames and merged by temporalPatchSize (qwen3-vl shape). Static tpf=1
+// isolates the frame-group count.
+func TestVideoEstimator_TemporalMergeAndMinFrames(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{
+		Frames:         &framesConfig{Mode: videoFramesModeSampled, MinFrames: 4, Sampled: &framesSampledMode{SampleFPS: 2, TemporalPatchSize: 2}},
+		TokensPerFrame: &tokensPerFrameConfig{Mode: videoTPFModeStatic, Static: &tokensPerFrameStaticMode{NumTokensPerFrame: 1}},
+	}})}
+	// 10s: 10*2 = 20 sampled frames, /2 temporal merge = 10 groups.
+	long, err := b.produce(videoCtx(videoMetadata{duration: 10}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 10, long.Prompts[0].MultiModalFeatures[0].Length)
+	// 1s: 2 sampled frames floored to minFrames 4, /2 merge = 2 groups.
+	short, err := b.produce(videoCtx(videoMetadata{duration: 1}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 2, short.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestVideoEstimator_HeaderRespectsMaxVideoTokens asserts the overall cap still
+// bounds a count derived from header metadata.
+func TestVideoEstimator_HeaderRespectsMaxVideoTokens(t *testing.T) {
+	b := estimateBackend{vid: newVideoEstimator(&estimateConfig{Video: &videoEstimateConfig{MaxVideoTokens: 100}})}
+	// Uncapped would be 6*75 = 450; capped to 100.
+	tp, err := b.produce(videoCtx(videoMetadata{width: 320, height: 240, duration: 3}), chatVideoBody("https://example.com/clip.mp4"))
+	require.NoError(t, err)
+	assert.Equal(t, 100, tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image
@@ -237,8 +526,9 @@ func TestEstimateBackend_MessagesImageFeature(t *testing.T) {
 	}
 	tp, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
-	require.Len(t, tp.MultiModalFeatures, 1)
-	f := tp.MultiModalFeatures[0]
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	f := tp.Prompts[0].MultiModalFeatures[0]
 	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
 	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64Raw), 16), f.Hash, "base64 source must hash by its raw payload")
 	assert.Greater(t, f.Length, 1, "image length must be > 1 (placeholder weighting)")
@@ -262,8 +552,9 @@ func TestEstimateBackend_MessagesURLImageKey(t *testing.T) {
 	}
 	tp, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
-	require.Len(t, tp.MultiModalFeatures, 1)
-	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(url), 16), tp.MultiModalFeatures[0].Hash)
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(url), 16), tp.Prompts[0].MultiModalFeatures[0].Hash)
 }
 
 // TestEstimateBackend_MessagesDeterministic asserts identical requests produce
@@ -283,10 +574,10 @@ func TestEstimateBackend_MessagesDeterministic(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), build("you are helpful", "hello world"))
 	require.NoError(t, err)
-	assert.Equal(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "identical messages requests produced different tokens")
+	assert.Equal(t, hashTokens(a.Prompts[0].TokenIDs), hashTokens(b.Prompts[0].TokenIDs), "identical messages requests produced different tokens")
 	c, err := estimateBackend{}.produce(context.Background(), build("you are concise", "hello world"))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(c.PerPromptTokens[0]), "different system prompts produced identical tokens")
+	assert.NotEqual(t, hashTokens(a.Prompts[0].TokenIDs), hashTokens(c.Prompts[0].TokenIDs), "different system prompts produced identical tokens")
 }
 
 // TestEstimateBackend_ChatToolsBeforeSystem asserts the tools list is emitted
@@ -311,19 +602,19 @@ func TestEstimateBackend_ChatToolsBeforeSystem(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), chat("you are a concise assistant"))
 	require.NoError(t, err)
-	require.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "streams identical, system was not applied")
+	require.NotEqual(t, hashTokens(a.Prompts[0].TokenIDs), hashTokens(b.Prompts[0].TokenIDs), "streams identical, system was not applied")
 	for i := 0; i < sharedTokens; i++ {
-		assert.Equal(t, a.PerPromptTokens[0][i], b.PerPromptTokens[0][i], "token %d differs: tools should seed the prefix before system", i)
+		assert.Equal(t, a.Prompts[0].TokenIDs[i], b.Prompts[0].TokenIDs[i], "token %d differs: tools should seed the prefix before system", i)
 	}
 }
 
 // TestEstimateBackend_MessagesToolsBeforeSystem is the /v1/messages analog of
 // TestEstimateBackend_ChatToolsBeforeSystem.
 func TestEstimateBackend_MessagesToolsBeforeSystem(t *testing.T) {
-	tools := []any{map[string]any{
-		"name":         "search_for_long_enough_byte_segment_for_this_ordering_test",
-		"description":  "ensures stable byte length",
-		"input_schema": map[string]any{"type": "object"},
+	tools := []fwkrh.AnthropicTool{{
+		Name:        "search_for_long_enough_byte_segment_for_this_ordering_test",
+		Description: "ensures stable byte length",
+		InputSchema: json.RawMessage(`{"type": "object"}`),
 	}}
 	toolsJSON, err := json.Marshal(tools)
 	require.NoError(t, err)
@@ -342,9 +633,9 @@ func TestEstimateBackend_MessagesToolsBeforeSystem(t *testing.T) {
 	require.NoError(t, err)
 	b, err := estimateBackend{}.produce(context.Background(), build("you are a concise assistant"))
 	require.NoError(t, err)
-	require.NotEqual(t, hashTokens(a.PerPromptTokens[0]), hashTokens(b.PerPromptTokens[0]), "streams identical, system was not applied")
+	require.NotEqual(t, hashTokens(a.Prompts[0].TokenIDs), hashTokens(b.Prompts[0].TokenIDs), "streams identical, system was not applied")
 	for i := 0; i < sharedTokens; i++ {
-		assert.Equal(t, a.PerPromptTokens[0][i], b.PerPromptTokens[0][i], "token %d differs: tools should seed the prefix before system", i)
+		assert.Equal(t, a.Prompts[0].TokenIDs[i], b.Prompts[0].TokenIDs[i], "token %d differs: tools should seed the prefix before system", i)
 	}
 }
 
@@ -365,20 +656,20 @@ func TestEstimateBackend_ChatToolsAffectPrefix(t *testing.T) {
 	}}
 	withTools, err := estimateBackend{}.produce(context.Background(), chat(weather))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(noTools.PerPromptTokens[0]), hashTokens(withTools.PerPromptTokens[0]), "tools list was ignored by the prefix estimator")
+	assert.NotEqual(t, hashTokens(noTools.Prompts[0].TokenIDs), hashTokens(withTools.Prompts[0].TokenIDs), "tools list was ignored by the prefix estimator")
 	stock := []any{map[string]any{
 		"type":     "function",
 		"function": map[string]any{"name": "get_stock_price"},
 	}}
 	otherTools, err := estimateBackend{}.produce(context.Background(), chat(stock))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(withTools.PerPromptTokens[0]), hashTokens(otherTools.PerPromptTokens[0]), "different tools lists produced identical tokens")
+	assert.NotEqual(t, hashTokens(withTools.Prompts[0].TokenIDs), hashTokens(otherTools.Prompts[0].TokenIDs), "different tools lists produced identical tokens")
 }
 
 // TestEstimateBackend_MessagesToolsAffectPrefix is the /v1/messages analog of
 // TestEstimateBackend_ChatToolsAffectPrefix.
 func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
-	build := func(tools []any) *fwkrh.InferenceRequestBody {
+	build := func(tools []fwkrh.AnthropicTool) *fwkrh.InferenceRequestBody {
 		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
 			Messages: []fwkrh.AnthropicMessage{
 				{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hello world"}},
@@ -388,22 +679,18 @@ func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
 	}
 	noTools, err := estimateBackend{}.produce(context.Background(), build(nil))
 	require.NoError(t, err)
-	weather := []any{map[string]any{
-		"name":         "get_weather",
-		"description":  "Get the current weather",
-		"input_schema": map[string]any{"type": "object"},
-	}}
-	withTools, err := estimateBackend{}.produce(context.Background(), build(weather))
+	withTools, err := estimateBackend{}.produce(context.Background(), build([]fwkrh.AnthropicTool{{
+		Name:        "get_weather",
+		Description: "Get the current weather",
+	}}))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(noTools.PerPromptTokens[0]), hashTokens(withTools.PerPromptTokens[0]), "tools list was ignored by the messages prefix estimator")
-	stock := []any{map[string]any{
-		"name":         "get_stock_price",
-		"description":  "Get a stock price",
-		"input_schema": map[string]any{"type": "object"},
-	}}
-	otherTools, err := estimateBackend{}.produce(context.Background(), build(stock))
+	assert.NotEqual(t, hashTokens(noTools.Prompts[0].TokenIDs), hashTokens(withTools.Prompts[0].TokenIDs), "tools list was ignored by the messages prefix estimator")
+	otherTools, err := estimateBackend{}.produce(context.Background(), build([]fwkrh.AnthropicTool{{
+		Name:        "get_stock_price",
+		Description: "Get a stock price",
+	}}))
 	require.NoError(t, err)
-	assert.NotEqual(t, hashTokens(withTools.PerPromptTokens[0]), hashTokens(otherTools.PerPromptTokens[0]), "different tools lists produced identical tokens")
+	assert.NotEqual(t, hashTokens(withTools.Prompts[0].TokenIDs), hashTokens(otherTools.Prompts[0].TokenIDs), "different tools lists produced identical tokens")
 }
 
 // TestEstimateBackend_NonChatNoFeatures asserts non-chat protocols carry no
@@ -413,13 +700,13 @@ func TestEstimateBackend_NonChatNoFeatures(t *testing.T) {
 		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
 	})
 	require.NoError(t, err)
-	assert.Nil(t, tp.MultiModalFeatures, "non-chat features should be nil")
+	assert.Nil(t, tp.Prompts[0].MultiModalFeatures, "non-chat features should be nil")
 }
 
-// TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens asserts
-// that a multi-string completions prompt estimates each string independently
-// and populates PerPromptTokens.
-func TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens(t *testing.T) {
+// TestEstimateBackend_MultiStringCompletionsPopulatesPrompts asserts that a
+// multi-string completions prompt estimates each string independently and
+// populates Prompts.
+func TestEstimateBackend_MultiStringCompletionsPopulatesPrompts(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Completions: &fwkrh.CompletionsRequest{
 			Prompt: fwkrh.Prompt{Strings: []string{"hello world", "foo bar"}},
@@ -428,18 +715,18 @@ func TestEstimateBackend_MultiStringCompletionsPopulatesPerPromptTokens(t *testi
 	if err != nil {
 		t.Fatalf("produce: %v", err)
 	}
-	if len(tp.PerPromptTokens) != 2 {
-		t.Fatalf("PerPromptTokens: got %d prompts, want 2", len(tp.PerPromptTokens))
+	if len(tp.Prompts) != 2 {
+		t.Fatalf("Prompts: got %d prompts, want 2", len(tp.Prompts))
 	}
-	if tp.TokenCount() != len(tp.PerPromptTokens[0])+len(tp.PerPromptTokens[1]) {
+	if tp.TokenCount() != len(tp.Prompts[0].TokenIDs)+len(tp.Prompts[1].TokenIDs) {
 		t.Errorf("flat TokenIDs length %d != sum of per-prompt lengths %d+%d",
-			tp.TokenCount(), len(tp.PerPromptTokens[0]), len(tp.PerPromptTokens[1]))
+			tp.TokenCount(), len(tp.Prompts[0].TokenIDs), len(tp.Prompts[1].TokenIDs))
 	}
 }
 
-// TestEstimateBackend_SingleStringCompletionsSetsPerPromptTokens asserts that a
-// single-element string array uses a length-1 PerPromptTokens slice.
-func TestEstimateBackend_SingleStringCompletionsSetsPerPromptTokens(t *testing.T) {
+// TestEstimateBackend_SingleStringCompletionsSetsPrompts asserts that a
+// single-element string array uses a length-1 Prompts slice.
+func TestEstimateBackend_SingleStringCompletionsSetsPrompts(t *testing.T) {
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
 		Completions: &fwkrh.CompletionsRequest{
 			Prompt: fwkrh.Prompt{Strings: []string{"hello world"}},
@@ -448,7 +735,46 @@ func TestEstimateBackend_SingleStringCompletionsSetsPerPromptTokens(t *testing.T
 	if err != nil {
 		t.Fatalf("produce: %v", err)
 	}
-	if len(tp.PerPromptTokens) != 1 {
-		t.Errorf("single-string prompt should set length-1 PerPromptTokens, got %d", len(tp.PerPromptTokens))
+	if len(tp.Prompts) != 1 {
+		t.Errorf("single-string prompt should set length-1 Prompts, got %d", len(tp.Prompts))
 	}
+}
+
+// TestEstimateBackend_MessagesToolBlocksAffectPrefix asserts tool_use,
+// tool_result, and thinking blocks participate in the prefix stream so
+// conversations differing only in tool traffic do not collide on one key.
+func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
+	build := func(blocks []fwkrh.AnthropicContentBlock) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "assistant", Content: fwkrh.AnthropicContent{Structured: blocks}},
+			},
+		}}
+	}
+	base := build([]fwkrh.AnthropicContentBlock{})
+	baseOut, err := estimateBackend{}.produce(context.Background(), base)
+	require.NoError(t, err)
+
+	thinking := build([]fwkrh.AnthropicContentBlock{{Type: "thinking", Thinking: "deep thought"}})
+	thinkingOut, err := estimateBackend{}.produce(context.Background(), thinking)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(thinkingOut.Prompts[0].TokenIDs),
+		"thinking text was ignored by the prefix estimator")
+
+	toolUse := build([]fwkrh.AnthropicContentBlock{{
+		Type: "tool_use", ID: "toolu_01", Name: "get_weather", Input: json.RawMessage(`{"city":"Zurich"}`),
+	}})
+	toolUseOut, err := estimateBackend{}.produce(context.Background(), toolUse)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(toolUseOut.Prompts[0].TokenIDs),
+		"tool_use input was ignored by the prefix estimator")
+
+	toolResult := build([]fwkrh.AnthropicContentBlock{{
+		Type: "tool_result", ToolUseID: "toolu_01",
+		Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"},
+	}})
+	toolResultOut, err := estimateBackend{}.produce(context.Background(), toolResult)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(toolResultOut.Prompts[0].TokenIDs),
+		"tool_result content was ignored by the prefix estimator")
 }
