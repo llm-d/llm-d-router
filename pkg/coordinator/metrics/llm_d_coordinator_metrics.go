@@ -60,7 +60,7 @@ var (
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "request_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Incoming request body size distribution in bytes.", compbasemetrics.ALPHA),
-			Buckets:   requestSizeBuckets,
+			Buckets:   metricsutil.RequestSizeBuckets,
 		},
 		modelLabel,
 	)

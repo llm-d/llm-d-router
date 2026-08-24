@@ -40,3 +40,12 @@ var GeneralLatencyBuckets = []float64{
 	8, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 360, 480, 600, 900, 1200,
 	1800, 2700, 3600,
 }
+
+// RequestSizeBuckets is a request-body-size histogram ladder from 64 bytes
+// to 1 GiB. Every llm-d component that emits a request-size histogram
+// reuses it. Wide enough for multimodal bodies with inlined image data.
+var RequestSizeBuckets = []float64{
+	64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+	131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608,
+	16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824,
+}

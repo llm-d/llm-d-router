@@ -98,12 +98,7 @@ var (
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_sizes",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_size_bytes] Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
-			// Use buckets ranging from 1000 bytes (1KB) to 10^9 bytes (1GB).
-			Buckets: []float64{
-				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, // More fine-grained up to 64KB
-				131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, // Exponential up to 8MB
-				16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, // Exponential up to 1GB
-			},
+			Buckets:   metricsutil.RequestSizeBuckets,
 		},
 		modelLabels,
 	)
