@@ -24,8 +24,9 @@ server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
 
-  # metrics_port is the port for the Prometheus /metrics endpoint. Non-positive
-  # disables the endpoint entirely. The --metrics-port CLI flag overrides this.
+  # metrics_port is the port for the Prometheus /metrics endpoint. Default 9090.
+  # Non-positive disables the endpoint entirely. The --metrics-port CLI flag
+  # overrides this.
   # env: COORDINATOR_SERVER_METRICS_PORT
   # metrics_port: 9090
 

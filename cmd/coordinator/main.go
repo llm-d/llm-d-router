@@ -49,7 +49,7 @@ const metricsShutdownTimeout = 5 * time.Second
 
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
-	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port.")
+	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port (default 9090).")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)

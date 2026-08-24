@@ -41,7 +41,7 @@ const DefaultMaxRequestBodySize = 64 // 64 MB
 
 type ServerConfig struct {
 	ListenAddr         string        `mapstructure:"listen_addr"`
-	MetricsPort        int           `mapstructure:"metrics_port"` // non-positive disables the endpoint
+	MetricsPort        int           `mapstructure:"metrics_port"` // default 9090; non-positive disables the endpoint
 	ReadTimeout        time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout       time.Duration `mapstructure:"write_timeout"`
 	ShutdownTimeout    time.Duration `mapstructure:"shutdown_timeout"`
