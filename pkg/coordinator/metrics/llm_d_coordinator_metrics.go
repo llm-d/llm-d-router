@@ -70,7 +70,7 @@ var (
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "request_input_tokens",
 			Help:      metricsutil.HelpMsgWithStability("Prompt token count distribution per client request, measured after render.", compbasemetrics.ALPHA),
-			Buckets:   inputTokensBuckets,
+			Buckets:   metricsutil.TokenCountBuckets,
 		},
 		modelLabel,
 	)

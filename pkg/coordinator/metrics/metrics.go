@@ -89,15 +89,6 @@ func withLabel(base []string, extra string) []string {
 	return append(out, extra)
 }
 
-var (
-	// inputTokensBuckets is a power-of-two ladder from 1 to 1M input tokens;
-	// most models have input context windows below 1 million tokens.
-	inputTokensBuckets = []float64{
-		1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-		32768, 65536, 131072, 262144, 524288, 1048576,
-	}
-)
-
 // resettableCollector is a prometheus.Collector that supports Reset. All
 // vector metrics this package uses (CounterVec, HistogramVec, GaugeVec)
 // satisfy it. Adding a collector that does not implement Reset causes a
