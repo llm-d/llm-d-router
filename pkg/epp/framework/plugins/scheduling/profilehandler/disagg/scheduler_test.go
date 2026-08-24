@@ -273,7 +273,16 @@ func TestPDSchedule(t *testing.T) {
 					pod.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(inputTokens, inputTokens, 1))
 				}
 
-				got, err = scheduler.Schedule(ctx, test.req, test.input)
+				// Fresh request for the second schedule call so per-request
+				// memoization from the first call doesn't leak. Production
+				// models each schedule call as its own *InferenceRequest.
+				nextReq := &fwksched.InferenceRequest{
+					RequestID:   uuid.NewString(),
+					TargetModel: test.req.TargetModel,
+					Body:        test.req.Body,
+					Headers:     test.req.Headers,
+				}
+				got, err = scheduler.Schedule(ctx, nextReq, test.input)
 				if test.err != (err != nil) {
 					t.Errorf("Unexpected error in schedule call, got %v, want %v", err, test.err)
 				}

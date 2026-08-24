@@ -32,7 +32,6 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 )
 
 // localRegistry is a thread-safe storage for simulated endpoint load.
@@ -680,7 +679,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.Inf
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests++
 		if req != nil {
-			load.Tokens += inflightload.NewSimpleTokenEstimator().Estimate(req)
+			load.Tokens += simulatedTokenLoad(req)
 		}
 	})
 }
@@ -693,7 +692,7 @@ func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.I
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests--
 		if req != nil {
-			load.Tokens -= inflightload.NewSimpleTokenEstimator().Estimate(req)
+			load.Tokens -= simulatedTokenLoad(req)
 		}
 	})
 }
@@ -712,9 +711,8 @@ func driveLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName 
 func driveTokenLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName string, requests []*fwksched.InferenceRequest) {
 	id := fullEndpointName(endpointName)
 	var total int64
-	estimator := inflightload.NewSimpleTokenEstimator()
 	for _, r := range requests {
-		total += estimator.Estimate(r)
+		total += simulatedTokenLoad(r)
 	}
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Tokens += total
@@ -803,8 +801,22 @@ func (f *liveSchedulingEndpoint) Keys() []fwkplugin.DataKey {
 func (f *liveSchedulingEndpoint) String() string                { return f.id }
 func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
+// simulatedTokenLoad models the per-request token contribution these saturation
+// tests rely on: input tokens plus a fixed 3:2 output allowance (1 input -> 3
+// total, 4 input -> 10 total). It is deliberately local so the saturation math
+// stays independent of the production in-flight token estimator's policy, which
+// derives output tokens from the outlen-bucket attribute rather than a fixed ratio.
+func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
+	if req == nil || req.Body == nil || req.Body.TokenizedRequest == nil {
+		return 0
+	}
+	input := int64(req.Body.TokenizedRequest.TokenCount())
+	// round(input * 1.5) via integer half-up, matching the numbers these tests assert.
+	return input + (input*3+1)/2
+}
+
 // makeTokenRequest builds a request with inputTokens tokenized input tokens.
-// The estimator then derives total tokens as inputTokens * (1 + OutputRatio).
+// simulatedTokenLoad then derives total tokens as inputTokens + round(inputTokens * 1.5).
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,

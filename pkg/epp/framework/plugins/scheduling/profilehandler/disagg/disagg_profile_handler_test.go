@@ -379,7 +379,7 @@ func TestHandlerFactory_InvalidJSON(t *testing.T) {
 
 func TestHandler_Pick_PD(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	req := completionsRequest("hello world hello world hello world") // ~8 tokens
+	const prompt = "hello world hello world hello world" // ~8 tokens
 
 	profiles := map[string]scheduling.SchedulerProfile{
 		defaultDecodeProfile:  &mockProfile{},
@@ -440,6 +440,10 @@ func TestHandler_Pick_PD(t *testing.T) {
 			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
 				decider, nil)
 
+			// Fresh request per subtest: the decider memoizes its decision on
+			// the request attribute store, and sharing one request across cases
+			// would let an earlier subtest's memo leak into a later one.
+			req := completionsRequest(prompt)
 			inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			injectPrefixCache(tt.profileResults, tt.cachedTokens, inputTokens)
 
@@ -474,8 +478,10 @@ func TestHandler_Pick_PD_InputTokenError(t *testing.T) {
 
 func TestHandler_Pick_PD_Series(t *testing.T) {
 	ctx := context.Background()
-	short := completionsRequest("hello world, hello world!")
-	long := completionsRequest("hello world, hello world! and some additional padding text here")
+	const (
+		shortPrompt = "hello world, hello world!"
+		longPrompt  = "hello world, hello world! and some additional padding text here"
+	)
 
 	profiles := map[string]scheduling.SchedulerProfile{
 		defaultDecodeProfile:  &mockProfile{},
@@ -485,7 +491,7 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 		name            string
 		nonCachedTokens int
 		steps           []struct {
-			req          *scheduling.InferenceRequest
+			prompt       string
 			cachedTokens int
 			want         []string
 		}
@@ -494,24 +500,24 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 			name:            "same request twice: first disaggregates, second hits cache",
 			nonCachedTokens: 2,
 			steps: []struct {
-				req          *scheduling.InferenceRequest
+				prompt       string
 				cachedTokens int
 				want         []string
 			}{
-				{short, 0, []string{defaultPrefillProfile}},
-				{short, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{}},
+				{shortPrompt, 0, []string{defaultPrefillProfile}},
+				{shortPrompt, len(shortPrompt) / averageCharactersPerToken, []string{}},
 			},
 		},
 		{
 			name:            "short then long: long triggers disaggregation",
 			nonCachedTokens: 2,
 			steps: []struct {
-				req          *scheduling.InferenceRequest
+				prompt       string
 				cachedTokens int
 				want         []string
 			}{
-				{short, 0, []string{defaultPrefillProfile}},
-				{long, len(short.Body.Completions.Prompt.Raw) / averageCharactersPerToken, []string{defaultPrefillProfile}},
+				{shortPrompt, 0, []string{defaultPrefillProfile}},
+				{longPrompt, len(shortPrompt) / averageCharactersPerToken, []string{defaultPrefillProfile}},
 			},
 		},
 	}
@@ -524,13 +530,17 @@ func TestHandler_Pick_PD_Series(t *testing.T) {
 				decider, nil)
 
 			for _, step := range tt.steps {
+				// Fresh request per step: production models each call as its own
+				// *InferenceRequest, and the decider's per-request memoization
+				// would otherwise return the previous step's decision.
+				req := completionsRequest(step.prompt)
 				// Fresh results per step to avoid mutation leaking between iterations.
 				results := map[string]*scheduling.ProfileRunResult{
 					defaultDecodeProfile: makeProfileRunResult("pod1"),
 				}
-				inputTokens := len(step.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
+				inputTokens := len(req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 				injectPrefixCache(results, step.cachedTokens, inputTokens)
-				got := h.Pick(ctx, step.req, profiles, results)
+				got := h.Pick(ctx, req, profiles, results)
 				assert.ElementsMatch(t, step.want, profileNames(got))
 			}
 		})
