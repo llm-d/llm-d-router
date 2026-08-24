@@ -50,7 +50,7 @@ var (
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("End-to-end request latency distribution in seconds.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		modelLabel,
 	)
@@ -94,7 +94,7 @@ var (
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "step_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Per-step wall-time latency distribution in seconds.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		stepLabel,
 	)
@@ -138,7 +138,7 @@ var (
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "upstream_request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Latency distribution of a single outbound call to an upstream service.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		upstreamLabel,
 	)

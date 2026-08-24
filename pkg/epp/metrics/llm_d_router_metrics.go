@@ -60,7 +60,7 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("End-to-end request latency distribution in seconds.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		modelLabelsWithFairnessPriority,
 	)

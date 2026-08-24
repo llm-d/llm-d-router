@@ -53,15 +53,6 @@ var (
 	modelWithPriorityLabels = []string{"model_name", "target_model_name", "priority"}
 	poolLabels              = []string{"name"}
 	endpointLabels          = []string{"pod_name", "namespace", "port"}
-
-	// --- Common Buckets ---
-
-	// generalLatencyBuckets for long running inference from 5ms to 1 hour
-	generalLatencyBuckets = []float64{
-		0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
-		8, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 360, 480, 600, 900, 1200,
-		1800, 2700, 3600,
-	}
 )
 
 // --- Inference Objective Metrics ---
@@ -95,7 +86,7 @@ var (
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_duration_seconds] Inference objective response latency distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		modelLabels,
 	)
