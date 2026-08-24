@@ -80,6 +80,8 @@ spec:
             - ${POST_TARGET_PORT_STR}
             - "--otlp-traces-endpoint"
             - ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
+            - "--pooling_cache_config"
+            - ${POOLING_CACHE_CONFIG}
           ports:
             - name: http
               containerPort: ${POST_TARGET_PORT}

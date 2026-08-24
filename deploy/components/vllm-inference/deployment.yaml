@@ -39,7 +39,7 @@ spec:
             - "--max-model-len"
             - "1"
             - "--max-num-seqs"
-            - "32"
+            - ${INF_MAX_NUM_SEQS_STR}
             - "--hf-overrides"
             - '{"dtype": "torch.float16"}'
             - "--dtype"
@@ -54,6 +54,8 @@ spec:
             - ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
             - "--io-processor-plugin"
             - ${IO_PROCESSOR_PLUGIN}
+            - "--pooling_cache_config"
+            - ${POOLING_CACHE_CONFIG}
           ports:
             - name: http
               containerPort: ${TARGET_PORT}
@@ -123,6 +125,8 @@ spec:
             - name: io-transfer-volume
               mountPath: /tmp/io_transfer
               readOnly: false
+            - name: datasets
+              mountPath: /tmp/datasets
           resources:
             requests:
               cpu: ${INF_CPU_RESOURCES}
@@ -139,3 +143,6 @@ spec:
           persistentVolumeClaim:
             claimName: disagg-data-pvc
             readOnly: false
+        - name: datasets
+          persistentVolumeClaim:
+            claimName: datasets-konpap

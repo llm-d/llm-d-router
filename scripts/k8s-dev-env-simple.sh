@@ -29,6 +29,18 @@ build_io_config() {
     }'
 }
 
+build_pooling_cache_config() {
+  jq -cn \
+    --argjson pre_process_caching "$([ "${PRE_CACHING}" = "true" ] && echo true || echo false)" \
+    --argjson inference_caching "$([ "${INF_CACHING}" = "true" ] && echo true || echo false)" \
+    --argjson post_process_caching "$([ "${POST_CACHING}" = "true" ] && echo true || echo false)" \
+    '{
+      pre_process_caching: $pre_process_caching,
+      inference_caching: $inference_caching,
+      post_process_caching: $post_process_caching
+    }'
+}
+
 # ------------------------------------------------------------------------------
 # Variables
 # ------------------------------------------------------------------------------
@@ -120,6 +132,9 @@ export POST_IO_TRANSFER_CONFIG=$(build_io_config "io_receiver")
 
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 
+export INF_MAX_NUM_SEQS="${INF_MAX_NUM_SEQS:-32}"
+export INF_MAX_NUM_SEQS_STR="\"${INF_MAX_NUM_SEQS}\""
+
 export PRE_RENDERER_NUM_WORKERS="${PRE_RENDERER_NUM_WORKERS:-1}"
 export PRE_RENDERER_NUM_WORKERS_STR="\"${PRE_RENDERER_NUM_WORKERS}\""
 export INF_RENDERER_NUM_WORKERS="${INF_RENDERER_NUM_WORKERS:-1}"
@@ -175,6 +190,12 @@ export OTEL_TRACES_SAMPLER_ARG_STR="\"${OTEL_TRACES_SAMPLER_ARG}\""
 
 export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:-http/protobuf}"
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://${JAEGER_IP}:4318/v1/traces}"
+
+# Caching
+export PRE_CACHING="${PRE_CACHING:-false}"
+export INF_CACHING="${INF_CACHING:-false}"
+export POST_CACHING="${POST_CACHING:-false}"
+export POOLING_CACHE_CONFIG="'$(build_pooling_cache_config)'"
 
 # ------------------------------------------------------------------------------
 # Deployment

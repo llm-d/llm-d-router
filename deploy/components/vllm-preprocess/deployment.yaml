@@ -53,6 +53,8 @@ spec:
             - ${TARGET_PORT_STR}
             - "--otlp-traces-endpoint"
             - ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
+            - "--pooling_cache_config="
+            - ${POOLING_CACHE_CONFIG}
           ports:
             - name: http
               containerPort: ${TARGET_PORT}
@@ -119,6 +121,8 @@ spec:
             - name: io-transfer-volume
               mountPath: /tmp/io_transfer
               readOnly: false
+            - name: datasets
+              mountPath: /tmp/datasets
           resources:
             requests:
               cpu: ${PRE_CPU_RESOURCES}
@@ -133,3 +137,6 @@ spec:
           persistentVolumeClaim:
             claimName: disagg-data-pvc
             readOnly: false
+        - name: datasets
+          persistentVolumeClaim:
+            claimName: datasets-konpap
