@@ -16,8 +16,10 @@ limitations under the License.
 
 // Package metrics defines the Prometheus metrics exposed by the disaggregation
 // sidecar proxy. Metrics are registered with controller-runtime's registry and
-// served on the sidecar's /metrics route alongside Go runtime metrics, matching
-// EPP. The sidecar handles encode, prefill, and decode disaggregation.
+// served at /metrics on the sidecar's dedicated --metrics-port, kept separate
+// from the data-plane proxy port so the model server's own /metrics stays
+// reachable through the proxy. The sidecar handles encode, prefill, and decode
+// disaggregation.
 package metrics
 
 import (

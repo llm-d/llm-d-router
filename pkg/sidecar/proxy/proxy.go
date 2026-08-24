@@ -33,15 +33,12 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const (
@@ -212,9 +209,11 @@ type Config struct {
 
 	// MetricsPort is the port for the Prometheus /metrics endpoint. 0 (the
 	// default) disables it; when > 0 the sidecar serves the shared metrics
-	// registry (carrying the moriio_dns_* counters) at /metrics on that port,
-	// on a separate address from the data-plane proxy port. Takes precedence
-	// over the MORIIO_METRICS_ADDR env var (kept for backward compatibility).
+	// registry (carrying the moriio_dns_* and llm_d_disagg_sidecar_* counters)
+	// at /metrics on that port, on a separate address from the data-plane
+	// proxy port so the model server's own /metrics path stays reachable
+	// through the proxy. Takes precedence over the MORIIO_METRICS_ADDR env
+	// var (kept for backward compatibility).
 	MetricsPort int
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
@@ -506,7 +505,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startHTTP(ctx)
 	})
 
-	// Opt-in Prometheus /metrics endpoint (MORIIO_METRICS_ADDR); no-op when unset.
+	// Opt-in Prometheus /metrics endpoint (--metrics-port or MORIIO_METRICS_ADDR); no-op when unset.
 	s.maybeStartMetrics(ctx, grp)
 
 	return grp.Wait()
@@ -628,8 +627,6 @@ func (s *Server) createRoutes() *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	metrics.Register()
-	mux.Handle("GET /metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	mux.HandleFunc("POST "+ChatCompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
