@@ -75,7 +75,7 @@ A mailbox is the same list structure as a belt, holding exactly one result under
 
 The AP protocol is unchanged. Dispatches carry no mode header, so they re-enter the coordinator as ordinary requests and get phased to the EPP like any synchronous call.
 
-A request keeps one client-visible id for its whole life: the validated `x-request-id` (or a minted UUID) is the fetch id and names the mailbox. The envelope id is that id prefixed with the tenant, so every AP-side key derived from it (the in-flight marker and the cancellation key) is tenant scoped, and one tenant's id choices cannot collide with or probe another's. The dispatch call itself carries no `x-request-id`, so that hop logs under a fresh UUID in the coordinator, and `traceparent` on the envelope metadata is the join key between the two. Results are written to the message's mailbox with the configured TTL, and the list push fires the keyspace notification that completes any held wait. The step depends on three AP-side features from llm-d-async (result TTLs on queue config, per-lane objective and fairness stamping, and DEADLINE_EXCEEDED classification for deadline-aborted sends), see [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394).
+A request keeps one client-visible id for its whole life: the validated `x-request-id` (or a minted UUID) is the fetch id and names the mailbox. The envelope id is that id prefixed with the tenant, so every AP-side key derived from it (the in-flight marker and the cancellation key) is tenant scoped, and one tenant's id choices cannot collide with another's. The dispatch call itself carries no `x-request-id`, so that hop logs under a fresh UUID in the coordinator, and `traceparent` on the envelope metadata is the join key between the two. Results are written to the message's mailbox with the configured TTL, and the list push fires the keyspace notification that completes any held wait. The step depends on three AP-side features from llm-d-async (result TTLs on queue config, per-lane objective and fairness stamping, and DEADLINE_EXCEEDED classification for deadline-aborted sends), see [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394).
 
 ## Configuration
 
@@ -132,6 +132,8 @@ The three lifecycle clocks hand off without overlap: the deadline ends where the
 
 ## Deployment notes
 
+- The gateway must route `GET/DELETE /v1/requests/*` and `GET /v1/models` to the coordinator. Stock llm-d routing forwards only the inference paths, so these need adding to the coordinator's HTTPRoute.
+- The tenant header is trusted as asserted, the same as everywhere else on the llm-d serving path. Request id is the only secret protecting a stored result, so clients that need an unguessable handle should omit `X-Request-Id` and use the minted UUID.
 - Set `result_ttl_seconds` on every AP queue the step feeds, or unfetched results never expire.
 - Redis needs keyspace notifications enabled for the wait wake-up (`notify-keyspace-events Kl`). The step detects their absence and falls back to polling.
 - Wait mode holds one gateway to coordinator connection per waiting client, so the gateway's circuit breaker limits on the coordinator cluster must be sized for held connections, not request rate. Envoy defaults are far too low.

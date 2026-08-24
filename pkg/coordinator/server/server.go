@@ -82,9 +82,9 @@ func logRequestResponse(next http.Handler) http.Handler {
 // endpoints from the coordinator listener, beyond the built-in inference
 // routes (for example, result retrieval for a queueing step). RegisterRoutes
 // is called once per implementing step at server construction, after the
-// built-in routes are registered. Registering a path the server already owns
-// fails at startup (chi panics on duplicate registration), never at request
-// time.
+// built-in routes are registered. chi keeps the last handler registered for
+// a pattern, so a step registering a path the server already owns would
+// silently take over that route: steps must use paths of their own.
 type RouteRegistrar interface {
 	RegisterRoutes(r chi.Router)
 }
