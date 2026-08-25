@@ -45,6 +45,7 @@ func benchPlugin() fwkplugin.Plugin {
 	p := &producerConsumerPlugin{}
 	p.produces = map[fwkplugin.DataKey]any{producedKey: nil}
 	p.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
+	RegisterScopeSpecs([]fwkplugin.Plugin{p})
 	return p
 }
 

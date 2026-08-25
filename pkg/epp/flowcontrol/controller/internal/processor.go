@@ -32,7 +32,9 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -388,6 +390,39 @@ func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contra
 	return true, stats
 }
 
+// recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
+// flow in the band, never per flow queue), plus the all-bands rollup in its own metric family when a global capacity
+// is configured. It reads a single Stats() snapshot; the data source is expected to move with the engine-merge
+// refactor, but the metric contract (names, labels, semantics) stays stable (#2102).
+//
+// Band capacities always resolve to a value (applyDefaults supplies a fallback), so every configured band reports.
+// Global capacity is optional, so its series is omitted when unset rather than reported as a misleading 0.
+func (p *Processor) recordCapacityUtilization() {
+	stats := p.registry.Stats()
+
+	for priority, band := range stats.PerPriorityBandStats {
+		priorityStr := strconv.Itoa(priority)
+		if band.CapacityRequests > 0 {
+			metrics.RecordFlowControlCapacityUtilizationRequests(priorityStr, p.poolName,
+				float64(band.Len)/float64(band.CapacityRequests))
+		}
+		if band.CapacityBytes > 0 {
+			metrics.RecordFlowControlCapacityUtilizationBytes(priorityStr, p.poolName,
+				float64(band.ByteSize)/float64(band.CapacityBytes))
+		}
+	}
+
+	// All-bands rollup, only when a global capacity is configured.
+	if stats.TotalCapacityRequests > 0 {
+		metrics.RecordFlowControlGlobalCapacityUtilizationRequests(p.poolName,
+			float64(stats.TotalLen)/float64(stats.TotalCapacityRequests))
+	}
+	if stats.TotalCapacityBytes > 0 {
+		metrics.RecordFlowControlGlobalCapacityUtilizationBytes(p.poolName,
+			float64(stats.TotalByteSize)/float64(stats.TotalCapacityBytes))
+	}
+}
+
 // dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
 // It applies the configured policies for each band to select an item and then attempts to dispatch it.
 // It returns true if an item was successfully dispatched, and false otherwise.
@@ -406,14 +441,45 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
+
 	// Run is the sole writer, so the load and the store cannot interleave with another write.
 	if empty := len(pool) == 0; empty != p.regime.Load().empty {
 		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
-	saturation := p.saturationDetector.Saturation(ctx, pool)
 
-	// Record pool saturation metric
-	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
+	prefill, decode, interleaved := partitionEndpoints(pool)
+
+	// Interleaved pods serve both stages, so they contribute capacity to both pools,
+	// mirroring how the scheduling filters route requests.
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
+
+	saturation := -1.0
+	for _, part := range []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+	}{
+		{"prefill", prefill},
+		{"decode", decode},
+	} {
+		if len(part.endpoints) == 0 {
+			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
+			continue
+		}
+		stageSat := p.saturationDetector.Saturation(ctx, part.endpoints)
+		metrics.RecordFlowControlPoolSaturation(p.poolName, part.name, stageSat)
+		if stageSat > saturation {
+			saturation = stageSat
+		}
+	}
+	if saturation < 0 {
+		saturation = p.saturationDetector.Saturation(ctx, pool)
+	}
+
+	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
+
+	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
+	p.recordCapacityUtilization()
 
 	priorities := p.registry.AllOrderedPriorityLevels()
 	ceilings := p.ceilingsBuffer(len(priorities))
@@ -474,6 +540,40 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 		buf[i] = 1.0
 	}
 	return buf
+}
+
+// partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets
+// based on the llm-d.ai/role pod label. Endpoints without a role label or without metadata
+// default to the decode bucket, matching the decode-filter's allowsNoLabel convention for
+// monolithic deployment safety. Encode-only pods and unrecognized role values are excluded
+// from all buckets because they are rejected by every role filter and receive no traffic.
+func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+		meta := ep.GetMetadata()
+		if meta == nil || meta.Labels == nil {
+			decode = append(decode, ep)
+			continue
+		}
+		role := meta.Labels[bylabel.RoleLabel]
+		switch role {
+		case bylabel.RolePrefill, bylabel.RoleEncodePrefill:
+			prefill = append(prefill, ep)
+		case bylabel.RoleDecode, "":
+			decode = append(decode, ep)
+		case bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
+			interleaved = append(interleaved, ep)
+		case bylabel.RoleEncode:
+			// Encode-only pods receive no prefill or decode traffic; excluding them
+			// keeps both stage signals clean.
+		default:
+			// Unrecognized role values are rejected by every role filter and receive
+			// no traffic; counting them anywhere dilutes the stage signal.
+		}
+	}
+	return
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.

@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 	integration "github.com/llm-d/llm-d-router/test/integration"
@@ -204,8 +205,9 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				P(0, 0, 0.2, "foo"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 			},
-			wantResponses: ExpectReject(envoyTypePb.StatusCode_ServiceUnavailable,
-				"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request"),
+			wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+				"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
+				errcommon.RequestDroppedReasonNoEndpoints),
 		},
 
 		// --- Response Processing (Non-streaming) ---

@@ -32,6 +32,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
 const (
@@ -114,7 +115,7 @@ func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mode
 // InferenceRequestBody. Token IDs are required; everything else is optional.
 func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResult, error) {
 	bodyMap := make(map[string]any)
-	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+	if err := parserutil.Unmarshal(rawBody, &bodyMap); err != nil {
 		return nil, err
 	}
 

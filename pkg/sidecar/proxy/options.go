@@ -693,35 +693,12 @@ func validatePortRange(startPort, rangeSize int) error {
 	return nil
 }
 
-// customLevelEncoder maps negative Zap levels to human-readable names that
-// match the project's verbosity constants (VERBOSE=3, DEBUG=4, TRACE=5).
-// Without this, controller-runtime's zap bridge emits all V(n) calls as
-// "debug" in JSON output, which is misleading for V(1)–V(3) (verbose info).
-func customLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-	if l >= 0 {
-		zapcore.LowercaseLevelEncoder(l, enc)
-		return
-	}
-	switch l {
-	case zapcore.Level(-1 * logutil.DEBUG): // V(4) → "debug"
-		enc.AppendString("debug")
-	case zapcore.Level(-1 * logutil.TRACE): // V(5) → "trace"
-		enc.AppendString("trace")
-	default:
-		if l >= zapcore.Level(-1*logutil.VERBOSE) { // V(1)–V(3) → "info"
-			enc.AppendString("info")
-		} else { // V(6+) → "trace"
-			enc.AppendString("trace")
-		}
-	}
-}
-
 // NewLogger returns a logger configured from the Options logging flags,
 // with a custom level encoder that maps verbosity levels to their semantic
 // names instead of always rendering V(n) as "debug".
 func (opts *Options) NewLogger() logr.Logger {
 	config := uberzap.NewProductionEncoderConfig()
-	config.EncodeLevel = customLevelEncoder
+	config.EncodeLevel = logutil.LevelEncoder
 	return zap.New(
 		zap.UseFlagOptions(&opts.loggingOptions),
 		zap.Encoder(zapcore.NewJSONEncoder(config)),

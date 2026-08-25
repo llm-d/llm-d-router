@@ -48,6 +48,7 @@ import (
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
@@ -379,6 +380,92 @@ func TestLoadRawConfiguration(t *testing.T) {
 	}
 }
 
+// TestLoadRawConfigExtraGates verifies that flag-supplied feature gates are appended to the
+// configuration's own featureGates list, and so take precedence over it. The rawConfig assertion
+// matters as much as the map: InstantiateAndConfigure and validateConfig each re-derive gate from
+// rawConfig.FeatureGates, so a gate applied only to the returned map would leave them disagreeing.
+func TestLoadRawConfigExtraGates(t *testing.T) {
+	t.Parallel()
+
+	RegisterFeatureGate(testFeatureGate, true)
+	RegisterFeatureGate(flowcontrol.FeatureGate, false)
+
+	tests := []struct {
+		name       string
+		configText string
+		extraGates []string
+		wantGates  map[string]bool
+		wantRaw    configapi.FeatureGates
+		wantErr    bool
+	}{
+		{
+			name:       "flag gate with no config",
+			extraGates: []string{flowcontrol.FeatureGate},
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: true,
+			},
+			wantRaw: configapi.FeatureGates{flowcontrol.FeatureGate},
+		},
+		{
+			name:       "flag explicit false overrides registered default",
+			extraGates: []string{testFeatureGate + "=false"},
+			wantGates: map[string]bool{
+				testFeatureGate:         false,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{testFeatureGate + "=false"},
+		},
+		{
+			name:       "bare flag gate overrides file's explicit false",
+			configText: successNoProfilesText,
+			extraGates: []string{testFeatureGate},
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{testFeatureGate + "=false", testFeatureGate},
+		},
+		{
+			name: "no flag gates leaves config untouched",
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{},
+		},
+		{
+			name:       "unregistered flag gate is rejected",
+			extraGates: []string{"no-such-gate"},
+			wantErr:    true,
+		},
+		{
+			name:       "non-boolean flag value is rejected",
+			extraGates: []string{flowcontrol.FeatureGate + "=notabool"},
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logger := logging.NewTestLogger()
+
+			got, gates, err := LoadRawConfig([]byte(tc.configText), logger, tc.extraGates...)
+
+			if tc.wantErr {
+				require.Error(t, err, "Expected LoadRawConfig to fail")
+				return
+			}
+			require.NoError(t, err, "Expected LoadRawConfig to succeed")
+
+			require.Empty(t, cmp.Diff(tc.wantGates, gates), "Resolved feature gates mismatch")
+			require.Empty(t, cmp.Diff(tc.wantRaw, got.FeatureGates),
+				"rawConfig.FeatureGates must carry the flag entries so later phases derive the same gates")
+		})
+	}
+}
+
 // --- Test: Phase 2 (Instantiation, System Defaulting, Deep Validation) ---
 
 func TestPluginsWithDependencies(t *testing.T) {
@@ -623,13 +710,15 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
 				parsers := cfg.ParserRegistry.Parsers()
-				require.Len(t, parsers, 3, "Should have three default parsers")
+				require.Len(t, parsers, 4, "Should have the three default parsers plus the passthrough fallback")
 				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
 				require.Equal(t, openai.OpenAIParserType, parsers[0].TypedName().Type)
 				require.Equal(t, "anthropic-parser", parsers[1].TypedName().Name)
 				require.Equal(t, anthropic.AnthropicParserType, parsers[1].TypedName().Type)
 				require.Equal(t, "vllmhttp-parser", parsers[2].TypedName().Name)
 				require.Equal(t, vllmhttp.VllmHTTPParserType, parsers[2].TypedName().Type)
+				require.Equal(t, passthrough.PassthroughParserType, parsers[3].TypedName().Type,
+					"Passthrough is last so it does not shadow the claimed parsers")
 			},
 		},
 		{
@@ -664,6 +753,20 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be loaded")
 				require.Equal(t, "utilization-detector", cfg.SaturationDetector.TypedName().Name)
+			},
+		},
+		{
+			name:       "Success - Explicit parsers keep their own fallback",
+			configText: successExplicitPassthroughConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 2, "Explicit parsers are used as given")
+				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
+				require.Equal(t, "myFallback", parsers[1].TypedName().Name,
+					"The operator's own fallback is kept, under its own name")
+				require.Equal(t, passthrough.PassthroughParserType, parsers[1].TypedName().Type)
 			},
 		},
 		{
@@ -1204,6 +1307,7 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityStable, vertexai.VertexAIParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityStable, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityStable, vllmhttp.VllmHTTPParserPluginFactory)
+	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityStable, usagelimits.StaticPolicyFactory)
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, fwkplugin.StabilityStable, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityStable, reqdataprodprefix.ApproxPrefixCacheFactory)

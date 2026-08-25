@@ -73,7 +73,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello, Claude"},
 					},
@@ -108,7 +108,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -141,7 +141,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system":     "You are a helpful assistant.",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -176,7 +176,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system": []any{
 						map[string]any{"type": "text", "text": "You are a helpful assistant."},
 					},
@@ -230,7 +230,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -281,7 +281,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"tools": []any{
 						map[string]any{
 							"name":        "get_weather",
@@ -314,7 +314,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"stream":     true,
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -344,7 +344,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"cache_salt": "test-salt-123",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -371,7 +371,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
 					},
@@ -605,6 +605,13 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "content delta with usage text but no usage object",
+			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"usage\"}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
+		{
 			name:  "message_stop without usage",
 			chunk: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}"),
 			want: &fwkrh.ParsedResponse{
@@ -621,6 +628,34 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("ParseResponse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
+	parser := NewAnthropicParser()
+	tests := []struct {
+		name  string
+		chunk []byte
+	}{
+		{
+			name:  "without_usage",
+			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}"),
+		},
+		{
+			name:  "with_usage",
+			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15}}"),
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}

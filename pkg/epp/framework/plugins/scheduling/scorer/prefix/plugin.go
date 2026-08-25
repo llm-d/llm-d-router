@@ -131,13 +131,14 @@ func (p *Plugin) Consumes() plugin.DataDependencies {
 func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
+	missingMatchInfo := 0
 
 	for _, endpoint := range endpoints {
 		// Default to score 0 if PrefixCacheMatchInfo is missing or invalid.
 		scores[endpoint] = 0.0
 		info, ok := endpoint.Get(p.prefixMatchDataKey)
 		if !ok {
-			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo not found for endpoint, assigning score 0", "endpoint", endpoint, "key", p.prefixMatchDataKey.String())
+			missingMatchInfo++
 			continue
 		}
 
@@ -164,6 +165,10 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 			matchLengthScore = normalizedMatchLength * normalizedMatchLength
 		}
 		scores[endpoint] += p.matchLengthWeight*matchLengthScore + (1.0-p.matchLengthWeight)*matchRatioScore
+	}
+	if missingMatchInfo > 0 {
+		logger.V(logutil.DEFAULT).Info("PrefixCacheMatchInfo not found for endpoints, assigning score 0",
+			"count", missingMatchInfo, "key", p.prefixMatchDataKey.String())
 	}
 	return scores
 }
