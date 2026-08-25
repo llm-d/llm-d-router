@@ -252,6 +252,41 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	)
 }
 
+// TestConditionalDecodeStep_NilClientTransport builds a step around a
+// gateway.Client whose Transport() returns nil. gateway.NewWithTransport
+// documents that as valid and leaves the default-transport fallback to
+// http.Client; the timedRoundTripper wrapper must reproduce the same fallback
+// so the step does not panic.
+func TestConditionalDecodeStep_NilClientTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	gwClient := gateway.NewWithTransport(nil, srv.URL)
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone on cache hit, got %v", err)
+	}
+	if got := recorder.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+}
+
 // probeCount reads conditional_decode_probes_total for the given result label.
 // Absent series is 0.
 func probeCount(t *testing.T, reg *prometheus.Registry, result string) float64 {

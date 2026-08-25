@@ -80,8 +80,15 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamDecode)
+	// The wrapper below calls inner.RoundTrip unconditionally; fall back to
+	// http.DefaultTransport when the client was built without a transport,
+	// matching http.Client.Do's own behavior.
+	inner := s.gwClient.Transport()
+	if inner == nil {
+		inner = http.DefaultTransport
+	}
 	transport := &timedRoundTripper{
-		inner: s.gwClient.Transport(),
+		inner: inner,
 		record: func(d time.Duration) {
 			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamDecode, d)
 		},

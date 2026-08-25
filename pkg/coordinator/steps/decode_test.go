@@ -372,6 +372,41 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_NilClientTransport builds a step around a gateway.Client whose
+// Transport() returns nil. gateway.NewWithTransport documents that as valid and
+// leaves the default-transport fallback to http.Client; the timedRoundTripper
+// wrapper must reproduce the same fallback so the step does not panic.
+func TestDecodeStep_NilClientTransport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"text": "ok"}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.NewWithTransport(nil, server.URL)
+	step, err := NewDecodeStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		OriginalPath:     testChatCompletionsPath,
+		Model:            "test",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body:             map[string]any{"model": "test", "stream": false},
+		ResponseWriter:   recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := recorder.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+}
+
 func TestDecodeStep_TransportError(t *testing.T) {
 	// Start a server, capture its URL, then close it: subsequent connects fail
 	// before any HTTP response arrives. This exercises the ErrorHandler branch
