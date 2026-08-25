@@ -28,7 +28,7 @@ X-Request-Timeout-Seconds: 30      # optional deadline
 {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Summarize this."}]}
 ```
 
-An id names one logical request. Re-submitting an id reattaches to the live request or its stored result instead of running a second copy (reviving it if it was cancelled), so a retry with a different body gets the original body's response. A retry runs fresh only once the previous attempt is fully dead: delivered, expired, or cancelled and dropped.
+An id names one logical request. Re-submitting an id reattaches to the live request or its stored result instead of running a second copy (reviving it if it was cancelled in-queue), so a retry with a different body gets the original body's response (don't do this). A retry runs fresh only once the previous attempt is fully dead: delivered, expired, or cancelled and dropped.
 
 **Enqueue** returns immediately and the completion is collected later by id:
 
@@ -44,6 +44,7 @@ HTTP/1.1 200 OK                    # the model's response, upstream status mirro
 
 # still queued or executing:  202 {"id": "job-4217", "status": "pending"}
 # wrong tenant, expired TTL, or deleted:  410 Gone
+# cancelled while queued:  499 once the AP drops it, until the result TTL expires
 ```
 
 After a successful fetch delivery the result's TTL is shrunk to a grace window (`fetch_grace_seconds`), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
@@ -136,7 +137,7 @@ The three lifecycle clocks hand off without overlap: the deadline ends where the
 
 - The gateway must route `GET/DELETE /v1/requests/*` and `GET /v1/models` to the coordinator. Stock llm-d routing forwards only the inference paths, so these need adding to the coordinator's HTTPRoute.
 - The tenant header is trusted as asserted, the same as everywhere else on the llm-d serving path. Request id is the only secret protecting a stored result, so clients that need an unguessable handle should omit `X-Request-Id` and use the minted UUID.
-- Set `result_ttl_seconds` on every AP queue the step feeds, or unfetched results never expire. Leave `result_queue_name` unset on those queues, since a queue-level result queue overrides the per-message mailbox.
+- Set `result_ttl_seconds` on every AP queue the step feeds, or unfetched results never expire.
 - Redis needs keyspace notifications enabled for the wait wake-up (`notify-keyspace-events Kl`). The step detects their absence and falls back to polling.
 - Wait mode holds one gateway to coordinator connection per waiting client, so the gateway's circuit breaker limits on the coordinator cluster must be sized for held connections, not request rate. Envoy defaults are far too low.
 - `preserve_external_request_id` should be set on the gateway so client supplied request ids survive the hop for retry and fetch by id.
