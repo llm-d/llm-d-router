@@ -54,8 +54,6 @@ type Runtime struct {
 	notification *notificationManager
 	endpoint     *endpointManager
 	extractors   *extractorMap
-	syncer       fwkdl.CrossReplicaSyncer
-	syncInterval time.Duration
 
 	crossReplicaPub *crossReplicaPublisher
 
@@ -106,8 +104,6 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	numSources := 0
 	if cfg != nil {
 		numSources = len(cfg.Sources)
-		r.syncer = cfg.Syncer
-		r.syncInterval = cfg.SyncInterval
 	}
 	logger.Info("Configuring datalayer runtime", "numSources", numSources)
 
@@ -246,7 +242,9 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		markBound(srcName, extType)
 	}
 
-	r.crossReplicaPub = newCrossReplicaPublisher(r.syncer, r.extractors, r.syncInterval)
+	if cfg != nil {
+		r.crossReplicaPub = newCrossReplicaPublisher(cfg.Syncer, r.extractors, cfg.SyncInterval)
+	}
 
 	logger.Info("Datalayer runtime configured",
 		"pollers", r.dispatchers.Count(),
@@ -395,9 +393,7 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 // Start is called to enable the Runtime to start processing data collection. It wires
 // Kubernetes notifications into the manager and starts cross-replica syncing.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
-	if r.crossReplicaPub != nil {
-		go r.runCrossReplicaSync(ctx)
-	}
+	r.StartCrossReplicaSync(ctx)
 
 	return r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
 		var extractors []fwkdl.NotificationExtractor
@@ -414,6 +410,14 @@ func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 	})
 }
 
+// StartCrossReplicaSync starts the shared cross-replica publishing loop.
+func (r *Runtime) StartCrossReplicaSync(ctx context.Context) {
+	if r.crossReplicaPub == nil {
+		return
+	}
+	r.crossReplicaPub.Start(ctx)
+}
+
 // NewEndpoint sets up data polling on the provided endpoint.
 func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 	logger, _ := logr.FromContext(ctx)
@@ -428,17 +432,25 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 		}
 		dispatchers = append(dispatchers, d)
 	}
+	key := endpointMetadata.GetID()
 	if len(dispatchers) == 0 {
+		if r.crossReplicaPub != nil && !r.crossReplicaPub.RegisterEndpoint(key) {
+			logger.V(logging.DEFAULT).Info("endpoint already registered for cross-replica publishing", "endpoint", key)
+			return nil
+		}
 		logger.Info("No polling sources configured, creating endpoint without collector")
 		r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
 		return endpoint
 	}
 
 	collector := NewCollector()
-
-	key := endpointMetadata.GetID()
-	if !r.collectors.Register(key, collector, endpoint) {
+	if !r.collectors.Register(key, collector) {
 		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
+		return nil
+	}
+	if r.crossReplicaPub != nil && !r.crossReplicaPub.RegisterEndpoint(key) {
+		r.collectors.Remove(key)
+		logger.V(logging.DEFAULT).Info("endpoint already registered for cross-replica publishing", "endpoint", key)
 		return nil
 	}
 
@@ -446,6 +458,9 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
 		logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
 		r.collectors.Remove(key)
+		if r.crossReplicaPub != nil {
+			r.crossReplicaPub.UnregisterEndpoint(key, nil)
+		}
 		return nil
 	}
 
@@ -454,31 +469,21 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	return endpoint
 }
 
-// runCrossReplicaSync publishes endpoint state on its own ticker rather than
-// the collectors' polling interval, so the configured sync interval is
-// honoured. One loop serves every endpoint.
-func (r *Runtime) runCrossReplicaSync(ctx context.Context) {
-	ticker := time.NewTicker(r.crossReplicaPub.Interval())
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.collectors.RangeEndpoints(func(ep fwkdl.Endpoint) {
-				_ = r.crossReplicaPub.Dispatch(ctx, ep)
-			})
-		}
-	}
-}
-
 // ReleaseEndpoint terminates polling for data on the given endpoint.
 func (r *Runtime) ReleaseEndpoint(ep fwkdl.Endpoint) {
-	r.dispatchEndpointEvent(context.Background(), r.logger, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep})
-
 	key := ep.GetMetadata().GetID()
-	if collector, ok := r.collectors.Remove(key); ok {
-		collector.Stop()
+	finalize := func() {
+		if collector, ok := r.collectors.Remove(key); ok {
+			collector.Stop()
+		}
+		r.dispatchEndpointEvent(context.Background(), r.logger, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep})
+	}
+	if r.crossReplicaPub != nil {
+		if !r.crossReplicaPub.UnregisterEndpoint(key, finalize) {
+			return
+		}
+	} else {
+		finalize()
 	}
 }
 
@@ -514,28 +519,9 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 				if err := epExt.Extract(ctx, *processed); err != nil {
 					logger.Error(err, "endpoint extractor failed", "extractor", ext.TypedName())
 				}
-				if contributor, ok := ext.(fwkdl.CrossReplicaContributor); ok && r.syncer != nil {
-					spec := contributor.CrossReplicaState()
-					endpointID := processed.Endpoint.GetMetadata().GetNamespacedName().String()
-					if spec.SyncDisabled {
-						continue
-					}
-					switch processed.Type {
-					case fwkdl.EventAddOrUpdate:
-						processed.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
-							Get: func() fwkdl.Cloneable {
-								if val, ok, _ := r.syncer.Get(ctx, spec.StateKey, endpointID, spec.Aggregate); ok {
-									if c, ok := val.(fwkdl.Cloneable); ok {
-										return c
-									}
-								}
-								return nil
-							},
-						})
-					case fwkdl.EventDelete:
-						if err := r.syncer.Delete(ctx, spec.StateKey, endpointID); err != nil {
-							logger.Error(err, "failed to delete shared state", "extractor", ext.TypedName(), "key", spec.StateKey)
-						}
+				if r.crossReplicaPub != nil {
+					if err := r.crossReplicaPub.HandleEndpointEvent(ctx, *processed, ext); err != nil {
+						logger.Error(err, "failed to handle cross-replica endpoint event", "extractor", ext.TypedName())
 					}
 				}
 			}

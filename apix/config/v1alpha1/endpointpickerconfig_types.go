@@ -248,8 +248,8 @@ type DataLayerConfig struct {
 	CrossReplicaSyncerPluginRef string `json:"crossReplicaSyncerPluginRef,omitempty"`
 	// +optional
 	// CrossReplicaSyncInterval is the cadence at which each replica publishes
-	// its local per-endpoint state to the cross-replica syncer. It is rounded
-	// to a multiple of the datalayer base tick. If omitted, a default is used.
+	// its local per-endpoint state to the cross-replica syncer. This cadence is
+	// independent of the datalayer polling interval. If omitted, a default is used.
 	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
 }
 
