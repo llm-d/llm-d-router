@@ -13,7 +13,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -24,6 +24,8 @@ const (
 	// DefaultContextLengthLabel is the default label name used to identify context length ranges on pods
 	DefaultContextLengthLabel = "llm-d.ai/context-length-range"
 )
+
+var routingLengthDataKey = plugin.NewDataKey("RoutingLengthDataKey", ContextLengthAwareType)
 
 type contextLengthAwareParameters struct {
 	// Label is the pod label name to check for context length range.
@@ -67,6 +69,9 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 	if parameters.Label == "" {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'label' must be specified", ContextLengthAwareType)
 	}
+	if parameters.ReusableTokensProducerName != "" && parameters.Label == DefaultContextLengthLabel {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: reusableTokensProducerName requires a work-range label other than %q", ContextLengthAwareType, DefaultContextLengthLabel)
+	}
 
 	return NewContextLengthAware(name, parameters), nil
 }
@@ -78,8 +83,9 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 		labelName:                  params.Label,
 		enableFiltering:            params.EnableFiltering,
 		reusableTokensProducerName: params.ReusableTokensProducerName,
-		reusableTokensDataKey: p2psource.ReusablePrefixTokensDataKey.
+		reusableTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.
 			WithNonEmptyProducerName(params.ReusableTokensProducerName),
+		routingLengthDataKey: routingLengthDataKey.WithNonEmptyProducerName(name),
 	}
 }
 
@@ -104,6 +110,8 @@ type ContextLengthAware struct {
 	reusableTokensProducerName string
 	// reusableTokensDataKey identifies the configured producer's request data.
 	reusableTokensDataKey plugin.DataKey
+	// routingLengthDataKey identifies this plugin instance's request snapshot.
+	routingLengthDataKey plugin.DataKey
 }
 
 // TypedName returns the typed name of the plugin.
@@ -114,6 +122,7 @@ func (p *ContextLengthAware) TypedName() plugin.TypedName {
 // WithName sets the name of the plugin.
 func (p *ContextLengthAware) WithName(name string) *ContextLengthAware {
 	p.typedName.Name = name
+	p.routingLengthDataKey = routingLengthDataKey.WithNonEmptyProducerName(name)
 	return p
 }
 
@@ -125,7 +134,7 @@ func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
 		tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 	}
 	if p.reusableTokensProducerName != "" {
-		required[p.reusableTokensDataKey] = p2psource.ReusablePrefixTokens(0)
+		required[p.reusableTokensDataKey] = attrprefix.ReusablePrefixTokens(0)
 	}
 	return plugin.DataDependencies{
 		Required: required,
@@ -220,21 +229,37 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 }
 
 // getContextLength returns the token count after subtracting the configured
-// producer's reusable prefix token floor. Missing reusable-token data leaves
-// the total token count unchanged. When tokens are unavailable it returns 0.
+// producer's reusable prefix token floor. Positive token counts have at least
+// one token of prefill work. Missing reusable-token data leaves the total token
+// count unchanged. When tokens are unavailable it returns 0. With cache
+// subtraction enabled, the result is stored per request and plugin instance so
+// Filter and Score use the same value.
 func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceRequest) int {
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+	if request == nil {
 		return 0
 	}
-	total := request.Body.TokenizedRequest.TokenCount()
 	if p.reusableTokensProducerName == "" {
-		return total
+		if request.Body == nil || request.Body.TokenizedRequest == nil {
+			return 0
+		}
+		return request.Body.TokenizedRequest.TokenCount()
 	}
-	reusable, ok := scheduling.ReadRequestAttribute[p2psource.ReusablePrefixTokens](request, p.reusableTokensDataKey)
-	if !ok {
-		return total
+	if routingLength, ok := scheduling.ReadRequestAttribute[int](request, p.routingLengthDataKey); ok {
+		return routingLength
 	}
-	return max(0, total-int(reusable))
+
+	routingLength := 0
+	if request.Body != nil && request.Body.TokenizedRequest != nil {
+		total := request.Body.TokenizedRequest.TokenCount()
+		routingLength = total
+		if total > 0 {
+			if reusable, ok := scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](request, p.reusableTokensDataKey); ok {
+				routingLength = max(1, total-int(reusable))
+			}
+		}
+	}
+	request.PutAttribute(p.routingLengthDataKey, routingLength)
+	return routingLength
 }
 
 // parseContextRange parses a label value into a single context range.

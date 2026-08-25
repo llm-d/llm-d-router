@@ -58,6 +58,10 @@ type PodMatch struct {
 	WeightedScore float64
 	// MatchedBlocks is the chain length in blocks, regardless of tier.
 	MatchedBlocks int
+	// ConfirmedBlocks is the chain length in blocks counting only keys the
+	// pod holds in an engine-reported device tier; the tier may change from
+	// block to block. Speculative entries end the chain.
+	ConfirmedBlocks int
 	// BlocksByTier is the per-tier chain length: a tier counts a block only
 	// while the pod holds every previous block in that same tier.
 	// Speculative entries count under SpeculativeTier. Never nil.
@@ -283,6 +287,11 @@ type matchSlot struct {
 	seen   uint32
 	weight float64
 	tiers  []tierChain
+	// confirmed tracks the chain of keys held in a non-speculative tier;
+	// confirmedSeen is the key stamp of the last key holding one.
+	confirmed      int
+	confirmedSeen  uint32
+	confirmedAlive bool
 }
 
 // prefixAccumulator folds an ordered walk over request keys into per-pod
@@ -360,6 +369,8 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		tier, tierOrdinal := ref.DeviceTier, ref.TierOrdinal
 		if ref.Speculative || ref.DeviceTier == SpeculativeTier {
 			tier, tierOrdinal = SpeculativeTier, speculativeTierOrdinal
+		} else {
+			slot.confirmedSeen = a.keyStamp
 		}
 
 		w := a.weightOf(tier, tierOrdinal)
@@ -398,6 +409,9 @@ func (a *prefixAccumulator) endKey() bool {
 		for i := range a.slots {
 			s := &a.slots[i]
 			s.matched, s.score = 1, s.weight
+			if s.confirmedSeen == a.keyStamp {
+				s.confirmed, s.confirmedAlive = 1, true
+			}
 			for t := range s.tiers {
 				s.tiers[t].count = 1
 			}
@@ -414,6 +428,13 @@ func (a *prefixAccumulator) endKey() bool {
 		}
 		s.matched++
 		s.score += s.weight
+		switch {
+		case !s.confirmedAlive:
+		case s.confirmedSeen == a.keyStamp:
+			s.confirmed++
+		default:
+			s.confirmedAlive = false
+		}
 		for t := range s.tiers {
 			tc := &s.tiers[t]
 			switch {
@@ -439,7 +460,7 @@ func (a *prefixAccumulator) result() map[string]PodMatch {
 		for _, tc := range s.tiers {
 			byTier[tc.name] = tc.count
 		}
-		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, BlocksByTier: byTier}
+		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, ConfirmedBlocks: s.confirmed, BlocksByTier: byTier}
 	}
 	return out
 }
