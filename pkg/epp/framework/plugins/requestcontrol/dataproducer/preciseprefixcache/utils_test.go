@@ -97,6 +97,48 @@ func TestMatchedBlockCount(t *testing.T) {
 	}
 }
 
+func TestMatchedConfirmedBlockCount(t *testing.T) {
+	const pod = "10.0.0.1:8000"
+	keys := []kvblock.BlockHash{1, 2, 3, 4}
+	gpu := func() kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "gpu"} }
+	cpu := func() kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu"} }
+	speculative := func() kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, Speculative: true} }
+
+	tests := []struct {
+		name      string
+		keyToPods map[kvblock.BlockHash][]kvblock.PodEntry
+		want      int
+	}{
+		{
+			name: "real tier can change across the prefix",
+			keyToPods: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {gpu()}, 2: {cpu()}, 3: {gpu(), cpu()}, 4: {cpu()},
+			},
+			want: 4,
+		},
+		{
+			name: "speculative-only block stops confirmed prefix",
+			keyToPods: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {gpu(), speculative()}, 2: {speculative()}, 3: {cpu()},
+			},
+			want: 1,
+		},
+		{
+			name: "speculative-only prefix has no confirmed blocks",
+			keyToPods: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {speculative()}, 2: {speculative()},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, matchedConfirmedBlockCount(keys, tt.keyToPods, pod))
+		})
+	}
+}
+
 func TestMatchedBlockCountByTier(t *testing.T) {
 	const (
 		podA = "10.0.0.1:8000"

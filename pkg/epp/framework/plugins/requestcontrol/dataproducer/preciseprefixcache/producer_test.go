@@ -383,6 +383,7 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 
 	gpuA := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8080", DeviceTier: "gpu"}
 	cpuA := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8080", DeviceTier: "cpu"}
+	speculativeA := kvblock.PodEntry{PodIdentifier: "10.0.0.1:8080", Speculative: true}
 
 	idx := &fakeKVCacheIndexer{
 		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
@@ -394,10 +395,10 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 		index: &fakeKVBlockIndex{
 			lookup: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
 				if keys[0] == keysA[0] {
-					// Prompt A: block 0 on gpu+cpu, block 1 on gpu only.
+					// Prompt A: block 0 is confirmed on gpu+cpu; block 1 is speculative only.
 					return map[kvblock.BlockHash][]kvblock.PodEntry{
 						keysA[0]: {gpuA, cpuA},
-						keysA[1]: {gpuA},
+						keysA[1]: {speculativeA},
 					}, nil
 				}
 				// Prompt B: single block on gpu+cpu.
@@ -434,14 +435,18 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 3, info.CachedBlockCount())
-	// gpu: 2 (prompt A) + 1 (prompt B); cpu: 1 (prompt A) + 1 (prompt B).
-	assert.Equal(t, map[string]int{"gpu": 3, "cpu": 2}, info.CachedBlocksByTier())
+	assert.Equal(t, 2, info.ConfirmedCachedBlockCount())
+	// Each confirmed tier covers one block from each prompt. The speculative
+	// block follows a confirmed block, so it is not contiguous from block zero
+	// within the speculative tier.
+	assert.Equal(t, map[string]int{"gpu": 2, "cpu": 2}, info.CachedBlocksByTier())
 
 	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 0, info.CachedBlockCount())
+	assert.Equal(t, 0, info.ConfirmedCachedBlockCount())
 	assert.NotNil(t, info.CachedBlocksByTier())
 	assert.Empty(t, info.CachedBlocksByTier())
 }

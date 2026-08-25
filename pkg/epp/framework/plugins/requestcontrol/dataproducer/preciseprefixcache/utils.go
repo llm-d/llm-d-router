@@ -56,6 +56,22 @@ func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash
 	return count
 }
 
+// matchedConfirmedBlockCount returns the number of contiguous prefix blocks
+// held by podID in any non-speculative device tier. The device tier can change
+// between blocks without breaking the confirmed prefix.
+func matchedConfirmedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
+	count := 0
+	for _, key := range keys {
+		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool {
+			return e.PodIdentifier == podID && !e.Speculative
+		}) {
+			break
+		}
+		count++
+	}
+	return count
+}
+
 // matchedBlockCountByTier returns, per device tier, the number of contiguous
 // cached prefix blocks podID holds in that tier, counting from the first
 // block until the first block the pod does not hold in that tier. A block

@@ -66,6 +66,10 @@ func producerTimeout(p fwkrc.DataProducer) time.Duration {
 // (e.g. abort outbound HTTP calls) and avoid committing state after the director has moved on.
 func dataProducerPluginsWithTimeout(ctx context.Context, timeout time.Duration, plugins []fwkrc.DataProducer,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	// The timeout path does not join the producer goroutine. Allocate the
+	// sync.Map before launching it so any cancellation-aware producer finishing
+	// a write cannot race with scheduling over lazy store initialization.
+	request.InitializeAttributeStore()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
