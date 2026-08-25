@@ -192,11 +192,11 @@ const (
 // submit until the result is flushed. Both reads are tenant-scoped, so a
 // caller with the wrong tenant sees an unknown id.
 func lookupResult(ctx context.Context, rdb *redis.Client, tenant, id string) (asyncRequestState, *api.ResultMessage, error) {
-	res, err := readMailbox(ctx, rdb, tenant, id)
+	res, found, err := readMailbox(ctx, rdb, tenant, id)
 	if err != nil {
 		return asyncStateUnknown, nil, err
 	}
-	if res != nil {
+	if found {
 		return asyncStateReady, res, nil
 	}
 
@@ -210,30 +210,30 @@ func lookupResult(ctx context.Context, rdb *redis.Client, tenant, id string) (as
 	// The AP can deliver the result and clear the active marker between the
 	// two reads above, which would misread a just-completed request as
 	// unknown: re-read the mailbox once before concluding that.
-	res, err = readMailbox(ctx, rdb, tenant, id)
+	res, found, err = readMailbox(ctx, rdb, tenant, id)
 	if err != nil {
 		return asyncStateUnknown, nil, err
 	}
-	if res != nil {
+	if found {
 		return asyncStateReady, res, nil
 	}
 	return asyncStateUnknown, nil, nil
 }
 
-// readMailbox returns the stored result, nil when the mailbox is empty.
-func readMailbox(ctx context.Context, rdb *redis.Client, tenant, id string) (*api.ResultMessage, error) {
+// readMailbox returns the stored result, reporting whether one was present.
+func readMailbox(ctx context.Context, rdb *redis.Client, tenant, id string) (*api.ResultMessage, bool, error) {
 	vals, err := rdb.LRange(ctx, resultKey(tenant, id), 0, 0).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		return nil, fmt.Errorf("failed to read result: %w", err)
+		return nil, false, fmt.Errorf("failed to read result: %w", err)
 	}
 	if len(vals) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	var res api.ResultMessage
 	if err := json.Unmarshal([]byte(vals[0]), &res); err != nil {
-		return nil, fmt.Errorf("failed to parse stored result: %w", err)
+		return nil, false, fmt.Errorf("failed to parse stored result: %w", err)
 	}
-	return &res, nil
+	return &res, true, nil
 }
 
 // openAIError is the OpenAI error response envelope.
