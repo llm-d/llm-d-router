@@ -161,6 +161,16 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 		d.maybeLogStaleEndpoints(staleCount, len(candidates))
 	}
 
+	// Fail-open when every candidate has stale or missing metrics. A stale timestamp means the
+	// detector has not received fresh telemetry; it does not mean the endpoint is unhealthy or
+	// overloaded. When some endpoints are fresh, scoring stale ones as saturated correctly biases
+	// traffic toward the fresh endpoints. But when ALL are stale there is no fresh alternative,
+	// and hard-blocking dispatch (saturation=1.0) rejects requests against healthy backends.
+	// This is consistent with Filter, which already fails open in the same situation.
+	if staleCount == len(candidates) {
+		return 0.0
+	}
+
 	return totalScore / float64(len(candidates))
 }
 

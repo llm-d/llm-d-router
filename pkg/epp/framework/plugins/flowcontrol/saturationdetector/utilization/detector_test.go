@@ -178,10 +178,10 @@ func TestDetector_Saturation(t *testing.T) {
 		{
 			name: "Single pod with stale metrics",
 			pods: []fwkdl.Endpoint{
-				// Stale = 1.0
+				// All endpoints stale: fail-open (0.0), not fail-closed (1.0).
 				makePodMetric("pod1", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
 			},
-			wantSaturation: 1.0,
+			wantSaturation: 0.0,
 		},
 		{
 			name: "Single pod with high queue depth",
@@ -204,11 +204,12 @@ func TestDetector_Saturation(t *testing.T) {
 		{
 			name: "Single pod with nil metrics",
 			pods: []fwkdl.Endpoint{
+				// All endpoints have nil metrics: fail-open (0.0).
 				fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 					ID: types.NamespacedName{Name: "pod1", Namespace: "ns1"},
 				}, nil),
 			},
-			wantSaturation: 1.0,
+			wantSaturation: 0.0,
 		},
 		{
 			name: "Multiple pods, all good capacity",
@@ -268,9 +269,10 @@ func TestDetector_Saturation(t *testing.T) {
 		{
 			name: "Metrics age just over staleness threshold",
 			pods: []fwkdl.Endpoint{
+				// All endpoints stale: fail-open (0.0).
 				makePodMetric("pod1", 1, 0.1, baseTime.Add(-101*time.Millisecond)),
 			},
-			wantSaturation: 1.0,
+			wantSaturation: 0.0,
 		},
 	}
 
@@ -438,4 +440,58 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	require.Equal(t, 2.0, staleGaugeValue(), "staleness should be re-observed after the empty list")
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
 	require.Equal(t, 0.0, staleGaugeValue(), "gauge should return to zero when staleness clears")
+}
+
+// TestDetector_SingleEndpointStaleMetrics_SaturationFilterInconsistency demonstrates the
+// behavior gap that causes RHOAIENG-87650: when a single-endpoint pool experiences a brief
+// metrics scrape delay, Saturation() returns 1.0 (fail-closed, blocking all dispatch) while
+// Filter() returns the endpoint (fail-open fallback). The endpoint is healthy with zero errors;
+// only the metrics timestamp is stale.
+//
+// This inconsistency means the flow control layer blocks all requests via HoL blocking
+// (saturation >= usageLimit), even though the scheduler would have routed to the healthy
+// endpoint if the request had reached it.
+func TestDetector_SingleEndpointStaleMetrics_SaturationFilterInconsistency(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+
+	config := &Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: 200 * time.Millisecond,
+		Headroom:                  0.2,
+	}
+
+	detector := NewDetector("single-ep-stale-test", *config, logr.Discard())
+
+	// A healthy endpoint whose metrics are just barely past the staleness threshold.
+	// In production this happens during brief metric scrape delays or concurrent request bursts.
+	staleButHealthy := makePodMetric("llama-3-1-8b-instruct", 0, 0.10, baseTime.Add(-250*time.Millisecond))
+	dlEndpoints := []fwkdl.Endpoint{staleButHealthy}
+
+	// Saturation must NOT hard-block when every endpoint is stale. When all candidates have
+	// stale metrics, Saturation should fail-open (return < 1.0), consistent with Filter's
+	// fallback behavior. A stale metric timestamp does not mean the pod is unhealthy.
+	saturation := detector.Saturation(context.Background(), dlEndpoints)
+	require.Less(t, saturation, 1.0,
+		"Saturation must not return 1.0 when all endpoints are stale; fail-open to let the scheduler route to the healthy pod")
+
+	// Filter already handles this correctly: when all endpoints are stale, it returns the
+	// full list via its fail-open fallback (len(filtered)==0 triggers fallback).
+	schedEndpoints := []fwksched.Endpoint{
+		makeSchedulingEndpoint("llama-3-1-8b-instruct", 0, 0.10, baseTime.Add(-250*time.Millisecond)),
+	}
+	filtered := detector.Filter(context.Background(), nil, schedEndpoints)
+	require.Len(t, filtered, 1,
+		"Filter returns the stale endpoint via fail-open fallback")
+
+	// Saturation and Filter must agree: both should allow routing to the healthy endpoint
+	// when the only signal is a stale metrics timestamp.
+
+	// Sanity check: with fresh metrics, the same endpoint has near-zero saturation.
+	freshEndpoint := makePodMetric("llama-3-1-8b-instruct", 0, 0.10, time.Now())
+	freshSaturation := detector.Saturation(context.Background(), []fwkdl.Endpoint{freshEndpoint})
+	require.Less(t, freshSaturation, 0.2,
+		"The same endpoint with fresh metrics has low saturation, confirming the pod is healthy")
 }
