@@ -32,8 +32,9 @@ const (
 	// DefaultKVCacheUtilThreshold is the default KV cache utilization (0.0 to 1.0) threshold.
 	DefaultKVCacheUtilThreshold float64 = 0.8
 	// DefaultMetricsStalenessThreshold defines how old metrics can be before they are considered
-	// stale.
-	DefaultMetricsStalenessThreshold time.Duration = 200 * time.Millisecond
+	// stale. The value must comfortably exceed the metrics scrape interval so that a single
+	// delayed scrape does not cause the detector to treat healthy endpoints as saturated.
+	DefaultMetricsStalenessThreshold time.Duration = 5 * time.Second
 	// defaultHeadroom is the default burst allowance (0%).
 	defaultHeadroom float64 = 0.0
 )
