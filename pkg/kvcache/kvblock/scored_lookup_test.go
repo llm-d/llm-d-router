@@ -149,7 +149,7 @@ func TestScoredLookupEmptyKeys(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestScoredLookupDoesNotRefreshIndexLRU(t *testing.T) {
+func TestScoredLookupRefreshesIndexLRU(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 2, PodCacheSize: 1})
 	require.NoError(t, err)
@@ -166,10 +166,10 @@ func TestScoredLookupDoesNotRefreshIndexLRU(t *testing.T) {
 
 	stats, err = index.ScoredLookup(ctx, []BlockHash{10}, nil, scoredLookupTierWeights)
 	require.NoError(t, err)
-	assert.Empty(t, stats)
+	assert.Contains(t, stats, "pod-a")
 	stats, err = index.ScoredLookup(ctx, []BlockHash{20}, nil, scoredLookupTierWeights)
 	require.NoError(t, err)
-	assert.Contains(t, stats, "pod-a")
+	assert.Empty(t, stats)
 }
 
 // Pod churn (interned ids from pods since cleared) must change neither

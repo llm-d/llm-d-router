@@ -199,8 +199,8 @@ const maxTierMaskBits = 64
 // interned. The walk stops at the first key with no qualifying pod, matching
 // the composition of Lookup and the longest-prefix scorer.
 //
-// Reads do not update the top-level index LRU. KV-event additions determine
-// key recency, while concurrent scoring requests share the cache read lock.
+// Successful reads refresh the top-level index LRU so prefixes reused across
+// requests remain resident under capacity pressure.
 func (m *InMemoryIndex) ScoredLookup(ctx context.Context, requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string], tierWeights map[string]float64,
 ) (map[string]PodMatchStats, error) {
@@ -254,7 +254,7 @@ retry:
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		pc, found := m.data.Peek(key)
+		pc, found := m.data.Get(key)
 		if !found || pc == nil {
 			break
 		}
