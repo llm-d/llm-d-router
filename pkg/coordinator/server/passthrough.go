@@ -89,9 +89,13 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.V(logutil.DEFAULT).Info("received request", "method", r.Method, "path", r.URL.Path)
 
-	// A passthrough response may stream (e.g. /v1/messages with stream:true).
-	// Clear the write deadline like handleInference does for streaming so a
-	// long response is not cut by WriteTimeout mid-stream.
+	// The passthrough proxies request bodies verbatim and never parses them,
+	// so it cannot detect stream:true without defeating that design. Clear
+	// the write deadline unconditionally: a streaming response (the stated
+	// motivator, e.g. /v1/messages with stream:true) would otherwise be cut
+	// by WriteTimeout mid-stream. The trade-off is that non-streaming
+	// passthrough responses lose the slow-client guard; the gateway and
+	// server IdleTimeout still bound stalled connections.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		logger.V(logutil.DEFAULT).Info("could not clear write deadline", "error", err)
 	}
