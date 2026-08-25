@@ -107,6 +107,7 @@ const (
 	KVConnectorSGLang        = constants.KVConnectorSGLang
 	KVConnectorMooncake      = constants.KVConnectorMooncake
 	KVConnectorOffloading    = constants.KVConnectorOffloading
+	KVConnectorATOM          = constants.KVConnectorATOM
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
@@ -304,6 +305,10 @@ type Config struct {
 	MoRIIORemoteHostSpecs []string
 	MoRIIODecodeHostSpecs []string
 	MoRIIODecodePodIPSpec string
+
+	// ATOMDPSize is the data-parallel size for ATOM engines, used to compute
+	// the data_parallel_rank injected into request bodies for ATOM P/D routing.
+	ATOMDPSize int
 }
 
 // MarshalJSON implements json.Marshaler for Config.
@@ -584,6 +589,8 @@ func (s *Server) setKVConnector() {
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, _ APIType) {
 			s.handleP2P(w, r, host, kvCacheSource)
 		}
+	case KVConnectorATOM:
+		s.handlePDConnector = s.handleATOM
 	case KVConnectorNIXLV2:
 		fallthrough
 	default:

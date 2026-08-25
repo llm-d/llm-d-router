@@ -168,6 +168,7 @@ var (
 		KVConnectorSGLang:        {},
 		KVConnectorMooncake:      {},
 		KVConnectorOffloading:    {},
+		KVConnectorATOM:          {},
 	}
 
 	// supportedECConnectors defines all valid E/P EC connector types
@@ -183,7 +184,7 @@ var (
 		encodeStage:  {},
 	}
 
-	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang, KVConnectorMooncake, KVConnectorOffloading}, ", ")
+	supportedKVConnectorNamesStr = strings.Join([]string{KVConnectorNIXLV2, KVConnectorSharedStorage, KVConnectorSGLang, KVConnectorMooncake, KVConnectorOffloading, KVConnectorATOM}, ", ")
 	supportedECConnectorNamesStr = strings.Join([]string{ECExampleConnector, ECConnectorNIXL}, ", ")
 
 	supportedTLSStageNamesStr = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
@@ -242,6 +243,8 @@ func NewOptions() *Options {
 			MoRIIORemoteHosts: nil,
 			MoRIIODPSizeLocal: 0,
 			MoRIIODecodeHosts: nil,
+			// ATOM connector defaults
+			ATOMDPSize: 1,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -332,6 +335,11 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"remote_hosts. Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
 			"are resolved to IPs at startup; literal IPs are used as-is. "+
 			"Pair with --moriio-dp-size-local.")
+
+	// ATOM connector flags
+	fs.IntVar(&opts.ATOMDPSize, "atom-dp-size", opts.ATOMDPSize,
+		"Data-parallel size for ATOM engines, used to compute the data_parallel_rank "+
+			"injected into request bodies for ATOM P/D routing. Only used with --kv-connector=atom.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
