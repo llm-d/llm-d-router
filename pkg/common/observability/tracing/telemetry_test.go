@@ -265,3 +265,138 @@ func TestTracer(t *testing.T) {
 		})
 	}
 }
+
+// samplerEnv are the variables newSampler reads. Each subtest starts from them
+// unset so an inherited value cannot decide the result.
+var samplerEnv = []string{"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"}
+
+func TestNewSampler(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    sdktrace.Sampler
+		wantErr bool
+	}{
+		{
+			name: "unset defaults to a tenth of traces",
+			want: sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1)),
+		},
+		{
+			name: "always_on",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "always_on"},
+			want: sdktrace.AlwaysSample(),
+		},
+		{
+			name: "always_off",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "always_off"},
+			want: sdktrace.NeverSample(),
+		},
+		{
+			name: "parentbased_always_on",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_on"},
+			want: sdktrace.ParentBased(sdktrace.AlwaysSample()),
+		},
+		{
+			name: "parentbased_always_off",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_off"},
+			want: sdktrace.ParentBased(sdktrace.NeverSample()),
+		},
+		{
+			name: "traceidratio is not wrapped in a parent-based decorator",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0.25"},
+			want: sdktrace.TraceIDRatioBased(0.25),
+		},
+		{
+			name: "parentbased_traceidratio",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0.5"},
+			want: sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.5)),
+		},
+		{
+			name: "ratio sampler without an argument keeps the default ratio",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "traceidratio"},
+			want: sdktrace.TraceIDRatioBased(0.1),
+		},
+		{
+			name: "the argument is ignored by samplers that take none",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "always_off", "OTEL_TRACES_SAMPLER_ARG": "nonsense"},
+			want: sdktrace.NeverSample(),
+		},
+		{
+			name:    "an unsupported sampler is reported",
+			env:     map[string]string{"OTEL_TRACES_SAMPLER": "jaeger_remote"},
+			want:    sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1)),
+			wantErr: true,
+		},
+		{
+			name:    "an empty sampler is reported rather than treated as unset",
+			env:     map[string]string{"OTEL_TRACES_SAMPLER": ""},
+			want:    sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1)),
+			wantErr: true,
+		},
+		{
+			name:    "an unparsable argument is reported and does not change the sampler shape",
+			env:     map[string]string{"OTEL_TRACES_SAMPLER": "traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0.1percent"},
+			want:    sdktrace.TraceIDRatioBased(0.1),
+			wantErr: true,
+		},
+		{
+			name:    "an argument above one is reported instead of clamping to always-on",
+			env:     map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "10"},
+			want:    sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1)),
+			wantErr: true,
+		},
+		{
+			name:    "a negative argument is reported instead of clamping to always-off",
+			env:     map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "-1"},
+			want:    sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1)),
+			wantErr: true,
+		},
+		{
+			name: "the range bounds are accepted",
+			env:  map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "1"},
+			want: sdktrace.ParentBased(sdktrace.TraceIDRatioBased(1)),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t, samplerEnv...)
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+
+			got, err := newSampler()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("newSampler() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got.Description() != tc.want.Description() {
+				t.Errorf("newSampler() = %s, want %s", got.Description(), tc.want.Description())
+			}
+		})
+	}
+}
+
+// A rejected sampler configuration must not stop process startup, since sampling
+// is a runtime knob rather than a precondition for serving traffic.
+func TestInitTracingSurvivesRejectedSampler(t *testing.T) {
+	clearEnv(t, append(samplerEnv, "OTEL_TRACES_EXPORTER")...)
+	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "not-a-ratio")
+
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
+	})
+
+	shutdown, err := InitTracing(context.Background(), testr.New(t), testServiceName)
+	if err != nil {
+		t.Fatalf("InitTracing() error = %v, want startup to continue at the default ratio", err)
+	}
+	t.Cleanup(func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown() error = %v", err)
+		}
+	})
+}

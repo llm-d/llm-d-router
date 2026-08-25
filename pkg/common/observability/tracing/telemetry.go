@@ -63,26 +63,9 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 		return nil, err
 	}
 
-	// Go SDK doesn't have an automatic sampler, handle manually
-	samplerType, ok := os.LookupEnv("OTEL_TRACES_SAMPLER")
-	if !ok {
-		samplerType = "parentbased_traceidratio"
-	}
-	samplerARG, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG")
-	if !ok {
-		samplerARG = "0.1"
-	}
-
-	sampler := sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))
-	if samplerType == "parentbased_traceidratio" {
-		fraction, err := strconv.ParseFloat(samplerARG, 64)
-		if err != nil {
-			fraction = 0.1
-		}
-
-		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(fraction))
-	} else {
-		loggerWrap.Handle(fmt.Errorf("unsupported sampler type: %s, fallback to parentbased_traceidratio with 0.1 Ratio", samplerType))
+	sampler, err := newSampler()
+	if err != nil {
+		loggerWrap.Handle(fmt.Errorf("trace sampler configuration degraded: %w", err))
 	}
 
 	opt := []sdktrace.TracerProviderOption{
@@ -115,6 +98,77 @@ func newResource(ctx context.Context, defaultServiceName string) (*resource.Reso
 		),
 		resource.WithFromEnv(),
 	)
+}
+
+// Sampler defaults. The OpenTelemetry specification defaults OTEL_TRACES_SAMPLER
+// to parentbased_always_on; this package keeps a ratio instead, so a deployment
+// that sets neither variable samples a tenth of its requests rather than all of
+// them.
+const (
+	defaultSamplerType = "parentbased_traceidratio"
+	defaultSamplerArg  = 0.1
+)
+
+// newSampler builds the sampler from OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG.
+// The Go SDK has no built-in mapping from those variables to a Sampler, so the
+// specification's values are mapped here.
+//
+// A rejected value is returned as an error alongside a usable sampler: sampling is
+// a runtime knob, and refusing to start the process over a typo in it would be
+// worse than running at the documented default.
+//
+// jaeger_remote and parentbased_jaeger_remote are reported as unsupported. They
+// need go.opentelemetry.io/contrib/samplers/jaegerremote, which is not a dependency
+// of this module.
+func newSampler() (sdktrace.Sampler, error) {
+	samplerType, ok := os.LookupEnv("OTEL_TRACES_SAMPLER")
+	if !ok {
+		samplerType = defaultSamplerType
+	}
+
+	switch samplerType {
+	case "always_on":
+		return sdktrace.AlwaysSample(), nil
+	case "always_off":
+		return sdktrace.NeverSample(), nil
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample()), nil
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample()), nil
+	case "traceidratio":
+		fraction, err := samplerFraction()
+		return sdktrace.TraceIDRatioBased(fraction), err
+	case "parentbased_traceidratio":
+		fraction, err := samplerFraction()
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(fraction)), err
+	default:
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(defaultSamplerArg)),
+			fmt.Errorf("unsupported OTEL_TRACES_SAMPLER %q, falling back to %s at %v", samplerType, defaultSamplerType, defaultSamplerArg)
+	}
+}
+
+// samplerFraction reads the ratio for the traceidratio samplers, and is not consulted
+// for the samplers that take no argument. The returned fraction is always usable; an
+// error accompanies it when the configured value was rejected.
+//
+// The range check runs before the SDK sees the value. TraceIDRatioBased clamps a
+// fraction outside [0, 1] to always-on or always-off, so an operator who writes 10
+// meaning ten percent would otherwise sample everything with no diagnostic.
+func samplerFraction() (float64, error) {
+	arg, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG")
+	if !ok {
+		return defaultSamplerArg, nil
+	}
+
+	fraction, err := strconv.ParseFloat(arg, 64)
+	if err != nil {
+		return defaultSamplerArg, fmt.Errorf("invalid OTEL_TRACES_SAMPLER_ARG %q, falling back to %v: %w", arg, defaultSamplerArg, err)
+	}
+	if fraction < 0 || fraction > 1 {
+		return defaultSamplerArg, fmt.Errorf("OTEL_TRACES_SAMPLER_ARG %v outside [0, 1], falling back to %v", fraction, defaultSamplerArg)
+	}
+
+	return fraction, nil
 }
 
 // initTraceExporter create a SpanExporter
