@@ -168,9 +168,10 @@ func TestTerminationCause(t *testing.T) {
 
 func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 	tests := []struct {
-		name   string
-		status string
-		want   fwkrc.TerminationCause
+		name     string
+		status   string
+		useValue bool
+		want     fwkrc.TerminationCause
 	}{
 		{
 			name:   "OK",
@@ -191,6 +192,12 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 			name: "missing grpc status",
 			want: "",
 		},
+		{
+			name:     "internal error from value",
+			status:   "13",
+			useValue: true,
+			want:     fwkrc.TerminationCauseError,
+		},
 	}
 
 	for _, tt := range tests {
@@ -200,12 +207,16 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 			}
 
 			if tt.status != "" {
-				trailers.Trailers.Headers = []*corev3.HeaderValue{
-					{
-						Key:      "grpc-status",
-						RawValue: []byte(tt.status),
-					},
+				header := &corev3.HeaderValue{
+					Key: "grpc-status",
 				}
+				if tt.useValue {
+					header.Value = tt.status
+				} else {
+					header.RawValue = []byte(tt.status)
+				}
+
+				trailers.Trailers.Headers = []*corev3.HeaderValue{header}
 			}
 
 			assert.Equal(

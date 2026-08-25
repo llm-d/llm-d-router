@@ -266,7 +266,7 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.Te
 
 	for _, header := range trailers.GetTrailers().GetHeaders() {
 		if header.Key == "grpc-status" {
-			if grpcStatus := string(header.RawValue); grpcStatus != "" && grpcStatus != "0" {
+			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
 				return fwkrc.TerminationCauseError
 			}
 			return ""
