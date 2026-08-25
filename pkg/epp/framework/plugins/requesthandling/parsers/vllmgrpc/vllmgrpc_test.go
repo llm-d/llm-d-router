@@ -127,7 +127,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{
-						TokenIDs: []uint32{11, 12, 13},
+						TokenIDs: [][]uint32{{11, 12, 13}},
 					},
 				},
 				Payload: fwkrh.PayloadProto{
@@ -164,7 +164,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: []uint32{101, 102, 103, 104, 105}},
+					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -214,7 +214,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: []uint32{201, 202, 203, 204}},
+					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -297,7 +297,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			want: &fwkrh.InferenceRequestBody{
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{
-						TokenIDs: []uint32{4, 5, 6},
+						TokenIDs: [][]uint32{{4, 5, 6}},
 					},
 				},
 				Payload: fwkrh.PayloadProto{

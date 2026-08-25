@@ -413,6 +413,92 @@ func TestLoadRawConfiguration(t *testing.T) {
 	}
 }
 
+// TestLoadRawConfigExtraGates verifies that flag-supplied feature gates are appended to the
+// configuration's own featureGates list, and so take precedence over it. The rawConfig assertion
+// matters as much as the map: InstantiateAndConfigure and validateConfig each re-derive gate from
+// rawConfig.FeatureGates, so a gate applied only to the returned map would leave them disagreeing.
+func TestLoadRawConfigExtraGates(t *testing.T) {
+	t.Parallel()
+
+	RegisterFeatureGate(testFeatureGate, true)
+	RegisterFeatureGate(flowcontrol.FeatureGate, false)
+
+	tests := []struct {
+		name       string
+		configText string
+		extraGates []string
+		wantGates  map[string]bool
+		wantRaw    configapi.FeatureGates
+		wantErr    bool
+	}{
+		{
+			name:       "flag gate with no config",
+			extraGates: []string{flowcontrol.FeatureGate},
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: true,
+			},
+			wantRaw: configapi.FeatureGates{flowcontrol.FeatureGate},
+		},
+		{
+			name:       "flag explicit false overrides registered default",
+			extraGates: []string{testFeatureGate + "=false"},
+			wantGates: map[string]bool{
+				testFeatureGate:         false,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{testFeatureGate + "=false"},
+		},
+		{
+			name:       "bare flag gate overrides file's explicit false",
+			configText: successNoProfilesText,
+			extraGates: []string{testFeatureGate},
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{testFeatureGate + "=false", testFeatureGate},
+		},
+		{
+			name: "no flag gates leaves config untouched",
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{},
+		},
+		{
+			name:       "unregistered flag gate is rejected",
+			extraGates: []string{"no-such-gate"},
+			wantErr:    true,
+		},
+		{
+			name:       "non-boolean flag value is rejected",
+			extraGates: []string{flowcontrol.FeatureGate + "=notabool"},
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logger := logging.NewTestLogger()
+
+			got, gates, err := LoadRawConfig([]byte(tc.configText), logger, tc.extraGates...)
+
+			if tc.wantErr {
+				require.Error(t, err, "Expected LoadRawConfig to fail")
+				return
+			}
+			require.NoError(t, err, "Expected LoadRawConfig to succeed")
+
+			require.Empty(t, cmp.Diff(tc.wantGates, gates), "Resolved feature gates mismatch")
+			require.Empty(t, cmp.Diff(tc.wantRaw, got.FeatureGates),
+				"rawConfig.FeatureGates must carry the flag entries so later phases derive the same gates")
+		})
+	}
+}
+
 // --- Test: Phase 2 (Instantiation, System Defaulting, Deep Validation) ---
 
 func TestPluginsWithDependencies(t *testing.T) {
