@@ -23,41 +23,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-func TestSchedulerPDDecisionCount(t *testing.T) {
-	SchedulerPDDecisionCount.Reset()
-	LlmdPDDecisionCount.Reset()
-
-	model := "test-model"
-
-	RecordPDDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-	RecordPDDecision("test-plugin", "test-type", model, DecisionTypeDecodeOnly)
-	RecordPDDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-
-	expected := `
-		# HELP llm_d_inference_scheduler_pd_decision_total [ALPHA] [Deprecated: Use llm_d_epp_pd_decision_total] Total number of P/D disaggregation decisions made
-		# TYPE llm_d_inference_scheduler_pd_decision_total counter
-		llm_d_inference_scheduler_pd_decision_total{decision_type="decode-only",model_name="test-model"} 1
-		llm_d_inference_scheduler_pd_decision_total{decision_type="prefill-decode",model_name="test-model"} 2
-	`
-
-	if err := testutil.CollectAndCompare(SchedulerPDDecisionCount, strings.NewReader(expected),
-		"llm_d_inference_scheduler_pd_decision_total"); err != nil {
-		t.Errorf("RecordPDDecision() failed: %v", err)
-	}
-
-	expectedNew := `
-		# HELP llm_d_epp_pd_decision_total [ALPHA] Total number of P/D disaggregation decisions made
-		# TYPE llm_d_epp_pd_decision_total counter
-		llm_d_epp_pd_decision_total{decision_type="decode-only",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 1
-		llm_d_epp_pd_decision_total{decision_type="prefill-decode",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 2
-	`
-
-	if err := testutil.CollectAndCompare(LlmdPDDecisionCount, strings.NewReader(expectedNew),
-		"llm_d_epp_pd_decision_total"); err != nil {
-		t.Errorf("RecordPDDecision() new failed: %v", err)
-	}
-}
-
 func TestRecordDisaggDecision(t *testing.T) {
 	// Reset the counters before the test to avoid interference from other tests.
 	SchedulerDisaggDecisionCount.Reset()

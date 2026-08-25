@@ -82,17 +82,6 @@ func RegisterDeprecated(pluginType string, stability StabilityLevel, factory Fac
 	RegistryMetadata[pluginType] = meta
 }
 
-// RegisterDeprecatedWithPluginDependencies registers a plugin with dependencies and deprecation metadata.
-func RegisterDeprecatedWithPluginDependencies(pluginType string, stability StabilityLevel, factory FactoryFunc, parser ConfigParserFunc, deprecatedIn, scheduledRemovalIn, replacementType string) {
-	RegisterWithPluginDependencies(pluginType, stability, factory, parser)
-	meta := RegistryMetadata[pluginType]
-	meta.Deprecated = true
-	meta.DeprecatedIn = deprecatedIn
-	meta.ScheduledRemovalIn = scheduledRemovalIn
-	meta.ReplacementType = replacementType
-	RegistryMetadata[pluginType] = meta
-}
-
 // GetPluginStability looks up the stability level of a registered plugin type.
 // Returns StabilityStable by default for unregistered plugins.
 func GetPluginStability(pluginType string) StabilityLevel {

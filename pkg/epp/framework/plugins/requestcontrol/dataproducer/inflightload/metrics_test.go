@@ -79,12 +79,13 @@ llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default"
 		require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(expectedTokens), "llm_d_epp_inflight_tokens"))
 	}
 
-	// Admission: 4 input + 6 estimated output = 10 tokens, 1 request.
+	// Admission: 4 input + UnknownOutputTokens estimated output (no outlen-bucket
+	// attribute in this unit test) = 4+UnknownOutputTokens tokens, 1 request.
 	req := makeTokenRequest("req-gauge-lifecycle", 4)
 	res := makeSchedulingResult("ep1")
 	err := producer.PreRequest(ctx, req, res)
 	require.NoError(t, err)
-	expect(t, 1, 10)
+	expect(t, 1, 4+UnknownOutputTokens)
 
 	// Completion: series stay present at zero.
 	req.SchedulingResult = res
@@ -119,10 +120,11 @@ llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="custom-tenant",name
 `
 	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
 
+	// 1004 = 4 input tokens + UnknownOutputTokens (no outlen-bucket attribute set).
 	expectedTokens := `
 # HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
 # TYPE llm_d_epp_inflight_tokens gauge
-llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="custom-tenant",namespace="default",priority="3",producer_name="inflight-load-producer"} 10
+llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="custom-tenant",namespace="default",priority="3",producer_name="inflight-load-producer"} 1004
 `
 	require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(expectedTokens), "llm_d_epp_inflight_tokens"))
 
