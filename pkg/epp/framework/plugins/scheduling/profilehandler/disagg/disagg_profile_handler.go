@@ -9,7 +9,6 @@ import (
 	"net"
 	"strings"
 
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -96,55 +95,6 @@ type DisaggProfileHandlerParameters struct {
 	Deciders   disaggDecidersParameters `json:"deciders"`
 }
 
-// legacyDisaggProfileHandlerParameters is the deprecated flat parameter format.
-// Unknown fields (e.g. pd-profile-handler's prefixPluginType, primaryPort) are
-// silently ignored by json.Unmarshal, so they need not be declared here.
-type legacyDisaggProfileHandlerParameters struct {
-	StageOrder               StageOrder `json:"stageOrder,omitempty"`
-	DecodeProfile            string     `json:"decodeProfile"`
-	PrefillProfile           string     `json:"prefillProfile"`
-	EncodeProfile            string     `json:"encodeProfile"`
-	PrefillDeciderPluginName string     `json:"prefillDeciderPluginName"`
-	EncodeDeciderPluginName  string     `json:"encodeDeciderPluginName"`
-	// DeciderPluginName is a legacy alias from pd-profile-handler, maps to deciders.prefill.
-	DeciderPluginName string `json:"deciderPluginName"`
-}
-
-// toDisaggParams copies legacy flat fields into the nested format, logging a
-// deprecation warning for each field in use.
-func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) DisaggProfileHandlerParameters {
-	p := DisaggProfileHandlerParameters{}
-	if l.StageOrder != "" {
-		p.StageOrder = l.StageOrder
-	}
-	if l.DecodeProfile != "" {
-		logger.Info("Deprecated parameter 'decodeProfile', use 'profiles.decode' instead")
-		p.Profiles.Decode = l.DecodeProfile
-	}
-	if l.PrefillProfile != "" {
-		logger.Info("Deprecated parameter 'prefillProfile', use 'profiles.prefill' instead")
-		p.Profiles.Prefill = l.PrefillProfile
-	}
-	if l.EncodeProfile != "" {
-		logger.Info("Deprecated parameter 'encodeProfile', use 'profiles.encode' instead")
-		p.Profiles.Encode = l.EncodeProfile
-	}
-	if l.PrefillDeciderPluginName != "" {
-		logger.Info("Deprecated parameter 'prefillDeciderPluginName', use 'deciders.prefill' instead")
-		p.Deciders.Prefill = l.PrefillDeciderPluginName
-	}
-	// DeciderPluginName is a lower-priority alias for prefill decider (from pd-profile-handler).
-	if l.DeciderPluginName != "" && p.Deciders.Prefill == "" {
-		logger.Info("Deprecated parameter 'deciderPluginName', use 'deciders.prefill' instead")
-		p.Deciders.Prefill = l.DeciderPluginName
-	}
-	if l.EncodeDeciderPluginName != "" {
-		logger.Info("Deprecated parameter 'encodeDeciderPluginName', use 'deciders.encode' instead")
-		p.Deciders.Encode = l.EncodeDeciderPluginName
-	}
-	return p
-}
-
 // HandlerFactory is the unified factory for all disaggregation profile handlers.
 //
 //	if parameters.deciders.prefill is set - P disaggregation will be supported
@@ -202,38 +152,11 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	return handler.WithName(name), nil
 }
 
-func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin.Handle) (any, error) {
-	logger := log.FromContext(handle.Context())
-
+func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Handle) (any, error) {
 	parameters := DisaggProfileHandlerParameters{}
 	if rawParameters != nil {
-		// Capture raw bytes once so we can try each schema independently with
-		// strict decoding. The decoder passed in is one-shot, so we re-read
-		// from these bytes for the second attempt.
-		var raw json.RawMessage
-		if err := rawParameters.Decode(&raw); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler - %w", err)
-		}
-
-		// Try the new (nested) schema strictly first. If the user supplied
-		// only new-format fields, this succeeds. Per #1068, deprecated
-		// (legacy flat) fields are not in the new struct, so they would
-		// produce "unknown field" errors here — that's the signal to fall
-		// back to the legacy schema.
-		errNew := plugin.StrictDecoder(raw).Decode(&parameters)
-		if errNew != nil {
-			legacy := legacyDisaggProfileHandlerParameters{}
-			if errLegacy := plugin.StrictDecoder(raw).Decode(&legacy); errLegacy != nil {
-				// Neither schema parses cleanly: either mixed schemas or a
-				// genuinely unknown field. Surface both errors so callers can
-				// tell which they meant.
-				return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler: "+
-					"nested schema error: %w; legacy schema error: %v "+
-					"(use one format exclusively: either nested profiles/deciders or the deprecated flat fields)",
-					errNew, errLegacy)
-			}
-			logger.Info("Deprecated: using flat parameter format, migrate to nested profiles/deciders format")
-			parameters = legacy.toDisaggParams(logger)
 		}
 	}
 
