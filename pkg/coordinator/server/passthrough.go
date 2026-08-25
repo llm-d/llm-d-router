@@ -17,7 +17,6 @@ limitations under the License.
 package server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -123,17 +122,22 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 		FlushInterval: -1,
 		Transport:     transport,
 		ErrorLog:      log.New(&passthroughErrorLogWriter{logger: logger}, "", 0),
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				logger.V(logutil.DEFAULT).Info("passthrough proxy: request body exceeds cap", "capBytes", maxBytesErr.Limit)
 				w.WriteHeader(http.StatusRequestEntityTooLarge)
 				return
 			}
-			// Client cancellation and request-context deadlines are routine events on
-			// public routes, not backend faults; keep them out of error dashboards.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				logger.V(logutil.VERBOSE).Info("passthrough proxy: client cancelled", "error", err)
+			// A request whose context already ended (client disconnected, or a
+			// client-set deadline expired) is a routine lifecycle event, not a
+			// backend fault. Check req.Context().Err() rather than err's identity:
+			// Transport.RoundTrip's ResponseHeaderTimeout returns net/http's
+			// errTimeout, which satisfies errors.Is(err, context.DeadlineExceeded)
+			// by stdlib design and would otherwise misclassify a hung backend as
+			// a client cancellation.
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				logger.V(logutil.VERBOSE).Info("passthrough proxy: client cancelled", "error", ctxErr)
 			} else {
 				logger.Error(err, "passthrough proxy error")
 			}
