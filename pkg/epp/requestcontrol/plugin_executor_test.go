@@ -93,6 +93,31 @@ func (p *ctxObservingPlugin) Produce(ctx context.Context, _ *fwksched.InferenceR
 
 func (p *ctxObservingPlugin) Produces() map[fwkplugin.DataKey]any { return nil }
 
+// lateAttributePlugin ignores cancellation and writes after the timeout path
+// has returned, modeling a producer that does not stop promptly on ctx.Done().
+type lateAttributePlugin struct {
+	key     fwkplugin.DataKey
+	started chan struct{}
+	release chan struct{}
+	done    chan struct{}
+}
+
+func (p *lateAttributePlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock", Name: "late-attribute"}
+}
+
+func (p *lateAttributePlugin) Produce(_ context.Context, request *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
+	close(p.started)
+	<-p.release
+	request.PutAttribute(p.key, 1)
+	close(p.done)
+	return nil
+}
+
+func (p *lateAttributePlugin) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{p.key: 0}
+}
+
 // TestDataProducerPluginsWithTimeout_CancelsPluginContext verifies that the
 // child context passed to plugins is cancelled with DeadlineExceeded when the
 // timeout fires. Without this cancellation, a slow plugin would continue
@@ -118,6 +143,47 @@ func TestDataProducerPluginsWithTimeout_CancelsPluginContext(t *testing.T) {
 	plugin.wg.Wait()
 	assert.ErrorIs(t, plugin.observedCtxErr, context.DeadlineExceeded,
 		"plugin's context should be cancelled with DeadlineExceeded when timeout fires")
+}
+
+func TestDataProducerPluginsWithTimeout_LateAttributeWriteIsSafe(t *testing.T) {
+	request := &fwksched.InferenceRequest{}
+	plugin := &lateAttributePlugin{
+		key:     fwkplugin.NewDataKey("late", "mock"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+
+	err := dataProducerPluginsWithTimeout(
+		context.Background(),
+		20*time.Millisecond,
+		[]fwkrc.DataProducer{plugin},
+		request,
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DataProducer execution timed out")
+	<-plugin.started
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-plugin.done:
+				return
+			default:
+				_, _ = request.GetAttribute(plugin.key)
+			}
+		}
+	}()
+	close(plugin.release)
+	<-plugin.done
+	<-readerDone
+
+	value, ok := fwksched.ReadRequestAttribute[int](request, plugin.key)
+	require.True(t, ok)
+	assert.Equal(t, 1, value)
 }
 
 func TestDataProducerPluginsWithTimeout(t *testing.T) {

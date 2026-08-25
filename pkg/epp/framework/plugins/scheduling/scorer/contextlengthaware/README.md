@@ -38,7 +38,8 @@ metadata:
 - `enableFiltering` (bool, optional, default: `false`): Also act as a filter, removing out-of-range pods before scoring.
 - `reusableTokensProducerName` (string, optional): Name of the
   `p2p-source-producer` instance whose `ReusablePrefixTokens` request attribute
-  is subtracted from the total prompt length. Empty disables cache subtraction.
+  is subtracted from the total prompt length. Requires a `label` other than
+  `llm-d.ai/context-length-range`. Empty disables cache subtraction.
 
 **Configuration Example:**
 ```yaml
@@ -70,18 +71,35 @@ not consume this attribute and always uses total prompt length.
 #### P2P Cache-Aware Prefill Work
 
 The named [P2P source producer](../../../requestcontrol/dataproducer/p2psource/README.md)
-publishes a request-wide reusable-prefix floor `G`. The context-length-aware
-plugin uses:
+publishes a request-wide reusable-prefix floor `G` from confirmed CPU-tier
+cache data. The context-length-aware plugin uses:
 
 ```text
-routingLength = max(0, totalPromptTokens - G)
+routingLength = 0                              when totalPromptTokens is 0
+routingLength = max(1, totalPromptTokens - G) otherwise
 ```
 
-The routing length is a conservative upper bound on the prefill work under the
-router's cache snapshot: a destination either has at least `G` tokens locally
-or qualifies for the P2P pull. Cache state can change and transfers can fail,
-so every destination, including P-short, must support the request's full
-logical sequence.
+Missing floor data leaves a known total unchanged.
+
+Let `S` be the confirmed prefix on the sampled source, `D` be
+`minCachedTokenDelta`, and `newTokens` be the prompt tokens after that prefix.
+For a positive floor and a follow-up with positive `newTokens`:
+
+```text
+totalPromptTokens = S + newTokens
+G = S - D + 1
+routingLength = newTokens + D - 1
+```
+
+The delta is part of the routed work. If P-short is intended to accept at most
+`N` new tokens, its work-range ceiling must be at least `N + D - 1`; a ceiling
+of `N` is sufficient only when `D` is `1`. Start the next work range above the
+adjusted ceiling.
+
+The routing length is a conservative upper bound under the producer's cache
+snapshot. Every destination, including P-short, must still support the
+request's full logical sequence because cache state can change and a transfer
+can fail.
 
 Use cache subtraction only in the prefill scheduling profile. Use a separate
 work-range label such as `llm-d.ai/prefill-work-range`; the default
@@ -89,27 +107,14 @@ work-range label such as `llm-d.ai/prefill-work-range`; the default
 by a pod. Label every candidate in the prefill profile because unlabeled pods
 are retained by filtering as general-purpose candidates.
 
-The following excerpt configures a precise cache producer, P2P source
-selection, and a prefill-only work classifier in a disaggregated
-configuration. The `p2p-cache-source` name binds the producer and consumer.
-The `prefill` name must also be the prefill profile selected by
-`disagg-profile-handler`; that handler and the profile's existing candidate
-filters and picker are omitted here.
+Configure `p2p-cache-source` as shown in the
+[producer configuration](../../../requestcontrol/dataproducer/p2psource/README.md#configuration).
+Its `prefillProfileName` must match both the profile selected by
+`disagg-profile-handler` and the profile that references the work classifier.
+The profile's candidate filters and picker are omitted here.
 
 ```yaml
 plugins:
-  - type: precise-prefix-cache-producer
-    name: precise-cache
-    parameters:
-      tokenProcessorConfig:
-        blockSizeTokens: 64
-      speculativeIndexing: false
-  - type: p2p-source-producer
-    name: p2p-cache-source
-    parameters:
-      prefixMatchInfoProducerName: precise-cache
-      minCachedTokenDelta: 1
-      prefillProfileName: prefill
   - type: context-length-aware
     name: prefill-work-router
     parameters:
@@ -122,9 +127,9 @@ schedulingProfiles:
       - pluginRef: prefill-work-router
 ```
 
-The cache producer and serving pods must satisfy the
-[`p2p-source-producer` deployment requirements](../../../requestcontrol/dataproducer/p2psource/README.md#deployment-requirements).
-A short-work pod can use labels such as:
+The producer and serving pods must satisfy the
+[deployment requirements](../../../requestcontrol/dataproducer/p2psource/README.md#deployment-requirements).
+With `D = 1`, a short-work class for up to 8192 new tokens can use:
 
 ```yaml
 metadata:
@@ -133,8 +138,9 @@ metadata:
     llm-d.ai/context-length-range: "0-131072"
 ```
 
-The P-long candidates can use `llm-d.ai/prefill-work-range: "8193-131072"`
-while retaining the same logical context range.
+P-long candidates can use `llm-d.ai/prefill-work-range: "8193-131072"` while
+retaining the same logical context range. For larger `D`, raise the short
+ceiling and the long lower bound by `D - 1`.
 
 **Example — Scorer with token-producer:**
 ```yaml

@@ -364,6 +364,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
 			WithCachedBlockCount(match.MatchedBlocks).
+			WithConfirmedCachedBlockCount(match.ConfirmedBlocks).
 			WithCachedBlocksByTier(match.BlocksByTier)
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, match.MatchedBlocks)})
@@ -398,6 +399,7 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 	}
 	a.WeightedScore += b.WeightedScore
 	a.MatchedBlocks += b.MatchedBlocks
+	a.ConfirmedBlocks += b.ConfirmedBlocks
 	for tier, count := range b.BlocksByTier {
 		a.BlocksByTier[tier] += count
 	}

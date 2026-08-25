@@ -50,7 +50,7 @@ func TestP2PReusablePrefixDependency(t *testing.T) {
 		Label:                      migrationWorkRangeLabel,
 		ReusableTokensProducerName: migrationP2PProducer,
 	})
-	key := p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(migrationP2PProducer)
+	key := attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(migrationP2PProducer)
 
 	produced, producesKey := p2p.Produces()[key]
 	consumed, consumesKey := workRouter.Consumes().Required[key]
@@ -77,7 +77,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 		EnableFiltering:            true,
 		ReusableTokensProducerName: migrationP2PProducer,
 	})
-	reusableTokensKey := p2psource.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(migrationP2PProducer)
+	reusableTokensKey := attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(migrationP2PProducer)
 
 	// A cold 100K-token request has no transferable source, so its full prompt
 	// is prefill work and only the long-prefill worker matches.
@@ -88,7 +88,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	coldRequest := migrationTokenizedRequest("cold-100k", migrationInitialTokens)
 
 	require.NoError(t, p2p.Produce(ctx, coldRequest, []scheduling.Endpoint{coldLong, coldShort}))
-	_, hasReusableTokens := scheduling.ReadRequestAttribute[p2psource.ReusablePrefixTokens](coldRequest, reusableTokensKey)
+	_, hasReusableTokens := scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](coldRequest, reusableTokensKey)
 	assert.False(t, hasReusableTokens)
 	coldCandidates := workRouter.Filter(ctx, coldRequest, []scheduling.Endpoint{coldLong, coldShort})
 	require.Len(t, coldCandidates, 1)
@@ -106,9 +106,9 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	followUpRequest := migrationTokenizedRequest("follow-up-101k", migrationFollowUpTokens)
 
 	require.NoError(t, p2p.Produce(ctx, followUpRequest, []scheduling.Endpoint{warmLong, warmShort}))
-	reusableTokens, ok := scheduling.ReadRequestAttribute[p2psource.ReusablePrefixTokens](followUpRequest, reusableTokensKey)
+	reusableTokens, ok := scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](followUpRequest, reusableTokensKey)
 	require.True(t, ok)
-	assert.Equal(t, p2psource.ReusablePrefixTokens(migrationInitialTokens), reusableTokens)
+	assert.Equal(t, attrprefix.ReusablePrefixTokens(migrationInitialTokens), reusableTokens)
 	warmCandidates := workRouter.Filter(ctx, followUpRequest, []scheduling.Endpoint{warmLong, warmShort})
 	require.Len(t, warmCandidates, 1)
 	assert.Equal(t, "p-short", warmCandidates[0].GetMetadata().ID.Name)
@@ -131,6 +131,7 @@ func migrationPrefiller(
 	endpoint.Put(prefixDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, totalBlocks, migrationBlockSize).
 			WithCachedBlockCount(cachedBlocks).
+			WithConfirmedCachedBlockCount(cachedBlocks).
 			WithCachedBlocksByTier(map[string]int{"cpu": cachedBlocks}))
 	return endpoint
 }
