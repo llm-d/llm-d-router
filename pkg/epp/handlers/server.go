@@ -144,6 +144,14 @@ type RequestContext struct {
 	// response record defaults an unset cause to a natural completion.
 	TerminationCause fwkrc.TerminationCause
 
+	// FlowControlAdmitted reports whether flow control processed this request. It gates emission of the
+	// FlowQueueDuration response header, distinguishing a genuine zero-wait dispatch from flow control
+	// not running.
+	FlowControlAdmitted bool
+	// FlowControlQueueDuration is the wall-clock time the request spent in flow control admission
+	// (enqueue-and-wait). Meaningful only when FlowControlAdmitted is true.
+	FlowControlQueueDuration time.Duration
+
 	// Lifecycle bookkeeping.
 	firstTokenTimestamp        time.Time
 	lastChunkReceivedTimestamp time.Time
