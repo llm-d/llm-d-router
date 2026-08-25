@@ -28,7 +28,7 @@ X-Request-Timeout-Seconds: 30      # optional deadline
 {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Summarize this."}]}
 ```
 
-An id names one logical request, so reusing an id with a different body gives undefined results.
+An id names one logical request. Retry an id only after it has failed or expired, since re-submitting a live request runs it twice, and reusing an id with a different body gives undefined results.
 
 **Enqueue** returns immediately and the completion is collected later by id:
 
