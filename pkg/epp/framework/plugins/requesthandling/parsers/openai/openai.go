@@ -62,6 +62,8 @@ const (
 	cachedTokensField        = "cached_tokens"
 	totalTokensField         = "total_tokens"
 
+	// Text to speech api response format:
+	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
 	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"
 	vllmOmniOutputTokensHeader = "x-vllm-omni-output-tokens"
 	vllmOmniTotalTokensHeader  = "x-vllm-omni-total-tokens"
