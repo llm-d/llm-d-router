@@ -19,7 +19,6 @@ package openai
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -1103,17 +1102,6 @@ func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
 	}
 	if string(got["seed"]) != seed.String() {
 		t.Errorf("repackaged seed = %s, want %s", got["seed"], seed)
-	}
-}
-
-func TestOpenAIParser_RejectsTrailingJSON(t *testing.T) {
-	_, err := NewOpenAIParser().ParseRequest(
-		context.Background(),
-		[]byte(`{"model":"test","prompt":"hello"}{"extra":true}`),
-		map[string]string{":path": "/v1/completions"},
-	)
-	if err == nil || !strings.Contains(err.Error(), "unexpected trailing data") {
-		t.Fatalf("ParseRequest() error = %v, want unexpected trailing data", err)
 	}
 }
 

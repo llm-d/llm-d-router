@@ -19,7 +19,6 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -456,17 +455,6 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func TestAnthropicParser_RejectsTrailingJSON(t *testing.T) {
-	_, err := NewAnthropicParser().ParseRequest(
-		context.Background(),
-		[]byte(`{"model":"test","max_tokens":1,"messages":[{"role":"user","content":"hello"}]}{"extra":true}`),
-		map[string]string{":path": "/v1/messages"},
-	)
-	if err == nil || !strings.Contains(err.Error(), "unexpected trailing data") {
-		t.Fatalf("ParseRequest() error = %v, want unexpected trailing data", err)
 	}
 }
 

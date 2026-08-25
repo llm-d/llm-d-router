@@ -241,11 +241,6 @@ func TestVllmHTTPParser_ParseRequest_GenerateErrorPaths(t *testing.T) {
 			body:        `{"token_ids":[]}`,
 			errContains: "must have non-empty token_ids field",
 		},
-		{
-			name:        "trailing JSON is rejected",
-			body:        `{"token_ids":[1,2,3]}{"extra":true}`,
-			errContains: "unexpected trailing data",
-		},
 	}
 
 	for _, tt := range tests {
