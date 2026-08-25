@@ -266,8 +266,9 @@ func TestExecute_ErrPipelineDoneIsNotAnError(t *testing.T) {
 	}
 }
 
-// pathCount reads the execution_path_total counter for a model+path pair.
-func pathCount(t *testing.T, reg *prometheus.Registry, model, path string) float64 {
+// pathCount reads the execution_path_total counter for the given path under
+// the test's canonical model_name "m".
+func pathCount(t *testing.T, reg *prometheus.Registry, path string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
@@ -280,7 +281,7 @@ func pathCount(t *testing.T, reg *prometheus.Registry, model, path string) float
 			for _, l := range m.GetLabel() {
 				labels[l.GetName()] = l.GetValue()
 			}
-			if labels["model_name"] == model && labels["path"] == path {
+			if labels["model_name"] == "m" && labels["path"] == path {
 				return m.GetCounter().GetValue()
 			}
 		}
@@ -338,7 +339,7 @@ func TestExecute_ExecutionPathTable(t *testing.T) {
 			if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			require.InDelta(t, 1.0, pathCount(t, reg, "m", tc.wantPath), 1e-9)
+			require.InDelta(t, 1.0, pathCount(t, reg, tc.wantPath), 1e-9)
 		})
 	}
 }
@@ -357,7 +358,7 @@ func TestExecute_ExecutionPathRecordedOnDecodeFailure(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
 		t.Fatal("expected error")
 	}
-	require.InDelta(t, 1.0, pathCount(t, reg, "m", coordmetrics.PathPrefillDecode), 1e-9)
+	require.InDelta(t, 1.0, pathCount(t, reg, coordmetrics.PathPrefillDecode), 1e-9)
 }
 
 func TestExecute_ExecutionPathRecordedOnConditionalDecodeFailure(t *testing.T) {
@@ -372,7 +373,7 @@ func TestExecute_ExecutionPathRecordedOnConditionalDecodeFailure(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
 		t.Fatal("expected error")
 	}
-	require.InDelta(t, 1.0, pathCount(t, reg, "m", coordmetrics.PathDecodeOnly), 1e-9)
+	require.InDelta(t, 1.0, pathCount(t, reg, coordmetrics.PathDecodeOnly), 1e-9)
 }
 
 func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
@@ -387,7 +388,7 @@ func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	for _, p := range []string{coordmetrics.PathDecodeOnly, coordmetrics.PathPrefillDecode, coordmetrics.PathEncodePrefillDecode} {
-		require.Zero(t, pathCount(t, reg, "m", p))
+		require.Zero(t, pathCount(t, reg, p))
 	}
 }
 
