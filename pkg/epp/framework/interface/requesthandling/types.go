@@ -156,10 +156,10 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 // from a decoded JSON request body. The keys are tried in order and the first one
 // holding a valid value wins, so callers express per-API precedence (e.g. chat
 // completions: max_completion_tokens then the legacy max_tokens). JSON numbers
-// decode as float64; json.Number is also accepted. A present key whose value is
-// the wrong type, negative, or non-integral is treated as absent and the next key
-// is tried. An explicit non-negative whole number (including 0) is returned; if no
-// key holds a valid value the result is nil ("no cap").
+// may decode as float64 or json.Number; both are accepted. A present key whose
+// value is the wrong type, negative, or non-integral is treated as absent and the
+// next key is tried. An explicit non-negative whole number (including 0) is
+// returned; if no key holds a valid value the result is nil ("no cap").
 func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 	for _, k := range keys {
 		v, ok := m[k]
@@ -211,6 +211,15 @@ type PromptTokens struct {
 	MultiModalFeatures []MultiModalFeature
 }
 
+// NewTokenizedRequest builds one PromptTokens entry per token-ID array.
+func NewTokenizedRequest(arrays [][]uint32) *TokenizedRequest {
+	prompts := make([]PromptTokens, len(arrays))
+	for i, ids := range arrays {
+		prompts[i] = PromptTokens{TokenIDs: ids}
+	}
+	return &TokenizedRequest{Prompts: prompts}
+}
+
 // TokenCount returns the total number of tokens across all prompts.
 func (tp *TokenizedRequest) TokenCount() int {
 	if tp == nil {
@@ -239,17 +248,34 @@ type MultiModalFeature struct {
 }
 
 // Prompt represents the prompt field in a /v1/completions request.
-// Per the OpenAI spec it can be a string or an array of strings.
+// Per the OpenAI spec it can be a string, an array of strings, an array of
+// integers (token IDs), or an array of arrays of integers (multiple prompts
+// as token IDs).
 // See https://platform.openai.com/docs/api-reference/completions/create#completions-create-prompt
 type Prompt struct {
 	Raw      string
 	Strings  []string
-	TokenIDs []uint32
+	TokenIDs [][]uint32
 }
 
 type arrayInputResult struct {
 	Strings  []string
-	TokenIDs []uint32
+	TokenIDs [][]uint32
+}
+
+func parseTokenIDs(v []any, errorPrefix string) ([]uint32, error) {
+	ids := make([]uint32, len(v))
+	for i, val := range v {
+		flt, ok := val.(float64)
+		if !ok {
+			return nil, fmt.Errorf("%s: mixed types in array", errorPrefix)
+		}
+		if flt != float64(uint32(flt)) {
+			return nil, fmt.Errorf("%s: floating-point number %f is not a valid token ID", errorPrefix, flt)
+		}
+		ids[i] = uint32(flt)
+	}
+	return ids, nil
 }
 
 func parseArrayInput(v []any, errorPrefix string) (arrayInputResult, error) {
@@ -268,18 +294,28 @@ func parseArrayInput(v []any, errorPrefix string) (arrayInputResult, error) {
 		}
 		return arrayInputResult{Strings: strings}, nil
 	case float64:
-		uint32s := make([]uint32, len(v))
-		for i, val := range v {
-			flt, ok := val.(float64)
+		ids, err := parseTokenIDs(v, errorPrefix)
+		if err != nil {
+			return arrayInputResult{}, err
+		}
+		return arrayInputResult{TokenIDs: [][]uint32{ids}}, nil
+	case []any:
+		arrays := make([][]uint32, len(v))
+		for i, elem := range v {
+			inner, ok := elem.([]any)
 			if !ok {
 				return arrayInputResult{}, fmt.Errorf("%s: mixed types in array", errorPrefix)
 			}
-			if flt != float64(uint32(flt)) {
-				return arrayInputResult{}, fmt.Errorf("%s: floating-point number %f is not a valid token ID", errorPrefix, flt)
+			if len(inner) == 0 {
+				return arrayInputResult{}, fmt.Errorf("%s: empty sub-array at index %d", errorPrefix, i)
 			}
-			uint32s[i] = uint32(flt)
+			ids, err := parseTokenIDs(inner, errorPrefix)
+			if err != nil {
+				return arrayInputResult{}, err
+			}
+			arrays[i] = ids
 		}
-		return arrayInputResult{TokenIDs: uint32s}, nil
+		return arrayInputResult{TokenIDs: arrays}, nil
 	default:
 		return arrayInputResult{}, fmt.Errorf("%s: unsupported array element type", errorPrefix)
 	}
@@ -310,7 +346,11 @@ func (p *Prompt) UnmarshalJSON(data []byte) error {
 
 func (p Prompt) TokenCountHint() int {
 	if len(p.TokenIDs) > 0 {
-		return len(p.TokenIDs)
+		n := 0
+		for _, ids := range p.TokenIDs {
+			n += len(ids)
+		}
+		return n
 	}
 	return -1
 }
@@ -321,6 +361,9 @@ func (p Prompt) MarshalJSON() ([]byte, error) {
 	}
 	if p.Strings != nil {
 		return json.Marshal(p.Strings)
+	}
+	if p.TokenIDs != nil {
+		return json.Marshal(p.TokenIDs)
 	}
 	return json.Marshal("")
 }
@@ -341,7 +384,7 @@ func (p Prompt) IsEmpty() bool {
 // This struct includes fields usable for plugins and scheduling decisions - and not the entire
 // API spec.
 type CompletionsRequest struct {
-	// Prompt is the prompt(s) sent in the request body; can be a string or an array of strings.
+	// Prompt is the prompt(s) sent in the request body.
 	Prompt Prompt `json:"prompt"`
 	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	CacheSalt string `json:"cache_salt,omitempty"`
@@ -423,11 +466,12 @@ func (c *ConversationsRequest) String() string {
 }
 
 // EmbeddingsInput represents the input field in a /v1/embeddings request.
-// Per the OpenAI spec it can be a string, an array of strings, or an array of integers.
+// Per the OpenAI spec it can be a string, an array of strings, an array of
+// integers (token IDs), or an array of arrays of integers.
 type EmbeddingsInput struct {
 	Raw      string
 	Strings  []string
-	TokenIDs []uint32
+	TokenIDs [][]uint32
 }
 
 func (e *EmbeddingsInput) UnmarshalJSON(data []byte) error {
@@ -455,7 +499,11 @@ func (e *EmbeddingsInput) UnmarshalJSON(data []byte) error {
 
 func (e EmbeddingsInput) TokenCountHint() int {
 	if len(e.TokenIDs) > 0 {
-		return len(e.TokenIDs)
+		n := 0
+		for _, ids := range e.TokenIDs {
+			n += len(ids)
+		}
+		return n
 	}
 	return -1
 }

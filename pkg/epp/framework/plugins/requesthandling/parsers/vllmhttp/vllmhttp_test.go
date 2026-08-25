@@ -61,7 +61,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{1, 2, 3},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"token_ids": []any{json.Number("1"), json.Number("2"), json.Number("3")},
 				},
 			},
 		},
@@ -78,7 +78,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					CacheSalt: "abc123",
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids":  []any{float64(10), float64(20), float64(30)},
+					"token_ids":  []any{json.Number("10"), json.Number("20"), json.Number("30")},
 					"cache_salt": "abc123",
 				},
 			},
@@ -99,10 +99,10 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{1, 2, 3},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"token_ids": []any{json.Number("1"), json.Number("2"), json.Number("3")},
 					"sampling_params": map[string]any{
-						"temperature": 0.8,
-						"max_tokens":  float64(128),
+						"temperature": json.Number("0.8"),
+						"max_tokens":  json.Number("128"),
 					},
 					"stream": true,
 				},
@@ -137,7 +137,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{5, 6, 7},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{float64(5), float64(6), float64(7)},
+					"token_ids": []any{json.Number("5"), json.Number("6"), json.Number("7")},
 				},
 			},
 		},
@@ -175,9 +175,9 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"token_ids": []any{
-						float64(151644), float64(872), float64(198), float64(3838), float64(374), float64(279),
-						float64(6722), float64(315), float64(9625), float64(30), float64(151645), float64(198),
-						float64(151644), float64(77091), float64(198),
+						json.Number("151644"), json.Number("872"), json.Number("198"), json.Number("3838"), json.Number("374"), json.Number("279"),
+						json.Number("6722"), json.Number("315"), json.Number("9625"), json.Number("30"), json.Number("151645"), json.Number("198"),
+						json.Number("151644"), json.Number("77091"), json.Number("198"),
 					},
 					"features": map[string]any{
 						"mm_hashes": map[string]any{
@@ -185,8 +185,8 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 						},
 						"mm_placeholders": map[string]any{
 							"image": []any{
-								map[string]any{"offset": float64(1), "length": float64(3)},
-								map[string]any{"offset": float64(4), "length": float64(3)},
+								map[string]any{"offset": json.Number("1"), "length": json.Number("3")},
+								map[string]any{"offset": json.Number("4"), "length": json.Number("3")},
 							},
 						},
 					},

@@ -140,7 +140,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "completions token ids uses exact hint",
 			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
-				TokenIDs: []uint32{1, 2, 3, 4},
+				TokenIDs: [][]uint32{{1, 2, 3, 4}},
 			}), 4),
 			want: 4,
 		},
@@ -154,7 +154,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "embeddings token ids uses exact hint",
 			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
-				TokenIDs: []uint32{1, 2, 3},
+				TokenIDs: [][]uint32{{1, 2, 3}},
 			}), 3),
 			want: 3,
 		},
