@@ -10,7 +10,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
-	extmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 )
@@ -33,9 +33,9 @@ import (
 
 func endpointWith(queue int, kvUsage float64) fwksched.Endpoint {
 	attrs := fwkdl.NewAttributes()
-	attrs.Put(attrmetrics.ScalarMetricDataKey(extmetrics.WaitingQueueSizeKey),
+	attrs.Put(attrmetrics.ScalarMetricDataKey(extractormetrics.WaitingQueueSizeKey),
 		attrmetrics.ScalarMetricValue(float64(queue)))
-	attrs.Put(attrmetrics.ScalarMetricDataKey(extmetrics.KVCacheUsagePercentKey),
+	attrs.Put(attrmetrics.ScalarMetricDataKey(extractormetrics.KVCacheUsagePercentKey),
 		attrmetrics.ScalarMetricValue(kvUsage))
 	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{},
@@ -72,7 +72,7 @@ func TestParityQueueScorer(t *testing.T) {
 		{endpointWith(7, 0.5)}, // single endpoint
 	}
 	legacy := queuedepth.NewQueueScorer()
-	ea, err := NewEndpointAttributeScorer("ea-queue", adaptiveParams(extmetrics.WaitingQueueSizeKey))
+	ea, err := NewEndpointAttributeScorer("ea-queue", adaptiveParams(extractormetrics.WaitingQueueSizeKey))
 	require.NoError(t, err)
 
 	for i, endpoints := range cases {
@@ -86,6 +86,39 @@ func TestParityQueueScorer(t *testing.T) {
 	}
 }
 
+// TestDivergenceWhenAttributeAbsent locks in the asymmetry the comment block
+// above describes. Every case in the parity tests puts the value on both the
+// Metrics struct and the attribute map, so none of them exercises what happens
+// when the attribute is missing — which is the failure a wrong customMetrics
+// block actually produces.
+//
+// The two scorers disagree by construction there. The legacy scorer reads
+// WaitingQueueSize from Metrics, sees 0, and treats an empty queue as the best
+// possible endpoint. The endpoint-attribute scorer finds no attribute and
+// returns 0.0, the worst. Absence reads as best on one path and worst on the
+// other, and nothing in the framework flags it: the dependency is Optional, so
+// the data graph logs a warning and the run proceeds.
+func TestDivergenceWhenAttributeAbsent(t *testing.T) {
+	noAttr := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{},
+		&fwkdl.Metrics{WaitingQueueSize: 0, KVCacheUsagePercent: 0.0},
+		fwkdl.NewAttributes(),
+	)
+	endpoints := []fwksched.Endpoint{noAttr}
+
+	legacy := queuedepth.NewQueueScorer()
+	ea, err := NewEndpointAttributeScorer("ea-queue", adaptiveParams(extractormetrics.WaitingQueueSizeKey))
+	require.NoError(t, err)
+
+	legacyScores := legacy.Score(context.Background(), nil, endpoints)
+	eaScores := ea.Score(context.Background(), nil, endpoints)
+
+	assert.InDelta(t, 1.0, legacyScores[noAttr], 1e-9,
+		"legacy reads WaitingQueueSize 0 from Metrics and scores an empty queue best")
+	assert.InDelta(t, 0.0, eaScores[noAttr], 1e-9,
+		"endpoint-attribute finds no attribute and scores the endpoint worst")
+}
+
 func TestParityKVCacheScorer(t *testing.T) {
 	cases := [][]fwksched.Endpoint{
 		{endpointWith(0, 0.0), endpointWith(0, 0.5), endpointWith(0, 1.0)},
@@ -93,7 +126,7 @@ func TestParityKVCacheScorer(t *testing.T) {
 		{endpointWith(0, 0.9)},
 	}
 	legacy := kvcacheutilization.NewKVCacheUtilizationScorer()
-	ea, err := NewEndpointAttributeScorer("ea-kv", fixedParams(extmetrics.KVCacheUsagePercentKey, 0.0, 1.0))
+	ea, err := NewEndpointAttributeScorer("ea-kv", fixedParams(extractormetrics.KVCacheUsagePercentKey, 0.0, 1.0))
 	require.NoError(t, err)
 
 	for i, endpoints := range cases {
