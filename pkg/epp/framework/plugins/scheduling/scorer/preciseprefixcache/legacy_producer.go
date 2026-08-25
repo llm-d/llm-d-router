@@ -84,7 +84,7 @@ func newLegacyProducer(ctx context.Context, name string, cfg preciseproducer.Plu
 	return lp, nil
 }
 
-// Consumes drops the TokenizedPrompt dependency when the wrapper owns a
+// Consumes drops the TokenizedRequest dependency when the wrapper owns a
 // tokenizer pool, since the prompt-fallback path tokenizes the request
 // itself and no upstream token-producer is required.
 func (lp *legacyProducer) Consumes() plugin.DataDependencies {
@@ -95,7 +95,7 @@ func (lp *legacyProducer) Consumes() plugin.DataDependencies {
 }
 
 // Produce tokenizes the request prompt via the wrapper-owned pool when
-// no TokenizedPrompt is set, then delegates to the embedded Producer.
+// no TokenizedRequest is set, then delegates to the embedded Producer.
 func (lp *legacyProducer) Produce(ctx context.Context,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) error {
@@ -109,7 +109,7 @@ func needsLegacyTokenization(request *scheduling.InferenceRequest) bool {
 	if request == nil || request.Body == nil {
 		return false
 	}
-	if tp := request.Body.TokenizedPrompt; tp != nil && tp.TokenCount() > 0 {
+	if tp := request.Body.TokenizedRequest; tp != nil && tp.TokenCount() > 0 {
 		return false
 	}
 	return request.Body.Completions != nil || request.Body.ChatCompletions != nil
@@ -132,15 +132,17 @@ func (lp *legacyProducer) tokenizeRequest(request *scheduling.InferenceRequest) 
 		return
 	}
 
-	request.Body.TokenizedPrompt = &fwkrh.TokenizedPrompt{
-		PerPromptTokens:    [][]uint32{tokens},
-		MultiModalFeatures: flattenMMFeatures(mmFeatures),
-		CacheSalt:          tokenizer.CacheSaltFromBody(request.Body),
+	request.Body.TokenizedRequest = &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokens,
+			MultiModalFeatures: flattenMMFeatures(mmFeatures),
+		}},
+		CacheSalt: tokenizer.CacheSaltFromBody(request.Body),
 	}
 }
 
 // flattenMMFeatures regroups the kvcache map-shaped multimodal metadata
-// into the upstream flat list expected on TokenizedPrompt, sorted by
+// into the upstream flat list expected on PromptTokens, sorted by
 // placeholder offset so consumers see items in prompt order.
 func flattenMMFeatures(src *tokenization.MultiModalFeatures) []fwkrh.MultiModalFeature {
 	if src == nil || len(src.MMHashes) == 0 {

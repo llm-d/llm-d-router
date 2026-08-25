@@ -35,7 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
 
-const mockProducedDataKey = "mockProducedData"
+var mockProducedDataKey = fwkplugin.NewDataKey("mockProducedData", "mock")
 
 type mockDataProducerP struct {
 	name       string

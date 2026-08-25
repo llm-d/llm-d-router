@@ -60,6 +60,13 @@ const (
 	// The associated error will wrap `ErrTTLExpired` (and `ErrEvicted`).
 	QueueOutcomeEvictedTTL
 
+	// QueueOutcomeEvictedNoEndpoints indicates eviction from a queue because the queue-wait budget expired while the
+	// candidate pool had no endpoints. It is distinguished from `QueueOutcomeEvictedTTL` so the admission layer can
+	// surface genuine unavailability (HTTP 503) instead of backpressure (HTTP 429), and so the two unavailability
+	// regimes remain separable on dashboards.
+	// The associated error will wrap `ErrTTLExpired` and `ErrNoEndpoints` (and `ErrEvicted`).
+	QueueOutcomeEvictedNoEndpoints
+
 	// QueueOutcomeEvictedContextCancelled indicates eviction from a queue because the request's own context (from
 	// `FlowControlRequest.Context()`) was cancelled.
 	// The associated error will wrap `ErrContextCancelled` (which may further wrap the underlying `context.Canceled` or
@@ -93,6 +100,8 @@ func (o QueueOutcome) String() string {
 		return "RejectedOther"
 	case QueueOutcomeEvictedTTL:
 		return "EvictedTTL"
+	case QueueOutcomeEvictedNoEndpoints:
+		return "EvictedNoEndpoints"
 	case QueueOutcomeEvictedContextCancelled:
 		return "EvictedContextCancelled"
 	case QueueOutcomeEvictedOther:

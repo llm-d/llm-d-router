@@ -12,7 +12,9 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -39,8 +41,8 @@ const (
 // the input token count.
 func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 	return &fwkrh.InferenceRequestBody{
-		Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
+		Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
 	}
 }
 
@@ -224,6 +226,7 @@ func TestPDSchedule(t *testing.T) {
 			//  initialize scheduler with config
 			prefixScorer, err := prefix.New(ctx, prefix.PrefixCacheScorerPluginType, "")
 			assert.NoError(t, err, "Prefix plugin creation returned unexpected error")
+			datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{prefixScorer})
 
 			prefillSchedulerProfile := scheduling.NewSchedulerProfile().
 				WithFilters(bylabel.NewPrefillRole()).
@@ -252,7 +255,7 @@ func TestPDSchedule(t *testing.T) {
 
 			inputTokens := len(test.req.Body.Completions.Prompt.Raw) / averageCharactersPerToken
 			for _, pod := range test.input {
-				pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(0, inputTokens, 1))
+				pod.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(0, inputTokens, 1))
 			}
 			got, err := scheduler.Schedule(ctx, test.req, test.input)
 
@@ -267,10 +270,19 @@ func TestPDSchedule(t *testing.T) {
 			if test.wantRes2 != nil { // Checking the prefix match in the decode pod.
 				// update number of cached tokens for the following schedule call
 				for _, pod := range test.input {
-					pod.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(inputTokens, inputTokens, 1))
+					pod.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(inputTokens, inputTokens, 1))
 				}
 
-				got, err = scheduler.Schedule(ctx, test.req, test.input)
+				// Fresh request for the second schedule call so per-request
+				// memoization from the first call doesn't leak. Production
+				// models each schedule call as its own *InferenceRequest.
+				nextReq := &fwksched.InferenceRequest{
+					RequestID:   uuid.NewString(),
+					TargetModel: test.req.TargetModel,
+					Body:        test.req.Body,
+					Headers:     test.req.Headers,
+				}
+				got, err = scheduler.Schedule(ctx, nextReq, test.input)
 				if test.err != (err != nil) {
 					t.Errorf("Unexpected error in schedule call, got %v, want %v", err, test.err)
 				}
@@ -281,5 +293,80 @@ func TestPDSchedule(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPDSchedule_PrefillFirst(t *testing.T) {
+	ctx := context.Background()
+
+	endpoint1 := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "endpoint1"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	endpoint2 := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "endpoint2"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+
+	prefillDecodeResult := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			decode: {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: endpoint2,
+					},
+				},
+			},
+			prefill: {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: endpoint1,
+					},
+				},
+			},
+		},
+		PrimaryProfileName: decode,
+	}
+
+	prefillSchedulerProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewPrefillRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	decodeSchedulerProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewDecodeRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	profileHandle := disagg.NewDisaggProfileHandler(decode, prefill, "",
+		nil, nil).WithStageOrder(disagg.StageOrderPrefillFirst)
+
+	schedulerConfig := scheduling.NewSchedulerConfig(profileHandle, map[string]fwksched.SchedulerProfile{
+		prefill: prefillSchedulerProfile,
+		decode:  decodeSchedulerProfile,
+	})
+	scheduler := scheduling.NewSchedulerWithConfig(schedulerConfig)
+
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "critical",
+		Body:        completionsBody("12345678906"),
+	}
+	input := []fwksched.Endpoint{endpoint1, endpoint2}
+
+	got, err := scheduler.Schedule(ctx, req, input)
+	assert.NoError(t, err)
+
+	if diff := cmp.Diff(prefillDecodeResult, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
+		cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
+		t.Errorf("Unexpected output (-want +got): %v", diff)
 	}
 }

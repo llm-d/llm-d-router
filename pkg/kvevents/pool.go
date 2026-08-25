@@ -46,6 +46,41 @@ func normalizeDeviceTier(deviceTier string) string {
 	return strings.ToLower(deviceTier)
 }
 
+func isPrefixIndexableSpecKind(kind KVCacheSpecKind) bool {
+	switch kind {
+	case KVCacheSpecKindFullAttention, KVCacheSpecKindMlaAttention, KVCacheSpecKindSinkFull:
+		return true
+	default:
+		return false
+	}
+}
+
+func cacheKindLabel(kind KVCacheSpecKind) string {
+	if kind == "" {
+		return string(KVCacheSpecKindUnknown)
+	}
+	return string(kind)
+}
+
+func blockStoredEventDigestible(ev *BlockStoredEvent) (bool, string) {
+	if ev.GroupIdx == nil {
+		return true, ""
+	}
+	if !isPrefixIndexableSpecKind(ev.KVCacheSpecKind) {
+		return false, "unsupported_cache_kind"
+	}
+	if len(ev.Tokens) == 0 {
+		return true, ""
+	}
+	if ev.BlockSize <= 0 {
+		return false, "invalid_block_size"
+	}
+	if len(ev.Tokens)%ev.BlockSize != 0 || len(ev.Tokens)/ev.BlockSize != len(ev.BlockHashes) {
+		return false, "non_dense_block_span"
+	}
+	return true, ""
+}
+
 // Config holds the configuration for the event processing pool.
 type Config struct {
 	// ZMQEndpoint is the ZMQ address to connect to (e.g., "tcp://indexer:5557").
@@ -425,13 +460,32 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
 			if ev.GroupIdx != nil {
 				g := kvblock.GroupID(*ev.GroupIdx)
-				p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
-					Kind:              string(ev.KVCacheSpecKind),
-					BlockSize:         ev.BlockSize,
-					SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
-				})
+				if ev.KVCacheSpecKind == "" {
+					if meta, found := p.groupCatalog.Get(podIdentifier, g); found {
+						ev.KVCacheSpecKind = KVCacheSpecKind(meta.Kind)
+					}
+				} else {
+					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
+						Kind:              string(ev.KVCacheSpecKind),
+						BlockSize:         ev.BlockSize,
+						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
+					})
+				}
 				podEntries[0].HasGroup = true
 				podEntries[0].GroupIdx = g
+			}
+
+			if digestible, reason := blockStoredEventDigestible(ev); !digestible {
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+					"podIdentifier", podIdentifier,
+					"groupIdx", ev.GroupIdx,
+					"cacheKind", ev.KVCacheSpecKind,
+					"reason", reason,
+					"numTokens", len(ev.Tokens),
+					"numBlockHashes", len(ev.BlockHashes),
+					"blockSize", ev.BlockSize)
+				continue
 			}
 
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
@@ -445,7 +499,13 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
 				if err != nil {
 					debugLogger.Error(err, "Failed to get request key for parent block",
-						"parentEngineKey", parentEngineKey, "effectiveModelName", effectiveModelName)
+						"parentEngineKey", parentEngineKey,
+						"effectiveModelName", effectiveModelName,
+						"groupIdx", ev.GroupIdx,
+						"cacheKind", ev.KVCacheSpecKind,
+						"numTokens", len(ev.Tokens),
+						"numBlockHashes", len(ev.BlockHashes),
+						"blockSize", ev.BlockSize)
 					continue
 				}
 				parentRequestKey = key
@@ -528,6 +588,24 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			if ev.GroupIdx != nil {
+				groupIdx := kvblock.GroupID(*ev.GroupIdx)
+				meta, found := p.groupCatalog.Get(podIdentifier, groupIdx)
+				if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
+					reason := "unsupported_cache_kind"
+					if !found {
+						reason = "unknown_group"
+					}
+					metrics.KVEventRemovalsSkipped.WithLabelValues(
+						cacheKindLabel(KVCacheSpecKind(meta.Kind)), reason).Inc()
+					log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache remove event",
+						"podIdentifier", podIdentifier,
+						"groupIdx", groupIdx,
+						"cacheKind", meta.Kind,
+						"groupKnown", found)
+					continue
+				}
+			}
 
 			// Create PodEntry for this specific event's device tier.
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}

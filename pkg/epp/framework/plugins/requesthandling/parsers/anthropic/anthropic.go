@@ -17,6 +17,7 @@ limitations under the License.
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -198,19 +199,20 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	event: message_stop
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(string(chunk))
+	usage := extractUsageStreaming(chunk)
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
 }
 
-func extractUsageStreaming(responseText string) *fwkrh.Usage {
+func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 	var result *fwkrh.Usage
 
-	lines := strings.Split(responseText, "\n")
-	for _, line := range lines {
-		if !strings.HasPrefix(line, streamingRespPrefix) {
+	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
+	for line := range lines {
+		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
+		if !ok || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
-		content := strings.TrimPrefix(line, streamingRespPrefix)
 
 		var event struct {
 			Type    string `json:"type"`
@@ -219,7 +221,7 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 			} `json:"message"`
 			Usage map[string]any `json:"usage"`
 		}
-		if err := json.Unmarshal([]byte(content), &event); err != nil {
+		if err := json.Unmarshal(content, &event); err != nil {
 			continue
 		}
 

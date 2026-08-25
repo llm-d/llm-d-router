@@ -36,8 +36,6 @@ import (
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
 
-const blockTypeText = "text"
-
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
@@ -108,27 +106,30 @@ func parseResolution(s string) (width, height int) {
 	return w, h
 }
 
-func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	// Pre-tokenized inputs are already real tokens; pass them through unchanged
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
 	switch {
 	case body.Generate != nil:
-		return &fwkrh.TokenizedPrompt{
-			PerPromptTokens:    [][]uint32{body.Generate.TokenIDs},
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
-		}, nil
+		}}}, nil
 	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Completions.Prompt.TokenIDs}}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Completions.Prompt.TokenIDs}}}, nil
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Embeddings.Input.TokenIDs}}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Embeddings.Input.TokenIDs}}}, nil
 	}
 
 	// Chat and Anthropic messages fold multimodal placeholders into the stream
 	// and report them as features.
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions, mmMetadataFromContext(ctx))
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}, MultiModalFeatures: features}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
@@ -140,7 +141,10 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 			"mmFeatureCount", len(features),
 			"mmFeatures", features,
 		)
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}, MultiModalFeatures: features}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokens,
+			MultiModalFeatures: features,
+		}}}, nil
 	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
@@ -151,16 +155,16 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}}, nil
+	return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
 }
 
-func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedPrompt, error) {
-	allTokenIDs := make([][]uint32, 0, len(req.Prompt.Strings))
+func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedRequest, error) {
+	prompts := make([]fwkrh.PromptTokens, 0, len(req.Prompt.Strings))
 	for _, s := range req.Prompt.Strings {
 		ids := packBytes([]byte(s))
-		allTokenIDs = append(allTokenIDs, ids)
+		prompts = append(prompts, fwkrh.PromptTokens{TokenIDs: ids})
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
+	return &fwkrh.TokenizedRequest{Prompts: prompts}, nil
 }
 
 // estimateBytes serializes the user input of a non-chat request body to a byte
@@ -243,16 +247,8 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			out = append(out, raw...)
 		}
 	}
-	// The system field accepts only text -- a string or an array of text blocks.
-	// See https://docs.anthropic.com/en/api/messages#body-system.
-	if req.System.Raw != "" {
-		out = append(out, []byte(req.System.Raw)...)
-	} else {
-		for _, block := range req.System.Structured {
-			if block.Type == blockTypeText {
-				out = append(out, []byte(block.Text)...)
-			}
-		}
+	if sys := anthropicSystemText(req.System); sys != "" {
+		out = append(out, []byte(sys)...)
 	}
 	for _, msg := range req.Messages {
 		if msg.Role != "" {
@@ -266,9 +262,22 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			switch block.Type {
 			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case "image":
+			case blockTypeImage:
 				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
 					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
+				}
+			case blockTypeThinking:
+				out = append(out, []byte(block.Thinking)...)
+			case blockTypeToolUse:
+				out = append(out, []byte(block.ID)...)
+				out = append(out, []byte(block.Name)...)
+				out = append(out, block.Input...)
+			case blockTypeToolResult:
+				text, imageBlocks := anthropicToolResultContent(block)
+				out = append(out, []byte(text)...)
+				for _, img := range imageBlocks {
+					url := img.ImageURL.URL
+					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
 				}
 			}
 		}

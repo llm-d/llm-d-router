@@ -124,8 +124,7 @@ monitoring:
   # Options: ["gmp", "prometheusoperator"].
   #     gmp: Google Managed Prometheus
   #     prometheusoperator: Open Source Prometheus Operator
-  # If not set, defaults to "prometheusoperator". For backwards compatibility,
-  # legacy provider.name=gke still maps to "gmp" when this field is unset.
+  # If not set, defaults to "prometheusoperator".
   provider:
     name: ""
     gmp:
