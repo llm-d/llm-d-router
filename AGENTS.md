@@ -41,9 +41,25 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 - Standard Go. `make format` and `make lint` are authoritative.
 - Comments are terse and only present when the WHY is non-obvious. Never paraphrase the code.
-- Docs and comments describe the current state on its own terms. No "previously", "now", "recently", "renamed from", "added to fix", or other temporal or conversational framing. A reader with no context for the change must still understand the text.
+- Docs and comments describe the current state on its own terms. No "previously", "now", "recently", "renamed from", "added to fix", "this PR", "see above", or other temporal, deictic, or conversational framing. A reader with no context for the change must still understand the text.
 - State each fact once, in its canonical location. Do not duplicate across struct docs, prose, tables, inline comments, and examples.
 - Do not use Unicode symbols or special characters in general, unless explicitly requested.
+
+### Constructions to delete
+
+Model-drafted prose drifts toward compressed, rhetorical phrasing. Before shipping any prose (comments, docs, commit bodies, PR descriptions), decompress it: rewrite each such sentence as a plain statement of the fact it carries, judged against what the change is actually for. The test: if a sentence sounds quotable, delete it.
+
+| Tic | Example | Fix |
+|---|---|---|
+| X, not Y | "the queue is not a buffer, it is a fairness mechanism" | say what it is, once |
+| Coined aphorism | "a shed request is not a failure, it is the contract" | delete the sentence |
+| Closing zinger | a paragraph that ends on a beat instead of a fact | end on information |
+| Triads for rhythm | "no locks to take, no channels to drain, no state to sync" | one clause |
+| Portent counters | "three things follow", "two points are worth noting" | just say them |
+| Filler intensifiers | genuinely, precisely, critically, crucially, "worth noting" | cut |
+| Editorial tails | "..., which is exactly what we want" | cut, or a new sentence |
+| Grandeur adjectives | comprehensive, robust, seamless, production-ready | name the verified behavior |
+| Dash pileup | more than one dash pair per paragraph | periods |
 
 ### Logging
 

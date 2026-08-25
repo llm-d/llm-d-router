@@ -228,8 +228,9 @@ func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
 		return false
 	}
 	return fc.MaxBytes != nil || fc.MaxRequests != nil || fc.DefaultRequestTTL != nil ||
-		fc.DefaultPriorityBand != nil || fc.DefaultNegativePriorityBand != nil ||
-		len(fc.PriorityBands) > 0 || fc.UsageLimitPolicyPluginRef != ""
+		fc.NoEndpointRequestTTL != nil || fc.DefaultPriorityBand != nil ||
+		fc.DefaultNegativePriorityBand != nil || len(fc.PriorityBands) > 0 ||
+		fc.UsageLimitPolicyPluginRef != ""
 }
 
 func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error) {

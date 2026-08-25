@@ -100,7 +100,10 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	}
 	candidates := &mocks.MockEndpointCandidates{Candidates: opts.candidates}
 	fc := fccontroller.NewFlowController(ctx, "test-pool", &fccontroller.Config{
-		DefaultRequestTTL:        requestTTL,
+		DefaultRequestTTL: requestTTL,
+		// Both unavailability regimes share one budget, as they do under the shipped defaults, so requestTTL
+		// bounds queue wait whether or not the pool has endpoints.
+		NoEndpointRequestTTL:     requestTTL,
 		ExpiryCleanupInterval:    10 * time.Millisecond,
 		EnqueueChannelBufferSize: 100,
 	}, fccontroller.Deps{

@@ -48,6 +48,7 @@ import (
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
@@ -502,6 +503,19 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - Flow Control No-Endpoint TTL Follows Default",
+			configText: successFlowControlInheritedTTLText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, _ *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.FlowControlConfig, "FlowControl config should have been loaded")
+				require.NotNil(t, cfg.FlowControlConfig.Controller, "Controller config should be present")
+				require.Equal(t, time.Duration(0), cfg.FlowControlConfig.Controller.DefaultRequestTTL,
+					"an explicit 0s should disable eviction while the pool has endpoints")
+				require.Equal(t, time.Duration(0), cfg.FlowControlConfig.Controller.NoEndpointRequestTTL,
+					"an unset no-endpoint budget should follow defaultRequestTTL, so 0s disables eviction in both regimes")
+			},
+		},
+		{
 			name:       "Success - Picker Before Scorer",
 			configText: successPickerBeforeScorerText,
 			wantErr:    false,
@@ -526,6 +540,8 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Equal(t, uint64(1024), cfg.FlowControlConfig.Registry.MaxBytes, "MaxBytes should match yaml")
 				require.NotNil(t, cfg.FlowControlConfig.Controller, "Controller config should be present")
 				require.Equal(t, 1*time.Minute, cfg.FlowControlConfig.Controller.DefaultRequestTTL, "DefaultRequestTTL should match yaml")
+				require.Equal(t, 5*time.Minute, cfg.FlowControlConfig.Controller.NoEndpointRequestTTL,
+					"NoEndpointRequestTTL should match yaml")
 				require.Equal(t, 1*time.Second, cfg.FlowControlConfig.Controller.ExpiryCleanupInterval, "ExpiryCleanupInterval should use default")
 
 				// Verify plugins were injected into the Raw Config.
@@ -608,13 +624,15 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
 				parsers := cfg.ParserRegistry.Parsers()
-				require.Len(t, parsers, 3, "Should have three default parsers")
+				require.Len(t, parsers, 4, "Should have the three default parsers plus the passthrough fallback")
 				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
 				require.Equal(t, openai.OpenAIParserType, parsers[0].TypedName().Type)
 				require.Equal(t, "anthropic-parser", parsers[1].TypedName().Name)
 				require.Equal(t, anthropic.AnthropicParserType, parsers[1].TypedName().Type)
 				require.Equal(t, "vllmhttp-parser", parsers[2].TypedName().Name)
 				require.Equal(t, vllmhttp.VllmHTTPParserType, parsers[2].TypedName().Type)
+				require.Equal(t, passthrough.PassthroughParserType, parsers[3].TypedName().Type,
+					"Passthrough is last so it does not shadow the claimed parsers")
 			},
 		},
 		{
@@ -649,6 +667,20 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be loaded")
 				require.Equal(t, "utilization-detector", cfg.SaturationDetector.TypedName().Name)
+			},
+		},
+		{
+			name:       "Success - Explicit parsers keep their own fallback",
+			configText: successExplicitPassthroughConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
+				parsers := cfg.ParserRegistry.Parsers()
+				require.Len(t, parsers, 2, "Explicit parsers are used as given")
+				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
+				require.Equal(t, "myFallback", parsers[1].TypedName().Name,
+					"The operator's own fallback is kept, under its own name")
+				require.Equal(t, passthrough.PassthroughParserType, parsers[1].TypedName().Type)
 			},
 		},
 		{
@@ -1189,6 +1221,7 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityStable, vertexai.VertexAIParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityStable, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityStable, vllmhttp.VllmHTTPParserPluginFactory)
+	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityStable, usagelimits.StaticPolicyFactory)
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, fwkplugin.StabilityStable, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityStable, reqdataprodprefix.ApproxPrefixCacheFactory)

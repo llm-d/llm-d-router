@@ -46,6 +46,7 @@ var (
 		lowerHeaderNames(
 			metadata.DestinationEndpointKey,
 			metadata.DestinationEndpointServedKey,
+			metadata.FlowQueueDurationHeaderKey,
 		),
 		errcommon.RequestDroppedReasonHeaderKey,
 	)
