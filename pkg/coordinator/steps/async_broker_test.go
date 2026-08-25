@@ -618,3 +618,73 @@ func TestAsyncQuotaFailsOpen(t *testing.T) {
 	assert.Equal(t, asyncClassificationReserved, class)
 	assert.Nil(t, release)
 }
+
+// TestAsyncBrokerRetryReattaches covers re-POSTs of a client-chosen id: a
+// live copy is reattached to, a cancelled but still queued copy is revived,
+// a cancelled tombstone routes to a fresh enqueue, and a stored result is
+// delivered to a wait retry. None of them enqueue a duplicate.
+func TestAsyncBrokerRetryReattaches(t *testing.T) {
+	const queue = "team-default-queue"
+	post := func(t *testing.T, step *AsyncBrokerStep, mode, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
+			"X-AP-Mode": mode, "X-Team": "team-a", "X-Request-Id": id,
+		})
+		reqCtx.RequestID = id
+		err := step.Execute(t.Context(), reqCtx)
+		require.True(t, errors.Is(err, pipeline.ErrPipelineDone))
+		return rec
+	}
+	queueLen := func(t *testing.T, rdb *redis.Client) int64 {
+		t.Helper()
+		n, err := rdb.ZCard(t.Context(), queue).Result()
+		require.NoError(t, err)
+		return n
+	}
+
+	t.Run("live id is not re-enqueued", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		post(t, step, "enqueue", "job-r1")
+		rec := post(t, step, "enqueue", "job-r1")
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		assert.Equal(t, int64(1), queueLen(t, rdb))
+	})
+
+	t.Run("cancelled queued copy is revived", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		post(t, step, "enqueue", "job-r2")
+		eid := envelopeID("team-a", "job-r2")
+		require.NoError(t, step.sub.CancelRequests(t.Context(), []string{eid}))
+		rec := post(t, step, "enqueue", "job-r2")
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), exists, "retry should clear the cancel marker")
+		assert.Equal(t, int64(1), queueLen(t, rdb))
+	})
+
+	t.Run("cancelled tombstone runs fresh", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		res, err := json.Marshal(api.ResultMessage{ErrorCode: api.ErrCodeCancelled, ErrorMessage: "cancelled"})
+		require.NoError(t, err)
+		key := resultKey("team-a", "job-r3")
+		require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+		rec := post(t, step, "enqueue", "job-r3")
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		exists, err := rdb.Exists(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), exists, "retry should clear the tombstone")
+		assert.Equal(t, int64(1), queueLen(t, rdb))
+	})
+
+	t.Run("wait retry delivers the stored result", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		res, err := json.Marshal(api.ResultMessage{StatusCode: 200, Payload: `{"object":"chat.completion"}`})
+		require.NoError(t, err)
+		require.NoError(t, rdb.LPush(t.Context(), resultKey("team-a", "job-r4"), string(res)).Err())
+		rec := post(t, step, "wait", "job-r4")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "chat.completion")
+		assert.Equal(t, int64(0), queueLen(t, rdb), "no enqueue for a completed request")
+	})
+}

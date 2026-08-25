@@ -238,6 +238,13 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 	}
 	timeout := time.Duration(timeoutSecs) * time.Second
 
+	// A client-chosen id names a logical request, so a re-POST reattaches
+	// to any live copy or stored result instead of enqueueing a duplicate.
+	if reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) != "" &&
+		s.reattachRetry(ctx, reqCtx, mode, tenant, timeout) {
+		return pipeline.ErrPipelineDone
+	}
+
 	queue, _ := s.cfg.route(reqCtx.Model, tenant)
 	now := time.Now()
 
@@ -281,6 +288,59 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 	}
 	s.waitForResult(ctx, reqCtx, tenant, timeout)
 	return pipeline.ErrPipelineDone
+}
+
+// unCancelScript revives a cancelled request that is still queued. The
+// marker is deleted only while it matches the active token, so a marker
+// left by an older submission of the same id is not cleared by mistake.
+var unCancelScript = redis.NewScript(`
+local cancel = redis.call("GET", KEYS[1])
+if cancel and cancel == redis.call("GET", KEYS[2]) then
+  redis.call("DEL", KEYS[1])
+  return 1
+end
+return 0
+`)
+
+// reattachRetry resolves a client-chosen id against the broker before
+// enqueueing. A stored result or live copy answers without a new enqueue
+// (a still-queued cancelled copy is revived via unCancelScript), while a
+// cancelled tombstone is cleared so the retry runs fresh. The revive can
+// lose its race with the AP dropping the copy, in which case the tombstone
+// it writes ends the hold with 499 and the next retry lands on the fresh
+// path. Returns true when the response was written here; false sends the
+// caller to the fresh enqueue, which is also the fallback on lookup errors.
+func (s *AsyncBrokerStep) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContext, mode asyncMode, tenant string, timeout time.Duration) bool {
+	logger := log.FromContext(ctx).WithName(AsyncBrokerStepName)
+	id := reqCtx.RequestID
+	state, res, err := lookupResult(ctx, s.rdb, tenant, id)
+	if err != nil {
+		logger.Error(err, "retry state lookup failed, enqueueing fresh", "id", id)
+		return false
+	}
+	switch state {
+	case asyncStateUnknown:
+		return false
+	case asyncStateReady:
+		if res.StatusCode == 0 && res.ErrorCode == api.ErrCodeCancelled {
+			if err := s.rdb.Del(ctx, resultKey(tenant, id)).Err(); err != nil {
+				logger.Error(err, "failed to clear cancelled result before retry", "id", id)
+			}
+			return false
+		}
+	case asyncStatePending:
+		eid := envelopeID(tenant, id)
+		if err := unCancelScript.Run(ctx, s.rdb,
+			[]string{api.RequestCancellationKey(eid), api.RequestActiveTokenKey(eid)}).Err(); err != nil {
+			logger.Error(err, "failed to revive cancelled request on retry", "id", id)
+		}
+	}
+	if mode == asyncModeEnqueue {
+		writePending(reqCtx.ResponseWriter, id)
+		return true
+	}
+	s.waitForResult(ctx, reqCtx, tenant, timeout)
+	return true
 }
 
 func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string, timeout time.Duration) {
@@ -352,10 +412,10 @@ func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.Re
 			if ctx.Err() != nil {
 				// Client disconnected: nobody will fetch this result, so
 				// cancel pre-dispatch (best effort, per the producer's
-				// cancellation contract). A later retry with the same id is
-				// accepted, since SubmitRequest clears the cancellation
-				// marker on enqueue, though it enqueues a fresh message: if
-				// the original is still queued, both may dispatch.
+				// cancellation contract). A later retry with the same id
+				// reattaches: reattachRetry revives a still-queued copy, and
+				// an already-dropped one leaves a cancelled tombstone that
+				// routes the retry to a fresh enqueue.
 				cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancelFn()
 				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
