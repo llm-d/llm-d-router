@@ -86,6 +86,33 @@ func BenchmarkInMemoryIndexLookup(b *testing.B) {
 	}
 }
 
+// BenchmarkInMemoryIndexLookupParallel measures the materializing lookup path
+// under concurrent request traffic sharing one index.
+func BenchmarkInMemoryIndexLookupParallel(b *testing.B) {
+	const numKeys = 3750
+	for _, numPods := range []int{8, 96} {
+		b.Run(fmt.Sprintf("keys=3750/pods=%d", numPods), func(b *testing.B) {
+			idx, keys := populateIndex(b, numKeys, numPods)
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					res, err := idx.Lookup(ctx, keys, nil)
+					if err != nil {
+						b.Error(err)
+						return
+					}
+					if len(res) != numKeys {
+						b.Errorf("unexpected result size %d", len(res))
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkInMemoryIndexAdd measures ingesting one BlockStored event's worth
 // of keys (64 blocks) for a single pod entry, over a warm index.
 func BenchmarkInMemoryIndexAdd(b *testing.B) {
