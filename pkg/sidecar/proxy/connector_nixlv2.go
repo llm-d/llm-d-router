@@ -34,6 +34,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // tokenLimitMap returns the map holding the token-limit fields: sampling_params
@@ -242,12 +243,14 @@ retryLoop:
 	}
 
 	prefillDuration := time.Since(prefillStart)
+	metrics.RecordPrefillDuration(prefillDuration)
 	prefillSpan.SetAttributes(
 		attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 		attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 	)
 
 	if isHTTPError(pw.statusCode) {
+		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
 			"body", pw.buffer.String())
@@ -440,6 +443,7 @@ retryLoop:
 	}
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
 	decodeSpan.SetAttributes(attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())))
 
 	// Calculate end-to-end P/D timing metrics.
