@@ -157,6 +157,16 @@ func (m *mockEncodeDecider) disaggregate(_ context.Context, _ *scheduling.Infere
 	return m.allow
 }
 
+type mockPDDecider struct {
+	allow bool
+}
+
+func (m *mockPDDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
+
+func (m *mockPDDecider) disaggregate(_ context.Context, _ *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
+	return m.allow
+}
+
 // ── Helper function tests ────────────────────────────────────────────────────
 
 func TestHasMultimodalContent(t *testing.T) {
@@ -512,6 +522,62 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 			tt.check(t, res)
 		})
 	}
+}
+
+// TestHandler_PD_PrefillRequiredButUnavailable exercises the real Pick ->
+// ProcessResults sequence (as the scheduler runs them) for the two ways a
+// picked prefill profile can end up nil in profileResults: the PD decider
+// declining to run it (safe to complete decode-only) versus the profile
+// having been picked and run, but finding no endpoint (must fail the
+// request rather than silently complete decode-only). Regression test for
+// https://github.com/llm-d/llm-d-router/issues/2427: with an always-disagg
+// decider and no ready prefill endpoints, requests were completing on
+// decode alone instead of failing.
+func TestHandler_PD_PrefillRequiredButUnavailable(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+	newDecodeResults := func() map[string]*scheduling.ProfileRunResult {
+		return map[string]*scheduling.ProfileRunResult{
+			defaultDecodeProfile: makeProfileRunResult("pod1"),
+		}
+	}
+
+	t.Run("decider declines prefill -> decode-only, no error", func(t *testing.T) {
+		req := completionsRequest(testLongPrompt)
+		decodeResults := newDecodeResults()
+		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+			&mockPDDecider{allow: false}, nil)
+
+		got := h.Pick(ctx, req, profiles, decodeResults)
+		assert.ElementsMatch(t, []string{}, profileNames(got), "decider should decline prefill")
+
+		res, err := h.ProcessResults(ctx, req, decodeResults)
+		assert.NoError(t, err, "a declined prefill stage must not fail the request")
+		assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+		assert.NotContains(t, res.ProfileResults, defaultPrefillProfile)
+	})
+
+	t.Run("decider requires prefill, none available -> error", func(t *testing.T) {
+		req := completionsRequest(testLongPrompt)
+		decodeResults := newDecodeResults()
+		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+			newAlwaysDisaggPDDecider(), nil)
+
+		got := h.Pick(ctx, req, profiles, decodeResults)
+		assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got), "decider should pick prefill")
+
+		// Simulate the scheduler running the picked prefill profile and finding
+		// no endpoint: it records a nil result, exactly like a declined stage.
+		failedResults := map[string]*scheduling.ProfileRunResult{
+			defaultDecodeProfile:  decodeResults[defaultDecodeProfile],
+			defaultPrefillProfile: nil,
+		}
+		_, err := h.ProcessResults(ctx, req, failedResults)
+		assert.Error(t, err, "a required prefill stage that found no endpoint must fail the request")
+	})
 }
 
 func TestHandler_ProcessResults_NilRequest(t *testing.T) {

@@ -67,6 +67,14 @@ func ParseStageOrder(s string) (StageOrder, error) {
 // The value is an Endpoint.
 var PeerEndpointAttributeKey = plugin.NewDataKey("peer-endpoint", DisaggProfileHandlerType)
 
+// prefillDeclinedAttributeKey marks, for decode-first mode, that the PD
+// decider itself chose not to run the prefill profile (or no PD decider is
+// configured). ProcessResults reads this to tell that intentional skip apart
+// from a prefill profile that was picked to run and then failed to find any
+// endpoint: both leave profileResults[prefillProfile] as a nil entry, but
+// only the former is safe to complete decode-only. The value is a bool.
+var prefillDeclinedAttributeKey = plugin.NewDataKey("prefill-declined", DisaggProfileHandlerType)
+
 // ── Factory & constructor ────────────────────────────────────────────────────
 
 type disaggProfilesParameters struct {
@@ -329,8 +337,10 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
-			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
+			// Decider rejected prefill - mark as evaluated so we don't re-run the decider,
+			// and record that this is an intentional skip, not a failed run.
 			profileResults[h.prefillProfile] = nil
+			request.PutAttribute(prefillDeclinedAttributeKey, true)
 			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
 		}
 	}
@@ -428,8 +438,16 @@ func (h *Handler) ProcessResults(
 
 	updatedResults[h.decodeProfile] = decodeRunResults
 
-	if prefillRes, ok := profileResults[h.prefillProfile]; ok && prefillRes != nil {
-		updatedResults[h.prefillProfile] = prefillRes
+	if prefillRes, ok := profileResults[h.prefillProfile]; ok {
+		if prefillRes != nil {
+			updatedResults[h.prefillProfile] = prefillRes
+		} else if declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey); !declined {
+			// The PD decider picked the prefill profile to run and it found no
+			// endpoint, instead of the decider declining to run it at all.
+			// Completing decode-only here would silently run prefill work on a
+			// decode pod instead of failing the request.
+			return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
+		}
 	}
 
 	if encodeRes, ok := profileResults[h.encodeProfile]; ok && encodeRes != nil {

@@ -50,7 +50,7 @@ func TestPrompt_UnmarshalJSON(t *testing.T) {
 		{
 			name:  "array of integers prompt",
 			input: `[1,2,3]`,
-			want:  Prompt{TokenIDs: []uint32{1, 2, 3}},
+			want:  Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
 		},
 		{
 			name:    "array of floats prompt is rejected",
@@ -59,8 +59,38 @@ func TestPrompt_UnmarshalJSON(t *testing.T) {
 		},
 
 		{
-			name:    "array of arrays of integers prompt is rejected for now",
-			input:   `[[1,2],[3,4]]`,
+			name:  "array of arrays of integers prompt",
+			input: `[[1,2],[3,4]]`,
+			want:  Prompt{TokenIDs: [][]uint32{{1, 2}, {3, 4}}},
+		},
+		{
+			name:  "single sub-array of integers prompt",
+			input: `[[10,20,30]]`,
+			want:  Prompt{TokenIDs: [][]uint32{{10, 20, 30}}},
+		},
+		{
+			name:    "empty sub-array in nested prompt",
+			input:   `[[1,2],[]]`,
+			wantErr: true,
+		},
+		{
+			name:    "mixed types in nested array prompt",
+			input:   `[[1,2],"hello"]`,
+			wantErr: true,
+		},
+		{
+			name:    "float in sub-array prompt",
+			input:   `[[1,2.5]]`,
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric in sub-array prompt",
+			input:   `[[1,"a"]]`,
+			wantErr: true,
+		},
+		{
+			name:    "triple nesting prompt",
+			input:   `[[[1,2]]]`,
 			wantErr: true,
 		},
 
@@ -110,18 +140,17 @@ func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
 		{
 			name:  "array of integers input",
 			input: `[1,2,3]`,
-			want:  EmbeddingsInput{TokenIDs: []uint32{1, 2, 3}},
+			want:  EmbeddingsInput{TokenIDs: [][]uint32{{1, 2, 3}}},
 		},
 		{
 			name:    "array of floats input is rejected",
 			input:   `[1.5,2.7]`,
 			wantErr: true,
 		},
-
 		{
-			name:    "array of arrays of integers input is rejected for now",
-			input:   `[[1,2],[3,4]]`,
-			wantErr: true,
+			name:  "array of arrays of integers input",
+			input: `[[1,2],[3,4]]`,
+			want:  EmbeddingsInput{TokenIDs: [][]uint32{{1, 2}, {3, 4}}},
 		},
 
 		{
@@ -169,6 +198,7 @@ func TestPrompt_IsEmpty(t *testing.T) {
 	assert.True(t, Prompt{Strings: []string{}}.IsEmpty())
 	assert.False(t, Prompt{Raw: "x"}.IsEmpty())
 	assert.False(t, Prompt{Strings: []string{"x"}}.IsEmpty())
+	assert.False(t, Prompt{TokenIDs: [][]uint32{{1, 2}}}.IsEmpty())
 }
 
 func TestPrompt_MarshalJSON(t *testing.T) {
@@ -177,6 +207,9 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 
 	arr, _ := Prompt{Strings: []string{"a", "b"}}.MarshalJSON()
 	assert.Equal(t, `["a","b"]`, string(arr))
+
+	nested, _ := Prompt{TokenIDs: [][]uint32{{1, 2}, {3, 4}}}.MarshalJSON()
+	assert.Equal(t, `[[1,2],[3,4]]`, string(nested))
 
 	empty, _ := Prompt{}.MarshalJSON()
 	assert.Equal(t, `""`, string(empty))

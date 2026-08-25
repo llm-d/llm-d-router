@@ -73,7 +73,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello, Claude"},
 					},
@@ -108,7 +108,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -141,7 +141,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system":     "You are a helpful assistant.",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -176,7 +176,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system": []any{
 						map[string]any{"type": "text", "text": "You are a helpful assistant."},
 					},
@@ -230,7 +230,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -281,7 +281,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"tools": []any{
 						map[string]any{
 							"name":        "get_weather",
@@ -314,7 +314,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"stream":     true,
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -344,7 +344,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"cache_salt": "test-salt-123",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -371,7 +371,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
 					},
