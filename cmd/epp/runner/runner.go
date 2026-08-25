@@ -259,7 +259,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
-	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil && rawConfig.DataLayer.Discovery.Endpoints != nil {
+	dlCfg := rawConfig.DataLayer
+	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
 	}
 

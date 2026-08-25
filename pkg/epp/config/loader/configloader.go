@@ -157,7 +157,7 @@ func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPic
 
 	//nolint:staticcheck // SA1019: dl.Discovery.PluginRef is deprecated: use discovery.endpoints instead.
 	if dl.Discovery != nil && dl.Discovery.PluginRef != "" {
-		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead.")
+		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead. If both are set, the new field is used.")
 		if dl.Discovery.Endpoints == nil {
 			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
 		}
