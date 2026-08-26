@@ -19,6 +19,8 @@ package kvblock_test
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -231,6 +233,130 @@ func BenchmarkScoredLookupParallel(b *testing.B) {
 			})
 		})
 	}
+}
+
+// BenchmarkScoredLookupEarlyBreak measures a cached request whose candidate
+// chain ends at the second key, so later request-key batches are not fetched.
+func BenchmarkScoredLookupEarlyBreak(b *testing.B) {
+	const numKeys = 3750
+	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{
+		Size:         1 << 20,
+		PodCacheSize: 128,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	keys := make([]kvblock.BlockHash, numKeys)
+	for i := range keys {
+		keys[i] = kvblock.BlockHash(uint64(i) + 1)
+	}
+	ctx := context.Background()
+	requireAdd := func(keys []kvblock.BlockHash, pod string) {
+		b.Helper()
+		entries := []kvblock.PodEntry{{PodIdentifier: pod, DeviceTier: "gpu"}}
+		if err := idx.Add(ctx, nil, keys, entries); err != nil {
+			b.Fatal(err)
+		}
+	}
+	requireAdd(keys[:1], "10.0.0.1:8000")
+	requireAdd(keys[1:], "10.0.0.2:8000")
+	tierWeights := map[string]float64{"gpu": 1.0}
+	lookup := func(b *testing.B) {
+		stats, err := idx.ScoredLookup(ctx, keys, nil, tierWeights)
+		if err != nil {
+			b.Error(err)
+			return
+		}
+		first, found := stats["10.0.0.1:8000"]
+		if len(stats) != 1 || !found || first.MatchedBlocks != 1 {
+			b.Errorf("unexpected stats: pods=%d first-found=%t first-matched=%d", len(stats), found, first.MatchedBlocks)
+		}
+	}
+
+	b.Run("serial", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			lookup(b)
+		}
+	})
+	b.Run("parallel", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				lookup(b)
+			}
+		})
+	})
+}
+
+// BenchmarkScoredLookupMixed measures concurrent fused scoring while event
+// writers insert new block mappings into the same index.
+func BenchmarkScoredLookupMixed(b *testing.B) {
+	const (
+		numKeys    = 3750
+		numPods    = 16
+		numWriters = 4
+	)
+	idx, keys := populateIndex(b, numKeys, numPods)
+	ctx := context.Background()
+	tierWeights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
+
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	var writers sync.WaitGroup
+	var writeOps atomic.Uint64
+	writers.Add(numWriters)
+	for w := 0; w < numWriters; w++ {
+		go func(w int) {
+			defer writers.Done()
+			entries := []kvblock.PodEntry{{PodIdentifier: fmt.Sprintf("10.1.0.%d:8000", w), DeviceTier: "gpu"}}
+			engineKeys := make([]kvblock.BlockHash, 64)
+			requestKeys := make([]kvblock.BlockHash, 64)
+			<-start
+			for i := uint64(0); ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				base := (uint64(1) << 48) + uint64(w)*(uint64(1)<<44) + i*64 + 1
+				for j := range engineKeys {
+					engineKeys[j] = kvblock.BlockHash(base + uint64(j))
+					requestKeys[j] = kvblock.BlockHash(base + uint64(j))
+				}
+				if err := idx.Add(ctx, engineKeys, requestKeys, entries); err != nil {
+					b.Error(err)
+					return
+				}
+				writeOps.Add(1)
+			}
+		}(w)
+	}
+
+	// Allocation metrics include both lookup and writer work.
+	b.ReportAllocs()
+	b.ResetTimer()
+	close(start)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			stats, err := idx.ScoredLookup(ctx, keys, nil, tierWeights)
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			first, found := stats["10.0.0.0:8000"]
+			if len(stats) != numPods || !found || first.MatchedBlocks != numKeys {
+				b.Errorf("unexpected stats: pods=%d first-found=%t first-matched=%d", len(stats), found, first.MatchedBlocks)
+				return
+			}
+		}
+	})
+	b.StopTimer()
+	elapsed := b.Elapsed()
+	completedWrites := writeOps.Load()
+	close(stop)
+	writers.Wait()
+	b.ReportMetric(float64(completedWrites)/elapsed.Seconds(), "writes/s")
 }
 
 // BenchmarkScoredLookupAfterChurn measures the fused walk after 10,000
