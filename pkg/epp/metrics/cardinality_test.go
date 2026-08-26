@@ -23,34 +23,14 @@ import (
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 )
 
-func TestBoundedLabel(t *testing.T) {
-	b := newBoundedLabel(2)
-
-	require.Equal(t, "a", b.bound("a"), "first value admitted")
-	require.Equal(t, "b", b.bound("b"), "second value admitted")
-	require.Equal(t, overflowValue, b.bound("c"), "value beyond cap collapses to overflow")
-	require.Equal(t, "a", b.bound("a"), "already-admitted value still returns itself after cap")
-	require.Equal(t, overflowValue, b.bound("d"), "further unseen values keep collapsing")
-	require.Equal(t, "", b.bound(""), "empty value passes through without consuming a slot")
-}
-
-// Pinned names model operator-configured models (InferenceModelRewrite sources
-// and targets): they must emit their real label even when the cap is exhausted
-// by unconfigured names, and must not consume cap slots themselves.
-func TestBoundedLabelPin(t *testing.T) {
-	b := newBoundedLabel(2)
-
-	b.pin("configured")
-	b.pin("configured") // idempotent
-	require.Equal(t, "a", b.bound("a"), "pin does not consume a cap slot")
-	require.Equal(t, "b", b.bound("b"), "cap still has room for a second unconfigured name")
-	require.Equal(t, overflowValue, b.bound("c"), "cap full for unconfigured names")
-	require.Equal(t, "configured", b.bound("configured"), "pinned name survives a full cap")
-
-	b.pin("late")
-	require.Equal(t, "late", b.bound("late"), "name pinned after the cap fills still emits its real label")
+// resetFairnessLabelLimit restores the shared fairness cap to its default after a test.
+func resetFairnessLabelLimit(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() { cardinality.SetFairnessIDLabelLimit(cardinality.DefaultFairnessIDLabelLimit) })
 }
 
 // PreAdmitModelLabels feeds the package-level limiter used by the record
@@ -58,7 +38,7 @@ func TestBoundedLabelPin(t *testing.T) {
 func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(testCap)
+	modelLabelLimiter = cardinality.NewBoundedLabel(testCap)
 	requestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
@@ -84,7 +64,7 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(testCap)
+	modelLabelLimiter = cardinality.NewBoundedLabel(testCap)
 	requestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
@@ -100,17 +80,16 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 		"model_name cardinality must stay bounded by the cap, got %d series", count)
 }
 
-// The fairness_id label is populated from a client request header, so the package-level limiter
-// must collapse an unbounded flood of distinct IDs into the overflow bucket instead of minting a
-// series per ID.
+// The fairness_id label is populated from a client request header, so the shared limiter must
+// collapse an unbounded flood of distinct IDs into the overflow bucket instead of minting a series
+// per ID.
 func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 	const testCap = 5
-	old := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(testCap)
+	resetFairnessLabelLimit(t)
+	cardinality.SetFairnessIDLabelLimit(testCap)
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
-		fairnessLabelLimiter = old
 		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
@@ -129,12 +108,11 @@ func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 // DeleteFlowControlFlowSeries backs the flow registry's GC hook: once a flow is collected, its
 // series must not linger for the lifetime of the process.
 func TestDeleteFlowControlFlowSeries(t *testing.T) {
-	old := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(10)
+	resetFairnessLabelLimit(t)
+	cardinality.SetFairnessIDLabelLimit(10)
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
-		fairnessLabelLimiter = old
 		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
@@ -158,14 +136,13 @@ func TestDeleteFlowControlFlowSeries(t *testing.T) {
 // pattern regressing there.
 func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 	const testCap = 3
-	oldFairness := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(testCap)
+	resetFairnessLabelLimit(t)
+	cardinality.SetFairnessIDLabelLimit(testCap)
 	oldModels := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(10)
+	modelLabelLimiter = cardinality.NewBoundedLabel(10)
 	requestCounter.Reset()
 	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
-		fairnessLabelLimiter = oldFairness
 		modelLabelLimiter = oldModels
 		requestCounter.Reset()
 		llmdRequestCounter.Reset()
@@ -186,14 +163,13 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 func TestQueueDurationBoundsModelLabels(t *testing.T) {
 	const testCap = 3
 	oldModels := modelLabelLimiter
-	modelLabelLimiter = newBoundedLabel(testCap)
-	oldFairness := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(10)
+	modelLabelLimiter = cardinality.NewBoundedLabel(testCap)
+	resetFairnessLabelLimit(t)
+	cardinality.SetFairnessIDLabelLimit(10)
 	flowControlRequestQueueDuration.Reset()
 	llmdFlowControlRequestQueueDuration.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = oldModels
-		fairnessLabelLimiter = oldFairness
 		flowControlRequestQueueDuration.Reset()
 		llmdFlowControlRequestQueueDuration.Reset()
 	})
@@ -212,12 +188,11 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 // A client can choose the overflow value itself as its fairness ID; GC of that flow must not
 // delete the shared overflow series that aggregates every capped-out tenant.
 func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
-	old := fairnessLabelLimiter
-	fairnessLabelLimiter = newBoundedLabel(1)
+	resetFairnessLabelLimit(t)
+	cardinality.SetFairnessIDLabelLimit(1)
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
-		fairnessLabelLimiter = old
 		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
@@ -228,7 +203,7 @@ func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
 	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
 		"setup: expected the admitted series plus the overflow series")
 
-	DeleteFlowControlFlowSeries(overflowValue, "0")
+	DeleteFlowControlFlowSeries(cardinality.OverflowValue, "0")
 
 	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
 		"deleting the overflow value must be a no-op; the shared overflow series must survive")
@@ -236,10 +211,10 @@ func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
 		"the llm_d_epp family must be preserved identically")
 }
 
-// SetFairnessIDLabelLimit changes the cap on distinct fairness_id label values.
-func TestSetFairnessIDLabelLimit(t *testing.T) {
+// The configured cap propagates through the record functions to the emitted series.
+func TestFairnessIDLabelLimitAppliesToRecordedMetrics(t *testing.T) {
+	resetFairnessLabelLimit(t)
 	t.Cleanup(func() {
-		fairnessLabelLimiter = newBoundedLabel(DefaultFairnessIDMetricLabelLimit)
 		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
@@ -257,11 +232,9 @@ func TestSetFairnessIDLabelLimit(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fairnessLabelLimiter = newBoundedLabel(DefaultFairnessIDMetricLabelLimit)
+			cardinality.SetFairnessIDLabelLimit(test.limit)
 			flowControlRequestEnqueueDuration.Reset()
 			llmdFlowControlRequestEnqueueDuration.Reset()
-
-			SetFairnessIDLabelLimit(test.limit)
 
 			for i := 0; i < 100; i++ {
 				RecordFlowControlRequestEnqueueDuration(fmt.Sprintf("tenant-%d", i), "0", "Dispatched", time.Millisecond)

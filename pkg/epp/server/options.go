@@ -37,7 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 )
 
 const (
@@ -162,7 +162,7 @@ func NewOptions() *Options {
 		LoggingOptions:                   *logging.NewOptions(),
 		Tracing:                          true,
 		MetricsPort:                      9090,
-		FairnessIDMetricLabelLimit:       metrics.DefaultFairnessIDMetricLabelLimit,
+		FairnessIDMetricLabelLimit:       cardinality.DefaultFairnessIDLabelLimit,
 		GRPCHealthPort:                   9003,
 		EnablePprof:                      true,
 		SecureServing:                    true,

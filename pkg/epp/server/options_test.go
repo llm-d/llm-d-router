@@ -28,7 +28,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 )
 
 const (
@@ -276,8 +276,8 @@ func TestValidateDirectValues(t *testing.T) {
 }
 
 func TestFairnessIDMetricLabelLimitDefault(t *testing.T) {
-	if got := NewOptions().FairnessIDMetricLabelLimit; got != metrics.DefaultFairnessIDMetricLabelLimit {
-		t.Errorf("default FairnessIDMetricLabelLimit: got %d, want %d", got, metrics.DefaultFairnessIDMetricLabelLimit)
+	if got := NewOptions().FairnessIDMetricLabelLimit; got != cardinality.DefaultFairnessIDLabelLimit {
+		t.Errorf("default FairnessIDMetricLabelLimit: got %d, want %d", got, cardinality.DefaultFairnessIDLabelLimit)
 	}
 }
 
