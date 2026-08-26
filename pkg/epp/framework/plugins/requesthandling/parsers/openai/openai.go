@@ -127,15 +127,26 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if apiType == imagesEditsAPI {
 		return parseImagesEditsRequest(body, headers)
 	}
-	bodyMap := make(map[string]any)
-	if err := parserutil.Unmarshal(body, &bodyMap); err != nil {
-		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
-	}
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error extracting request body: %w", err)
 	}
-	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+
+	rawField := tokenInputField(extractedBody)
+	var bodyMap fwkrh.PayloadMap
+	if rawField == "" {
+		bodyMap = make(fwkrh.PayloadMap)
+		err = parserutil.Unmarshal(body, &bodyMap)
+	} else {
+		var payload map[string]any
+		payload, err = parserutil.UnmarshalMapWithRawField(body, rawField)
+		bodyMap = fwkrh.PayloadMap(payload)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
+	}
+
+	extractedBody.Payload = bodyMap
 	if model, ok := bodyMap["model"].(string); ok {
 		extractedBody.Model = model
 	}
@@ -144,6 +155,17 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+func tokenInputField(body *fwkrh.InferenceRequestBody) string {
+	switch {
+	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
+		return "prompt"
+	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
+		return "input"
+	default:
+		return ""
+	}
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
@@ -265,48 +287,70 @@ func determineAPITypeFromPath(path string) string {
 func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequestBody, error) {
 	switch apiType {
 	case conversationsAPI:
+		validationErr := errors.New("invalid conversations request: must have items field")
 		var conversations fwkrh.ConversationsRequest
-		if err := json.Unmarshal(rawBody, &conversations); err == nil && len(conversations.Items) > 0 {
-			return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
+		if err := json.Unmarshal(rawBody, &conversations); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid conversations request: must have items field")
+		if len(conversations.Items) == 0 {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
 
 	case responsesAPI:
+		validationErr := errors.New("invalid responses request: must have input field")
 		var responses fwkrh.ResponsesRequest
-		if err := json.Unmarshal(rawBody, &responses); err == nil && responses.Input != nil {
-			return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
+		if err := json.Unmarshal(rawBody, &responses); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid responses request: must have input field")
+		if responses.Input == nil {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
 
 	case chatCompletionsAPI:
+		validationErr := errors.New("invalid chat completions request: must have valid messages field")
 		var chatCompletions fwkrh.ChatCompletionsRequest
-		if err := json.Unmarshal(rawBody, &chatCompletions); err == nil {
-			if err = validateChatCompletionsMessages(chatCompletions.Messages); err == nil {
-				return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
-			}
+		if err := json.Unmarshal(rawBody, &chatCompletions); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid chat completions request: must have valid messages field")
+		if err := validateChatCompletionsMessages(chatCompletions.Messages); err != nil {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
 
 	case completionsAPI:
+		validationErr := errors.New("invalid completions request: must have prompt field")
 		var completions fwkrh.CompletionsRequest
-		if err := json.Unmarshal(rawBody, &completions); err == nil && !completions.Prompt.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
+		if err := json.Unmarshal(rawBody, &completions); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid completions request: must have prompt field")
+		if completions.Prompt.IsEmpty() {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
 
 	case embeddingsAPI:
+		validationErr := errors.New("invalid embeddings request: must have input field")
 		var embeddings fwkrh.EmbeddingsRequest
-		if err := json.Unmarshal(rawBody, &embeddings); err == nil && !embeddings.Input.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
+		if err := json.Unmarshal(rawBody, &embeddings); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid embeddings request: must have input field")
+		if embeddings.Input.IsEmpty() {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 
 	case imagesGenerationsAPI:
+		validationErr := errors.New("invalid images generations request: must have prompt field")
 		var images fwkrh.ImagesGenerationsRequest
-		if err := json.Unmarshal(rawBody, &images); err == nil && images.Prompt != "" {
-			return &fwkrh.InferenceRequestBody{Images: &images}, nil
+		if err := json.Unmarshal(rawBody, &images); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid images generations request: must have prompt field")
+		if images.Prompt == "" {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Images: &images}, nil
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}
@@ -385,6 +429,14 @@ func headerValue(headers map[string]string, name string) string {
 		}
 	}
 	return ""
+}
+
+func requestBodyDecodeError(err, validationErr error) error {
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return err
+	}
+	return validationErr
 }
 
 func validateChatCompletionsMessages(messages []fwkrh.Message) error {
