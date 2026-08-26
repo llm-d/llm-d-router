@@ -157,6 +157,16 @@ func (m *mockEncodeDecider) disaggregate(_ context.Context, _ *scheduling.Infere
 	return m.allow
 }
 
+type mockPDDecider struct {
+	allow bool
+}
+
+func (m *mockPDDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
+
+func (m *mockPDDecider) disaggregate(_ context.Context, _ *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
+	return m.allow
+}
+
 // ── Helper function tests ────────────────────────────────────────────────────
 
 func TestHasMultimodalContent(t *testing.T) {
@@ -255,99 +265,9 @@ func TestHandlerFactory(t *testing.T) {
 		{"unknown encodeDecider", map[string]any{
 			"deciders": map[string]any{"encode": "INVALID"},
 		}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
-			if tt.expectErr {
-				assert.Error(t, err)
-				assert.Nil(t, p)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, p)
-			}
-		})
-	}
-}
-
-func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := handleWithDeciders(ctx)
-
-	tests := []struct {
-		name      string
-		params    map[string]any
-		expectErr bool
-	}{
-		{"deprecated prefillDeciderPluginName", map[string]any{
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"deprecated encodeDeciderPluginName", map[string]any{
-			"encodeDeciderPluginName": AlwaysDisaggMulimodalPluginType,
-		}, false},
-		{"deprecated custom profile names", map[string]any{
-			"decodeProfile":            "my-decode",
-			"prefillProfile":           "my-prefill",
-			"encodeProfile":            "my-encode",
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"nested format with unknown extra fields is rejected", map[string]any{
+		{"unknown field is rejected", map[string]any{
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
-		}, true},
-		{"mixing deprecated and nested fields is an error", map[string]any{
-			"decodeProfile": "my-decode",
-			"profiles":      map[string]any{"decode": "other-decode"},
-		}, true},
-		{"mixing deprecated decider and nested deciders is an error", map[string]any{
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-			"deciders":                 map[string]any{"prefill": AlwaysDisaggPDDeciderPluginType},
-		}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
-			if tt.expectErr {
-				assert.Error(t, err)
-				assert.Nil(t, p)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, p)
-			}
-		})
-	}
-}
-
-// TestHandlerFactory_PdProfileHandlerParams verifies that
-// Handler accepts the exact parameter format of the deprecated
-// pd-profile-handler, enabling a zero-change migration between the two types.
-func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := handleWithDeciders(ctx)
-
-	tests := []struct {
-		name      string
-		params    map[string]any
-		expectErr bool
-	}{
-		{"pd-profile-handler defaults (no params)", map[string]any{}, false},
-		{"pd-profile-handler with deciderPluginName", map[string]any{
-			"decodeProfile":     "decode",
-			"prefillProfile":    "prefill",
-			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"pd-profile-handler with unknown fields is rejected", map[string]any{
-			"decodeProfile":     "decode",
-			"prefillProfile":    "prefill",
-			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			"prefixPluginType":  "prefix-cache-scorer", // unknown to both schemas (#1068)
-			"prefixPluginName":  "prefix-cache-scorer",
-			"primaryPort":       8080,
-		}, true},
-		{"pd-profile-handler unknown deciderPluginName", map[string]any{
-			"deciderPluginName": "INVALID",
 		}, true},
 	}
 	for _, tt := range tests {
@@ -602,6 +522,62 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 			tt.check(t, res)
 		})
 	}
+}
+
+// TestHandler_PD_PrefillRequiredButUnavailable exercises the real Pick ->
+// ProcessResults sequence (as the scheduler runs them) for the two ways a
+// picked prefill profile can end up nil in profileResults: the PD decider
+// declining to run it (safe to complete decode-only) versus the profile
+// having been picked and run, but finding no endpoint (must fail the
+// request rather than silently complete decode-only). Regression test for
+// https://github.com/llm-d/llm-d-router/issues/2427: with an always-disagg
+// decider and no ready prefill endpoints, requests were completing on
+// decode alone instead of failing.
+func TestHandler_PD_PrefillRequiredButUnavailable(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+	newDecodeResults := func() map[string]*scheduling.ProfileRunResult {
+		return map[string]*scheduling.ProfileRunResult{
+			defaultDecodeProfile: makeProfileRunResult("pod1"),
+		}
+	}
+
+	t.Run("decider declines prefill -> decode-only, no error", func(t *testing.T) {
+		req := completionsRequest(testLongPrompt)
+		decodeResults := newDecodeResults()
+		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+			&mockPDDecider{allow: false}, nil)
+
+		got := h.Pick(ctx, req, profiles, decodeResults)
+		assert.ElementsMatch(t, []string{}, profileNames(got), "decider should decline prefill")
+
+		res, err := h.ProcessResults(ctx, req, decodeResults)
+		assert.NoError(t, err, "a declined prefill stage must not fail the request")
+		assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+		assert.NotContains(t, res.ProfileResults, defaultPrefillProfile)
+	})
+
+	t.Run("decider requires prefill, none available -> error", func(t *testing.T) {
+		req := completionsRequest(testLongPrompt)
+		decodeResults := newDecodeResults()
+		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+			newAlwaysDisaggPDDecider(), nil)
+
+		got := h.Pick(ctx, req, profiles, decodeResults)
+		assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got), "decider should pick prefill")
+
+		// Simulate the scheduler running the picked prefill profile and finding
+		// no endpoint: it records a nil result, exactly like a declined stage.
+		failedResults := map[string]*scheduling.ProfileRunResult{
+			defaultDecodeProfile:  decodeResults[defaultDecodeProfile],
+			defaultPrefillProfile: nil,
+		}
+		_, err := h.ProcessResults(ctx, req, failedResults)
+		assert.Error(t, err, "a required prefill stage that found no endpoint must fail the request")
+	})
 }
 
 func TestHandler_ProcessResults_NilRequest(t *testing.T) {
@@ -1519,39 +1495,12 @@ func TestHandler_Factory_StageOrder(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "legacy flat format with stageOrder",
-			params: map[string]any{
-				"decodeProfile": "decode",
-				"stageOrder":    "prefill-first",
-			},
-			expectErr:   false,
-			expectOrder: StageOrderPrefillFirst,
-		},
-		{
 			name: "prefill-first with deciders.prefill returns error",
 			params: map[string]any{
 				"stageOrder": "prefill-first",
 				"deciders": map[string]any{
 					"prefill": PrefixBasedPDDeciderPluginType,
 				},
-			},
-			expectErr: true,
-		},
-		{
-			name: "prefill-first with legacy deciderPluginName returns error",
-			params: map[string]any{
-				"stageOrder":        "prefill-first",
-				"decodeProfile":     "decode",
-				"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			},
-			expectErr: true,
-		},
-		{
-			name: "prefill-first with legacy prefillDeciderPluginName returns error",
-			params: map[string]any{
-				"stageOrder":               "prefill-first",
-				"decodeProfile":            "decode",
-				"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
 			},
 			expectErr: true,
 		},

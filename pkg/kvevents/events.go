@@ -50,8 +50,9 @@ type GenericEvent interface {
 
 // EventBatch represents a batch of generic events from an inference engine.
 type EventBatch struct {
-	Timestamp float64
-	Events    []GenericEvent
+	Timestamp        float64
+	Events           []GenericEvent
+	DataParallelRank *int
 }
 
 // RawMessage holds the raw transport-level data from a received pub/sub message.

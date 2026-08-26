@@ -48,8 +48,9 @@ const (
 	LoraInfoWaitingAdaptersMetricName = "waiting_lora_adapters"
 	LoraInfoMaxAdaptersMetricName     = "max_lora"
 
-	CacheConfigBlockSizeInfoMetricName = "block_size"
-	CacheConfigNumGPUBlocksMetricName  = "num_gpu_blocks"
+	CacheConfigBlockSizeInfoMetricName   = "block_size"
+	CacheConfigNumGPUBlocksMetricName    = "num_gpu_blocks"
+	CacheConfigPrefixMatchUnitMetricName = "prefix_match_unit"
 )
 
 // Extractor implements the metrics extraction based on the model
@@ -272,6 +273,7 @@ func populateLoRAMetrics(clone *fwkdl.Metrics, metric *dto.Metric, errs *[]error
 // (e.g. SGLang uses "page_size" and "num_pages" instead of "block_size" and "num_gpu_blocks").
 func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSizeLabelName, numBlocksLabelName string, errs *[]error) {
 	clone.CacheBlockSize = 0
+	clone.CachePrefixMatchUnit = 0
 	for _, label := range metric.GetLabel() {
 		switch label.GetName() {
 		case blockSizeLabelName:
@@ -286,6 +288,14 @@ func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSiz
 			if label.GetValue() != "" {
 				if val, err := strconv.Atoi(label.GetValue()); err == nil {
 					clone.CacheNumBlocks = val
+				} else {
+					*errs = append(*errs, err)
+				}
+			}
+		case CacheConfigPrefixMatchUnitMetricName:
+			if label.GetValue() != "" && label.GetValue() != "None" {
+				if val, err := strconv.Atoi(label.GetValue()); err == nil {
+					clone.CachePrefixMatchUnit = val
 				} else {
 					*errs = append(*errs, err)
 				}

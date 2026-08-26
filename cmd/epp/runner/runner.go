@@ -227,6 +227,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Apply the process-wide plugin-state staleness threshold before any plugin is instantiated.
+	fwkplugin.SetDefaultStalenessThreshold(opts.PluginStateStalenessThreshold)
+
 	// Print flag values, skipping deprecated metric flags configured via engineConfigs
 	flags := make(map[string]any)
 	pflag.VisitAll(func(f *pflag.Flag) {
@@ -259,7 +262,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
-	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil {
+	dlCfg := rawConfig.DataLayer
+	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
 	}
 
@@ -617,8 +621,6 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityBeta, single.SingleProfileHandlerFactory)
 	fwkplugin.RegisterDeprecated(disagg.DisaggHeadersHandlerType, fwkplugin.StabilityBeta, disagg.HeadersHandlerFactory, "v0.9.0", "v0.11.0", disagg.DisaggProfileHandlerType) //nolint:staticcheck // deprecated in v0.9.0 (#905)
 	fwkplugin.RegisterDeprecated(disagg.PrefillHeaderHandlerType, fwkplugin.StabilityBeta, disagg.HeadersHandlerFactory, "v0.9.0", "v0.11.0", disagg.DisaggProfileHandlerType) //nolint:staticcheck // deprecated in v0.9.0 (#905)
-	fwkplugin.RegisterDeprecatedWithPluginDependencies(disagg.PdProfileHandlerType, fwkplugin.StabilityBeta, disagg.PdProfileHandlerFactory,                                   //nolint:staticcheck // deprecated in v0.7.0 (#732/#756)
-		disagg.PdProfileHandlerConfigParser, "v0.7.0", "v0.9.0", disagg.DisaggProfileHandlerType)
 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
@@ -758,7 +760,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 
 	r.registerInTreePlugins()
 
-	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger)
+	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger, opts.FeatureGates...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config - %w", err)
 	}
@@ -932,13 +934,13 @@ func resolvePoolNamespace(poolNamespace string) string {
 }
 
 // resolveDiscovery returns the discovery plugin identified by
-// rawConfig.DataLayer.Discovery.PluginRef. The plugin is expected to have
-// already been instantiated and registered in r.PluginHandle by
+// rawConfig.DataLayer.Discovery.Endpoints.PluginRef. The plugin is expected to
+// have already been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo; this function only looks it up and verifies its
 // type, so the loader-created instance (with its real Handle wired in) is the
 // one the runner drives.
 func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
-	ref := rawConfig.DataLayer.Discovery.PluginRef
+	ref := rawConfig.DataLayer.Discovery.Endpoints.PluginRef
 	p := r.PluginHandle.Plugin(ref)
 	if p == nil {
 		return nil, fmt.Errorf("discovery: no plugin found with name %q", ref)

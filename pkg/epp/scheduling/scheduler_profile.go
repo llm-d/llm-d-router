@@ -221,7 +221,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// The tracer is resolved once and threaded into runScorer so the per-scorer
 	// spans reuse it rather than rebuilding instrumentation options per scorer.
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "llm_d.epp.scoring", internalSpanKind)
+	ctx, span := tracer.Start(ctx, "scoring", internalSpanKind)
 	defer span.End()
 	// On the default (tracing-disabled) path Start returns a non-recording span;
 	// skip all attribute and child-span construction so the scoring hot path
@@ -264,7 +264,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 }
 
 // runScorer invokes a single weighted scorer and records its latency metric.
-// When tracing is active it wraps the call in an llm_d.epp.scorer.<type> span
+// When tracing is active it wraps the call in a scorer.<type> span
 // annotated with the scorer's identity, weight, candidate count, and aggregate
 // score signals; aggregates are derived from the returned score map only, with
 // no per-endpoint attribute keys, to keep span cardinality bounded. When
@@ -285,7 +285,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 		return scores
 	}
 
-	ctx, span := tracer.Start(ctx, "llm_d.epp.scorer."+typedName.Type, internalSpanKind)
+	ctx, span := tracer.Start(ctx, "scorer."+typedName.Type, internalSpanKind)
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("llm_d.epp.scorer.type", typedName.Type),

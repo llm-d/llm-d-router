@@ -48,8 +48,10 @@ type managedQueue struct {
 	policy flowcontrol.OrderingPolicy
 	logger logr.Logger
 
-	// onStatsDelta is the callback used to propagate statistics changes up to the registry.
-	onStatsDelta propagateStatsDeltaFunc
+	// bandStats and registryStats receive this queue's measured statistics deltas: the owning priority band's
+	// counters and the registry-wide totals. Never nil.
+	bandStats     *occupancyStats
+	registryStats *occupancyStats
 
 	// onActiveTransition is invoked when the queue transitions between empty and non-empty, so the
 	// owning priority band can maintain its index of active (non-empty) queues. Transitions are
@@ -78,7 +80,8 @@ func newManagedQueue(
 	policy flowcontrol.OrderingPolicy,
 	key flowcontrol.FlowKey,
 	logger logr.Logger,
-	onStatsDelta propagateStatsDeltaFunc,
+	bandStats *occupancyStats,
+	registryStats *occupancyStats,
 	onActiveTransition func(mq *managedQueue, active bool),
 ) *managedQueue {
 	mqLogger := logger.WithName("managed-queue").WithValues("flowKey", key)
@@ -86,7 +89,8 @@ func newManagedQueue(
 		queue:              queue,
 		policy:             policy,
 		key:                key,
-		onStatsDelta:       onStatsDelta,
+		bandStats:          bandStats,
+		registryStats:      registryStats,
 		onActiveTransition: onActiveTransition,
 		logger:             mqLogger,
 	}
@@ -208,8 +212,10 @@ func (mq *managedQueue) applyAndPropagateLocked(mutate func()) {
 		}
 	}
 
-	// Propagate the delta up to the registry. This propagation is lock-free and eventually consistent.
-	mq.onStatsDelta(mq.key.Priority, lenDelta, byteSizeDelta)
+	// Apply the delta to the owning band's counters and the registry-wide totals.
+	// These updates are lock-free and eventually consistent.
+	mq.bandStats.add(lenDelta, byteSizeDelta)
+	mq.registryStats.add(lenDelta, byteSizeDelta)
 }
 
 // --- `flowQueueAccessor` ---

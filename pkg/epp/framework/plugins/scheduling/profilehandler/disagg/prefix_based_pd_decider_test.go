@@ -140,7 +140,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "completions token ids uses exact hint",
 			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
-				TokenIDs: []uint32{1, 2, 3, 4},
+				TokenIDs: [][]uint32{{1, 2, 3, 4}},
 			}), 4),
 			want: 4,
 		},
@@ -154,7 +154,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "embeddings token ids uses exact hint",
 			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
-				TokenIDs: []uint32{1, 2, 3},
+				TokenIDs: [][]uint32{{1, 2, 3}},
 			}), 3),
 			want: 3,
 		},
@@ -474,25 +474,6 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, decider.disaggregate(ctx, makeRequestWithTokens(100), ep))
-}
-
-func TestConsumes(t *testing.T) {
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
-	require.NoError(t, err)
-
-	handler, err := NewPdProfileHandler(
-		"test-handler",
-		PdProfileHandlerParameters{
-			PrefillProfile:              "prefill",
-			DecodeProfile:               "decode",
-			PrefixMatchInfoProducerName: "test",
-		},
-		decider,
-	)
-	require.NoError(t, err)
-
-	consumed := handler.Consumes()
-	assert.Contains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 }
 
 func TestWithName(t *testing.T) {

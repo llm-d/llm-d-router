@@ -79,7 +79,7 @@ func RegisterFeatureGate(gate string, isEnabledByDefault bool) {
 
 // LoadRawConfig parses the raw configuration bytes, applies initial defaults, and extracts feature gates.
 // It does not instantiate plugins.
-func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointPickerConfig, map[string]bool, error) {
+func LoadRawConfig(configBytes []byte, logger logr.Logger, extraGates ...string) (*configapi.EndpointPickerConfig, map[string]bool, error) {
 	var rawConfig *configapi.EndpointPickerConfig
 	var err error
 	if len(configBytes) != 0 {
@@ -121,6 +121,8 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
+		migrateDiscoveryConfig(logger, rawConfig)
+
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
 		logger.Info("A configuration wasn't specified. A default one is being used.")
@@ -129,6 +131,16 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	}
 
 	applyStaticDefaults(rawConfig)
+
+	// Appended after the config's own entries because loadFeatureConfig is last-wins,
+	// so flag-supplied gates override file-supplied ones. This mutates rawConfig rather
+	// than only the returned map: InstantiateAndConfigure and validateConfig each
+	// re-derive gates from rawConfig.FeatureGates, and applying a gate to only one of
+	// the three leaves the EPP inconsistent.
+	if len(extraGates) > 0 {
+		rawConfig.FeatureGates = append(rawConfig.FeatureGates, extraGates...)
+		logger.Info("Applied feature gates from flags", "gates", extraGates)
+	}
 
 	// We validate gates early because they might dictate downstream loading logic.
 	if err := validateFeatureGates(rawConfig.FeatureGates); err != nil {
@@ -141,6 +153,25 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	}
 
 	return rawConfig, featureConfig, nil
+}
+
+// migrateDiscoveryConfig lifts the deprecated bare pluginRef into the
+// consolidated discovery section:
+//
+//	dataLayer.discovery.pluginRef -> dataLayer.discovery.endpoints.pluginRef
+func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPickerConfig) {
+	if rawConfig.DataLayer == nil {
+		return
+	}
+	dl := rawConfig.DataLayer
+
+	//nolint:staticcheck // SA1019: dl.Discovery.PluginRef is deprecated: use discovery.endpoints instead.
+	if dl.Discovery != nil && dl.Discovery.PluginRef != "" {
+		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead. If both are set, the new field is used.")
+		if dl.Discovery.Endpoints == nil {
+			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
+		}
+	}
 }
 
 // InstantiateAndConfigure performs the heavy lifting of plugin instantiation, system architecture injection, and

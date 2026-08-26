@@ -128,15 +128,17 @@ func TestPDSchedule(t *testing.T) {
 			err:   true,
 		},
 		{
-			name: "one decode endpoint, long prompt",
+			name: "one decode endpoint, long prompt, no prefill endpoint available",
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
 				Body:        completionsBody("12345678901"),
 			},
-			// endpoint2 will be picked because it is the only endpoint with Decode role
-			input:   []fwksched.Endpoint{endpoint2},
-			wantRes: decodeResult,
+			// The long, uncached prompt makes the decider pick the prefill profile,
+			// but no Prefill-role endpoint is present: the request must fail rather
+			// than silently complete decode-only.
+			input: []fwksched.Endpoint{endpoint2},
+			err:   true,
 		},
 		{
 			name: "one prefill endpoint, long prompt",

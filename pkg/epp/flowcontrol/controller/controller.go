@@ -35,12 +35,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// registryClient defines the minimal interface that the FlowController needs to interact with the FlowRegistry.
-type registryClient interface {
-	contracts.FlowRegistryObserver
-	contracts.FlowRegistryDataPlane
-}
-
 // processor is the minimal internal interface that the FlowController requires from its worker.
 type processor interface {
 	Run(ctx context.Context)
@@ -81,7 +75,7 @@ type FlowController struct {
 	// --- Immutable dependencies (set at construction) ---
 
 	config             *Config
-	registry           registryClient
+	registry           contracts.FlowRegistryDataPlane
 	flowRegistry       contracts.FlowRegistry
 	registryBackground contracts.FlowRegistryBackground
 	saturationDetector flowcontrol.SaturationDetector
