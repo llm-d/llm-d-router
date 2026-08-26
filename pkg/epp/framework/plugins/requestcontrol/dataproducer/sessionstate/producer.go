@@ -22,14 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
-	sessionstateconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 )
 
@@ -37,9 +35,6 @@ const (
 	defaultEvictionTTL           = time.Hour
 	defaultEvictionSweepInterval = 5 * time.Minute
 )
-
-// SessionStateProducerType is the plugin type registered with the framework.
-const SessionStateProducerType = sessionstateconstants.SessionStateProducerType
 
 // Parameters configures idle session eviction.
 type Parameters struct {
@@ -61,23 +56,17 @@ func (p Parameters) validate() error {
 }
 
 var (
-	_ requestcontrol.DataProducer = &Producer{}
-	_ requestcontrol.PreRequest   = &Producer{}
+	_ requestcontrol.DataProducer          = &Producer{}
+	_ requestcontrol.PreRequest            = &Producer{}
+	_ requestcontrol.ResponseBodyProcessor = &Producer{}
 )
-
-type sessionRecord struct {
-	turnsTaken  int64
-	firstSeenAt time.Time
-	lastSeenAt  time.Time
-}
 
 // Producer tracks session history within one EPP instance.
 type Producer struct {
 	typedName fwkplugin.TypedName
 	dk        fwkplugin.DataKey
 
-	mu       sync.Mutex
-	sessions map[string]*sessionRecord
+	registry SessionStateRegistry
 
 	evictionTTL           time.Duration
 	evictionSweepInterval time.Duration
@@ -100,8 +89,7 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 
 	p := &Producer{
 		typedName:             fwkplugin.TypedName{Type: SessionStateProducerType, Name: name},
-		dk:                    attrsession.SessionStateDataKey.WithNonEmptyProducerName(name),
-		sessions:              make(map[string]*sessionRecord),
+		dk:                    SessionStateDataKey.WithNonEmptyProducerName(name),
 		evictionTTL:           time.Duration(params.EvictionTTLSeconds * float64(time.Second)),
 		evictionSweepInterval: time.Duration(params.EvictionSweepSeconds * float64(time.Second)),
 	}
@@ -118,7 +106,7 @@ func (p *Producer) TypedName() fwkplugin.TypedName {
 
 // Produces declares the SessionState request attribute written by this producer.
 func (p *Producer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{p.dk: attrsession.SessionState{}}
+	return map[fwkplugin.DataKey]any{p.dk: SessionState{}}
 }
 
 // Produce publishes the history observed before the current request is
@@ -129,24 +117,7 @@ func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest
 		return nil
 	}
 
-	now := time.Now()
-	p.mu.Lock()
-	record, exists := p.sessions[identity]
-	if !exists {
-		record = &sessionRecord{
-			firstSeenAt: now,
-			lastSeenAt:  now,
-		}
-		p.sessions[identity] = record
-	}
-	state := attrsession.SessionState{
-		TurnsTaken: record.turnsTaken,
-		Duration:   now.Sub(record.firstSeenAt),
-		LastSeenAt: record.lastSeenAt,
-	}
-	record.lastSeenAt = now
-	p.mu.Unlock()
-
+	state := p.registry.GetState(identity)
 	request.PutAttribute(p.dk, state)
 	return nil
 }
@@ -159,19 +130,32 @@ func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequ
 		return nil
 	}
 
-	now := time.Now()
-	p.mu.Lock()
-	record, exists := p.sessions[identity]
-	if !exists {
-		record = &sessionRecord{
-			firstSeenAt: now,
-			lastSeenAt:  now,
-		}
-		p.sessions[identity] = record
-	}
-	record.turnsTaken++
-	p.mu.Unlock()
+	p.registry.RecordDispatch(identity)
 	return nil
+}
+
+// ResponseBody updates session counters after the response lifecycle ends.
+// Only naturally completed responses contribute completion and token totals.
+func (p *Producer) ResponseBody(
+	_ context.Context,
+	request *fwksched.InferenceRequest,
+	response *requestcontrol.Response,
+	_ *fwkdl.EndpointMetadata,
+) {
+	if response == nil || !response.EndOfStream {
+		return
+	}
+	identity, ok := readAgentIdentity(request)
+	if !ok {
+		return
+	}
+
+	p.registry.RecordResponse(
+		identity,
+		response.TerminationCause == requestcontrol.TerminationCauseNatural,
+		int64(response.Usage.PromptTokens),
+		int64(response.Usage.CompletionTokens),
+	)
 }
 
 func readAgentIdentity(request *fwksched.InferenceRequest) (string, bool) {
@@ -196,11 +180,5 @@ func (p *Producer) runEviction(ctx context.Context) {
 }
 
 func (p *Producer) evictIdle(now time.Time) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for identity, record := range p.sessions {
-		if p.evictionTTL > 0 && now.Sub(record.lastSeenAt) > p.evictionTTL {
-			delete(p.sessions, identity)
-		}
-	}
+	p.registry.EvictIdle(now, p.evictionTTL)
 }

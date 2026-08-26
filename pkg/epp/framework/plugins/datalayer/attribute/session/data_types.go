@@ -20,32 +20,17 @@ limitations under the License.
 package session
 
 import (
-	"time"
-
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionidconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid/constants"
-	sessionstateconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate/constants"
 )
 
 // SessionIDDataKey identifies the session identifier published on the request
 // attribute store. The default producer is the session-id-producer.
 var SessionIDDataKey = plugin.NewDataKey("SessionIDDataKey", sessionidconstants.SessionIDProducerType)
 
-// SessionStateDataKey identifies session history published on the request
-// attribute store. The default producer is the session-state-producer.
-var SessionStateDataKey = plugin.NewDataKey("SessionStateDataKey", sessionstateconstants.SessionStateProducerType)
-
 // SessionID is the session identifier extracted from a request.
 type SessionID string
-
-// SessionState is the session history available before the current request is
-// dispatched.
-type SessionState struct {
-	TurnsTaken int64
-	Duration   time.Duration
-	LastSeenAt time.Time
-}
 
 // ReadSessionID returns the SessionID published by the default producer on the
 // request attribute store, or "" and false if absent.
@@ -57,11 +42,4 @@ type SessionState struct {
 func ReadSessionID(r *fwksched.InferenceRequest) (SessionID, bool) {
 	key := SessionIDDataKey.WithNonEmptyProducerName(sessionidconstants.SessionIDProducerType)
 	return fwksched.ReadRequestAttribute[SessionID](r, key)
-}
-
-// ReadSessionState returns the SessionState published by the default producer
-// on the request attribute store, or the zero value and false if absent.
-func ReadSessionState(r *fwksched.InferenceRequest) (SessionState, bool) {
-	key := SessionStateDataKey.WithNonEmptyProducerName(sessionstateconstants.SessionStateProducerType)
-	return fwksched.ReadRequestAttribute[SessionState](r, key)
 }

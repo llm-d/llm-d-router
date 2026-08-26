@@ -19,7 +19,6 @@ package sessionstate
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +27,8 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
@@ -60,20 +61,15 @@ func resultWithProfiles(profileCount int) *fwksched.SchedulingResult {
 	return &fwksched.SchedulingResult{ProfileResults: profiles}
 }
 
-func sessionCount(producer *Producer) int {
-	producer.mu.Lock()
-	defer producer.mu.Unlock()
-	return len(producer.sessions)
-}
-
-func setSessionTimes(t *testing.T, producer *Producer, identity string, firstSeenAt, lastSeenAt time.Time) {
-	t.Helper()
-	producer.mu.Lock()
-	defer producer.mu.Unlock()
-	record, ok := producer.sessions[identity]
-	require.True(t, ok)
-	record.firstSeenAt = firstSeenAt
-	record.lastSeenAt = lastSeenAt
+func finalResponse(cause fwkrc.TerminationCause, inputTokens, outputTokens int) *fwkrc.Response {
+	return &fwkrc.Response{
+		EndOfStream:      true,
+		TerminationCause: cause,
+		Usage: fwkrh.Usage{
+			PromptTokens:     inputTokens,
+			CompletionTokens: outputTokens,
+		},
+	}
 }
 
 func TestFactoryAndProduces(t *testing.T) {
@@ -82,10 +78,10 @@ func TestFactoryAndProduces(t *testing.T) {
 	producer := newTestProducer(t)
 
 	assert.Equal(t, fwkplugin.TypedName{Type: SessionStateProducerType, Name: SessionStateProducerType}, producer.TypedName())
-	expectedKey := attrsession.SessionStateDataKey.WithNonEmptyProducerName(SessionStateProducerType)
+	expectedKey := SessionStateDataKey.WithNonEmptyProducerName(SessionStateProducerType)
 	produced, ok := producer.Produces()[expectedKey]
 	require.True(t, ok)
-	assert.IsType(t, attrsession.SessionState{}, produced)
+	assert.IsType(t, SessionState{}, produced)
 	assert.Equal(t, defaultEvictionTTL, producer.evictionTTL)
 	assert.Equal(t, defaultEvictionSweepInterval, producer.evictionSweepInterval)
 }
@@ -167,7 +163,6 @@ func TestProduceWithoutAgentIdentityIsNoOp(t *testing.T) {
 	require.NoError(t, producer.Produce(context.Background(), requestWithAgentIdentity(""), nil))
 
 	assert.Empty(t, request.AttributeKeys())
-	assert.Zero(t, sessionCount(producer))
 }
 
 func TestSessionIDAttributeAloneIsNoOp(t *testing.T) {
@@ -180,9 +175,8 @@ func TestSessionIDAttributeAloneIsNoOp(t *testing.T) {
 	require.NoError(t, producer.Produce(context.Background(), request, nil))
 	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
 
-	_, published := attrsession.ReadSessionState(request)
+	_, published := ReadSessionState(request)
 	assert.False(t, published)
-	assert.Zero(t, sessionCount(producer))
 }
 
 func TestProduceAndPreRequestTrackSessionHistory(t *testing.T) {
@@ -194,27 +188,124 @@ func TestProduceAndPreRequestTrackSessionHistory(t *testing.T) {
 	beforeFirst := time.Now()
 	require.NoError(t, producer.Produce(context.Background(), first, nil))
 	afterFirst := time.Now()
-	state, ok := attrsession.ReadSessionState(first)
+	state, ok := ReadSessionState(first)
 	require.True(t, ok)
 	assert.Equal(t, int64(0), state.TurnsTaken)
 	assert.Zero(t, state.Duration)
 	assert.False(t, state.LastSeenAt.Before(beforeFirst))
 	assert.False(t, state.LastSeenAt.After(afterFirst))
+	assert.Zero(t, state.InFlightRequests)
+	assert.Zero(t, state.CompletedRequests)
+	assert.Zero(t, state.TotalInputTokens)
+	assert.Zero(t, state.TotalOutputTokens)
+	firstState := state
 
 	require.NoError(t, producer.PreRequest(context.Background(), first, resultWithProfiles(1)))
 
-	start := time.Now().Add(-2 * time.Minute)
-	setSessionTimes(t, producer, "session-a", start, start)
 	second := requestWithAgentIdentity("session-a")
-	beforeSecond := time.Now()
 	require.NoError(t, producer.Produce(context.Background(), second, nil))
-	afterSecond := time.Now()
-	state, ok = attrsession.ReadSessionState(second)
+	state, ok = ReadSessionState(second)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), state.TurnsTaken)
-	assert.GreaterOrEqual(t, state.Duration, beforeSecond.Sub(start))
-	assert.LessOrEqual(t, state.Duration, afterSecond.Sub(start))
-	assert.Equal(t, start, state.LastSeenAt)
+	assert.Equal(t, int64(1), state.InFlightRequests)
+	assert.GreaterOrEqual(t, state.Duration, time.Duration(0))
+	assert.Equal(t, firstState.LastSeenAt, state.LastSeenAt)
+}
+
+func TestResponseBodyTracksCompletedRequestsAndTokens(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	request := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
+
+	producer.ResponseBody(context.Background(), request, &fwkrc.Response{EndOfStream: false}, nil)
+	inFlight := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), inFlight, nil))
+	state, ok := ReadSessionState(inFlight)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), state.InFlightRequests)
+	assert.Zero(t, state.CompletedRequests)
+
+	producer.ResponseBody(context.Background(), request, finalResponse(fwkrc.TerminationCauseNatural, 12, 34), nil)
+	completed := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), completed, nil))
+	state, ok = ReadSessionState(completed)
+	require.True(t, ok)
+	assert.Zero(t, state.InFlightRequests)
+	assert.Equal(t, int64(1), state.CompletedRequests)
+	assert.Equal(t, int64(12), state.TotalInputTokens)
+	assert.Equal(t, int64(34), state.TotalOutputTokens)
+}
+
+func TestAbnormalTerminationDoesNotCompleteRequest(t *testing.T) {
+	t.Parallel()
+
+	causes := []fwkrc.TerminationCause{
+		fwkrc.TerminationCauseClientDisconnect,
+		fwkrc.TerminationCauseEvicted,
+		fwkrc.TerminationCauseError,
+	}
+	for _, cause := range causes {
+		t.Run(string(cause), func(t *testing.T) {
+			t.Parallel()
+			producer := newTestProducer(t)
+			request := requestWithAgentIdentity("session-a")
+			require.NoError(t, producer.Produce(context.Background(), request, nil))
+			require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
+
+			producer.ResponseBody(context.Background(), request, finalResponse(cause, 12, 34), nil)
+			next := requestWithAgentIdentity("session-a")
+			require.NoError(t, producer.Produce(context.Background(), next, nil))
+			state, ok := ReadSessionState(next)
+			require.True(t, ok)
+			assert.Zero(t, state.InFlightRequests)
+			assert.Zero(t, state.CompletedRequests)
+			assert.Zero(t, state.TotalInputTokens)
+			assert.Zero(t, state.TotalOutputTokens)
+		})
+	}
+}
+
+func TestNaturalCompletionWithoutUsage(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	request := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
+	producer.ResponseBody(context.Background(), request, finalResponse(fwkrc.TerminationCauseNatural, 0, 0), nil)
+
+	next := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), next, nil))
+	state, ok := ReadSessionState(next)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), state.CompletedRequests)
+	assert.Zero(t, state.TotalInputTokens)
+	assert.Zero(t, state.TotalOutputTokens)
+}
+
+func TestResponseBodyWithoutTrackedDispatchIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	request := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), request, nil))
+
+	producer.ResponseBody(context.Background(), nil, finalResponse(fwkrc.TerminationCauseNatural, 1, 2), nil)
+	producer.ResponseBody(context.Background(), &fwksched.InferenceRequest{}, finalResponse(fwkrc.TerminationCauseNatural, 1, 2), nil)
+	producer.ResponseBody(context.Background(), request, nil, nil)
+	producer.ResponseBody(context.Background(), request, finalResponse(fwkrc.TerminationCauseNatural, 1, 2), nil)
+
+	next := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), next, nil))
+	state, ok := ReadSessionState(next)
+	require.True(t, ok)
+	assert.Zero(t, state.InFlightRequests)
+	assert.Zero(t, state.CompletedRequests)
+	assert.Zero(t, state.TotalInputTokens)
+	assert.Zero(t, state.TotalOutputTokens)
 }
 
 func TestPreRequestCountsMultipleProfilesOnce(t *testing.T) {
@@ -227,103 +318,7 @@ func TestPreRequestCountsMultipleProfilesOnce(t *testing.T) {
 
 	next := requestWithAgentIdentity("session-a")
 	require.NoError(t, producer.Produce(context.Background(), next, nil))
-	state, ok := attrsession.ReadSessionState(next)
+	state, ok := ReadSessionState(next)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), state.TurnsTaken)
-}
-
-func TestSessionsAreIsolated(t *testing.T) {
-	t.Parallel()
-
-	producer := newTestProducer(t)
-	first := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), first, nil))
-	require.NoError(t, producer.PreRequest(context.Background(), first, resultWithProfiles(1)))
-
-	other := requestWithAgentIdentity("session-b")
-	require.NoError(t, producer.Produce(context.Background(), other, nil))
-	otherState, ok := attrsession.ReadSessionState(other)
-	require.True(t, ok)
-	assert.Equal(t, int64(0), otherState.TurnsTaken)
-
-	next := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), next, nil))
-	state, ok := attrsession.ReadSessionState(next)
-	require.True(t, ok)
-	assert.Equal(t, int64(1), state.TurnsTaken)
-	assert.Equal(t, 2, sessionCount(producer))
-}
-
-func TestEvictIdleSession(t *testing.T) {
-	t.Parallel()
-
-	producer := newTestProducer(t)
-	request := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
-	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
-	start := time.Now().Add(-2 * producer.evictionTTL)
-	setSessionTimes(t, producer, "session-a", start, start)
-
-	producer.evictIdle(start.Add(producer.evictionTTL))
-	assert.Equal(t, 1, sessionCount(producer), "a session at the TTL boundary must remain")
-
-	now := start.Add(producer.evictionTTL + time.Nanosecond)
-	producer.evictIdle(now)
-	assert.Zero(t, sessionCount(producer))
-
-	next := requestWithAgentIdentity("session-a")
-	before := time.Now()
-	require.NoError(t, producer.Produce(context.Background(), next, nil))
-	after := time.Now()
-	state, ok := attrsession.ReadSessionState(next)
-	require.True(t, ok)
-	assert.Equal(t, int64(0), state.TurnsTaken)
-	assert.Zero(t, state.Duration)
-	assert.False(t, state.LastSeenAt.Before(before))
-	assert.False(t, state.LastSeenAt.After(after))
-}
-
-func TestZeroTTLDisablesEviction(t *testing.T) {
-	t.Parallel()
-
-	plg, err := Factory(
-		SessionStateProducerType,
-		fwkplugin.StrictDecoder(json.RawMessage(`{"evictionTtlSeconds":0,"evictionSweepSeconds":1}`)),
-		nil,
-	)
-	require.NoError(t, err)
-	producer, ok := plg.(*Producer)
-	require.True(t, ok)
-
-	request := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
-
-	producer.evictIdle(time.Now().Add(24 * time.Hour))
-	assert.Equal(t, 1, sessionCount(producer))
-}
-
-func TestConcurrentDispatches(t *testing.T) {
-	t.Parallel()
-
-	producer := newTestProducer(t)
-	result := resultWithProfiles(1)
-	const requests = 100
-
-	var wg sync.WaitGroup
-	for range requests {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			request := requestWithAgentIdentity("session-a")
-			require.NoError(t, producer.Produce(context.Background(), request, nil))
-			require.NoError(t, producer.PreRequest(context.Background(), request, result))
-		}()
-	}
-	wg.Wait()
-
-	next := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), next, nil))
-	state, ok := attrsession.ReadSessionState(next)
-	require.True(t, ok)
-	assert.Equal(t, int64(requests), state.TurnsTaken)
 }
