@@ -479,7 +479,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// headers, then start it. The headers are only available here, so the span
 			// cannot be started at the top of Process without orphaning the trace.
 			ctx = extractTraceContext(ctx, v)
-			ctx, span = tracer.Start(ctx, "gateway.request", trace.WithSpanKind(trace.SpanKindServer))
+			ctx, span = tracer.Start(ctx, "request", trace.WithSpanKind(trace.SpanKindServer))
 
 			// Tag every log line of this request with the trace it belongs to.
 			ctx = tracing.LoggerWithSpanContext(ctx, span)

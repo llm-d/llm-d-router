@@ -57,11 +57,12 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 		loggerWrap.Handle(fmt.Errorf("%s: %v", "build trace resource degraded", err))
 	}
 
-	traceExporter, err := initTraceExporter(ctx, logger)
+	exporterType, err := traceExporterType()
 	if err != nil {
-		loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
-		return nil, err
+		loggerWrap.Handle(fmt.Errorf("trace exporter configuration degraded: %w", err))
 	}
+
+	logger.Info("init OTel trace exporter", "type", exporterType)
 
 	sampler, err := newSampler()
 	if err != nil {
@@ -69,9 +70,19 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	}
 
 	opt := []sdktrace.TracerProviderOption{
-		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithSampler(sampler),
 		sdktrace.WithResource(res),
+	}
+
+	// "none" registers no span processor at all. Spans are still created and
+	// propagated, so instrumented code and context propagation are unaffected.
+	if exporterType != exporterTypeNone {
+		traceExporter, err := newTraceExporter(ctx, exporterType)
+		if err != nil {
+			loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
+			return nil, err
+		}
+		opt = append(opt, sdktrace.WithBatcher(traceExporter))
 	}
 
 	tracerProvider := sdktrace.NewTracerProvider(opt...)
@@ -171,37 +182,64 @@ func samplerFraction() (float64, error) {
 	return fraction, nil
 }
 
-// initTraceExporter create a SpanExporter
-// support exporter type
-// - console: export spans in console for development use case
-// - otlp: export spans through gRPC to an opentelemetry collector
-//
-// Transport security, authentication headers and timeouts for the otlp exporter
-// come from the standard OTEL_EXPORTER_OTLP_* environment variables. Passing any
-// of them as an explicit option here would override the operator's setting, since
-// the exporter applies explicit options after the environment. The one exception
-// is the loopback fallback in localCollectorOptions, which applies only when the
-// environment sets none of them.
-func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanExporter, error) {
-	var traceExporter sdktrace.SpanExporter
-	traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdouttrace exporter: %w", err)
-	}
+// The exporter types OTEL_TRACES_EXPORTER selects between. The default sends spans
+// to a collector: console pretty print writes a multi-line JSON block per span onto
+// the same stream as the structured logs, so it is selected explicitly.
+const (
+	exporterTypeOTLP    = "otlp"
+	exporterTypeConsole = "console"
+	exporterTypeNone    = "none"
 
+	defaultExporterType = exporterTypeOTLP
+)
+
+// traceExporterType resolves OTEL_TRACES_EXPORTER to one of the types
+// newTraceExporter builds:
+//
+//   - otlp: export spans through gRPC to an opentelemetry collector
+//   - console: pretty print spans on stdout, for development
+//   - none: create spans but export nothing
+//
+// An unrecognised value is returned as an error alongside the default type, so a
+// typo is reported rather than quietly selecting an exporter the operator did not
+// ask for. The exporter is not worth failing startup over.
+func traceExporterType() (string, error) {
 	exporterType, ok := os.LookupEnv("OTEL_TRACES_EXPORTER")
 	if !ok {
-		exporterType = "console"
+		return defaultExporterType, nil
 	}
 
-	logger.Info("init OTel trace exporter", "type", exporterType)
-	if exporterType == "otlp" {
-		traceExporter, err = otlptracegrpc.New(ctx, localCollectorOptions()...)
+	switch exporterType {
+	case exporterTypeOTLP, exporterTypeConsole, exporterTypeNone:
+		return exporterType, nil
+	default:
+		return defaultExporterType, fmt.Errorf("unsupported OTEL_TRACES_EXPORTER %q, falling back to %s", exporterType, defaultExporterType)
+	}
+}
+
+// newTraceExporter builds the exporter named by exporterType, which traceExporterType
+// has already narrowed. Exactly one exporter is constructed; exporterTypeNone builds
+// none and is handled by the caller.
+//
+// Transport security, authentication headers and timeouts for the otlp exporter come
+// from the standard OTEL_EXPORTER_OTLP_* environment variables. Passing any of them as
+// an explicit option here would override the operator's setting, since the exporter
+// applies explicit options after the environment. The one exception is the loopback
+// fallback in localCollectorOptions, which applies only when the environment sets none
+// of them.
+func newTraceExporter(ctx context.Context, exporterType string) (sdktrace.SpanExporter, error) {
+	if exporterType == exporterTypeConsole {
+		traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {
-			return nil, fmt.Errorf("failed to create otlp-grcp exporter: %w", err)
+			return nil, fmt.Errorf("failed to create stdouttrace exporter: %w", err)
 		}
+		return traceExporter, nil
 	}
 
+	traceExporter, err := otlptracegrpc.New(ctx, localCollectorOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create otlp-grpc exporter: %w", err)
+	}
 	return traceExporter, nil
 }
 
