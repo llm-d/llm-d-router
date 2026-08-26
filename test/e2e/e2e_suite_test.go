@@ -289,7 +289,7 @@ func deleteNameSpace(nsName string) {
 	gomega.Eventually(func() bool {
 		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
 		return apierrors.IsNotFound(err)
-	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
+	}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.BeTrue())
 }
 
 // createCRDs creates the Inference Extension CRDs used for testing.
