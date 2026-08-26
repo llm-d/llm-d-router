@@ -263,7 +263,11 @@ func TestUnscope_LeavesUnwrappedEndpointsAlone(t *testing.T) {
 // Declarations grant nothing on their own: the allowed sets come from the
 // registry, and a plugin nobody registered is confined like one that declares
 // nothing.
-func TestScope_UnregisteredPluginIsConfinedToNothing(t *testing.T) {
+// A plugin that startup registration missed is still confined to its own
+// declarations rather than to nothing: the spec is derived from the plugin on
+// first use. Missing the registration is a wiring bug, not grounds for cutting
+// the plugin off from data it declared.
+func TestScope_UnregisteredPluginFallsBackToItsOwnDeclarations(t *testing.T) {
 	plug := &producerConsumerPlugin{}
 	plug.name = "never-registered"
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
@@ -273,11 +277,19 @@ func TestScope_UnregisteredPluginIsConfinedToNothing(t *testing.T) {
 	scoped, violations := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
 	require.Len(t, scoped, 1)
 
-	_, ok := scoped[0].Get(consumedKey)
-	assert.False(t, ok, "a declared read must not resolve without registration")
-	scoped[0].Put(producedKey, cloneableStr("nope"))
-	_, ok = endpoint.Get(producedKey)
-	assert.False(t, ok, "a declared write must not reach the endpoint without registration")
+	value, ok := scoped[0].Get(consumedKey)
+	assert.True(t, ok, "a declared read resolves from the derived spec")
+	assert.Equal(t, cloneableStr("consumed-value"), value)
+	scoped[0].Put(producedKey, cloneableStr("written"))
+	written, ok := endpoint.Get(producedKey)
+	assert.True(t, ok, "a declared write reaches the endpoint")
+	assert.Equal(t, cloneableStr("written"), written)
+	assert.NoError(t, violations.Write())
+
+	// An undeclared key is still rejected, leaving the endpoint's value intact.
+	scoped[0].Put(undeclaredKey, cloneableStr("nope"))
+	kept, _ := endpoint.Get(undeclaredKey)
+	assert.Equal(t, cloneableStr("secret"), kept)
 	assert.Error(t, violations.Write())
 }
 
