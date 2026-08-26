@@ -126,12 +126,12 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
 // is configured.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
 	}
 }
 
@@ -345,8 +345,11 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 	blockSize := p.config.BlockSizeTokens
 	if p.config.AutoTune && len(endpoints) > 0 {
 		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-			if metric := endpoint.GetMetrics().CacheBlockSize; metric > 0 {
-				blockSize = metric
+			m := endpoint.GetMetrics()
+			if pmu := m.CachePrefixMatchUnit; pmu > 0 {
+				blockSize = pmu
+			} else if bs := m.CacheBlockSize; bs > 0 {
+				blockSize = bs
 			}
 		}
 	}

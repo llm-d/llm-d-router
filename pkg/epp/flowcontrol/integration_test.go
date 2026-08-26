@@ -19,6 +19,7 @@ package flowcontrol_test
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,7 +87,7 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			req := &fwksched.InferenceRequest{
 				RequestID: fmt.Sprintf("req-%d", i),
 				Body: &fwkrh.InferenceRequestBody{
-					TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 10)}},
+					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 				},
 			}
 			result := &fwksched.SchedulingResult{
@@ -163,7 +164,7 @@ func TestSaturationFullLoop(t *testing.T) {
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("prefill-%d", i),
 			Body: &fwkrh.InferenceRequestBody{
-				TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -254,7 +255,7 @@ func TestDispatchOrderingSLODeadline(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(len(specs))
+		return h.reg.Stats().Global.Len == uint64(len(specs))
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -327,11 +328,11 @@ func TestPriorityBackpressure(t *testing.T) {
 
 	enqueue("low-1", lowKey)
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "low-priority request should be queued")
 	enqueue("high-1", highKey)
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 2
+		return h.reg.Stats().Global.Len == 2
 	}, time.Second, time.Millisecond, "both requests should be queued")
 
 	detector.Unblock(1)
@@ -389,7 +390,7 @@ func TestFairnessRoundRobin(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(total)
+		return h.reg.Stats().Global.Len == uint64(total)
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -452,7 +453,7 @@ func TestUsageLimitThresholdGatesDispatch(t *testing.T) {
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("inflight-%d", i),
 			Body: &fwkrh.InferenceRequestBody{
-				TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 10)}},
+				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -507,7 +508,7 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 
 	const count = 3
 	release := h.fillQueue(t, key, count, 100, func() bool {
-		return h.reg.Stats().TotalLen == count
+		return h.reg.Stats().Global.Len == count
 	})
 
 	// The global limit (3) is exhausted while the band limit (10) still has room, so a further
@@ -546,7 +547,7 @@ func TestByteCapacityEnforcement(t *testing.T) {
 
 	// 3 requests of 300 bytes each (900 total) fit within the 1000-byte budget.
 	release := h.fillQueue(t, key, 3, 300, func() bool {
-		return h.reg.Stats().TotalByteSize == 900
+		return h.reg.Stats().Global.ByteSize == 900
 	})
 
 	// A 4th 300-byte request would bring the band to 1200 bytes, so it must be rejected.
@@ -585,7 +586,7 @@ func TestEmptyPoolRejectsAsNoEndpoints(t *testing.T) {
 
 	// 3 requests of 300 bytes each (900 total) fit within the 1000-byte budget.
 	release := h.fillQueue(t, key, 3, 300, func() bool {
-		return h.reg.Stats().TotalByteSize == 900
+		return h.reg.Stats().Global.ByteSize == 900
 	})
 
 	// The 4th request exceeds the byte budget, but because the pool is empty the rejection must
@@ -716,7 +717,9 @@ func TestTTLExpiryEvictsQueuedRequest(t *testing.T) {
 	t.Parallel()
 
 	detector := newBlockedDetector()
-	h := newHarness(t, harnessOpts{detector: detector})
+	// The pool must be non-empty for this to be the saturation regime: with no endpoints the request would be waiting
+	// for one to appear, which is the no-endpoint budget's case, not this one.
+	h := newHarness(t, harnessOpts{detector: detector, endpointCandidates: nonEmptyCandidates()})
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
@@ -761,7 +764,7 @@ func TestCallerContextCancellationEvictsRequest(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "request should be queued before cancelling")
 	reqCancel()
 
@@ -858,7 +861,7 @@ func TestGracefulShutdownDrainsQueuedRequests(t *testing.T) {
 
 	// Wait for all requests to queue (detector is blocked).
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(numRequests)
+		return h.reg.Stats().Global.Len == uint64(numRequests)
 	}, time.Second, time.Millisecond, "all requests should be queued before shutdown")
 
 	// Simulate pod termination: cancel the controller context.
@@ -888,10 +891,9 @@ func TestGracefulShutdownDrainsQueuedRequests(t *testing.T) {
 // Production Edge Cases
 // ============================================================================
 
-// TestZombieCapacityStarvation verifies that TTL-expired items still in the
-// queue (zombies) consume capacity until the cleanup sweep runs. If the sweep
-// interval is long, new requests are falsely rejected because capacity is held
-// by dead items.
+// TestZombieCapacityStarvation verifies that finalized items still in the queue (zombies) consume capacity until the
+// cleanup sweep runs. If the sweep interval is long, new requests are falsely rejected because capacity is held by dead
+// items.
 func TestZombieCapacityStarvation(t *testing.T) {
 	t.Parallel()
 
@@ -902,7 +904,11 @@ func TestZombieCapacityStarvation(t *testing.T) {
 		bandMaxRequests:    3,
 		endpointCandidates: nonEmptyCandidates(),
 		controllerCfg: &controller.Config{
-			DefaultRequestTTL:        50 * time.Millisecond,
+			// The sweep finalizes and removes an expired item in the same pass, so queue-wait expiry cannot strand a
+			// zombie. A caller deadline can: it finalizes the item where it sits and leaves the sweep to reclaim it.
+			// The budgets therefore sit beyond the test's horizon and the callers give up instead.
+			DefaultRequestTTL:        1 * time.Minute,
+			NoEndpointRequestTTL:     1 * time.Minute,
 			ExpiryCleanupInterval:    10 * time.Second,
 			EnqueueChannelBufferSize: 100,
 		},
@@ -910,25 +916,29 @@ func TestZombieCapacityStarvation(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	// Fill capacity with 3 requests that will expire via TTL.
+	// Fill capacity with 3 requests whose callers give up while they are queued.
 	expired := make(chan dispatchResult, 3)
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("zombie-%d", i)
 		go func() {
-			req := &testRequest{id: id, key: key, byteSize: 100, ttl: 50 * time.Millisecond}
-			outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+			reqCtx, reqCancel := context.WithTimeout(h.ctx, 50*time.Millisecond)
+			defer reqCancel()
+			req := &testRequest{id: id, key: key, byteSize: 100}
+			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
 			expired <- dispatchResult{id: id, outcome: outcome, err: err}
 		}()
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Wait for all to expire.
+	// Wait for all to be finalized. Each must be evicted rather than rejected: only an item that reached a queue holds
+	// the capacity this test goes on to observe.
 	for i := 0; i < 3; i++ {
 		select {
 		case r := <-expired:
+			require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "zombie must have been queued before it was finalized")
 			require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired)
 		case <-time.After(5 * time.Second):
-			t.Fatalf("zombie %d did not expire", i)
+			t.Fatalf("zombie %d was not finalized", i)
 		}
 	}
 
@@ -993,7 +1003,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	oldReq := &fwksched.InferenceRequest{
 		RequestID: "old-req",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	oldResult := &fwksched.SchedulingResult{
@@ -1049,7 +1059,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	newReq := &fwksched.InferenceRequest{
 		RequestID: "new-req",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	newResult := &fwksched.SchedulingResult{
@@ -1110,7 +1120,7 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		RequestID: "new-pod-req",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 50)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	result := &fwksched.SchedulingResult{
@@ -1169,9 +1179,21 @@ func queueSizeGaugeSum(t *testing.T, fairnessID string) float64 {
 // deterministic.
 func TestFlowControlMetricsEmitted(t *testing.T) {
 	eppmetrics.Register()
+	// The capacity gauges are keyed only by (priority, inference_pool), which every harness in this
+	// package shares, so the assertions below need a clean slate.
+	eppmetrics.Reset()
 
 	detector := newBlockedDetector()
-	h := newHarness(t, harnessOpts{detector: detector})
+	// bandMaxRequests bounds the band and maxRequests/maxBytes bound the registry as a whole, so both
+	// the per-band ratios and both all-bands rollups are computable (occupancy/effective capacity).
+	// Band capacity always resolves to a value; the global ones are optional, which the omission test
+	// below covers.
+	h := newHarness(t, harnessOpts{
+		detector:        detector,
+		bandMaxRequests: 10,
+		maxRequests:     4,
+		maxBytes:        10_000,
+	})
 
 	key := flowcontrol.FlowKey{ID: "metrics-flow", Priority: 0}
 
@@ -1187,12 +1209,32 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	// would let an empty dispatch cycle consume its single slot (Saturation() charges inFlight
 	// even when nothing dispatches), leaving the request queued forever.
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "request should be queued before the gauge is read")
 
 	// The increment happens before queue admission, so the gauge is already > 0 here.
 	require.Greater(t, queueSizeGaugeSum(t, key.ID), 0.0,
 		"queue_size should be > 0 while a request is actively queued")
+
+	// Both dimensions are bounded (bandMaxRequests=10, maxRequests=4 above), so with exactly one
+	// request queued the ratios are occupancy/effective capacity: 1/10 for the band and 1/4 for the
+	// all-bands rollup. Unlike queue_size, these gauges are refreshed by the dispatch cycle rather
+	// than synchronously on enqueue, so they trail admission by up to one tick.
+	priorityStr := strconv.Itoa(key.Priority)
+	require.Eventually(t, func() bool {
+		return capacityUtilizationGauge(t, capacityUtilizationRequestsFamily, priorityStr) > 0
+	}, time.Second, time.Millisecond,
+		"band utilization ratio should be > 0 while a request is actively queued")
+	require.InDelta(t, 0.1, capacityUtilizationGauge(t, capacityUtilizationRequestsFamily, priorityStr), 1e-9,
+		"band ratio should equal occupancy/capacity (1 queued / bandMaxRequests=10)")
+	require.InDelta(t, 0.25, globalCapacityUtilizationGauge(t, globalCapacityUtilizationRequestsFamily), 1e-9,
+		"rollup ratio should equal occupancy/global capacity (1 queued / maxRequests=4)")
+
+	// The bytes dimension is driven by the same snapshot, so it must also be reporting a live ratio.
+	require.Greater(t, capacityUtilizationGauge(t, capacityUtilizationBytesFamily, priorityStr), 0.0,
+		"band byte-size utilization should be > 0 while a request is actively queued")
+	require.Greater(t, globalCapacityUtilizationGauge(t, globalCapacityUtilizationBytesFamily), 0.0,
+		"rollup byte-size utilization should be > 0 while a request is actively queued")
 
 	// Unblock the detector so the request finalizes deterministically via dispatch.
 	detector.Unblock(1)
@@ -1209,6 +1251,102 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	// gauge is already back at 0 -- no polling needed.
 	require.Zero(t, queueSizeGaugeSum(t, key.ID),
 		"queue_size should return to 0 after the request finalizes")
+
+	// The utilization gauges are dispatch-cycle driven, so they trail the drain by up to one tick.
+	require.Eventually(t, func() bool {
+		return capacityUtilizationGauge(t, capacityUtilizationRequestsFamily, priorityStr) == 0 &&
+			globalCapacityUtilizationGauge(t, globalCapacityUtilizationRequestsFamily) == 0
+	}, time.Second, time.Millisecond,
+		"band and rollup utilization ratios should return to 0 after the queue drains")
+}
+
+// TestFlowControlCapacityUtilizationOmitsUnsetGlobal verifies that the all-bands rollup is absent
+// rather than reported as 0 when no global capacity is configured. Downstream alerts may key off
+// series absence, so a refactor that starts emitting 0 here would silently change their meaning.
+func TestFlowControlCapacityUtilizationOmitsUnsetGlobal(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+
+	detector := newBlockedDetector()
+	// bandMaxRequests only: the band reports as usual, the global capacity stays unset.
+	h := newHarness(t, harnessOpts{detector: detector, bandMaxRequests: 10})
+
+	key := flowcontrol.FlowKey{ID: "metrics-flow-no-global", Priority: 0}
+	priorityStr := strconv.Itoa(key.Priority)
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		reqCtx, reqCancel := context.WithTimeout(h.ctx, 5*time.Second)
+		defer reqCancel()
+		req := &testRequest{id: key.ID, key: key, byteSize: 100, ttl: 5 * time.Second}
+		outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
+		results <- dispatchResult{id: key.ID, outcome: outcome, err: err}
+	}()
+
+	// Wait until the band series exists, which means a dispatch cycle has published a sample.
+	require.Eventually(t, func() bool {
+		return capacityUtilizationGauge(t, capacityUtilizationRequestsFamily, priorityStr) > 0
+	}, time.Second, time.Millisecond, "band utilization should be reported for a bounded band")
+
+	require.Equal(t, -1.0, globalCapacityUtilizationGauge(t, globalCapacityUtilizationRequestsFamily),
+		"no global request capacity is configured, so the rollup series must be absent, not 0")
+	require.Equal(t, -1.0, globalCapacityUtilizationGauge(t, globalCapacityUtilizationBytesFamily),
+		"no global byte capacity is configured, so the rollup series must be absent, not 0")
+
+	detector.Unblock(1)
+	select {
+	case r := <-results:
+		require.NoError(t, r.err)
+		require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not dispatch after detector was unblocked")
+	}
+}
+
+// Metric family names asserted by the capacity utilization tests.
+const (
+	capacityUtilizationRequestsFamily       = "llm_d_epp_flow_control_capacity_utilization_requests"
+	capacityUtilizationBytesFamily          = "llm_d_epp_flow_control_capacity_utilization_bytes"
+	globalCapacityUtilizationRequestsFamily = "llm_d_epp_flow_control_global_capacity_utilization_requests"
+	globalCapacityUtilizationBytesFamily    = "llm_d_epp_flow_control_global_capacity_utilization_bytes"
+)
+
+// capacityUtilizationGauge returns the per-band capacity utilization ratio recorded in the given
+// metric family for the given priority band, or -1 if no series exists for that band.
+func capacityUtilizationGauge(t *testing.T, family, priority string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != family {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "priority" && lp.GetValue() == priority {
+					return m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// globalCapacityUtilizationGauge returns the all-bands capacity utilization ratio recorded in the
+// given metric family, or -1 if the series is absent (no global capacity configured).
+func globalCapacityUtilizationGauge(t *testing.T, family string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != family {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			return m.GetGauge().GetValue()
+		}
+	}
+	return -1
 }
 
 // ============================================================================
@@ -1308,9 +1446,9 @@ func TestHighConcurrencyFlowChurnNoDeadlock(t *testing.T) {
 
 	// Verify aggregate stats are consistent after dispatch + GC.
 	stats := reg.Stats()
-	require.Equal(t, uint64(0), stats.TotalLen,
+	require.Equal(t, uint64(0), stats.Global.Len,
 		"registry should have 0 queued items after all dispatched + GC")
-	require.Equal(t, uint64(0), stats.TotalByteSize,
+	require.Equal(t, uint64(0), stats.Global.ByteSize,
 		"registry should have 0 bytes after all dispatched + GC")
 }
 
@@ -1401,5 +1539,158 @@ func TestEndpointChurnUnderLoad(t *testing.T) {
 			"request should dispatch after endpoints are restored")
 	case <-time.After(3 * time.Second):
 		t.Fatal("request did not dispatch after endpoint restoration")
+	}
+}
+
+// TestNoEndpointBudgetShedsAsUnavailability verifies that a request that exhausts its queue-wait budget against an
+// empty pool is shed as genuine unavailability (EvictedNoEndpoints, mapped to 503) rather than as backpressure,
+// independent of the saturation budget.
+func TestNoEndpointBudgetShedsAsUnavailability(t *testing.T) {
+	t.Parallel()
+
+	// Pool intentionally empty (no endpointCandidates set): the queue is a scale-from-zero waiting room.
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector: detector,
+		controllerCfg: &controller.Config{
+			// The saturation budget is long enough that only the no-endpoint budget can shed this request.
+			DefaultRequestTTL:        5 * time.Minute,
+			NoEndpointRequestTTL:     100 * time.Millisecond,
+			ExpiryCleanupInterval:    10 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		req := &testRequest{id: "noep-budget-req", key: key, byteSize: 100, ttl: 5 * time.Minute}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		results <- dispatchResult{id: "noep-budget-req", outcome: outcome, err: err}
+	}()
+
+	select {
+	case r := <-results:
+		require.Equal(t, fcTypes.QueueOutcomeEvictedNoEndpoints, r.outcome,
+			"an expiry against an empty pool should be attributed to unavailability")
+		require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "the request was queued, so it is evicted rather than rejected")
+		require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints, "the error should wrap ErrNoEndpoints")
+		require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired, "the error should wrap ErrTTLExpired")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not return after the no-endpoint budget expired")
+	}
+}
+
+// TestNoEndpointBudgetOutlastingSaturationShedsAsUnavailability covers the configuration this feature targets, where
+// the cold-start budget is the longer of the two. Only the sweep observes the regime, so only the sweep can attribute
+// an empty-pool expiry to unavailability; nothing keyed to the request alone may pre-empt that decision and shed the
+// request as backpressure instead.
+func TestNoEndpointBudgetOutlastingSaturationShedsAsUnavailability(t *testing.T) {
+	t.Parallel()
+
+	const saturationTTL = 100 * time.Millisecond
+
+	// Pool intentionally empty (no endpointCandidates set): the queue is a scale-from-zero waiting room.
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector: detector,
+		controllerCfg: &controller.Config{
+			DefaultRequestTTL:    saturationTTL,
+			NoEndpointRequestTTL: 6 * saturationTTL,
+			// The sweep must win the attribution race against the request context's backstop, which sits one sweep
+			// interval beyond the first tick that can observe the expiry. The interval is therefore the tolerance this
+			// test has for scheduling lateness, not just its resolution.
+			ExpiryCleanupInterval:    50 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		// ttl 0 defers to the controller's saturation budget.
+		req := &testRequest{id: "cold-start-budget-req", key: key, byteSize: 100}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		results <- dispatchResult{id: "cold-start-budget-req", outcome: outcome, err: err}
+	}()
+
+	// The saturation budget does not govern an empty pool, so the request holds well past it.
+	select {
+	case r := <-results:
+		t.Fatalf("request was shed on the saturation budget against an empty pool: outcome=%v err=%v", r.outcome, r.err)
+	case <-time.After(3 * saturationTTL):
+	}
+
+	select {
+	case r := <-results:
+		require.Equal(t, fcTypes.QueueOutcomeEvictedNoEndpoints, r.outcome,
+			"an expiry against an empty pool should be attributed to unavailability, not to backpressure")
+		require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "the request was queued, so it is evicted rather than rejected")
+		require.ErrorIs(t, r.err, fcTypes.ErrNoEndpoints, "the error should wrap ErrNoEndpoints")
+		require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired, "the error should wrap ErrTTLExpired")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not return after the no-endpoint budget expired")
+	}
+}
+
+// TestScaleFromZeroOutlivesSaturationBudget verifies the regime is not fixed at admission: a request queued against an
+// empty pool holds past the saturation budget, and once the pool scales up it dispatches on a fresh saturation budget
+// rather than being shed the instant it becomes servable.
+func TestScaleFromZeroOutlivesSaturationBudget(t *testing.T) {
+	t.Parallel()
+
+	const saturationTTL = 150 * time.Millisecond
+
+	// The pool starts empty and scales up mid-flight; the dispatch cycle reads it via Locate().
+	var endpoints atomic.Value
+	endpoints.Store([]datalayer.Endpoint(nil))
+	endpointCandidates := &contractmocks.MockEndpointCandidates{
+		LocateFunc: func(_ context.Context, _ map[string]any) []datalayer.Endpoint {
+			return endpoints.Load().([]datalayer.Endpoint)
+		},
+	}
+
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector:           detector,
+		endpointCandidates: endpointCandidates,
+		controllerCfg: &controller.Config{
+			DefaultRequestTTL:        saturationTTL,
+			NoEndpointRequestTTL:     5 * time.Second,
+			ExpiryCleanupInterval:    10 * time.Millisecond,
+			EnqueueChannelBufferSize: 100,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		// ttl 0 defers to the controller's saturation budget.
+		req := &testRequest{id: "cold-start-req", key: key, byteSize: 100}
+		outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+		results <- dispatchResult{id: "cold-start-req", outcome: outcome, err: err}
+	}()
+
+	// Wait well past the saturation budget while the pool is still empty.
+	select {
+	case r := <-results:
+		t.Fatalf("request was shed while waiting for the pool to scale up: outcome=%v err=%v", r.outcome, r.err)
+	case <-time.After(4 * saturationTTL):
+	}
+
+	// Scale from zero. The request only now becomes dispatchable, on a budget that has nominally elapsed.
+	endpoints.Store([]datalayer.Endpoint{datalayer.NewEndpoint(nil, nil)})
+	detector.Unblock(1)
+
+	select {
+	case r := <-results:
+		require.NoError(t, r.err, "a request that becomes dispatchable should not carry an error")
+		require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome,
+			"the request should dispatch once the pool scales up, not be shed against a spent budget")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not dispatch after the pool scaled up")
 	}
 }

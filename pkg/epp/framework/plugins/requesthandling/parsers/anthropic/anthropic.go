@@ -17,6 +17,7 @@ limitations under the License.
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
 const (
@@ -98,7 +100,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	}
 
 	bodyMap := make(map[string]any)
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	if err := parserutil.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
 	}
 
@@ -198,19 +200,20 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	event: message_stop
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(string(chunk))
+	usage := extractUsageStreaming(chunk)
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
 }
 
-func extractUsageStreaming(responseText string) *fwkrh.Usage {
+func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 	var result *fwkrh.Usage
 
-	lines := strings.Split(responseText, "\n")
-	for _, line := range lines {
-		if !strings.HasPrefix(line, streamingRespPrefix) {
+	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
+	for line := range lines {
+		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
+		if !ok || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
-		content := strings.TrimPrefix(line, streamingRespPrefix)
 
 		var event struct {
 			Type    string `json:"type"`
@@ -219,7 +222,7 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 			} `json:"message"`
 			Usage map[string]any `json:"usage"`
 		}
-		if err := json.Unmarshal([]byte(content), &event); err != nil {
+		if err := json.Unmarshal(content, &event); err != nil {
 			continue
 		}
 

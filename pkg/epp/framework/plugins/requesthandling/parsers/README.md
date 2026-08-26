@@ -8,8 +8,9 @@ This directory contains parser plugins used to parse and understand the payloads
 *   **`anthropic-parser`**: A parser designed to handle requests for the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). It supports both standard JSON and streaming SSE responses.
 *   **`vllmgrpc-parser`**: A parser designed to handle requests specifically for the [vLLM gRPC API](https://docs.vllm.ai/en/latest/api/vllm/entrypoints/grpc_server/).
 *   **`vllmhttp-parser`**: A parser for vLLM HTTP endpoints that are not part of the OpenAI-compatible API surface — specifically `/inference/v1/generate` (which accepts pre-tokenized prompts and multimodal features). Because it only handles this path, you must also configure `openai-parser` if you want to support OpenAI-compatible paths on the same route.
+*   **`sglanghttp-parser`**: A parser for SGLang's native HTTP `/generate` endpoint, which is not part of the OpenAI-compatible API. It currently supports a single pre-tokenized prompt or a batch of pre-tokenized prompts. Configure `openai-parser` alongside it if you also want to handle OpenAI-compatible paths on the same route.
 *   **`vertexai-parser`**: A parser designed to handle requests for the Vertex AI gRPC API, specifically supporting [PredictionService/ChatCompletions](https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto#L235). For unsupported Vertex AI APIs, it skips parsing and lets the request pass through without interpretation resulting in routing to a random endpoint.
-*   **`passthrough-parser`**: A model-agnostic parser that supports any request format by passing the request body through without interpretation.
+*   **`passthrough-parser`**: A model-agnostic parser that supports any request format by passing the request body through without interpretation. It claims no paths, so it acts as the fallback for unmatched traffic and is included last in the default parser list.
     *   **Drawback**: EPP cannot parse the payload, so payload-related scheduling scorers (e.g., `prefix-cache-scorer`) are not supported.
 
 ### Serving mixed vLLM-specific and OpenAI-compatible traffic
@@ -20,9 +21,13 @@ This directory contains parser plugins used to parse and understand the payloads
 
 Parsers are configured via the `requestHandler.parsers` list in the `EndpointPickerConfig` YAML file. You must first instantiate the parser plugin in the `plugins` section, and then reference its name in the `requestHandler.parsers` list.
 
-The EPP resolves incoming request paths to the matching parser using suffix matching. Suffixes are defined by each parser plugin's claims, and the first matching parser in the list is selected. If a parser does not define specific paths, it acts as a fallback for any unmatched traffic.
+The EPP resolves incoming request paths to the matching parser using longest-suffix matching. Suffixes are defined by each parser plugin's claims. If a parser does not define specific paths, it acts as a fallback for any unmatched traffic.
 
-If no parsers are specified, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used by default.
+Registration stops at the first parser claiming no paths. Any parser listed after it is skipped, so a fallback belongs last.
+
+If no parsers are specified, `openai-parser`, `anthropic-parser`, `vllmhttp-parser`, and `passthrough-parser` are used by default. The trailing `passthrough-parser` means a path none of the others claim is forwarded to the model server without interpretation, and is scheduled without payload-derived signals, rather than rejected with `400`.
+
+An explicit `requestHandler.parsers` list is used as given. It gains no fallback, so a path no listed parser claims is rejected. Add `passthrough-parser` as the last entry to forward that traffic instead.
 
 Here is an example configuration using the `vllmgrpc-parser`:
 

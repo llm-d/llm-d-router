@@ -32,7 +32,9 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -73,6 +75,7 @@ type Processor struct {
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
 	clock                clock.WithTicker
+	noEndpointRequestTTL time.Duration
 	cleanupSweepInterval time.Duration
 	logger               logr.Logger
 
@@ -86,11 +89,12 @@ type Processor struct {
 	// enqueueChan is the entry point for new requests.
 	enqueueChan chan *FlowItem
 
-	// poolEmpty caches whether the candidate pool had zero endpoints as of the most recent dispatchCycle. enqueue reads
-	// it to distinguish a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero)
-	// from one caused by backpressure against a contended but non-empty pool. Only accessed from the Run goroutine, so
-	// it needs no synchronization.
-	poolEmpty bool
+	// regime caches the unavailability regime observed by the most recent dispatchCycle. enqueue reads it to distinguish
+	// a queue-capacity rejection caused by genuine unavailability (no backends, e.g. scale-from-zero) from one caused by
+	// backpressure against a contended but non-empty pool, and the cleanup sweep reads it to pick the queue-wait budget
+	// in force and the point to charge it from. Written only by the Run goroutine; a single pointer lets a reader load
+	// the emptiness and its timestamp as one consistent sample. Never nil.
+	regime atomic.Pointer[regimeSample]
 
 	// ceilings is the reusable output buffer handed to the UsageLimitPolicy each dispatch cycle,
 	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
@@ -108,6 +112,15 @@ type Processor struct {
 	dropCounts [types.NumQueueOutcomes]atomic.Uint64
 }
 
+// regimeSample is one observation of the unavailability regime: whether the candidate pool was empty, and when that
+// answer last changed. The two travel together because a reader that mixed an emptiness from one observation with a
+// timestamp from another would charge queue wait against the wrong regime.
+type regimeSample struct {
+	empty bool
+	// since is the wall-clock time at which empty last changed value, or the zero time if it has never changed.
+	since time.Time
+}
+
 // NewProcessor creates a new Processor instance.
 func NewProcessor(
 	ctx context.Context,
@@ -118,12 +131,13 @@ func NewProcessor(
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
 	clock clock.WithTicker,
+	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
 	reclamation *ReclamationController,
 ) *Processor {
-	return &Processor{
+	p := &Processor{
 		registry:             registry,
 		registryBackground:   registryBackground,
 		poolName:             poolName,
@@ -131,12 +145,17 @@ func NewProcessor(
 		endpointCandidates:   endpointCandidates,
 		usageLimitPolicy:     usageLimitPolicy,
 		clock:                clock,
+		noEndpointRequestTTL: noEndpointRequestTTL,
 		cleanupSweepInterval: cleanupSweepInterval,
 		logger:               logger,
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
 		reclamation:          reclamation,
 	}
+	// Seeded so readers never handle a nil sample. The pool reads as non-empty until the first dispatch cycle observes
+	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
+	p.regime.Store(&regimeSample{})
+	return p
 }
 
 // Submit attempts a non-blocking handoff of an item to the processor's internal enqueue channel.
@@ -297,25 +316,26 @@ func (p *Processor) enqueue(item *FlowItem) {
 		return
 	}
 
-	_, err = p.registry.PriorityBandAccessor(key.Priority)
+	// --- Capacity Check ---
+	// This check is safe because it is performed by the single-writer Run goroutine.
+	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
 	if err != nil {
-		finalErr := fmt.Errorf("configuration error: failed to get priority band for priority %d: %w", key.Priority, err)
-		p.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
+		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %w", key.Priority, err)
+		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
-
-	// --- Capacity Check ---
-	// This check is safe because it is performed by the single-writer Run goroutine.
-	if ok, stats := p.hasCapacity(key.Priority, req.ByteSize()); !ok {
+	if !ok {
 		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
-		if p.poolEmpty {
+		if p.regime.Load().empty {
 			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
 				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
-				"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
-				"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
+				"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
+				"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
+				"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
+				"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
 			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
 				types.ErrRejected, types.ErrNoEndpoints))
 			p.recordDrop(types.QueueOutcomeRejectedNoEndpoints)
@@ -323,8 +343,10 @@ func (p *Processor) enqueue(item *FlowItem) {
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
 			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
-			"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
-			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
+			"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
+			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
+			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
+			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
 			types.ErrRejected, types.ErrQueueAtCapacity))
 		p.recordDrop(types.QueueOutcomeRejectedCapacity)
@@ -348,27 +370,67 @@ func (p *Processor) enqueue(item *FlowItem) {
 // hasCapacity checks if the global limits and the specific priority band have enough capacity.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
-func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.AggregateStats) {
-	stats := p.registry.Stats()
-	if stats.TotalCapacityBytes > 0 && stats.TotalByteSize+itemByteSize > stats.TotalCapacityBytes {
-		return false, stats
+// A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
+// exhausted.
+func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
+	snapshot, err := p.registry.CapacitySnapshot(priority)
+	if err != nil {
+		return false, snapshot, err
 	}
-	if stats.TotalCapacityRequests > 0 && stats.TotalLen+1 > stats.TotalCapacityRequests {
-		return false, stats
+	global, band := snapshot.Global, snapshot.Band
+	if global.CapacityBytes > 0 && global.ByteSize+itemByteSize > global.CapacityBytes {
+		return false, snapshot, nil
+	}
+	if global.CapacityRequests > 0 && global.Len+1 > global.CapacityRequests {
+		return false, snapshot, nil
+	}
+	if band.CapacityBytes > 0 && band.ByteSize+itemByteSize > band.CapacityBytes {
+		return false, snapshot, nil
+	}
+	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
+		return false, snapshot, nil
+	}
+	return true, snapshot, nil
+}
+
+// recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
+// flow in the band, never per flow queue), plus the all-bands rollup in its own metric family when a global capacity
+// is configured. It reads one CapacitySnapshot per configured band; the metric contract (names, labels, semantics)
+// is defined by #2102.
+//
+// Band capacities always resolve to a value (applyDefaults supplies a fallback), so every configured band reports.
+// Global capacity is optional, so its series is omitted when unset rather than reported as a misleading 0.
+func (p *Processor) recordCapacityUtilization() {
+	var global contracts.CapacityDimension
+	for _, priority := range p.registry.AllOrderedPriorityLevels() {
+		snapshot, err := p.registry.CapacitySnapshot(priority)
+		if err != nil {
+			// The band was deleted between listing the priority levels and the read.
+			continue
+		}
+		global = snapshot.Global
+
+		band := snapshot.Band
+		priorityStr := strconv.Itoa(priority)
+		if band.CapacityRequests > 0 {
+			metrics.RecordFlowControlCapacityUtilizationRequests(priorityStr, p.poolName,
+				float64(band.Len)/float64(band.CapacityRequests))
+		}
+		if band.CapacityBytes > 0 {
+			metrics.RecordFlowControlCapacityUtilizationBytes(priorityStr, p.poolName,
+				float64(band.ByteSize)/float64(band.CapacityBytes))
+		}
 	}
 
-	bandStats, ok := stats.PerPriorityBandStats[priority]
-	if !ok {
-		return false, stats
+	// All-bands rollup, only when a global capacity is configured.
+	if global.CapacityRequests > 0 {
+		metrics.RecordFlowControlGlobalCapacityUtilizationRequests(p.poolName,
+			float64(global.Len)/float64(global.CapacityRequests))
 	}
-	if bandStats.CapacityBytes > 0 && bandStats.ByteSize+itemByteSize > bandStats.CapacityBytes {
-		return false, stats
+	if global.CapacityBytes > 0 {
+		metrics.RecordFlowControlGlobalCapacityUtilizationBytes(p.poolName,
+			float64(global.ByteSize)/float64(global.CapacityBytes))
 	}
-	if bandStats.CapacityRequests > 0 && bandStats.Len+1 > bandStats.CapacityRequests {
-		return false, stats
-	}
-
-	return true, stats
 }
 
 // dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
@@ -389,11 +451,45 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}()
 
 	pool := p.endpointCandidates.Locate(ctx, nil)
-	p.poolEmpty = len(pool) == 0
-	saturation := p.saturationDetector.Saturation(ctx, pool)
 
-	// Record pool saturation metric
-	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
+	// Run is the sole writer, so the load and the store cannot interleave with another write.
+	if empty := len(pool) == 0; empty != p.regime.Load().empty {
+		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
+	}
+
+	prefill, decode, interleaved := partitionEndpoints(pool)
+
+	// Interleaved pods serve both stages, so they contribute capacity to both pools,
+	// mirroring how the scheduling filters route requests.
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
+
+	saturation := -1.0
+	for _, part := range []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+	}{
+		{"prefill", prefill},
+		{"decode", decode},
+	} {
+		if len(part.endpoints) == 0 {
+			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
+			continue
+		}
+		stageSat := p.saturationDetector.Saturation(ctx, part.endpoints)
+		metrics.RecordFlowControlPoolSaturation(p.poolName, part.name, stageSat)
+		if stageSat > saturation {
+			saturation = stageSat
+		}
+	}
+	if saturation < 0 {
+		saturation = p.saturationDetector.Saturation(ctx, pool)
+	}
+
+	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
+
+	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
+	p.recordCapacityUtilization()
 
 	priorities := p.registry.AllOrderedPriorityLevels()
 	ceilings := p.ceilingsBuffer(len(priorities))
@@ -454,6 +550,40 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 		buf[i] = 1.0
 	}
 	return buf
+}
+
+// partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets
+// based on the llm-d.ai/role pod label. Endpoints without a role label or without metadata
+// default to the decode bucket, matching the decode-filter's allowsNoLabel convention for
+// monolithic deployment safety. Encode-only pods and unrecognized role values are excluded
+// from all buckets because they are rejected by every role filter and receive no traffic.
+func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+		meta := ep.GetMetadata()
+		if meta == nil || meta.Labels == nil {
+			decode = append(decode, ep)
+			continue
+		}
+		role := meta.Labels[bylabel.RoleLabel]
+		switch role {
+		case bylabel.RolePrefill, bylabel.RoleEncodePrefill:
+			prefill = append(prefill, ep)
+		case bylabel.RoleDecode, "":
+			decode = append(decode, ep)
+		case bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
+			interleaved = append(interleaved, ep)
+		case bylabel.RoleEncode:
+			// Encode-only pods receive no prefill or decode traffic; excluding them
+			// keeps both stage signals clean.
+		default:
+			// Unrecognized role values are rejected by every role filter and receive
+			// no traffic; counting them anywhere dilutes the stage signal.
+		}
+	}
+	return
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
@@ -529,13 +659,37 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 	}
 }
 
-// sweepFinalizedItems performs a single scan of all queues, removing finalized items in batch and releasing their
-// memory.
+// sweepFinalizedItems performs a single scan of all queues, evicting items that have exhausted the queue-wait budget in
+// force and removing finalized items in batch, releasing their memory.
+//
+// Expiry is evaluated here rather than at admission because the budget depends on the unavailability regime, which the
+// request outlives: a pool that scales from zero moves its queued requests from the no-endpoint budget onto the
+// saturation budget. The regime is sampled once per sweep so that every queue decides against the same view.
 func (p *Processor) sweepFinalizedItems() {
+	now := p.clock.Now()
+	regime := p.regime.Load()
+
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
 			item, ok := itemAcc.(*FlowItem)
-			return ok && item.FinalState() != nil
+			if !ok {
+				// Nothing to finalize on an unknown type; leave it for the queue that owns it.
+				return false
+			}
+			if item.FinalState() != nil {
+				return true
+			}
+			outcome, expired := isExpired(item, now, regime, p.noEndpointRequestTTL)
+			if !expired {
+				return false
+			}
+			// Finalizing here rather than in a separate pass keeps expiry to a single scan. Finalization is
+			// idempotent, and an item finalized but not removed is the same zombie state the sweep already
+			// tolerates, so a queue that declines the removal costs nothing beyond a later sweep.
+			item.FinalizeWithOutcome(outcome, expiryError(outcome))
+			logger.V(logutil.TRACE).Info("Evicted item, queue-wait budget exhausted.",
+				"requestID", item.OriginalRequest().ID(), "outcome", outcome, "poolEmpty", regime.empty)
+			return true
 		}
 		removedItems := managedQ.Cleanup(predicate)
 		if len(removedItems) > 0 {
@@ -549,6 +703,42 @@ func (p *Processor) sweepFinalizedItems() {
 		}
 	}
 	p.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
+}
+
+// isExpired reports whether item has exhausted the queue-wait budget in force, and the outcome that eviction would
+// carry. A zero budget disables eviction in that regime.
+//
+// Elapsed time is charged from the later of enqueue and the most recent regime change. Charging from enqueue alone
+// would shed a request the moment it becomes dispatchable: an endpoint appearing after the saturation budget has
+// nominally elapsed would find that budget already spent, even though the request has only now become servable. Each
+// regime change therefore starts its budget fresh.
+func isExpired(
+	item *FlowItem,
+	now time.Time,
+	regime *regimeSample,
+	noEndpointRequestTTL time.Duration,
+) (types.QueueOutcome, bool) {
+	budget, outcome := item.EffectiveTTL(), types.QueueOutcomeEvictedTTL
+	if regime.empty {
+		budget, outcome = noEndpointRequestTTL, types.QueueOutcomeEvictedNoEndpoints
+	}
+	if budget <= 0 {
+		return outcome, false
+	}
+
+	chargeFrom := item.EnqueueTime()
+	if regime.since.After(chargeFrom) {
+		chargeFrom = regime.since
+	}
+	return outcome, !now.Before(chargeFrom.Add(budget))
+}
+
+// expiryError builds the error accompanying an expiry eviction, wrapping the sentinels that callers match on.
+func expiryError(outcome types.QueueOutcome) error {
+	if outcome == types.QueueOutcomeEvictedNoEndpoints {
+		return fmt.Errorf("%w: %w: %w", types.ErrEvicted, types.ErrTTLExpired, types.ErrNoEndpoints)
+	}
+	return fmt.Errorf("%w: %w", types.ErrEvicted, types.ErrTTLExpired)
 }
 
 // shutdown handles the graceful termination of the processor, ensuring all pending items (in channel and queues) are

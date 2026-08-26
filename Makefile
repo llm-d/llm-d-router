@@ -323,10 +323,10 @@ test-e2e: image-build-builder image-build ## Build images and run e2e tests
 
 
 .PHONY: bench-tokenizer
-bench-tokenizer: image-build-builder ## Run external tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
-	@printf "\033[33;1m==== Running External Tokenizer Benchmark ====\033[0m\n"
-	@printf "Ensure the kind cluster is running with the external tokenizer config.\n"
-	@printf "Run 'EXTERNAL_TOKENIZER_ENABLED=true KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
+bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
+	@printf "\033[33;1m==== Running Tokenizer Benchmark ====\033[0m\n"
+	@printf "Ensure the kind cluster is running with the KV cache config.\n"
+	@printf "Run 'KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke

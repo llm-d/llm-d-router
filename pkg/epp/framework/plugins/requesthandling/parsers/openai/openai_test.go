@@ -17,8 +17,10 @@ limitations under the License.
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -112,11 +114,11 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: []uint32{1, 2, 3}},
+					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":  "test",
-					"prompt": []any{float64(1), float64(2), float64(3)},
+					"prompt": []any{json.Number("1"), json.Number("2"), json.Number("3")},
 				},
 			},
 		},
@@ -888,11 +890,11 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			want: &fwkrh.InferenceRequestBody{
 				Embeddings: &fwkrh.EmbeddingsRequest{
-					Input: fwkrh.EmbeddingsInput{TokenIDs: []uint32{1, 2, 3}},
+					Input: fwkrh.EmbeddingsInput{TokenIDs: [][]uint32{{1, 2, 3}}},
 				},
 				Payload: fwkrh.PayloadMap{
 					"model": "text-embedding-3-small",
-					"input": []any{float64(1), float64(2), float64(3)},
+					"input": []any{json.Number("1"), json.Number("2"), json.Number("3")},
 				},
 			},
 		},
@@ -975,12 +977,12 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					"model":               "test-image-model",
 					"prompt":              "a cat wearing a spacesuit",
 					"negative_prompt":     "blurry",
-					"n":                   float64(2),
+					"n":                   json.Number("2"),
 					"size":                "1024x1024",
 					"response_format":     "b64_json",
-					"num_inference_steps": float64(30),
-					"guidance_scale":      7.5,
-					"seed":                float64(42),
+					"num_inference_steps": json.Number("30"),
+					"guidance_scale":      json.Number("7.5"),
+					"seed":                json.Number("42"),
 				},
 			},
 		},
@@ -1062,6 +1064,179 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// buildMultipartBody builds a multipart/form-data body with the given form
+// fields and one image file part, returning the body and its content-type.
+func buildMultipartBody(t *testing.T, fields map[string]string) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for name, value := range fields {
+		if err := w.WriteField(name, value); err != nil {
+			t.Fatalf("WriteField(%q) error = %v", name, err)
+		}
+	}
+	fw, err := w.CreateFormFile("image", "input.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if _, err := fw.Write([]byte("fake png bytes")); err != nil {
+		t.Fatalf("writing file part: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return buf.Bytes(), w.FormDataContentType()
+}
+
+func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
+	parser := NewOpenAIParser()
+
+	tests := []struct {
+		name        string
+		path        string
+		fields      map[string]string
+		contentType string // overrides the multipart content-type when set
+		wantModel   string
+		wantStream  bool
+		wantImages  *fwkrh.ImagesGenerationsRequest
+		wantErr     bool
+	}{
+		{
+			name: "images edits request with all scalar fields",
+			path: "/v1/images/edits",
+			fields: map[string]string{
+				"model":               "test-image-model",
+				"prompt":              "add a hat to the cat",
+				"n":                   "2",
+				"size":                "1024x1024",
+				"num_inference_steps": "30",
+			},
+			wantModel: "test-image-model",
+			wantImages: &fwkrh.ImagesGenerationsRequest{
+				Prompt:            "add a hat to the cat",
+				N:                 ptr.To[int64](2),
+				Size:              "1024x1024",
+				NumInferenceSteps: ptr.To[int64](30),
+			},
+		},
+		{
+			name:       "images edits request with prompt only",
+			path:       "/v1/images/edits",
+			fields:     map[string]string{"prompt": "make it night"},
+			wantImages: &fwkrh.ImagesGenerationsRequest{Prompt: "make it night"},
+		},
+		{
+			name: "images edits request with stream",
+			path: "/v1/images/edits",
+			fields: map[string]string{
+				"prompt": "make it night",
+				"stream": "true",
+			},
+			wantStream: true,
+			wantImages: &fwkrh.ImagesGenerationsRequest{Prompt: "make it night"},
+		},
+		{
+			name:       "images edits request via prefix-mounted path",
+			path:       "/openai/v1/images/edits",
+			fields:     map[string]string{"prompt": "make it night"},
+			wantImages: &fwkrh.ImagesGenerationsRequest{Prompt: "make it night"},
+		},
+		{
+			name:    "images edits request missing prompt",
+			path:    "/v1/images/edits",
+			fields:  map[string]string{"model": "test-image-model"},
+			wantErr: true,
+		},
+		{
+			name:    "images edits request with invalid n",
+			path:    "/v1/images/edits",
+			fields:  map[string]string{"prompt": "a cat", "n": "two"},
+			wantErr: true,
+		},
+		{
+			name:        "images edits request with non-multipart content-type",
+			path:        "/v1/images/edits",
+			fields:      map[string]string{"prompt": "a cat"},
+			contentType: "application/json",
+			wantErr:     true,
+		},
+		{
+			name:        "images edits request missing boundary",
+			path:        "/v1/images/edits",
+			fields:      map[string]string{"prompt": "a cat"},
+			contentType: "multipart/form-data",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, ct := buildMultipartBody(t, tt.fields)
+			if tt.contentType != "" {
+				ct = tt.contentType
+			}
+			headers := map[string]string{":path": tt.path, contentType: ct}
+			got, err := parser.ParseRequest(context.Background(), body, headers)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseRequest() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+
+			want := &fwkrh.InferenceRequestBody{
+				Images:  tt.wantImages,
+				Payload: fwkrh.RawPayload(body),
+				Model:   tt.wantModel,
+				Stream:  tt.wantStream,
+			}
+			if diff := cmp.Diff(want, got.Body); diff != "" {
+				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
+	const seed = json.Number("9007199254740993")
+
+	result, err := NewOpenAIParser().ParseRequest(
+		context.Background(),
+		[]byte(`{"model":"test","prompt":"hello","seed":9007199254740993}`),
+		map[string]string{":path": "/v1/completions"},
+	)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+
+	payload, ok := result.Body.Payload.(fwkrh.PayloadMap)
+	if !ok {
+		t.Fatalf("Payload type = %T, want requesthandling.PayloadMap", result.Body.Payload)
+	}
+	if got, ok := payload["seed"].(json.Number); !ok || got != seed {
+		t.Fatalf("parsed seed = %v (%T), want %s (json.Number)", payload["seed"], payload["seed"], seed)
+	}
+
+	result.Body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
+		payload["model"] = "backend-model"
+	})
+	repackaged, err := payload.Marshal()
+	if err != nil {
+		t.Fatalf("PayloadMap.Marshal() error = %v", err)
+	}
+
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(repackaged, &got); err != nil {
+		t.Fatalf("unmarshal repackaged payload: %v", err)
+	}
+	if string(got["model"]) != `"backend-model"` {
+		t.Errorf("repackaged model = %s, want %q", got["model"], "backend-model")
+	}
+	if string(got["seed"]) != seed.String() {
+		t.Errorf("repackaged seed = %s, want %s", got["seed"], seed)
 	}
 }
 
@@ -1220,6 +1395,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 10,
 					TotalTokens:      17,
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1232,13 +1408,23 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 10,
 					},
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "Chunk without usage returns ParsedResponse with nil usage",
 			chunk: []byte(`data: {"choices":[{"text":"hello"}]}`),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
+			},
+		},
+		{
+			name:  "Chunk with usage text but no usage object returns nil usage",
+			chunk: []byte(`data: {"choices":[{"delta":{"content":"usage"}}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1249,10 +1435,43 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "CRLF terminator is not counted",
+			chunk: []byte("data: {\"choices\":[{\"text\":\"a\"}]}\r\ndata: [DONE]\r\n"),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+			},
+		},
+		{
+			name:  "Event cut after the prefix is counted with the prefix half",
+			chunk: []byte("data: {\"choices\":[{\"text\":\"a\"}]}\ndata: {\"cho"),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name:  "Event cut inside the prefix is dropped",
+			chunk: []byte(`ta: {"choices":[{"text":"b"}]}`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 0,
+			},
+		},
+		{
+			name:  "Terminator cut mid-token is counted as an event",
+			chunk: []byte(`data: [DO`),
+			want: &fwkrh.ParsedResponse{
+				Usage:          nil,
+				StreamedEvents: 1,
+			},
+		},
+		{
 			name:  "Malformed JSON in stream (skipped)",
 			chunk: []byte(`data: {bad-json}\ndata: {\"usage\":{\"total_tokens\":5}}`),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1267,13 +1486,15 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 16,
 					},
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "ResponsesAPI without response.completed type returns nil",
 			chunk: []byte("event: response.in_progress\ndata: {\"response\":{\"usage\":{\"input_tokens\":31,\"output_tokens\":3}},\"type\":\"response.in_progress\"}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -1285,6 +1506,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 10,
 					TotalTokens:      49,
 				},
+				StreamedEvents: 2,
 			},
 		},
 	}
@@ -1297,6 +1519,34 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("ParseStreamResponse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func BenchmarkOpenAIParser_ParseResponse_Streaming(b *testing.B) {
+	parser := NewOpenAIParser()
+	tests := []struct {
+		name  string
+		chunk []byte
+	}{
+		{
+			name:  "without_usage",
+			chunk: []byte(`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"}}]}`),
+		},
+		{
+			name:  "with_usage",
+			chunk: []byte(`data: {"usage":{"prompt_tokens":7,"completion_tokens":10,"total_tokens":17}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
@@ -1315,6 +1565,7 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
+			imagesEditsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
