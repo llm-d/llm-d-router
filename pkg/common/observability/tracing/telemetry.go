@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -62,8 +63,6 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 		loggerWrap.Handle(fmt.Errorf("trace exporter configuration degraded: %w", err))
 	}
 
-	logger.Info("init OTel trace exporter", "type", exporterType)
-
 	sampler, err := newSampler()
 	if err != nil {
 		loggerWrap.Handle(fmt.Errorf("trace sampler configuration degraded: %w", err))
@@ -77,7 +76,7 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	// "none" registers no span processor at all. Spans are still created and
 	// propagated, so instrumented code and context propagation are unaffected.
 	if exporterType != exporterTypeNone {
-		traceExporter, err := newTraceExporter(ctx, exporterType)
+		traceExporter, err := newTraceExporter(ctx, loggerWrap, exporterType)
 		if err != nil {
 			loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
 			return nil, err
@@ -217,6 +216,45 @@ func traceExporterType() (string, error) {
 	}
 }
 
+// The OTLP transports OTEL_EXPORTER_OTLP_PROTOCOL selects between. http/json is not
+// listed: the Go SDK ships no JSON encoder for OTLP, so it cannot be served.
+const (
+	protocolGRPC = "grpc"
+	protocolHTTP = "http/protobuf"
+
+	defaultProtocol = protocolGRPC
+)
+
+// otlpProtocolEnv are the variables that select the OTLP transport, per-signal first.
+var otlpProtocolEnv = []string{
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_PROTOCOL",
+}
+
+// otlpProtocol resolves the OTLP transport. The per-signal variable wins when both are
+// set, as the specification requires.
+//
+// An unsupported value is returned as an error alongside the default, and resolution
+// stops at the first variable that is set: a rejected per-signal value is a
+// misconfiguration to report, not a reason to consult the generic one.
+func otlpProtocol() (string, error) {
+	for _, key := range otlpProtocolEnv {
+		protocol, ok := os.LookupEnv(key)
+		if !ok {
+			continue
+		}
+
+		switch protocol {
+		case protocolGRPC, protocolHTTP:
+			return protocol, nil
+		default:
+			return defaultProtocol, fmt.Errorf("unsupported %s %q, falling back to %s", key, protocol, defaultProtocol)
+		}
+	}
+
+	return defaultProtocol, nil
+}
+
 // newTraceExporter builds the exporter named by exporterType, which traceExporterType
 // has already narrowed. Exactly one exporter is constructed; exporterTypeNone builds
 // none and is handled by the caller.
@@ -225,10 +263,11 @@ func traceExporterType() (string, error) {
 // from the standard OTEL_EXPORTER_OTLP_* environment variables. Passing any of them as
 // an explicit option here would override the operator's setting, since the exporter
 // applies explicit options after the environment. The one exception is the loopback
-// fallback in localCollectorOptions, which applies only when the environment sets none
-// of them.
-func newTraceExporter(ctx context.Context, exporterType string) (sdktrace.SpanExporter, error) {
+// fallback, which applies only when the environment sets none of them.
+func newTraceExporter(ctx context.Context, h *errorHandler, exporterType string) (sdktrace.SpanExporter, error) {
 	if exporterType == exporterTypeConsole {
+		h.logger.Info("init OTel trace exporter", "type", exporterType)
+
 		traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create stdouttrace exporter: %w", err)
@@ -236,7 +275,21 @@ func newTraceExporter(ctx context.Context, exporterType string) (sdktrace.SpanEx
 		return traceExporter, nil
 	}
 
-	traceExporter, err := otlptracegrpc.New(ctx, localCollectorOptions()...)
+	protocol, err := otlpProtocol()
+	if err != nil {
+		h.Handle(fmt.Errorf("trace exporter protocol configuration degraded: %w", err))
+	}
+	h.logger.Info("init OTel trace exporter", "type", exporterType, "protocol", protocol)
+
+	if protocol == protocolHTTP {
+		traceExporter, err := otlptracehttp.New(ctx, localHTTPCollectorOptions()...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create otlp-http exporter: %w", err)
+		}
+		return traceExporter, nil
+	}
+
+	traceExporter, err := otlptracegrpc.New(ctx, localGRPCCollectorOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create otlp-grpc exporter: %w", err)
 	}
@@ -254,23 +307,49 @@ var otlpTransportEnv = []string{
 	"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
 }
 
-// localCollectorOptions targets a plaintext collector on the loopback address when
-// the environment configures no transport. The SDK's own default reaches the same
-// host and port but negotiates TLS, which a local collector does not serve.
-//
-// The options are dropped as soon as any of the transport variables is set, so an
-// operator's endpoint and its scheme still decide where spans go and how the
-// connection is secured.
-func localCollectorOptions() []otlptracegrpc.Option {
+// The loopback ports the two OTLP transports serve on.
+const (
+	localGRPCEndpoint = "localhost:4317"
+	localHTTPEndpoint = "localhost:4318"
+)
+
+// transportConfigured reports whether the environment says where spans go or how the
+// connection is secured. The loopback fallback applies only when it says neither, so
+// an operator's endpoint and its scheme still decide both.
+func transportConfigured() bool {
 	for _, key := range otlpTransportEnv {
 		if _, ok := os.LookupEnv(key); ok {
-			return nil
+			return true
 		}
 	}
 
+	return false
+}
+
+// localGRPCCollectorOptions targets a plaintext collector on the loopback address when
+// the environment configures no transport. The SDK's own default reaches the same host
+// and port but negotiates TLS, which a local collector does not serve.
+func localGRPCCollectorOptions() []otlptracegrpc.Option {
+	if transportConfigured() {
+		return nil
+	}
+
 	return []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint("localhost:4317"),
+		otlptracegrpc.WithEndpoint(localGRPCEndpoint),
 		otlptracegrpc.WithInsecure(),
+	}
+}
+
+// localHTTPCollectorOptions is localGRPCCollectorOptions for the HTTP transport, which
+// the SDK defaults to a different port.
+func localHTTPCollectorOptions() []otlptracehttp.Option {
+	if transportConfigured() {
+		return nil
+	}
+
+	return []otlptracehttp.Option{
+		otlptracehttp.WithEndpoint(localHTTPEndpoint),
+		otlptracehttp.WithInsecure(),
 	}
 }
 

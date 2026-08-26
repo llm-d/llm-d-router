@@ -452,7 +452,7 @@ func TestNewTraceExporter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.exporterType, func(t *testing.T) {
-			exporter, err := newTraceExporter(context.Background(), tc.exporterType)
+			exporter, err := newTraceExporter(context.Background(), &errorHandler{logger: testr.New(t)}, tc.exporterType)
 			if err != nil {
 				t.Fatalf("newTraceExporter(%q) error = %v", tc.exporterType, err)
 			}
