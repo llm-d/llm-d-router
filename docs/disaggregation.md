@@ -422,6 +422,9 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 - `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
   - If set to 0, the prompt-length gate is disabled
   - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
+- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads
+  - The specified producer must be present in the configuration
+  - If unset, the approximate-prefix producer (`approx-prefix-cache-producer`) is used by default
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.

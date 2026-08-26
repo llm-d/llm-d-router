@@ -220,12 +220,13 @@ func TestPrefixBasedPDDeciderConfigValidation(t *testing.T) {
 
 func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 	tests := []struct {
-		name             string
-		pluginName       string
-		rawParams        string
-		expectErr        bool
-		expectNonCached  int
-		expectPluginName string
+		name               string
+		pluginName         string
+		rawParams          string
+		expectErr          bool
+		expectNonCached    int
+		expectPluginName   string
+		expectProducerName string
 	}{
 		{
 			name:             "default parameters (nil)",
@@ -242,6 +243,15 @@ func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 			expectErr:        false,
 			expectNonCached:  50,
 			expectPluginName: "custom-decider",
+		},
+		{
+			name:               "custom prefixMatchInfoProducerName",
+			pluginName:         "precise-decider",
+			rawParams:          `{"nonCachedTokens": 50, "prefixMatchInfoProducerName": "precise-prefix-cache-producer"}`,
+			expectErr:          false,
+			expectNonCached:    50,
+			expectPluginName:   "precise-decider",
+			expectProducerName: "precise-prefix-cache-producer",
 		},
 		{
 			name:       "negative nonCachedTokens",
@@ -278,6 +288,10 @@ func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 			require.True(t, ok)
 			assert.Equal(t, tt.expectPluginName, decider.TypedName().Name)
 			assert.Equal(t, tt.expectNonCached, decider.config.NonCachedTokens)
+			// An empty expectProducerName resolves to the default approximate-prefix producer.
+			assert.Equal(t,
+				attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(tt.expectProducerName),
+				decider.prefixMatchInfoDataKey())
 		})
 	}
 }
@@ -488,6 +502,24 @@ func TestConsumes(t *testing.T) {
 
 	consumed := handler.Consumes()
 	assert.Contains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+}
+
+func TestDisaggregateWithNamedProducer(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	const preciseName = "precise-prefix-cache-producer"
+	preciseKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName)
+
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+		NonCachedTokens:             5,
+		PrefixMatchInfoProducerName: preciseName,
+	})
+	require.NoError(t, err)
+
+	ep := makeTestEndpointBase()
+	ep.Put(preciseKey, attrprefix.NewPrefixCacheMatchInfo(2, testTotalTokens, testBlockSize))
+
+	assert.True(t, decider.disaggregate(ctx, makeRequestWithTokens(10), ep))
 }
 
 func TestWithName(t *testing.T) {

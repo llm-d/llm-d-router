@@ -28,6 +28,11 @@ type PrefixBasedPDDeciderConfig struct {
 	// as character-count / AverageCharactersPerToken) required before applying
 	// prefix-cache-based disaggregation logic. Zero disables this prompt-length gate.
 	PromptTokens int `json:"promptTokens"`
+
+	// PrefixMatchInfoProducerName selects which prefix-cache producer's
+	// PrefixCacheMatchInfo to read on the decode endpoint. Empty defaults to the
+	// approximate-prefix producer.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 func (p PrefixBasedPDDeciderConfig) validate() error {
@@ -43,12 +48,16 @@ func (p PrefixBasedPDDeciderConfig) validate() error {
 }
 
 // compile-time type assertion
-var _ deciderPlugin = &PrefixBasedPDDecider{}
+var (
+	_ deciderPlugin           = &PrefixBasedPDDecider{}
+	_ prefixMatchInfoConsumer = &PrefixBasedPDDecider{}
+)
 
 // PrefixBasedPDDecider is a PD decider plugin which decision is based prefix aware
 type PrefixBasedPDDecider struct {
-	typedName plugin.TypedName
-	config    PrefixBasedPDDeciderConfig
+	typedName         plugin.TypedName
+	config            PrefixBasedPDDeciderConfig
+	prefixMatchInfoDK plugin.DataKey
 }
 
 // PrefixBasedPDDeciderPluginFactory defines the factory function for creating
@@ -88,7 +97,14 @@ func NewPrefixBasedPDDecider(config PrefixBasedPDDeciderConfig) (*PrefixBasedPDD
 	return &PrefixBasedPDDecider{
 		typedName: plugin.TypedName{Type: PrefixBasedPDDeciderPluginType},
 		config:    config,
+		prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(
+			config.PrefixMatchInfoProducerName,
+		),
 	}, nil
+}
+
+func (d *PrefixBasedPDDecider) prefixMatchInfoDataKey() plugin.DataKey {
+	return d.prefixMatchInfoDK
 }
 
 // TypedName returns the typed name of the plugin.
@@ -132,7 +148,7 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	}
 	// inspect the decode endpoint to disaggregate if prefill should run or not.
 	// if the non-cached part is short enough - no disaggregation.
-	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
+	prefixInfoRaw, ok := endpoint.Get(d.prefixMatchInfoDK)
 	if !ok || prefixInfoRaw == nil {
 		logger.Error(nil, "unable to read prefix cache state")
 		return false
