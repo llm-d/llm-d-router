@@ -73,12 +73,6 @@ func (m *mockFlowController) EnqueueAndWait(
 func TestLegacyAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	reqCtx := &handlers.RequestContext{
-		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
-		Request: &handlers.Request{
-			Metadata: map[string]any{},
-		},
-	}
 
 	mockPods := []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)}
 
@@ -128,6 +122,12 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			reqCtx := &handlers.RequestContext{
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+				Request: &handlers.Request{
+					Metadata: map[string]any{},
+				},
+			}
 			mockDetector := &mockSaturationDetector{
 				SaturationFunc: func(_ context.Context, _ []fwkdl.Endpoint) float64 {
 					if tc.isSaturated {
@@ -199,12 +199,6 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 func TestFlowControlAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	reqCtx := &handlers.RequestContext{
-		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
-		Request: &handlers.Request{
-			Metadata: map[string]any{},
-		},
-	}
 
 	testCases := []struct {
 		name            string
@@ -331,6 +325,12 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			reqCtx := &handlers.RequestContext{
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+				Request: &handlers.Request{
+					Metadata: map[string]any{},
+				},
+			}
 			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
 			ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{Candidates: tc.locatorPods})
 
