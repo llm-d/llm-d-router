@@ -18,6 +18,7 @@ package tracing
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -399,4 +400,102 @@ func TestInitTracingSurvivesRejectedSampler(t *testing.T) {
 			t.Errorf("shutdown() error = %v", err)
 		}
 	})
+}
+
+func TestTraceExporterType(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     *string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset defaults to otlp", env: nil, want: "otlp"},
+		{name: "otlp", env: ptr("otlp"), want: "otlp"},
+		{name: "console", env: ptr("console"), want: "console"},
+		{name: "none", env: ptr("none"), want: "none"},
+		{name: "an unrecognised value is reported", env: ptr("jaeger"), want: "otlp", wantErr: true},
+		{name: "an empty value is reported rather than treated as unset", env: ptr(""), want: "otlp", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t, "OTEL_TRACES_EXPORTER")
+			if tc.env != nil {
+				t.Setenv("OTEL_TRACES_EXPORTER", *tc.env)
+			}
+
+			got, err := traceExporterType()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("traceExporterType() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("traceExporterType() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+// newTraceExporter must build exactly the exporter it was asked for. The stdout
+// exporter in particular must not be constructed for the otlp type.
+func TestNewTraceExporter(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+
+	tests := []struct {
+		exporterType string
+		wantType     string
+	}{
+		{exporterType: "otlp", wantType: "*otlptrace.Exporter"},
+		{exporterType: "console", wantType: "*stdouttrace.Exporter"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.exporterType, func(t *testing.T) {
+			exporter, err := newTraceExporter(context.Background(), tc.exporterType)
+			if err != nil {
+				t.Fatalf("newTraceExporter(%q) error = %v", tc.exporterType, err)
+			}
+			t.Cleanup(func() { _ = exporter.Shutdown(context.Background()) })
+
+			if got := fmt.Sprintf("%T", exporter); got != tc.wantType {
+				t.Errorf("newTraceExporter(%q) = %s, want %s", tc.exporterType, got, tc.wantType)
+			}
+		})
+	}
+}
+
+// "none" registers no exporter while leaving span creation, sampling and
+// propagation intact, so instrumented code and context propagation are unaffected
+// by the decision not to export.
+func TestNoneExporterStillCreatesSpans(t *testing.T) {
+	clearEnv(t, "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG")
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
+	})
+
+	shutdown, err := InitTracing(context.Background(), testr.New(t), testServiceName)
+	if err != nil {
+		t.Fatalf("InitTracing() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown() error = %v", err)
+		}
+	})
+
+	_, span := Tracer().Start(context.Background(), "none-exporter-span")
+	if !span.SpanContext().IsValid() {
+		t.Error("span context is not valid, want spans to still be created and propagated")
+	}
+	if !span.SpanContext().IsSampled() {
+		t.Error("span is not sampled, want the sampler to be unaffected by the exporter")
+	}
+	span.End()
 }

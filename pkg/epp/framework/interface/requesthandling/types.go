@@ -107,7 +107,8 @@ type InferenceRequestBody struct {
 	// Generate holds pre-tokenized input for native generate endpoints
 	// (vLLM /inference/v1/generate and SGLang /generate).
 	Generate *GenerateRequest `json:"generate,omitempty"`
-	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations request body.
+	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations
+	// or /v1/images/edits request body.
 	Images *ImagesGenerationsRequest `json:"images,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
@@ -535,7 +536,7 @@ func (e *EmbeddingsRequest) String() string {
 	return fmt.Sprintf("{InputType: %T}", e.Input)
 }
 
-// ImagesGenerationsRequest represents the OpenAI /v1/images/generations request body
+// ImagesGenerationsRequest represents the OpenAI /v1/images/generations and /v1/images/edits request body
 // structure.
 type ImagesGenerationsRequest struct {
 	// Prompt is the text description of the desired image(s).

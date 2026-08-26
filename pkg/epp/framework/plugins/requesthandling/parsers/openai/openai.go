@@ -22,6 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strconv"
 	"strings"
 
@@ -43,6 +46,9 @@ const (
 	embeddingsAPI      = "embeddings"
 	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
 	imagesGenerationsAPI = "images/generations"
+	// imagesEditsAPI is the OpenAI-compatible image edit (image-to-image) endpoint.
+	// Requests are multipart/form-data.
+	imagesEditsAPI = "images/edits"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -100,6 +106,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
+			imagesEditsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -116,11 +123,14 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	if apiType == imagesEditsAPI {
+		return parseImagesEditsRequest(body, headers)
+	}
 	bodyMap := make(map[string]any)
 	if err := parserutil.Unmarshal(body, &bodyMap); err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
 	}
-	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
 		return nil, err
@@ -242,6 +252,9 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/images/generations") {
 		return imagesGenerationsAPI
 	}
+	if request.MatchPathSuffix(path, "/images/edits") {
+		return imagesEditsAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -297,6 +310,81 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}
+}
+
+// parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
+func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	mediaType, params, err := mime.ParseMediaType(headerValue(headers, contentType))
+	if err != nil || mediaType != "multipart/form-data" {
+		return nil, errors.New("images edits request must have a multipart/form-data content-type")
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, errors.New("images edits request: content-type is missing the multipart boundary")
+	}
+
+	images := &fwkrh.ImagesGenerationsRequest{}
+	extractedBody := &fwkrh.InferenceRequestBody{
+		Images:  images,
+		Payload: fwkrh.RawPayload(body),
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading images edits multipart body: %w", err)
+		}
+		if part.FileName() != "" {
+			continue
+		}
+		value, err := io.ReadAll(part)
+		if err != nil {
+			return nil, fmt.Errorf("error reading images edits form field %q: %w", part.FormName(), err)
+		}
+		switch part.FormName() {
+		case "model":
+			extractedBody.Model = string(value)
+		case "prompt":
+			images.Prompt = string(value)
+		case "size":
+			images.Size = string(value)
+		case "n":
+			n, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid images edits n field: %w", err)
+			}
+			images.N = &n
+		case "num_inference_steps":
+			steps, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid images edits num_inference_steps field: %w", err)
+			}
+			images.NumInferenceSteps = &steps
+		case "stream":
+			stream, err := strconv.ParseBool(string(value))
+			if err != nil {
+				return nil, fmt.Errorf("invalid images edits stream field: %w", err)
+			}
+			extractedBody.Stream = stream
+		}
+	}
+	if images.Prompt == "" {
+		return nil, errors.New("invalid images edits request: must have prompt field")
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// headerValue returns the value of the named header, matching case-insensitively.
+func headerValue(headers map[string]string, name string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 func validateChatCompletionsMessages(messages []fwkrh.Message) error {

@@ -637,7 +637,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dispatchCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	pCtx, prefillSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.prefill",
+	pCtx, prefillSpan := tracer.Start(dispatchCtx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -654,7 +654,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	preq.Body = io.NopCloser(bytes.NewReader(pbody))
 	preq.ContentLength = int64(len(pbody))
 
-	dCtx, decodeSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.decode",
+	dCtx, decodeSpan := tracer.Start(dispatchCtx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
