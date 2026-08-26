@@ -118,9 +118,12 @@ func New(name string, cfg Config) *Producer {
 // TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName { return p.typedName }
 
-// Produces declares no produced data keys; the best-match result is carried
-// as a request attribute consumed by this plugin's own PreRequest.
-func (p *Producer) Produces() map[plugin.DataKey]any { return map[plugin.DataKey]any{} }
+// Produces declares the best-match peer this plugin stashes on the request for
+// its own PreRequest to read back. The key is name-bound to this instance, so
+// two configured p2p-source producers do not share the stash.
+func (p *Producer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.attrKeyValue: (*bestMatchPeer)(nil)}
+}
 
 // Consumes declares the PrefixCacheMatchInfo dependency so the data-layer
 // DAG orders the producing plugin before this one.

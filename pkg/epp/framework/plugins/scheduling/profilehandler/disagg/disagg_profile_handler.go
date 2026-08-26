@@ -201,6 +201,8 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 var (
 	_ scheduling.ProfileHandler = &Handler{}
 	_ requestcontrol.PreRequest = &Handler{}
+	_ plugin.ProducerPlugin     = &Handler{}
+	_ plugin.ConsumerPlugin     = &Handler{}
 )
 
 // Handler is the unified disaggregation profile handler.
@@ -238,6 +240,33 @@ func (h *Handler) WithName(name string) *Handler {
 func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 	h.stageOrder = stageOrder
 	return h
+}
+
+// Produces declares the request attributes the handler publishes for later
+// scheduling phases and for its own ProcessResults, plus everything its
+// deciders write. Both live in the per-request store rather than on an
+// endpoint.
+//
+// The deciders run inside this handler's extension points, through the request
+// the handler was handed, so their keys are confined against this declaration
+// rather than their own. Consumes covers their reads for the same reason.
+func (h *Handler) Produces() map[plugin.DataKey]any {
+	produced := map[plugin.DataKey]any{
+		// Endpoint is an interface; its zero value is the type witness the
+		// data graph compares against a consumer's declaration.
+		PeerEndpointAttributeKey:    scheduling.Endpoint(nil),
+		prefillDeclinedAttributeKey: false,
+	}
+	for _, decider := range []deciderPlugin{h.pdDecider, h.encodeDecider} {
+		producer, ok := decider.(plugin.ProducerPlugin)
+		if !ok {
+			continue
+		}
+		for key, witness := range producer.Produces() {
+			produced[key] = witness
+		}
+	}
+	return produced
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).

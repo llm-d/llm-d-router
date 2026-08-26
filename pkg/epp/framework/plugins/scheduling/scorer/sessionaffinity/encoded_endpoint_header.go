@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
@@ -38,6 +39,12 @@ func newEncodedEndpointHeaderStrategy(params parameters) strategy {
 		sessionHeader: sessionutil.NormalizeHeader(params.EncodedEndpointHeaderConfig.Header),
 		profileName:   params.ProfileName,
 	}
+}
+
+// Consumes reports no request attributes: this strategy reads the session
+// header, not the attribute store.
+func (e *encodedEndpointHeaderStrategy) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{}
 }
 
 func (e *encodedEndpointHeaderStrategy) score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {

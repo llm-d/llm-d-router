@@ -31,6 +31,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -58,7 +59,8 @@ type Scheduler struct {
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
 func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (result *fwksched.SchedulingResult, err error) {
-	loggerVerbose := log.FromContext(ctx).V(logutil.VERBOSE)
+	logger := log.FromContext(ctx)
+	loggerVerbose := logger.V(logutil.VERBOSE)
 	verboseEnabled := loggerVerbose.Enabled()
 	handlerName := s.profileHandler.TypedName()
 
@@ -79,8 +81,13 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		if verboseEnabled {
 			loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", handlerName)
 		}
+		// violations dropped: Pick has no error return, so a rejected write is
+		// visible only through plugin_data_scope_violations_total. The profiles
+		// the handler returns run against the unscoped request below; each
+		// filter and scorer is scoped against its own declarations.
+		scopedRequest, _ := datalayer.ScopeRequest(logger, profilePickerExtensionPoint, s.profileHandler, request)
 		before := time.Now()
-		profiles := s.profileHandler.Pick(ctx, request, s.profiles, profileRunResults)
+		profiles := s.profileHandler.Pick(ctx, scopedRequest, s.profiles, profileRunResults)
 		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
 		if verboseEnabled {
 			loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", handlerName, "result", profiles)
@@ -122,9 +129,13 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	if verboseEnabled {
 		loggerVerbose.Info("Running profile handler, ProcessResults", "plugin", handlerName)
 	}
+	scopedRequest, violations := datalayer.ScopeRequest(logger, processProfilesResultsExtensionPoint, s.profileHandler, request)
 	before := time.Now()
-	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
+	result, err = s.profileHandler.ProcessResults(ctx, scopedRequest, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
+	if err == nil {
+		err = violations.Write()
+	}
 	if verboseEnabled {
 		loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", handlerName)
 	}

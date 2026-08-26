@@ -24,6 +24,11 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
+// PeerEndpointDataKey is the request-attribute key PeerTopology reads. Plugins
+// that call PeerTopology name it in Consumes() through this alias rather than
+// importing the profile-handler package for a key.
+var PeerEndpointDataKey = disagg.PeerEndpointAttributeKey
+
 // PeerTopology returns the topology of the endpoint selected in the peer
 // scheduling phase, or false when no peer topology is available.
 //

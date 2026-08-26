@@ -284,10 +284,11 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "plugin_data_scope_violations_total",
-			Help: metricsutil.HelpMsgWithStability("Total number of endpoint attribute accesses rejected because the "+
-				"plugin did not declare the DataKey in Produces() or Consumes(), by extension point, plugin type, "+
-				"plugin name and access kind (read or write). A non-zero value means a plugin's implementation has "+
-				"drifted from its declaration; rejected reads resolve as absent and rejected writes are dropped.", compbasemetrics.ALPHA),
+			Help: metricsutil.HelpMsgWithStability("Total number of endpoint and per-request attribute accesses "+
+				"rejected because the plugin did not declare the DataKey in Produces() or Consumes(), by extension "+
+				"point, plugin type, plugin name and access kind (read or write). A non-zero value means a plugin's "+
+				"implementation has drifted from its declaration; rejected reads resolve as absent and rejected "+
+				"writes are dropped.", compbasemetrics.ALPHA),
 		},
 		[]string{"extension_point", "plugin_type", "plugin_name", "access"},
 	)

@@ -88,13 +88,18 @@ func (f *Filter) TypedName() fwkplugin.TypedName {
 	return f.typedName
 }
 
-// Consumes returns the Topology attribute as optional: a missing producer
-// logs a startup warning rather than an error, since the filter fails open
-// (no peer topology means the candidates pass through unfiltered) rather
-// than depending on the attribute to function.
+// Consumes returns the Topology attribute and the peer endpoint the filter
+// compares against as optional: a missing producer logs a startup warning
+// rather than an error, since the filter fails open (no peer topology means
+// the candidates pass through unfiltered) rather than depending on either to
+// function. The peer endpoint is a request attribute published by the disagg
+// profile handler, which is absent in deployments that do not disaggregate.
 func (f *Filter) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
-		Optional: map[fwkplugin.DataKey]any{f.dataKey: attrtopology.Topology{}},
+		Optional: map[fwkplugin.DataKey]any{
+			f.dataKey:                    attrtopology.Topology{},
+			topoutil.PeerEndpointDataKey: fwksched.Endpoint(nil),
+		},
 	}
 }
 
