@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/funcr"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -261,6 +262,29 @@ func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 	// Verify Cleanup
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
+func TestInFlightLoadProducer_DeleteEndpointPrunesMetricSeries(t *testing.T) {
+	inflightRequests.Reset()
+	inflightTokens.Reset()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "deleted-endpoint"
+
+	inflightTokens.WithLabelValues(endpointName, "default", producer.typedName.Name, "fairness-id", "1").Add(1000)
+	inflightRequests.WithLabelValues(endpointName, "default", producer.typedName.Name, "fairness-id", "1").Inc()
+
+	require.Equal(t, 1, promtestutil.CollectAndCount(inflightTokens))
+
+	err := producer.Extract(ctx, datalayer.EndpointEvent{
+		Type:     datalayer.EventDelete,
+		Endpoint: newStubSchedulingEndpoint(endpointName),
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 0, promtestutil.CollectAndCount(inflightTokens))
+	require.Equal(t, 0, promtestutil.CollectAndCount(inflightRequests))
 }
 
 func TestInFlightLoadProducer_DumpState(t *testing.T) {

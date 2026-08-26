@@ -39,6 +39,7 @@ import (
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -349,6 +350,9 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 			break
 		}
 		p.registeredEndpoints.Delete(id)
+		endpointName, _ := splitNamespacedName(event.Endpoint.GetMetadata().ID.String())
+		inflightTokens.DeletePartialMatch(prometheus.Labels{"endpoint_name": endpointName})
+		inflightRequests.DeletePartialMatch(prometheus.Labels{"endpoint_name": endpointName})
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
