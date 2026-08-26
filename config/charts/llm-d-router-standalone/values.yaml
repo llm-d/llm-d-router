@@ -36,10 +36,10 @@ router:
       healthyPanicThreshold: 10.0
 
     # Active gRPC health check configuration for the ext_proc cluster.
-    healthCheckInterval: "5s"
-    healthCheckTimeout: "1s"
-    healthCheckUnhealthyThreshold: 2
-    healthCheckHealthyThreshold: 3
+    healthCheckInterval: "10s"
+    healthCheckTimeout: "2s"
+    healthCheckUnhealthyThreshold: 3
+    healthCheckHealthyThreshold: 2
 
     resources:
       requests:
@@ -257,12 +257,12 @@ router:
                           max_requests: 40000
                           max_retries: 1024
                     health_checks:
-                      # Active gRPC health checking with fast failure detection and delayed failback.
+                      # Active gRPC health checking for the ext_proc cluster.
                       - timeout: {{ .Values.router.proxy.healthCheckTimeout }}
                         interval: {{ .Values.router.proxy.healthCheckInterval }}
                         unhealthy_threshold: {{ .Values.router.proxy.healthCheckUnhealthyThreshold }}
                         healthy_threshold: {{ .Values.router.proxy.healthCheckHealthyThreshold }}
-                        reuse_connection: false
+                        reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
               {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}

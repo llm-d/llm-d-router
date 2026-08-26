@@ -156,7 +156,7 @@ helm install optimize-baseline ./config/charts/llm-d-router-standalone -f resour
 
 The router supports multiple High Availability (HA) modes:
 
-1. **Fully Active-Active**: Multiple EPP replicas run concurrently and share load across all instances. Suitable when scheduling algorithms and plugins do not require unified state across pods.
+1. **Fully Active-Active**: Multiple EPP replicas run concurrently and share load across all instances. Suitable when scheduling algorithms and plugins do not require unified state across pods or there is a synchronization mechanism in place.
 2. **Active-Passive**: Traffic routes to a single primary replica set while standby replicas remain available for failover.
    - **Priority Routing**: Available only when proxy mode is set to service (`router.proxy.mode: service`). Uses Envoy Priority Routing and outlier detection to route traffic to Primary EPP replicas (Priority 0) and shift traffic to Standby EPP replicas (Priority 1) upon primary failure.
    - **Leader Election with Fail-Open**: Uses Kubernetes `coordination.k8s.io/Lease` coordination so only the elected leader serves inference extension requests. Standby pods remain idle until acquiring the lease. If the active leader fails, the proxy operates in fail-open mode, routing traffic directly to model servers until a standby acquires leadership.
@@ -173,7 +173,7 @@ Priority Routing is only available in standalone service mode (`router.proxy.mod
 2. **Active Health Probing**: Envoy actively probes EPP Port 9002 via gRPC health check (`grpc.health.v1.Health`).
 3. **Outlier Detection Failover**: When priority routing is enabled, if a primary pod fails or crashes, Envoy's Outlier Detection detects TCP connection failure and ejects the primary host, shifting traffic to Priority 1 standbys in sub-second time without lease expiration delays.
 4. **Graceful Pod Termination**: EPP pods include a `lifecycle.preStop` hook (`sleep 5`) during planned deletion or rollout. This gives Envoy active health checks time to detect pod shutdown and redirect new traffic to standby endpoints before SIGTERM, allowing in-flight gRPC streams to drain.
-5. **Safe Failback**: When a replacement primary pod is rescheduled, `healthy_threshold: 3` requires 3 consecutive passing health probes before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
+5. **Safe Failback**: When a replacement primary pod is rescheduled, the health check `healthy_threshold` requires consecutive passing health probes before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
 
 #### Helm Configuration
 
@@ -194,10 +194,10 @@ router:
 | `router.proxy.priorityRouting.healthyPanicThreshold` | `10.0` | Threshold percentage to prevent panic routing during primary ejection. |
 | `router.proxy.priorityRouting.dnsRefreshRate` | `5s` | DNS resolution refresh rate for headless EPP endpoints. |
 | `router.proxy.priorityRouting.connectTimeout` | `0.250s` | Connection timeout to detect unreachable primary pods. |
-| `router.proxy.healthCheckInterval` | `5s` | Active gRPC health check probe interval. |
-| `router.proxy.healthCheckTimeout` | `1s` | Health check probe timeout. |
-| `router.proxy.healthCheckUnhealthyThreshold` | `2` | Number of failed probes before marking an endpoint unhealthy. |
-| `router.proxy.healthCheckHealthyThreshold` | `3` | Number of passing probes required before admitting recreated pods. |
+| `router.proxy.healthCheckInterval` | `10s` | Active gRPC health check probe interval. |
+| `router.proxy.healthCheckTimeout` | `2s` | Health check probe timeout. |
+| `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
+| `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
 | `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
 
 ### Leader Election and Fail-Open
