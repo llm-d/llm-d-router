@@ -176,6 +176,15 @@ func (mq *managedQueue) Drain() []flowcontrol.QueueItemAccessor {
 	return drainedItems
 }
 
+// Rescore re-establishes the underlying queue's ordering invariant against its current
+// OrderingPolicy. Membership is unchanged, so no statistics delta is measured or propagated.
+func (mq *managedQueue) Rescore() {
+	mq.mu.Lock()
+	defer mq.mu.Unlock()
+
+	mq.queue.Rescore()
+}
+
 // Len returns the current number of items in the queue.
 func (mq *managedQueue) Len() int {
 	return mq.queue.Len()

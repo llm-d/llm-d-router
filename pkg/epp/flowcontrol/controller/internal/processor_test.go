@@ -1961,3 +1961,64 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 			"an unchanged regime must not restart the budget")
 	})
 }
+
+// TestProcessor_RescoreScoringQueues verifies rescoreScoringQueues only rescores queues whose
+// OrderingPolicy is a ScoringOrderingPolicy, only once its RescoreInterval has elapsed, and
+// rescores every queue sharing one policy instance.
+func TestProcessor_RescoreScoringQueues(t *testing.T) {
+	t.Parallel()
+
+	t.Run("plain OrderingPolicy is never rescored", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		var calls atomic.Int32
+		q := h.addQueue(testFlow)
+		q.OrderingPolicyFunc = func() flowcontrol.OrderingPolicy { return &fwkfcmocks.MockOrderingPolicy{} }
+		q.RescoreFunc = func() { calls.Add(1) }
+
+		h.processor.rescoreScoringQueues()
+
+		assert.Zero(t, calls.Load(), "a plain OrderingPolicy must never be rescored")
+	})
+
+	t.Run("ScoringOrderingPolicy is rescored once due, on every queue sharing it", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		policy := &fwkfcmocks.MockScoringOrderingPolicy{RescoreIntervalV: testCleanupTick}
+
+		var calls atomic.Int32
+		q1 := h.addQueue(testFlow)
+		q1.OrderingPolicyFunc = func() flowcontrol.OrderingPolicy { return policy }
+		q1.RescoreFunc = func() { calls.Add(1) }
+		q2 := h.addQueue(flowcontrol.FlowKey{ID: "flow-b", Priority: testFlow.Priority})
+		q2.OrderingPolicyFunc = func() flowcontrol.OrderingPolicy { return policy }
+		q2.RescoreFunc = func() { calls.Add(1) }
+
+		h.processor.rescoreScoringQueues()
+		assert.Equal(t, int32(2), calls.Load(), "both queues sharing the policy must be rescored")
+
+		// Immediately due again: the interval has not elapsed, so nothing should fire.
+		h.processor.rescoreScoringQueues()
+		assert.Equal(t, int32(2), calls.Load(), "must not rescore again before RescoreInterval elapses")
+
+		// Advance the clock past the interval: due again.
+		h.clock.Step(testCleanupTick)
+		h.processor.rescoreScoringQueues()
+		assert.Equal(t, int32(4), calls.Load(), "must rescore again once RescoreInterval elapses")
+	})
+
+	t.Run("a non-positive RescoreInterval disables periodic rescoring", func(t *testing.T) {
+		t.Parallel()
+		h := newTestHarness(t, testCleanupTick)
+		var calls atomic.Int32
+		q := h.addQueue(testFlow)
+		q.OrderingPolicyFunc = func() flowcontrol.OrderingPolicy {
+			return &fwkfcmocks.MockScoringOrderingPolicy{RescoreIntervalV: 0}
+		}
+		q.RescoreFunc = func() { calls.Add(1) }
+
+		h.processor.rescoreScoringQueues()
+
+		assert.Zero(t, calls.Load(), "RescoreInterval <= 0 must disable periodic rescoring")
+	})
+}

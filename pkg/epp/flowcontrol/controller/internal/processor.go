@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -110,6 +111,11 @@ type Processor struct {
 	// Written by both the main Run goroutine (enqueue, shutdown) and the runCleanupSweep goroutine (sweep),
 	// so each slot is an atomic to avoid a data race.
 	dropCounts [types.NumQueueOutcomes]atomic.Uint64
+
+	// scoringPolicyNextDue tracks, per ScoringOrderingPolicy TypedName, the next time
+	// rescoreScoringQueues should force a re-heapify of queues using that policy. Read and written
+	// only from the runCleanupSweep goroutine, so it needs no synchronization of its own.
+	scoringPolicyNextDue map[plugin.TypedName]time.Time
 }
 
 // regimeSample is one observation of the unavailability regime: whether the candidate pool was empty, and when that
@@ -151,6 +157,7 @@ func NewProcessor(
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
 		reclamation:          reclamation,
+		scoringPolicyNextDue: make(map[plugin.TypedName]time.Time),
 	}
 	// Seeded so readers never handle a nil sample. The pool reads as non-empty until the first dispatch cycle observes
 	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
@@ -654,6 +661,7 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 			return
 		case <-ticker.C():
 			p.sweepFinalizedItems()
+			p.rescoreScoringQueues()
 			p.flushDropSummary()
 		}
 	}
@@ -703,6 +711,67 @@ func (p *Processor) sweepFinalizedItems() {
 		}
 	}
 	p.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
+}
+
+// rescoreScoringQueues re-heapifies queues whose OrderingPolicy is a ScoringOrderingPolicy and is
+// due for a rescore, so that time-decayed score changes on items that were neither added nor
+// removed still surface at the queue root. Plain OrderingPolicy implementations (fcfs, edf,
+// slodeadline) are untouched and pay no cost beyond one failed type assertion per queue per tick.
+//
+// The due set is computed in a single-threaded prelude - this goroutine is the sole reader and
+// writer of scoringPolicyNextDue - before handing off to the existing concurrent worker pool, so
+// the workers only ever read the (by then immutable) due set. This holds even though multiple
+// queues can share one ScoringOrderingPolicy instance, since ordering policies are per-priority-
+// band singletons.
+func (p *Processor) rescoreScoringQueues() {
+	now := p.clock.Now()
+
+	dueSet := make(map[plugin.TypedName]struct{})
+	for _, priority := range p.registry.AllOrderedPriorityLevels() {
+		band, err := p.registry.PriorityBandAccessor(priority)
+		if err != nil {
+			continue
+		}
+		band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
+			sp, ok := queue.OrderingPolicy().(flowcontrol.ScoringOrderingPolicy)
+			if !ok {
+				return true
+			}
+			name := sp.TypedName()
+			if _, alreadyDue := dueSet[name]; alreadyDue {
+				return true
+			}
+			interval := sp.RescoreInterval()
+			if interval <= 0 {
+				return true
+			}
+			if interval < p.cleanupSweepInterval {
+				interval = p.cleanupSweepInterval
+			}
+			if nextDue, seen := p.scoringPolicyNextDue[name]; seen && now.Before(nextDue) {
+				return true
+			}
+			dueSet[name] = struct{}{}
+			p.scoringPolicyNextDue[name] = now.Add(interval)
+			return true
+		})
+	}
+	if len(dueSet) == 0 {
+		return
+	}
+
+	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
+		sp, ok := managedQ.FlowQueueAccessor().OrderingPolicy().(flowcontrol.ScoringOrderingPolicy)
+		if !ok {
+			return
+		}
+		if _, due := dueSet[sp.TypedName()]; !due {
+			return
+		}
+		managedQ.Rescore()
+		logger.V(logutil.TRACE).Info("Rescored queue for time-varying ordering policy", "policy", sp.TypedName())
+	}
+	p.processAllQueuesConcurrently("rescoreScoringQueues", processFn)
 }
 
 // isExpired reports whether item has exhausted the queue-wait budget in force, and the outcome that eviction would

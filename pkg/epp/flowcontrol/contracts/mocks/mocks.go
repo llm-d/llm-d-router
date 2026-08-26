@@ -167,6 +167,7 @@ type MockSafeQueue struct {
 	RemoveFunc  func(handle flowcontrol.QueueItemHandle) (flowcontrol.QueueItemAccessor, error)
 	CleanupFunc func(predicate contracts.PredicateFunc) []flowcontrol.QueueItemAccessor
 	DrainFunc   func() []flowcontrol.QueueItemAccessor
+	RescoreFunc func()
 }
 
 func (m *MockSafeQueue) Len() int         { return m.LenV }
@@ -203,6 +204,12 @@ func (m *MockSafeQueue) Drain() []flowcontrol.QueueItemAccessor {
 	return nil
 }
 
+func (m *MockSafeQueue) Rescore() {
+	if m.RescoreFunc != nil {
+		m.RescoreFunc()
+	}
+}
+
 var _ contracts.SafeQueue = &MockSafeQueue{}
 
 // --- ManagedQueue Mock ---
@@ -236,6 +243,8 @@ type MockManagedQueue struct {
 	CleanupFunc func(predicate contracts.PredicateFunc) []flowcontrol.QueueItemAccessor
 	// DrainFunc allows a test to completely override the default Drain behavior.
 	DrainFunc func() []flowcontrol.QueueItemAccessor
+	// RescoreFunc allows a test to override the default (no-op) Rescore behavior, e.g. to count calls.
+	RescoreFunc func()
 	// OrderingPolicyFunc allows a test to override OrderingPolicy.
 	OrderingPolicyFunc func() flowcontrol.OrderingPolicy
 
@@ -326,6 +335,14 @@ func (m *MockManagedQueue) Drain() []flowcontrol.QueueItemAccessor {
 	}
 	m.items = make(map[flowcontrol.QueueItemHandle]flowcontrol.QueueItemAccessor)
 	return drained
+}
+
+// Rescore checks for a test override before doing nothing: the mock's map-backed state has no
+// ordering to re-establish, so membership-preserving rescoring is otherwise a no-op.
+func (m *MockManagedQueue) Rescore() {
+	if m.RescoreFunc != nil {
+		m.RescoreFunc()
+	}
 }
 
 func (m *MockManagedQueue) FlowKey() flowcontrol.FlowKey { return m.FlowKeyV }
