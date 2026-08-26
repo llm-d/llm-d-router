@@ -17,7 +17,10 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"context"
 	"fmt"
+	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -170,6 +173,98 @@ func TestScoredLookupRefreshesIndexLRU(t *testing.T) {
 	stats, err = index.ScoredLookup(ctx, []BlockHash{20}, nil, scoredLookupTierWeights)
 	require.NoError(t, err)
 	assert.Empty(t, stats)
+}
+
+func TestScoredLookupCanceledDoesNotRefreshIndexLRU(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 2, PodCacheSize: 1})
+	require.NoError(t, err)
+
+	entry := []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{10}, entry))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{20}, entry))
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = index.ScoredLookup(canceledCtx, []BlockHash{10}, nil, scoredLookupTierWeights)
+	require.ErrorIs(t, err, context.Canceled)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{30}, entry))
+	oldestStats, err := index.ScoredLookup(ctx, []BlockHash{10}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	newestStats, err := index.ScoredLookup(ctx, []BlockHash{20}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	assert.Empty(t, oldestStats)
+	assert.Contains(t, newestStats, "pod-a")
+}
+
+func TestScoredLookupRefreshesFetchedRequestBatch(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 4, PodCacheSize: 1})
+	require.NoError(t, err)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{30}, []PodEntry{{PodIdentifier: "pod-c", DeviceTier: "gpu"}}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{5}, []PodEntry{{PodIdentifier: "pod-cold", DeviceTier: "gpu"}}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{10}, []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{20}, []PodEntry{{PodIdentifier: "pod-b", DeviceTier: "gpu"}}))
+
+	stats, err := index.ScoredLookup(ctx, []BlockHash{10, 20, 30}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	require.Contains(t, stats, "pod-a")
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{40}, []PodEntry{{PodIdentifier: "pod-d", DeviceTier: "gpu"}}))
+
+	firstStats, err := index.ScoredLookup(ctx, []BlockHash{10}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	breakStats, err := index.ScoredLookup(ctx, []BlockHash{20}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	tailStats, err := index.ScoredLookup(ctx, []BlockHash{30}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	coldStats, err := index.ScoredLookup(ctx, []BlockHash{5}, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+	assert.Contains(t, firstStats, "pod-a")
+	assert.Contains(t, breakStats, "pod-b")
+	assert.Contains(t, tailStats, "pod-c")
+	assert.Empty(t, coldStats)
+}
+
+func TestScoredLookupConcurrentReadersAgree(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+
+	keys := []BlockHash{10, 20, 30}
+	for i := 0; i < 8; i++ {
+		entry := []PodEntry{{PodIdentifier: fmt.Sprintf("pod-%d", i), DeviceTier: "gpu"}}
+		require.NoError(t, index.Add(ctx, nil, keys, entry))
+	}
+	want, err := index.ScoredLookup(ctx, keys, nil, scoredLookupTierWeights)
+	require.NoError(t, err)
+
+	const readers = 16
+	errCh := make(chan error, readers)
+	var wg sync.WaitGroup
+	wg.Add(readers)
+	for range readers {
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				got, lookupErr := index.ScoredLookup(ctx, keys, nil, scoredLookupTierWeights)
+				if lookupErr != nil {
+					errCh <- lookupErr
+					return
+				}
+				if !reflect.DeepEqual(want, got) {
+					errCh <- fmt.Errorf("unexpected stats: got %v, want %v", got, want)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
 }
 
 // Pod churn (interned ids from pods since cleared) must change neither

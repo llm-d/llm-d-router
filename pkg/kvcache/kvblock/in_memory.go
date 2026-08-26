@@ -64,7 +64,7 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		podCacheSize = defaultPodsPerKey
 	}
 
-	cache, err := lru.New[BlockHash, *PodCache](cfg.Size)
+	cache, err := newRequestKeyCache(cfg.Size)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
 	}
@@ -89,7 +89,7 @@ type InMemoryIndex struct {
 	// check + mapping removal vs Add's pod entry insertion) to prevent TOCTOU races.
 	mu sync.Mutex
 	// data holds the mapping of requestKeys to sets of pod identifiers.
-	data *lru.Cache[BlockHash, *PodCache]
+	data *requestKeyCache
 	// engineToRequestKeys holds the mapping of engineKeys to requestKeys.
 	engineToRequestKeys *lru.Cache[BlockHash, []BlockHash]
 	// podCacheSize is the maximum number of pod entries per key.

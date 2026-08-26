@@ -76,7 +76,7 @@ func TestScoredLookupColdScratchDoesNotTrackPodHistory(t *testing.T) {
 			require.NoError(t, index.Clear(ctx, pod))
 		}
 
-		scoredScratchPool = sync.Pool{New: func() any { return &scoredScratch{} }}
+		scoredScratchPool = sync.Pool{New: newScoredScratch}
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
@@ -92,6 +92,73 @@ func TestScoredLookupColdScratchDoesNotTrackPodHistory(t *testing.T) {
 	withChurn := measure(20_000)
 	assert.Less(t, withChurn, withoutChurn+128*1024,
 		"cold request scratch must scale with live candidates, not interned pod history")
+}
+
+func TestScoredLookupCrossesRequestKeyBatchBoundary(t *testing.T) {
+	ctx := log.IntoContext(context.Background(), logr.Discard())
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+
+	keys := make([]BlockHash, requestKeyBatchSize+1)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+	entry := []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}
+	require.NoError(t, index.Add(ctx, nil, keys, entry))
+
+	stats, err := index.ScoredLookup(ctx, keys, nil, map[string]float64{"gpu": 1})
+	require.NoError(t, err)
+	assert.Equal(t, len(keys), stats["pod-a"].MatchedBlocks)
+}
+
+func TestScoredLookupStopsAtRequestKeyBatchBoundaryGap(t *testing.T) {
+	ctx := log.IntoContext(context.Background(), logr.Discard())
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+
+	keys := make([]BlockHash, requestKeyBatchSize+2)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+	entry := []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}
+	require.NoError(t, index.Add(ctx, nil, keys[:requestKeyBatchSize], entry))
+	require.NoError(t, index.Add(ctx, nil, keys[requestKeyBatchSize+1:], entry))
+
+	stats, err := index.ScoredLookup(ctx, keys, nil, map[string]float64{"gpu": 1})
+	require.NoError(t, err)
+	assert.Equal(t, requestKeyBatchSize, stats["pod-a"].MatchedBlocks)
+}
+
+func TestScoredLookupStopsFetchingAfterCandidateBreak(t *testing.T) {
+	ctx := log.IntoContext(context.Background(), logr.Discard())
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{
+		Size:         requestKeyBatchSize + 2,
+		PodCacheSize: 1,
+	})
+	require.NoError(t, err)
+
+	requestKeys := make([]BlockHash, requestKeyBatchSize+1)
+	for i := range requestKeys {
+		requestKeys[i] = BlockHash(100 + i)
+	}
+	tailKey := requestKeys[len(requestKeys)-1]
+	const coldKey BlockHash = 50
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{tailKey}, []PodEntry{{PodIdentifier: "pod-tail", DeviceTier: "gpu"}}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{coldKey}, []PodEntry{{PodIdentifier: "pod-cold", DeviceTier: "gpu"}}))
+	for i, key := range requestKeys[:requestKeyBatchSize] {
+		entry := []PodEntry{{PodIdentifier: fmt.Sprintf("pod-%d", i), DeviceTier: "gpu"}}
+		require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, entry))
+	}
+
+	stats, err := index.ScoredLookup(ctx, requestKeys, nil, map[string]float64{"gpu": 1})
+	require.NoError(t, err)
+	require.Equal(t, 1, stats["pod-0"].MatchedBlocks)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{999}, []PodEntry{{PodIdentifier: "pod-new", DeviceTier: "gpu"}}))
+	_, tailFound := index.data.Peek(tailKey)
+	_, coldFound := index.data.Peek(coldKey)
+	assert.False(t, tailFound, "a batch beyond the scoring break must remain cold")
+	assert.True(t, coldFound, "an older key must survive when the unfetched tail remains cold")
 }
 
 // BenchmarkMaxContiguousPodHits measures the hit-metric fold on the legacy
