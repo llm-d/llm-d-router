@@ -26,6 +26,7 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	integration "github.com/llm-d/llm-d-router/test/integration"
 )
@@ -206,6 +207,17 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 // ExpectReject asserts that the EPP immediately rejected the request with the given code and message.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
 	return integration.NewImmediateErrorResponse(code, msg)
+}
+
+// ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
+// and message, and that the response carries the drop-reason header.
+func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
+	return integration.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
+		Header: &envoyCorev3.HeaderValue{
+			Key:      errcommon.RequestDroppedReasonHeaderKey,
+			RawValue: []byte(reason),
+		},
+	})
 }
 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.

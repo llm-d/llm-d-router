@@ -39,29 +39,6 @@ const (
 )
 
 var (
-	// SchedulerPDDecisionCount records request P/D decision.
-	//
-	// Deprecated: Use LlmdPDDecisionCount instead.
-	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
-	SchedulerPDDecisionCount = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: eppmetrics.SchedulerSubsystem,
-			Name:      "pd_decision_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_pd_decision_total] Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
-		},
-		[]string{"model_name", "decision_type"}, // "decode-only" or "prefill-decode"
-	)
-
-	// LlmdPDDecisionCount records request P/D decision.
-	LlmdPDDecisionCount = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "pd_decision_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of P/D disaggregation decisions made", compbasemetrics.ALPHA),
-		},
-		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
-	)
-
 	// SchedulerDisaggDecisionCount records disaggregation routing decisions,
 	// covering all stages: decode-only, prefill-decode, encode-decode, encode-prefill-decode.
 	//
@@ -92,8 +69,6 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		return errors.New("disagg metrics registerer is required")
 	}
 	for _, collector := range []prometheus.Collector{
-		SchedulerPDDecisionCount,
-		LlmdPDDecisionCount,
 		SchedulerDisaggDecisionCount,
 		LlmdDisaggDecisionCount,
 	} {
@@ -106,17 +81,6 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		}
 	}
 	return nil
-}
-
-// RecordPDDecision increments the counter for a specific P/D routing decision.
-//
-// Deprecated: Use RecordDisaggDecision instead.
-func RecordPDDecision(pluginName, pluginType, modelName, decisionType string) {
-	if modelName == "" {
-		modelName = "unknown"
-	}
-	SchedulerPDDecisionCount.WithLabelValues(modelName, decisionType).Inc()
-	LlmdPDDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
 }
 
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.

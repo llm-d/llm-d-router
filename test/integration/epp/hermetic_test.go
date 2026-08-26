@@ -44,6 +44,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -293,8 +294,9 @@ dataLayer:
 						P(0, 0, 0.2, "foo"),
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
-					wantResponses: ExpectReject(envoyTypePb.StatusCode_ServiceUnavailable,
-						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request"),
+					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
+						errcommon.RequestDroppedReasonNoEndpoints),
 				},
 
 				// --- Request Modification (Passthrough & Rewrite) ---

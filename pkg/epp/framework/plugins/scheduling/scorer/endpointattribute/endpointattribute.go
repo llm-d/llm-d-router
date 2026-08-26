@@ -36,7 +36,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &EndpointAttributeScorer{}
+var (
+	_ fwksched.Scorer          = &EndpointAttributeScorer{}
+	_ fwkplugin.ConsumerPlugin = &EndpointAttributeScorer{}
+)
 
 // fixedRangeParameters normalizes the attribute value against a fixed
 // [min, max] range (e.g. kv-cache utilization, which is always in [0, 1]).

@@ -161,11 +161,12 @@ plugins:
 
 dataLayer:
   discovery:
-    pluginRef: my-endpoints     # must match a name in plugins above
+    endpoints:
+      pluginRef: my-endpoints   # must match a name in plugins above
 ```
 
-When `dataLayer.discovery` is present the EPP skips the Kubernetes setup
-entirely.  When it is absent the EPP uses the default Kubernetes-based
+When `dataLayer.discovery.endpoints` is present the EPP skips the Kubernetes
+setup entirely.  When it is absent the EPP uses the default Kubernetes-based
 discovery (backwards compatible).
 
 ---
@@ -384,7 +385,8 @@ schedulingProfiles:
 
 dataLayer:
   discovery:
-    pluginRef: file-disc
+    endpoints:
+      pluginRef: file-disc
 ```
 
 ### 3. Start the EPP
@@ -584,5 +586,6 @@ plugins:
 
 dataLayer:
   discovery:
-    pluginRef: my-disc
+    endpoints:
+      pluginRef: my-disc
 ```

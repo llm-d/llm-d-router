@@ -41,6 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 const (
@@ -124,14 +125,12 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 	h.PriorityBandAccessorFunc = h.priorityBandAccessor
 	h.FairnessPolicyFunc = h.fairnessPolicy
 
-	// Provide a default stats implementation that is effectively infinite.
-	h.StatsFunc = func() contracts.AggregateStats {
-		return contracts.AggregateStats{
-			TotalCapacityBytes: 1e9,
-			PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-				testFlow.Priority: {CapacityBytes: 1e9},
-			},
-		}
+	// Provide a default capacity snapshot that is effectively infinite.
+	h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+		return contracts.CapacitySnapshot{
+			Global: contracts.CapacityDimension{CapacityBytes: 1e9},
+			Band:   contracts.CapacityDimension{CapacityBytes: 1e9},
+		}, nil
 	}
 
 	h.processor = NewProcessor(
@@ -326,10 +325,10 @@ func TestProcessor(t *testing.T) {
 			h := newTestHarness(t, testCleanupTick)
 			item := h.newTestItem("req-capacity-reject", testFlow, testTTL)
 			h.addQueue(testFlow)
-			h.StatsFunc = func() contracts.AggregateStats {
-				return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-					testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
-				}}
+			h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+				return contracts.CapacitySnapshot{
+					Band: contracts.CapacityDimension{CapacityBytes: 50}, // 50 is less than item size of 100
+				}, nil
 			}
 
 			// --- ACT ---
@@ -594,10 +593,12 @@ func TestProcessor(t *testing.T) {
 					},
 				},
 				{
-					name: "should reject item on registry priority band lookup failure",
+					name: "should reject item on registry capacity lookup failure",
 					setupHarness: func(h *testHarness) {
 						h.addQueue(testFlow)
-						h.PriorityBandAccessorFunc = func(int) (flowcontrol.PriorityBandAccessor, error) { return nil, testErr }
+						h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+							return contracts.CapacitySnapshot{}, testErr
+						}
 					},
 					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
 						assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
@@ -627,10 +628,10 @@ func TestProcessor(t *testing.T) {
 						h.endpointCandidates.Candidates = nil
 						// Prime the regime via a dispatch cycle, mirroring the Run loop's periodic dispatch.
 						h.processor.dispatchCycle(context.Background())
-						h.StatsFunc = func() contracts.AggregateStats {
-							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
-							}}
+						h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+							return contracts.CapacitySnapshot{
+								Band: contracts.CapacityDimension{CapacityBytes: 50}, // 50 is less than item size of 100
+							}, nil
 						}
 					},
 					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
@@ -647,10 +648,10 @@ func TestProcessor(t *testing.T) {
 						h.addQueue(testFlow)
 						// Non-empty pool (harness default): a capacity rejection is backpressure, not unavailability.
 						h.processor.dispatchCycle(context.Background())
-						h.StatsFunc = func() contracts.AggregateStats {
-							return contracts.AggregateStats{PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-								testFlow.Priority: {CapacityBytes: 50}, // 50 is less than item size of 100
-							}}
+						h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+							return contracts.CapacitySnapshot{
+								Band: contracts.CapacityDimension{CapacityBytes: 50}, // 50 is less than item size of 100
+							}, nil
 						}
 					},
 					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
@@ -709,87 +710,67 @@ func TestProcessor(t *testing.T) {
 			testCases := []struct {
 				name         string
 				itemByteSize uint64
-				stats        contracts.AggregateStats
+				snapshot     contracts.CapacitySnapshot
 				expectHasCap bool
 			}{
 				{
 					name:         "should deny item if global byte capacity exceeded",
 					itemByteSize: 1,
-					stats:        contracts.AggregateStats{TotalByteSize: 100, TotalCapacityBytes: 100},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{ByteSize: 100, CapacityBytes: 100},
+					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should deny item if global request capacity exceeded",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityRequests: 10, TotalLen: 10,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 100, Len: 0},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityRequests: 10, Len: 10},
+						Band:   contracts.CapacityDimension{CapacityRequests: 100, Len: 0},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should deny item if band byte capacity exceeded",
 					itemByteSize: 1,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 200, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {ByteSize: 50, CapacityBytes: 50},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 200, ByteSize: 100},
+						Band:   contracts.CapacityDimension{ByteSize: 50, CapacityBytes: 50},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should deny item if band request capacity exceeded",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 5, Len: 5},
-						},
-					},
-					expectHasCap: false,
-				},
-				{
-					name:         "should deny item if band stats are missing",
-					itemByteSize: 1,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 200, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{}, // Missing stats for priority 10
+					snapshot: contracts.CapacitySnapshot{
+						Band: contracts.CapacityDimension{CapacityRequests: 5, Len: 5},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should allow item if both global and band have byte capacity",
 					itemByteSize: 10,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 200, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {ByteSize: 50, CapacityBytes: 100},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 200, ByteSize: 100},
+						Band:   contracts.CapacityDimension{ByteSize: 50, CapacityBytes: 100},
 					},
 					expectHasCap: true,
 				},
 				{
 					name:         "should allow item if both global and band have request capacity",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityRequests: 10, TotalLen: 5,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 8, Len: 3},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityRequests: 10, Len: 5},
+						Band:   contracts.CapacityDimension{CapacityRequests: 8, Len: 3},
 					},
 					expectHasCap: true,
 				},
 				{
 					name:         "should ignore zero-valued capacity limits",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 0, TotalByteSize: 999,
-						TotalCapacityRequests: 0, TotalLen: 999,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 0, ByteSize: 999, CapacityRequests: 0, Len: 999},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 0, ByteSize: 999, CapacityRequests: 0, Len: 999},
+						Band:   contracts.CapacityDimension{CapacityBytes: 0, ByteSize: 999, CapacityRequests: 0, Len: 999},
 					},
 					expectHasCap: true,
 				},
@@ -797,36 +778,27 @@ func TestProcessor(t *testing.T) {
 				{
 					name:         "should deny if global bytes ok but band requests exceeded",
 					itemByteSize: 10,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 200, TotalByteSize: 50,
-						TotalCapacityRequests: 100, TotalLen: 5,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 100, ByteSize: 20, CapacityRequests: 5, Len: 5},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 200, ByteSize: 50, CapacityRequests: 100, Len: 5},
+						Band:   contracts.CapacityDimension{CapacityBytes: 100, ByteSize: 20, CapacityRequests: 5, Len: 5},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should deny if global requests ok but band bytes exceeded",
 					itemByteSize: 10,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 200, TotalByteSize: 50,
-						TotalCapacityRequests: 100, TotalLen: 5,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 20, ByteSize: 20, CapacityRequests: 100, Len: 3},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 200, ByteSize: 50, CapacityRequests: 100, Len: 5},
+						Band:   contracts.CapacityDimension{CapacityBytes: 20, ByteSize: 20, CapacityRequests: 100, Len: 3},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should allow if all four checks pass",
 					itemByteSize: 10,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 200, TotalByteSize: 50,
-						TotalCapacityRequests: 100, TotalLen: 10,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 100, ByteSize: 20, CapacityRequests: 50, Len: 5},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 200, ByteSize: 50, CapacityRequests: 100, Len: 10},
+						Band:   contracts.CapacityDimension{CapacityBytes: 100, ByteSize: 20, CapacityRequests: 50, Len: 5},
 					},
 					expectHasCap: true,
 				},
@@ -834,88 +806,72 @@ func TestProcessor(t *testing.T) {
 				{
 					name:         "should allow when global bytes exactly at capacity after add",
 					itemByteSize: 10,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 110, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 60, ByteSize: 50},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 110, ByteSize: 100},
+						Band:   contracts.CapacityDimension{CapacityBytes: 60, ByteSize: 50},
 					},
 					expectHasCap: true,
 				},
 				{
 					name:         "should deny when global bytes one over capacity after add",
 					itemByteSize: 11,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 110, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 200, ByteSize: 50},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 110, ByteSize: 100},
+						Band:   contracts.CapacityDimension{CapacityBytes: 200, ByteSize: 50},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should allow when global requests exactly at capacity after add",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityRequests: 10, TotalLen: 9,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 10, Len: 5},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityRequests: 10, Len: 9},
+						Band:   contracts.CapacityDimension{CapacityRequests: 10, Len: 5},
 					},
 					expectHasCap: true,
 				},
 				{
 					name:         "should deny when global requests one over capacity after add",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityRequests: 10, TotalLen: 10,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 100, Len: 5},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityRequests: 10, Len: 10},
+						Band:   contracts.CapacityDimension{CapacityRequests: 100, Len: 5},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should allow when band bytes exactly at capacity after add",
 					itemByteSize: 10,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 500, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 60, ByteSize: 50},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 500, ByteSize: 100},
+						Band:   contracts.CapacityDimension{CapacityBytes: 60, ByteSize: 50},
 					},
 					expectHasCap: true,
 				},
 				{
 					name:         "should deny when band bytes one over capacity after add",
 					itemByteSize: 11,
-					stats: contracts.AggregateStats{
-						TotalCapacityBytes: 500, TotalByteSize: 100,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityBytes: 60, ByteSize: 50},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityBytes: 500, ByteSize: 100},
+						Band:   contracts.CapacityDimension{CapacityBytes: 60, ByteSize: 50},
 					},
 					expectHasCap: false,
 				},
 				{
 					name:         "should allow when band requests exactly at capacity after add",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityRequests: 100, TotalLen: 10,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 6, Len: 5},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityRequests: 100, Len: 10},
+						Band:   contracts.CapacityDimension{CapacityRequests: 6, Len: 5},
 					},
 					expectHasCap: true,
 				},
 				{
 					name:         "should deny when band requests one over capacity after add",
 					itemByteSize: 0,
-					stats: contracts.AggregateStats{
-						TotalCapacityRequests: 100, TotalLen: 10,
-						PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-							testFlow.Priority: {CapacityRequests: 5, Len: 5},
-						},
+					snapshot: contracts.CapacitySnapshot{
+						Global: contracts.CapacityDimension{CapacityRequests: 100, Len: 10},
+						Band:   contracts.CapacityDimension{CapacityRequests: 5, Len: 5},
 					},
 					expectHasCap: false,
 				},
@@ -925,11 +881,23 @@ func TestProcessor(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
-					h.StatsFunc = func() contracts.AggregateStats { return tc.stats }
-					hasCap, _ := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) { return tc.snapshot, nil }
+					hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					require.NoError(t, err, "hasCapacity should not fail when the snapshot read succeeds")
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
 				})
 			}
+
+			t.Run("should propagate the error when the priority band is not configured", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+					return contracts.CapacitySnapshot{}, contracts.ErrPriorityBandNotFound
+				}
+				hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, 1)
+				require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The lookup error should be propagated")
+				assert.False(t, hasCap, "A failed capacity read should never report available capacity")
+			})
 		})
 
 		t.Run("dispatchCycle", func(t *testing.T) {
@@ -1104,6 +1072,225 @@ func TestProcessor(t *testing.T) {
 					require.True(t, dispatched, "Expected a low-priority dispatch on cycle %d", i+1)
 				}
 				assert.Equal(t, 0, qLow.Len(), "Low-priority queue should be empty")
+			})
+		})
+
+		t.Run("partitionEndpoints", func(t *testing.T) {
+			t.Parallel()
+
+			makeEndpoint := func(labels map[string]string) fwkdl.Endpoint {
+				return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{Labels: labels}, nil)
+			}
+
+			t.Run("should classify endpoints by role label", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefill}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleDecode}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode}),
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncodePrefillDecode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Len(t, prefill, 2, "prefill should contain RolePrefill and RoleEncodePrefill")
+				assert.Len(t, decode, 1, "decode should contain RoleDecode")
+				assert.Len(t, interleaved, 2, "interleaved should contain RolePrefillDecode and RoleEncodePrefillDecode")
+			})
+
+			t.Run("should default unlabeled endpoints to decode", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(nil),                                 // no labels map
+					makeEndpoint(map[string]string{}),                 // empty labels
+					makeEndpoint(map[string]string{"other": "value"}), // unrelated label
+					fwkdl.NewEndpoint(nil, nil),                       // nil metadata gets defaulted by NewEndpoint
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Len(t, decode, 4, "all unlabeled endpoints should land in decode")
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude unrecognized role from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: "unknown-role"}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should exclude encode-only endpoints from all buckets", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleEncode}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should skip nil endpoints", func(t *testing.T) {
+				t.Parallel()
+				endpoints := []fwkdl.Endpoint{
+					nil,
+					makeEndpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill}),
+				}
+
+				prefill, decode, interleaved := partitionEndpoints(endpoints)
+				assert.Len(t, prefill, 1)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+
+			t.Run("should return empty slices for empty input", func(t *testing.T) {
+				t.Parallel()
+				prefill, decode, interleaved := partitionEndpoints(nil)
+				assert.Empty(t, prefill)
+				assert.Empty(t, decode)
+				assert.Empty(t, interleaved)
+			})
+		})
+
+		t.Run("stage-aware saturation gating", func(t *testing.T) {
+			t.Parallel()
+
+			makeEndpoint := func(role string) fwkdl.Endpoint {
+				return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					Labels: map[string]string{bylabel.RoleLabel: role},
+				}, nil)
+			}
+
+			t.Run("should gate on highest stage saturation", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					for _, ep := range endpoints {
+						if ep.GetMetadata().Labels[bylabel.RoleLabel] != bylabel.RolePrefill {
+							// Any mixed or decode set reads healthy: the flat average is
+							// diluted by idle decode workers.
+							return 0.3
+						}
+					}
+					return 1.5 // homogeneous prefill subset: stage saturated
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.False(t, dispatched, "should block when any stage is saturated")
+			})
+
+			t.Run("should not gate when all stages are healthy", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+					return 0.3
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "should dispatch when all stages are healthy")
+			})
+
+			t.Run("should skip empty partitions", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				// Only decode endpoints, no prefill. Empty prefill partition should
+				// be skipped, not treated as saturated (detector returns 1.0 for empty slices).
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RoleDecode),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					if len(endpoints) == 0 {
+						return 1.0 // Would block if not skipped.
+					}
+					return 0.2
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "should dispatch when only non-empty partitions are healthy")
+			})
+
+			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					makeEndpoint(bylabel.RolePrefill),
+					makeEndpoint(bylabel.RoleDecode),
+					makeEndpoint(bylabel.RolePrefillDecode), // interleaved
+				}
+
+				// Track which endpoints each Saturation call receives.
+				var calls [][]string
+				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+					roles := make([]string, 0, len(endpoints))
+					for _, ep := range endpoints {
+						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
+					}
+					calls = append(calls, roles)
+					return 0.2
+				}
+
+				h.processor.dispatchCycle(context.Background())
+
+				require.Len(t, calls, 2, "detector should be called once per stage")
+				// Prefill pool: prefill + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RolePrefill, bylabel.RolePrefillDecode}, calls[0])
+				// Decode pool: decode + interleaved
+				assert.ElementsMatch(t, []string{bylabel.RoleDecode, bylabel.RolePrefillDecode}, calls[1])
+			})
+
+			t.Run("should behave like monolithic when no role labels exist", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item-1", testFlow, testTTL)))
+
+				// Unlabeled endpoints all land in decode, behaving like the pre-change single-pool path.
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{
+					fwkdl.NewEndpoint(nil, nil),
+					fwkdl.NewEndpoint(nil, nil),
+				}
+
+				h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+					return 0.4
+				}
+
+				dispatched := h.processor.dispatchCycle(context.Background())
+				assert.True(t, dispatched, "monolithic deployment should dispatch normally")
 			})
 		})
 
@@ -1471,13 +1658,11 @@ func TestProcessor_DropSummary(t *testing.T) {
 		h.addQueue(testFlow)
 
 		// Force capacity-full: band has 1 slot already used, CapacityRequests=1.
-		h.StatsFunc = func() contracts.AggregateStats {
-			return contracts.AggregateStats{
-				TotalCapacityBytes: 1e9,
-				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-					testFlow.Priority: {CapacityRequests: 1, Len: 1},
-				},
-			}
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			return contracts.CapacitySnapshot{
+				Global: contracts.CapacityDimension{CapacityBytes: 1e9},
+				Band:   contracts.CapacityDimension{CapacityRequests: 1, Len: 1},
+			}, nil
 		}
 
 		item := h.newTestItem("req-cap", testFlow, testTTL)
@@ -1496,13 +1681,11 @@ func TestProcessor_DropSummary(t *testing.T) {
 		h.addQueue(testFlow)
 
 		// Force capacity-full.
-		h.StatsFunc = func() contracts.AggregateStats {
-			return contracts.AggregateStats{
-				TotalCapacityBytes: 1e9,
-				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-					testFlow.Priority: {CapacityRequests: 1, Len: 1},
-				},
-			}
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			return contracts.CapacitySnapshot{
+				Global: contracts.CapacityDimension{CapacityBytes: 1e9},
+				Band:   contracts.CapacityDimension{CapacityRequests: 1, Len: 1},
+			}, nil
 		}
 
 		item := h.newTestItem("req-flush", testFlow, testTTL)
@@ -1523,13 +1706,11 @@ func TestProcessor_DropSummary(t *testing.T) {
 		h.addQueue(testFlow)
 
 		// Reject via capacity: band has 1 slot already used, CapacityRequests=1.
-		h.StatsFunc = func() contracts.AggregateStats {
-			return contracts.AggregateStats{
-				TotalCapacityBytes: 1e9,
-				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-					testFlow.Priority: {CapacityRequests: 1, Len: 1},
-				},
-			}
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			return contracts.CapacitySnapshot{
+				Global: contracts.CapacityDimension{CapacityBytes: 1e9},
+				Band:   contracts.CapacityDimension{CapacityRequests: 1, Len: 1},
+			}, nil
 		}
 		for i := range 2 {
 			item := h.newTestItem(fmt.Sprintf("req-multi-cap-%d", i), testFlow, testTTL)
@@ -1537,17 +1718,9 @@ func TestProcessor_DropSummary(t *testing.T) {
 			h.waitForFinalization(item) //nolint:errcheck
 		}
 
-		// Reject via configuration error (RejectedOther): pass capacity, fail priority band lookup.
-		h.StatsFunc = func() contracts.AggregateStats {
-			return contracts.AggregateStats{
-				TotalCapacityBytes: 1e9,
-				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-					testFlow.Priority: {CapacityRequests: 100, Len: 0},
-				},
-			}
-		}
-		h.PriorityBandAccessorFunc = func(priority int) (flowcontrol.PriorityBandAccessor, error) {
-			return nil, errors.New("forced priority band failure")
+		// Reject via configuration error (RejectedOther): fail the capacity lookup.
+		h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+			return contracts.CapacitySnapshot{}, errors.New("forced capacity lookup failure")
 		}
 		item := h.newTestItem("req-multi-other", testFlow, testTTL)
 		h.processor.enqueue(item)

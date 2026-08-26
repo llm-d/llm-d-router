@@ -117,9 +117,9 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}}}, nil
 	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Completions.Prompt.TokenIDs}}}, nil
+		return fwkrh.NewTokenizedRequest(body.Completions.Prompt.TokenIDs), nil
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Embeddings.Input.TokenIDs}}}, nil
+		return fwkrh.NewTokenizedRequest(body.Embeddings.Input.TokenIDs), nil
 	}
 
 	// Chat and Anthropic messages fold multimodal placeholders into the stream

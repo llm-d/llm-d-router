@@ -40,39 +40,6 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
-	"deprecatedPdConfig": `apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- type: prefill-header-handler
-- type: approx-prefix-cache-producer
-  parameters:
-    blockSizeTokens: 16
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: prefill-filter
-- type: decode-filter
-- type: max-score-picker
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
-- type: pd-profile-handler
-  parameters:
-    deciderPluginName: prefix-based-pd-decider
-schedulingProfiles:
-- name: prefill
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`,
 	"pdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:

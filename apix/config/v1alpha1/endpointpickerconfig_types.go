@@ -234,16 +234,10 @@ type DataLayerConfig struct {
 	// Sources is the list of sources to define to the DataLayer
 	Sources []DataLayerSource `json:"sources,omitempty"`
 	// +optional
-	// Discovery specifies which EndpointDiscovery plugin to use for populating the
-	// endpoint datastore. When set, the EPP bypasses Kubernetes CRD reconcilers and
-	// relies entirely on the referenced plugin to enumerate and track inference
-	// endpoints. This enables running the EPP without a Kubernetes cluster.
-	// If omitted, the EPP uses the default Kubernetes-based discovery.
+	// Discovery groups configuration for all discovery plugins (endpoint discovery
+	// and peer discovery). If omitted, the EPP uses Kubernetes-based discovery for
+	// endpoints and disables peer discovery.
 	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
-	// +optional
-	// PeerDiscovery specifies which PeerDiscovery plugin to use for discovering
-	// peer EPP replicas. If omitted, peer discovery is disabled.
-	PeerDiscovery *PeerDiscoveryConfig `json:"peerDiscovery,omitempty"`
 	// +optional
 	// CrossReplicaSyncerPluginRef names the plugin instance to use as the cross-EPP
 	// cross-replica syncer. The reference is to the name of an entry in the
@@ -261,12 +255,39 @@ func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v, PeerDiscovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
-		dlc.Sources, dlc.Discovery, dlc.PeerDiscovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
+		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
 }
 
-// DiscoveryConfig references the EndpointDiscovery plugin to use.
+// DiscoveryConfig groups endpoint and peer discovery plugin references.
 type DiscoveryConfig struct {
+	// +optional
+	// Endpoints specifies which EndpointDiscovery plugin to use for populating the
+	// endpoint datastore. When set, the EPP bypasses Kubernetes CRD reconcilers and
+	// relies entirely on the referenced plugin to enumerate and track inference
+	// endpoints. This enables running the EPP without a Kubernetes cluster.
+	Endpoints *EndpointDiscoveryConfig `json:"endpoints,omitempty"`
+	// +optional
+	// Peers specifies which PeerDiscovery plugin to use for discovering
+	// peer EPP replicas. If omitted, peer discovery is disabled.
+	Peers *PeerDiscoveryConfig `json:"peers,omitempty"`
+	// +optional
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements EndpointDiscovery.
+	//
+	// Deprecated: use endpoints.pluginRef instead.
+	PluginRef string `json:"pluginRef,omitempty"`
+}
+
+func (dc *DiscoveryConfig) String() string {
+	if dc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{Endpoints: %v, Peers: %v, PluginRef: %s}", dc.Endpoints, dc.Peers, dc.PluginRef)
+}
+
+// EndpointDiscoveryConfig references the EndpointDiscovery plugin to use.
+type EndpointDiscoveryConfig struct {
 	// +required
 	// +kubebuilder:validation:Required
 	// PluginRef is the name of the plugin instance (from the Plugins list) that
@@ -274,11 +295,11 @@ type DiscoveryConfig struct {
 	PluginRef string `json:"pluginRef"`
 }
 
-func (dc *DiscoveryConfig) String() string {
-	if dc == nil {
+func (edc *EndpointDiscoveryConfig) String() string {
+	if edc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{PluginRef: %s}", dc.PluginRef)
+	return fmt.Sprintf("{PluginRef: %s}", edc.PluginRef)
 }
 
 // PeerDiscoveryConfig references the PeerDiscovery plugin to use.

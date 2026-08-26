@@ -167,6 +167,10 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
+			ginkgo.By("Verifying requests route successfully before disruption")
+			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
+			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+
 			ginkgo.By("Starting a streaming request")
 			connected := make(chan string, 1)
 			errCh := make(chan error, 1)

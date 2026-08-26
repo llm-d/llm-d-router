@@ -30,7 +30,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &KVCacheUtilizationScorer{}
+var (
+	_ fwksched.Scorer          = &KVCacheUtilizationScorer{}
+	_ fwkplugin.ConsumerPlugin = &KVCacheUtilizationScorer{}
+)
 
 // KvCacheUtilizationScorerFactory defines the factory function for KVCacheUtilizationScorer.
 func KvCacheUtilizationScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -59,10 +62,15 @@ func (s *KVCacheUtilizationScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (s *KVCacheUtilizationScorer) Consumes() map[string]any {
-	return map[string]any{
-		metrics.KVCacheUsagePercentKey: float64(0),
+// Consumes declares that the scorer reads the KV-cache utilization field
+// from the endpoint's Metrics struct. The DataKey names the field the
+// core-metrics-extractor publishes; the registry validates the consumer's
+// declared type against the producer's declaration.
+func (s *KVCacheUtilizationScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(metrics.KVCacheUsagePercentKey, metrics.MetricsExtractorType): float64(0),
+		},
 	}
 }
 
