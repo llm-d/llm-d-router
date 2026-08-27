@@ -61,6 +61,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -227,6 +228,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Apply the process-wide plugin-state staleness threshold before any plugin is instantiated.
+	fwkplugin.SetDefaultStalenessThreshold(opts.PluginStateStalenessThreshold)
+
 	// Print flag values, skipping deprecated metric flags configured via engineConfigs
 	flags := make(map[string]any)
 	pflag.VisitAll(func(f *pflag.Flag) {
@@ -259,7 +263,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
-	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil {
+	dlCfg := rawConfig.DataLayer
+	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
 	}
 
@@ -381,6 +386,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
 
 	// --- Setup Metrics Server ---
+	cardinality.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)
@@ -930,13 +936,13 @@ func resolvePoolNamespace(poolNamespace string) string {
 }
 
 // resolveDiscovery returns the discovery plugin identified by
-// rawConfig.DataLayer.Discovery.PluginRef. The plugin is expected to have
-// already been instantiated and registered in r.PluginHandle by
+// rawConfig.DataLayer.Discovery.Endpoints.PluginRef. The plugin is expected to
+// have already been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo; this function only looks it up and verifies its
 // type, so the loader-created instance (with its real Handle wired in) is the
 // one the runner drives.
 func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
-	ref := rawConfig.DataLayer.Discovery.PluginRef
+	ref := rawConfig.DataLayer.Discovery.Endpoints.PluginRef
 	p := r.PluginHandle.Plugin(ref)
 	if p == nil {
 		return nil, fmt.Errorf("discovery: no plugin found with name %q", ref)

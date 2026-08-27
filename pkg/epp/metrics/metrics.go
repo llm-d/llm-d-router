@@ -30,6 +30,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 )
 
 const (
@@ -1049,7 +1050,7 @@ func RecordFlowControlRevocationConfirmationDuration(inferencePool string, durat
 func DeleteFlowControlFlowSeries(fairnessID, priority string) {
 	// The overflow value aggregates every capped-out fairness ID, so a flow whose client-chosen ID
 	// equals it must not delete the shared series.
-	if fairnessID == overflowValue {
+	if fairnessID == cardinality.OverflowValue {
 		return
 	}
 	labels := prometheus.Labels{"fairness_id": fairnessID, "priority": priority}

@@ -472,8 +472,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey] = requestID // update in headers so director can consume it
 			}
 			logger = logger.WithValues(reqcommon.RequestIDHeaderKey, requestID)
-			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID will be logged too as part of logger context values.
-			loggerTrace = logger.V(logutil.TRACE)
 			ctx = log.IntoContext(ctx, logger)
 
 			// Re-parent the server span to the upstream trace context (e.g. the
@@ -481,7 +479,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// headers, then start it. The headers are only available here, so the span
 			// cannot be started at the top of Process without orphaning the trace.
 			ctx = extractTraceContext(ctx, v)
-			ctx, span = tracer.Start(ctx, "gateway.request", trace.WithSpanKind(trace.SpanKindServer))
+			ctx, span = tracer.Start(ctx, "request", trace.WithSpanKind(trace.SpanKindServer))
+
+			// Tag every log line of this request with the trace it belongs to.
+			ctx = tracing.LoggerWithSpanContext(ctx, span)
+			logger = log.FromContext(ctx)
+			loggerTrace = logger.V(logutil.TRACE)
+			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID and trace fields are logged as logger context values.
 
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:

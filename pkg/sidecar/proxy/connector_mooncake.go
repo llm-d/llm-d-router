@@ -198,7 +198,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 
 	// Prefill runs in a goroutine: only populates KV cache, response is discarded.
 	// Decode runs on the main thread: writes the actual response back to the client via w.
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -240,7 +240,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 	}()
 
 	// Decode Stage
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()

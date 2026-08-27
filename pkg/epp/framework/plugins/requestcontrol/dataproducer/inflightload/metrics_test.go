@@ -28,6 +28,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -313,4 +314,33 @@ func TestAddedTokensEntry_Clone(t *testing.T) {
 	require.Equal(t, entry.priority, cloned.priority)
 	require.Equal(t, int64(15), cloned.tokens.Load())
 	require.Equal(t, int32(1), cloned.requests.Load())
+}
+
+// The plugin's fairness_id label shares the cardinality cap, so a flood of distinct client IDs
+// collapses to the bounded set plus one overflow series instead of one series per ID.
+func TestInflightGauges_FairnessIDCardinalityBounded(t *testing.T) {
+	const testCap = 3
+	inflightRequests.Reset()
+	inflightTokens.Reset()
+	cardinality.SetFairnessIDLabelLimit(testCap)
+	t.Cleanup(func() {
+		cardinality.SetFairnessIDLabelLimit(cardinality.DefaultFairnessIDLabelLimit)
+		inflightRequests.Reset()
+		inflightTokens.Reset()
+	})
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	// All requests target the same endpoint, so fairness_id is the only varying label.
+	for i := 0; i < 100; i++ {
+		req := makeTokenRequest(fmt.Sprintf("req-%d", i), 4)
+		req.FairnessID = fmt.Sprintf("tenant-%d", i)
+		require.NoError(t, producer.PreRequest(ctx, req, makeSchedulingResult("ep1")))
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(inflightRequests),
+		"100 distinct fairness IDs must collapse to cap+overflow series")
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(inflightTokens),
+		"the tokens gauge must be bounded identically")
 }

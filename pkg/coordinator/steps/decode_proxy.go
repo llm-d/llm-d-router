@@ -106,11 +106,22 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 		Transport:      transport,
 		ModifyResponse: modifyResponse,
 		ErrorLog:       log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, proxyErr error) {
 			if errors.Is(proxyErr, errCacheMiss) {
 				return
 			}
-			logger.Error(proxyErr, "proxy error")
+			// A request whose context already ended (client disconnected, or a
+			// client-set deadline expired) is a routine lifecycle event, not a
+			// backend fault. Check req.Context().Err() rather than proxyErr's
+			// identity: Transport.RoundTrip's ResponseHeaderTimeout returns
+			// net/http's errTimeout, which satisfies
+			// errors.Is(err, context.DeadlineExceeded) by stdlib design and
+			// would otherwise misclassify a hung backend as a client cancellation.
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				logger.V(logutil.VERBOSE).Info("decode proxy: client cancelled", "error", ctxErr)
+			} else {
+				logger.Error(proxyErr, "proxy error")
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
