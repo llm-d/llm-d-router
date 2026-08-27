@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -407,7 +408,10 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	}
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
-	fairnessID := request.FairnessID
+	// Bound the fairness_id label so a large number of distinct client IDs cannot grow this
+	// plugin's series set. The bounded value is stored on the entry, so the eviction-time
+	// decrement uses the same label as the increment here.
+	fairnessID := metricsutil.BoundFairnessID(request.FairnessID)
 	priority := strconv.Itoa(request.Objectives.Priority)
 
 	if request.Body != nil {

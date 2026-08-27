@@ -59,9 +59,20 @@ func (s stubStep) Execute(ctx context.Context, rc *pipeline.RequestContext) erro
 	return s.err
 }
 
+// stubGatewayURL is a placeholder used by tests that never actually issue a
+// passthrough request. A real value only matters in passthrough_test.go.
+const stubGatewayURL = "http://gateway-stub.invalid"
+
 func newTestServer(stepErr error) *Server {
+	return newTestServerWithGateway(stepErr, stubGatewayURL)
+}
+
+func newTestServerWithGateway(stepErr error, gatewayURL string) *Server {
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", err: stepErr}})
-	srv, err := New(config.ServerConfig{}, p)
+	// A default *http.Transport{} is safe here: the passthrough handler needs a
+	// non-typed-nil RoundTripper so httputil.ReverseProxy dials the test server.
+	gw := gateway.NewWithTransport(&http.Transport{}, gatewayURL)
+	srv, err := New(config.ServerConfig{}, p, gw)
 	if err != nil {
 		panic(err) // default config is always valid
 	}
@@ -149,7 +160,7 @@ func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p)
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -164,7 +175,7 @@ func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 
 func TestNew_RejectsNegativeMaxRequestBodySize(t *testing.T) {
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	if _, err := New(config.ServerConfig{MaxRequestBodySize: -1}, p); err == nil {
+	if _, err := New(config.ServerConfig{MaxRequestBodySize: -1}, p, gateway.NewWithTransport(nil, stubGatewayURL)); err == nil {
 		t.Fatal("expected error for negative MaxRequestBodySize")
 	}
 }
@@ -173,8 +184,29 @@ func TestNew_RejectsOverflowMaxRequestBodySize(t *testing.T) {
 	// MaxInt64 would cause maxRequestBodySize+1 to overflow to a negative
 	// io.LimitReader limit, making it return immediate EOF.
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	if _, err := New(config.ServerConfig{MaxRequestBodySize: math.MaxInt64}, p); err == nil {
+	if _, err := New(config.ServerConfig{MaxRequestBodySize: math.MaxInt64}, p, gateway.NewWithTransport(nil, stubGatewayURL)); err == nil {
 		t.Fatal("expected error for MaxRequestBodySize > MaxInt64-1")
+	}
+}
+
+func TestNew_RejectsNilGatewayClient(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, nil); err == nil {
+		t.Fatal("expected error for nil gateway client")
+	}
+}
+
+func TestNew_RejectsGatewayURLWithoutHost(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, "not-a-url")); err == nil {
+		t.Fatal("expected error for gateway URL without a host")
+	}
+}
+
+func TestNew_RejectsUnparsableGatewayURL(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, "http://gw:notaport")); err == nil {
+		t.Fatal("expected error for unparsable gateway URL")
 	}
 }
 
@@ -252,6 +284,10 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 }
 
 func TestRoutesRegistered(t *testing.T) {
+	// With the NotFound passthrough in place, an unregistered path no longer
+	// returns 404 — it reverse-proxies to the stub gateway and returns 502.
+	// Assert 200 to prove the path reaches its handler (stub step + handleHealth
+	// both leave the recorder at its default 200).
 	const inferenceBody = `{"model":"m","token_ids":[1,2,3]}`
 	tests := []struct {
 		name   string
@@ -271,8 +307,8 @@ func TestRoutesRegistered(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			rec := httptest.NewRecorder()
 			srv.httpServer.Handler.ServeHTTP(rec, req)
-			if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
-				t.Fatalf("route %s %s not registered: got HTTP %d", tt.method, tt.path, rec.Code)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("route %s %s expected 200, got HTTP %d", tt.method, tt.path, rec.Code)
 			}
 		})
 	}
@@ -340,7 +376,7 @@ func TestHandleInference_StreamedUpstreamErrorClassifiedAndNotOverwritten(t *tes
 		return &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError}
 	}}
 	p := pipeline.New([]pipeline.Step{step})
-	srv, err := New(config.ServerConfig{}, p)
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	require.NoError(t, err)
 
 	rec := postInference(t, srv)
@@ -360,7 +396,7 @@ func TestHandleInference_PipelinePanicRecordsErrorAndPropagates(t *testing.T) {
 		panic("boom")
 	}}
 	p := pipeline.New([]pipeline.Step{panicky})
-	srv, err := New(config.ServerConfig{}, p)
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	require.NoError(t, err)
 
 	defer func() {
@@ -522,7 +558,7 @@ func TestHandleInference_OversizeBodyBalancesGauge(t *testing.T) {
 	reg := newMetricsRegistry(t)
 
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p)
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	require.NoError(t, err)
 
 	oversize := strings.Repeat("x", config.BytesPerMB+1)
@@ -560,7 +596,7 @@ func TestHandleInference_ParsedModelSwapsLabel(t *testing.T) {
 		},
 	}
 	p := pipeline.New([]pipeline.Step{observer})
-	srv, err := New(config.ServerConfig{}, p)
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	require.NoError(t, err)
 
 	rec := postInference(t, srv)
@@ -692,4 +728,17 @@ func labelsMatch(actual []*dto.LabelPair, want map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
+	// A registered route with the wrong method must return 405, not fall
+	// through to the passthrough. Chi's default MethodNotAllowed handler
+	// produces this; the coordinator does not override it.
+	srv := newTestServer(nil)
+	req := httptest.NewRequest(http.MethodGet, gateway.PathChatCompletions, nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET on POST-only %s, got %d", gateway.PathChatCompletions, rec.Code)
+	}
 }

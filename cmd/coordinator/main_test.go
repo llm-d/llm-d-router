@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/server"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
@@ -38,7 +39,7 @@ func newTestServer(t *testing.T, listenAddr string) *server.Server {
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
 		WriteTimeout:    time.Second,
-	}, pipeline.New(nil))
+	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
 	require.NoError(t, err)
 	return srv
 }

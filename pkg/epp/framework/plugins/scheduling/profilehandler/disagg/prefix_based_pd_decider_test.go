@@ -16,6 +16,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -140,7 +141,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "completions token ids uses exact hint",
 			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
-				TokenIDs: []uint32{1, 2, 3, 4},
+				TokenIDs: [][]uint32{{1, 2, 3, 4}},
 			}), 4),
 			want: 4,
 		},
@@ -154,7 +155,7 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "embeddings token ids uses exact hint",
 			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
-				TokenIDs: []uint32{1, 2, 3},
+				TokenIDs: [][]uint32{{1, 2, 3}},
 			}), 3),
 			want: 3,
 		},
@@ -222,12 +223,13 @@ func TestPrefixBasedPDDeciderConfigValidation(t *testing.T) {
 
 func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 	tests := []struct {
-		name             string
-		pluginName       string
-		rawParams        string
-		expectErr        bool
-		expectNonCached  int
-		expectPluginName string
+		name               string
+		pluginName         string
+		rawParams          string
+		expectErr          bool
+		expectNonCached    int
+		expectPluginName   string
+		expectProducerName string
 	}{
 		{
 			name:             "default parameters (nil)",
@@ -244,6 +246,15 @@ func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 			expectErr:        false,
 			expectNonCached:  50,
 			expectPluginName: "custom-decider",
+		},
+		{
+			name:               "custom prefixMatchInfoProducerName",
+			pluginName:         "precise-decider",
+			rawParams:          `{"nonCachedTokens": 50, "prefixMatchInfoProducerName": "precise-prefix-cache-producer"}`,
+			expectErr:          false,
+			expectNonCached:    50,
+			expectPluginName:   "precise-decider",
+			expectProducerName: "precise-prefix-cache-producer",
 		},
 		{
 			name:       "negative nonCachedTokens",
@@ -280,6 +291,46 @@ func TestPrefixBasedPDDeciderFactory(t *testing.T) {
 			require.True(t, ok)
 			assert.Equal(t, tt.expectPluginName, decider.TypedName().Name)
 			assert.Equal(t, tt.expectNonCached, decider.config.NonCachedTokens)
+			// An empty expectProducerName resolves to the default approximate-prefix producer.
+			assert.Equal(t,
+				attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(tt.expectProducerName),
+				decider.prefixMatchInfoDataKey())
+		})
+	}
+}
+
+func TestPrefixBasedPDDecider_Consumes(t *testing.T) {
+	const preciseName = "precise-prefix-cache-producer"
+
+	tests := []struct {
+		name        string
+		producer    string
+		expectedKey fwkplugin.DataKey
+	}{
+		{
+			name:        "default producer",
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "named producer",
+			producer:    preciseName,
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+				NonCachedTokens:             4,
+				PrefixMatchInfoProducerName: tt.producer,
+			})
+			require.NoError(t, err)
+
+			consumed := decider.Consumes()
+			assert.Contains(t, consumed.Required, tt.expectedKey)
+			assert.Contains(t, consumed.Required, tokenproducer.TokenizedPromptDataKey)
+			if tt.expectedKey != attrprefix.PrefixCacheMatchInfoDataKey {
+				assert.NotContains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+			}
 		})
 	}
 }
@@ -476,23 +527,22 @@ func TestDisaggregateWrongPrefixInfoType(t *testing.T) {
 	assert.False(t, decider.disaggregate(ctx, makeRequestWithTokens(100), ep))
 }
 
-func TestConsumes(t *testing.T) {
-	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: 0})
+func TestDisaggregateWithNamedProducer(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	const preciseName = "precise-prefix-cache-producer"
+	preciseKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName)
+
+	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+		NonCachedTokens:             5,
+		PrefixMatchInfoProducerName: preciseName,
+	})
 	require.NoError(t, err)
 
-	handler, err := NewPdProfileHandler(
-		"test-handler",
-		PdProfileHandlerParameters{
-			PrefillProfile:              "prefill",
-			DecodeProfile:               "decode",
-			PrefixMatchInfoProducerName: "test",
-		},
-		decider,
-	)
-	require.NoError(t, err)
+	ep := makeTestEndpointBase()
+	ep.Put(preciseKey, attrprefix.NewPrefixCacheMatchInfo(2, testTotalTokens, testBlockSize))
 
-	consumed := handler.Consumes()
-	assert.Contains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	assert.True(t, decider.disaggregate(ctx, makeRequestWithTokens(10), ep))
 }
 
 func TestWithName(t *testing.T) {

@@ -16,7 +16,10 @@ limitations under the License.
 
 package metrics
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // OverflowValue is the label value emitted by BoundedLabel.Bound once the cap
 // fills. Callers that need to distinguish an "unknown" (empty) request-derived
@@ -94,4 +97,30 @@ func (b *BoundedLabel) Pin(v string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pinned[v] = struct{}{}
+}
+
+// Fairness IDs are populated from a client request header (or an agent-identity
+// attribute), so their cardinality is not operator-bounded. They label
+// per-request, flow-control, and plugin metrics; without a cap, every distinct
+// fairness ID ever observed permanently grows the time series set. The cap
+// defaults to DefaultFairnessIDLabelLimit and collapses excess values to
+// OverflowValue. A cap of 0 folds every ID onto the single overflow series.
+const DefaultFairnessIDLabelLimit = 1000
+
+var fairnessLimiter atomic.Pointer[BoundedLabel]
+
+func init() {
+	fairnessLimiter.Store(NewBoundedLabel(DefaultFairnessIDLabelLimit))
+}
+
+// SetFairnessIDLabelLimit configures the cap on distinct fairness_id label
+// values from startup configuration.
+func SetFairnessIDLabelLimit(limit int) {
+	fairnessLimiter.Store(NewBoundedLabel(limit))
+}
+
+// BoundFairnessID caps the request-derived fairness_id label. Core code and
+// plugins that emit a fairness_id label call this so they share one cap.
+func BoundFairnessID(fairnessID string) string {
+	return fairnessLimiter.Load().Bound(fairnessID)
 }

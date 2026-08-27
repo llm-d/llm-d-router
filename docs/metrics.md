@@ -64,10 +64,11 @@ and the release stage is ALPHA. Request and latency metrics share the label set
 
 Client-derived label values are cardinality-bounded: `model_name` and `target_model_name` (from the
 request body) share a cap of 1000 distinct values, and `fairness_id` (from the
-`x-llm-d-inference-fairness-id` header) is capped at 1000 distinct values. Caps apply over the
-lifetime of the process; once a cap is reached, new values are reported as `other`. Model names
-configured through InferenceModelRewrite rules never fold to `other`. Flow control series for a
-`fairness_id` are removed when its flow is garbage collected.
+`x-llm-d-inference-fairness-id` header) has a cap that defaults to 1000 distinct values and is
+configurable with `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id`
+to `other`. Caps apply over the lifetime of the process; once a cap is reached, new values are
+reported as `other`. Model names configured through InferenceModelRewrite rules never fold to
+`other`. Flow control series for a `fairness_id` are removed when its flow is garbage collected.
 
 ### Request and latency
 
@@ -174,13 +175,17 @@ Labels `{plugin_name, plugin_type, model_name, target_model_name}` (some add `ty
 
 ### Disaggregation
 
-Both metrics carry labels `{plugin_name, plugin_type, model_name, decision_type}`. The current names
-are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin.
+Two variants are emitted. The current `llm_d_epp_disagg_decision_total` carries
+`{plugin_name, plugin_type, model_name, decision_type}`. Its deprecated
+`llm_d_inference_scheduler_disagg_decision_total` twin carries only
+`{model_name, decision_type}`.
 
 #### `disagg_decision_total`
 
 *   **Type:** Counter
 *   **Labels:**
+    *   `plugin_name`, `plugin_type`: the `disagg-profile-handler` plugin instance recording the
+        decision (`llm_d_epp_` variant only; absent from the deprecated twin)
     *   `model_name`: the target model name, or "unknown" if empty
     *   `decision_type`: one of
         *   `decode-only` - decode-only path (no disaggregation)
@@ -191,15 +196,6 @@ are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.
-
-#### `pd_decision_total` (deprecated handler)
-
-> Prefer `disagg_decision_total`. This metric is maintained for the deprecated `pd-profile-handler`
-> and covers only P/D disaggregation, not encode disaggregation.
-
-*   **Type:** Counter
-*   **Labels:** `model_name`; `decision_type` (`decode-only` or `prefill-decode`).
-*   **Description:** Counts requests by the Prefill/Decode disaggregation decision.
 
 #### DisaggregatedSet rollout
 

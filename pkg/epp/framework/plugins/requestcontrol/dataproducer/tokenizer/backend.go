@@ -108,7 +108,7 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 	switch {
 	case body.Completions != nil:
 		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
-			return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: ids}}}, nil
+			return fwkrh.NewTokenizedRequest(ids), nil
 		}
 		return b.renderCompletions(ctx, body)
 	case body.ChatCompletions != nil:
@@ -225,9 +225,5 @@ func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.Infere
 	if err != nil {
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
-	prompts := make([]fwkrh.PromptTokens, len(allTokenIDs))
-	for i, ids := range allTokenIDs {
-		prompts[i] = fwkrh.PromptTokens{TokenIDs: ids}
-	}
-	return &fwkrh.TokenizedRequest{Prompts: prompts}, nil
+	return fwkrh.NewTokenizedRequest(allTokenIDs), nil
 }

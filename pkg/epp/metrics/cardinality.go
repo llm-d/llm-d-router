@@ -33,17 +33,9 @@ const maxModelLabelValues = 1000
 
 var modelLabelLimiter = metricsutil.NewBoundedLabel(maxModelLabelValues)
 
-// Fairness IDs are populated from a client request header (or an agent-identity
-// attribute), so like model names their cardinality is not operator-bounded. They
-// label per-request and flow-control metrics; without a cap, every distinct fairness
-// ID ever observed permanently grows the time series set.
-const maxFairnessLabelValues = 1000
-
-var fairnessLabelLimiter = metricsutil.NewBoundedLabel(maxFairnessLabelValues)
-
 // boundFairnessID caps the request-derived fairness_id label.
 func boundFairnessID(fairnessID string) string {
-	return fairnessLabelLimiter.Bound(fairnessID)
+	return metricsutil.BoundFairnessID(fairnessID)
 }
 
 // PreAdmitModelLabels pins the given model names so they always emit their real

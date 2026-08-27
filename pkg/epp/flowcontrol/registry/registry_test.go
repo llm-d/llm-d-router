@@ -219,19 +219,19 @@ func TestFlowRegistry_Stats(t *testing.T) {
 	// Although the production `Stats()` method provides a 'fuzzy snapshot' under high contention, our test validates it
 	// in a quiescent state, so these assertions can and must be exact.
 	globalStats := h.fr.Stats()
-	assert.Equal(t, uint64(2), globalStats.TotalLen, "Global TotalLen should be the sum of all items")
-	assert.Equal(t, uint64(40), globalStats.TotalByteSize, "Global TotalByteSize should be the sum of all item sizes")
+	assert.Equal(t, uint64(2), globalStats.Global.Len, "Global TotalLen should be the sum of all items")
+	assert.Equal(t, uint64(40), globalStats.Global.ByteSize, "Global TotalByteSize should be the sum of all item sizes")
 
 	// Verify per-band stats are correctly propagated, not just global totals.
-	highBandStats, ok := globalStats.PerPriorityBandStats[highPriority]
-	require.True(t, ok, "PerPriorityBandStats should contain the high-priority band")
+	highBandStats, ok := globalStats.PerPriorityBand[highPriority]
+	require.True(t, ok, "PerPriorityBand should contain the high-priority band")
 	assert.Equal(t, uint64(1), highBandStats.Len,
 		"High-priority band should track 1 item")
 	assert.Equal(t, uint64(10), highBandStats.ByteSize,
 		"High-priority band should track 10 bytes")
 
-	lowBandStats, ok := globalStats.PerPriorityBandStats[lowPriority]
-	require.True(t, ok, "PerPriorityBandStats should contain the low-priority band")
+	lowBandStats, ok := globalStats.PerPriorityBand[lowPriority]
+	require.True(t, ok, "PerPriorityBand should contain the low-priority band")
 	assert.Equal(t, uint64(1), lowBandStats.Len,
 		"Low-priority band should track 1 item")
 	assert.Equal(t, uint64(30), lowBandStats.ByteSize,
@@ -385,7 +385,7 @@ func TestFlowRegistry_DynamicProvisioning(t *testing.T) {
 		assert.True(t, existsInConfig, "Dynamic priority must be added to global config definition")
 
 		stats := h.fr.Stats()
-		_, existsInStats := stats.PerPriorityBandStats[dynamicPrio]
+		_, existsInStats := stats.PerPriorityBand[dynamicPrio]
 		assert.True(t, existsInStats, "Dynamic priority must appear in global stats")
 
 		_, err = h.fr.ManagedQueue(key)
@@ -757,10 +757,6 @@ func TestFlowRegistry_deletePriorityBand(t *testing.T) {
 		_, exists = h.fr.config.PriorityBands[dynamicPrio]
 		h.fr.mu.RUnlock()
 		assert.False(t, exists, "Band should be removed from registry config")
-
-		// Verify band removed from stats
-		_, exists = h.fr.perPriorityBandStats.Load(dynamicPrio)
-		assert.False(t, exists, "Band should be removed from stats tracking")
 
 		// Verify band removed from registry
 		_, ok = h.fr.priorityBands.Load(dynamicPrio)

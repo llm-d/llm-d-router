@@ -316,25 +316,26 @@ func (p *Processor) enqueue(item *FlowItem) {
 		return
 	}
 
-	_, err = p.registry.PriorityBandAccessor(key.Priority)
+	// --- Capacity Check ---
+	// This check is safe because it is performed by the single-writer Run goroutine.
+	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
 	if err != nil {
-		finalErr := fmt.Errorf("configuration error: failed to get priority band for priority %d: %w", key.Priority, err)
-		p.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
+		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %w", key.Priority, err)
+		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
-
-	// --- Capacity Check ---
-	// This check is safe because it is performed by the single-writer Run goroutine.
-	if ok, stats := p.hasCapacity(key.Priority, req.ByteSize()); !ok {
+	if !ok {
 		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
 		if p.regime.Load().empty {
 			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
 				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
-				"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
-				"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
+				"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
+				"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
+				"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
+				"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
 			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
 				types.ErrRejected, types.ErrNoEndpoints))
 			p.recordDrop(types.QueueOutcomeRejectedNoEndpoints)
@@ -342,8 +343,10 @@ func (p *Processor) enqueue(item *FlowItem) {
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
 			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
-			"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
-			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
+			"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
+			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
+			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
+			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
 			types.ErrRejected, types.ErrQueueAtCapacity))
 		p.recordDrop(types.QueueOutcomeRejectedCapacity)
@@ -367,40 +370,47 @@ func (p *Processor) enqueue(item *FlowItem) {
 // hasCapacity checks if the global limits and the specific priority band have enough capacity.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
-func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.AggregateStats) {
-	stats := p.registry.Stats()
-	if stats.TotalCapacityBytes > 0 && stats.TotalByteSize+itemByteSize > stats.TotalCapacityBytes {
-		return false, stats
+// A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
+// exhausted.
+func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
+	snapshot, err := p.registry.CapacitySnapshot(priority)
+	if err != nil {
+		return false, snapshot, err
 	}
-	if stats.TotalCapacityRequests > 0 && stats.TotalLen+1 > stats.TotalCapacityRequests {
-		return false, stats
+	global, band := snapshot.Global, snapshot.Band
+	if global.CapacityBytes > 0 && global.ByteSize+itemByteSize > global.CapacityBytes {
+		return false, snapshot, nil
 	}
-
-	bandStats, ok := stats.PerPriorityBandStats[priority]
-	if !ok {
-		return false, stats
+	if global.CapacityRequests > 0 && global.Len+1 > global.CapacityRequests {
+		return false, snapshot, nil
 	}
-	if bandStats.CapacityBytes > 0 && bandStats.ByteSize+itemByteSize > bandStats.CapacityBytes {
-		return false, stats
+	if band.CapacityBytes > 0 && band.ByteSize+itemByteSize > band.CapacityBytes {
+		return false, snapshot, nil
 	}
-	if bandStats.CapacityRequests > 0 && bandStats.Len+1 > bandStats.CapacityRequests {
-		return false, stats
+	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
+		return false, snapshot, nil
 	}
-
-	return true, stats
+	return true, snapshot, nil
 }
 
 // recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
 // flow in the band, never per flow queue), plus the all-bands rollup in its own metric family when a global capacity
-// is configured. It reads a single Stats() snapshot; the data source is expected to move with the engine-merge
-// refactor, but the metric contract (names, labels, semantics) stays stable (#2102).
+// is configured. It reads one CapacitySnapshot per configured band; the metric contract (names, labels, semantics)
+// is defined by #2102.
 //
 // Band capacities always resolve to a value (applyDefaults supplies a fallback), so every configured band reports.
 // Global capacity is optional, so its series is omitted when unset rather than reported as a misleading 0.
 func (p *Processor) recordCapacityUtilization() {
-	stats := p.registry.Stats()
+	var global contracts.CapacityDimension
+	for _, priority := range p.registry.AllOrderedPriorityLevels() {
+		snapshot, err := p.registry.CapacitySnapshot(priority)
+		if err != nil {
+			// The band was deleted between listing the priority levels and the read.
+			continue
+		}
+		global = snapshot.Global
 
-	for priority, band := range stats.PerPriorityBandStats {
+		band := snapshot.Band
 		priorityStr := strconv.Itoa(priority)
 		if band.CapacityRequests > 0 {
 			metrics.RecordFlowControlCapacityUtilizationRequests(priorityStr, p.poolName,
@@ -413,13 +423,13 @@ func (p *Processor) recordCapacityUtilization() {
 	}
 
 	// All-bands rollup, only when a global capacity is configured.
-	if stats.TotalCapacityRequests > 0 {
+	if global.CapacityRequests > 0 {
 		metrics.RecordFlowControlGlobalCapacityUtilizationRequests(p.poolName,
-			float64(stats.TotalLen)/float64(stats.TotalCapacityRequests))
+			float64(global.Len)/float64(global.CapacityRequests))
 	}
-	if stats.TotalCapacityBytes > 0 {
+	if global.CapacityBytes > 0 {
 		metrics.RecordFlowControlGlobalCapacityUtilizationBytes(p.poolName,
-			float64(stats.TotalByteSize)/float64(stats.TotalCapacityBytes))
+			float64(global.ByteSize)/float64(global.CapacityBytes))
 	}
 }
 
@@ -563,7 +573,7 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 			prefill = append(prefill, ep)
 		case bylabel.RoleDecode, "":
 			decode = append(decode, ep)
-		case bylabel.RolePrefillDecode, bylabel.RoleBoth, bylabel.RoleEncodePrefillDecode: //nolint:staticcheck // RoleBoth is deprecated but must be matched for backward compatibility
+		case bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
 			interleaved = append(interleaved, ep)
 		case bylabel.RoleEncode:
 			// Encode-only pods receive no prefill or decode traffic; excluding them
