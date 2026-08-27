@@ -48,6 +48,42 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantType: attribute.STRING,
 		},
 		{
+			name:     "LLMDEPPFilterDecision",
+			got:      LLMDEPPFilterDecision("sticky"),
+			wantKey:  "llm_d.epp.filter.decision",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDEPPFilterCandidateEndpoints",
+			got:      LLMDEPPFilterCandidateEndpoints(8),
+			wantKey:  "llm_d.epp.filter.candidate_endpoints",
+			wantType: attribute.INT64,
+		},
+		{
+			name:     "LLMDEPPFilterFilteredEndpoints",
+			got:      LLMDEPPFilterFilteredEndpoints(5),
+			wantKey:  "llm_d.epp.filter.filtered_endpoints",
+			wantType: attribute.INT64,
+		},
+		{
+			name:     "LLMDEPPFilterStickyEndpoints",
+			got:      LLMDEPPFilterStickyEndpoints(3),
+			wantKey:  "llm_d.epp.filter.sticky_endpoints",
+			wantType: attribute.INT64,
+		},
+		{
+			name:     "LLMDEPPFilterAffinityThreshold",
+			got:      LLMDEPPFilterAffinityThreshold(0.8),
+			wantKey:  "llm_d.epp.filter.affinity_threshold",
+			wantType: attribute.FLOAT64,
+		},
+		{
+			name:     "LLMDEPPFilterTTFTPenaltyMs",
+			got:      LLMDEPPFilterTTFTPenaltyMs(1500),
+			wantKey:  "llm_d.epp.filter.ttft_penalty_ms",
+			wantType: attribute.FLOAT64,
+		},
+		{
 			name:     "LLMDEPPPDDisaggregationUsed",
 			got:      LLMDEPPPDDisaggregationUsed(true),
 			wantKey:  "llm_d.epp.pd.disaggregation_used",

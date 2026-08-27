@@ -28,14 +28,18 @@ import (
 	"math"
 	"math/rand"
 
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 const (
@@ -167,11 +171,30 @@ func (p *Plugin) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
+
+	_, span := tracing.Tracer(schedplugins.TracerScope).Start(ctx, "filter_prefix_cache_affinity",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
+	span.SetAttributes(
+		semconv.LLMDEPPFilterCandidateEndpoints(len(endpoints)),
+		semconv.LLMDEPPFilterAffinityThreshold(p.config.AffinityThreshold),
+	)
+	if request != nil {
+		if request.TargetModel != "" {
+			span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
+		}
+		if request.RequestID != "" {
+			span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+		}
+	}
 
 	if len(endpoints) <= 1 || p.config.AffinityThreshold <= 0 {
 		recordDecision(p.typedName.Name, outcomeNotApplicable)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNotApplicable))
 		return endpoints
 	}
 
@@ -180,6 +203,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: exploration skip, keeping all",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
 		recordDecision(p.typedName.Name, outcomeExploration)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeExploration))
 		return endpoints
 	}
 
@@ -193,11 +217,14 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 		}
 	}
 
+	span.SetAttributes(semconv.LLMDEPPFilterStickyEndpoints(len(sticky)))
+
 	// No sticky endpoints found, keep all.
 	if len(sticky) == 0 {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: no sticky endpoints",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
 		recordDecision(p.typedName.Name, outcomeNoMatch)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNoMatch))
 		return endpoints
 	}
 
@@ -205,11 +232,14 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	if p.config.MaxTTFTPenaltyMs > 0 && len(nonSticky) > 0 {
 		bestStickyTTFT := p.bestTTFT(sticky)
 		bestNonStickyTTFT := p.bestTTFT(nonSticky)
-		if bestStickyTTFT-bestNonStickyTTFT > p.config.MaxTTFTPenaltyMs {
+		penalty := bestStickyTTFT - bestNonStickyTTFT
+		span.SetAttributes(semconv.LLMDEPPFilterTTFTPenaltyMs(penalty))
+		if penalty > p.config.MaxTTFTPenaltyMs {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
-				"penalty", bestStickyTTFT-bestNonStickyTTFT, "maxPenalty", p.config.MaxTTFTPenaltyMs)
+				"penalty", penalty, "maxPenalty", p.config.MaxTTFTPenaltyMs)
 			recordDecision(p.typedName.Name, outcomeLoadOverride)
+			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeLoadOverride))
 			return endpoints
 		}
 	}
@@ -217,6 +247,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
 	recordDecision(p.typedName.Name, outcomeSticky)
+	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeSticky))
 	return sticky
 }
 
