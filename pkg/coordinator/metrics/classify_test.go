@@ -69,6 +69,14 @@ func TestClassifyErrorCode_Upstream5xxBand(t *testing.T) {
 	}
 }
 
+func TestClassifyErrorCode_UpstreamTransportFailure(t *testing.T) {
+	// An upstream error with StatusCode 0 means the round trip failed before
+	// headers arrived (connection refused, timeout, TCP reset). Route it to
+	// the transport bucket, not internal.
+	require.Equal(t, ErrorCodeUpstreamTransport,
+		ClassifyErrorCode(&upstreamStub{status: 0}, stubOpts))
+}
+
 func TestClassifyErrorCode_UpstreamSub4xxFallsThroughToInternal(t *testing.T) {
 	// A synthetic 3xx or 2xx wrapped as an upstream error is not a client
 	// fault under the current banding and is not a 5xx either; it falls to

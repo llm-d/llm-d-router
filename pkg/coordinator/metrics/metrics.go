@@ -37,11 +37,17 @@ const LLMDRouterCoordinatorSubsystem = "llm_d_coordinator"
 const ModelUnknown = "unknown"
 
 // Error-code label values for request_error_total and step_errors_total.
+// BadRequest is invalid client input. Upstream4xx/Upstream5xx are HTTP
+// responses from an upstream worker in those bands. UpstreamTransport is
+// a round-trip failure before headers arrive (connection refused, timeout,
+// TCP reset); no response was received. Internal is the fallthrough for
+// coordinator-owned code paths, never for reachability issues.
 const (
-	ErrorCodeBadRequest  = "bad_request"
-	ErrorCodeUpstream4xx = "upstream_4xx"
-	ErrorCodeUpstream5xx = "upstream_5xx"
-	ErrorCodeInternal    = "internal"
+	ErrorCodeBadRequest        = "bad_request"
+	ErrorCodeUpstream4xx       = "upstream_4xx"
+	ErrorCodeUpstream5xx       = "upstream_5xx"
+	ErrorCodeUpstreamTransport = "upstream_transport"
+	ErrorCodeInternal          = "internal"
 )
 
 // Upstream label values for the upstream_request_* metrics. Step names come

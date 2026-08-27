@@ -48,6 +48,8 @@ func ClassifyErrorCode(err error, opts ClassifyOptions) string {
 	if opts.IsUpstream != nil {
 		if status, ok := opts.IsUpstream(err); ok {
 			switch {
+			case status == 0:
+				return ErrorCodeUpstreamTransport
 			case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
 				return ErrorCodeUpstream4xx
 			case status >= http.StatusInternalServerError:
