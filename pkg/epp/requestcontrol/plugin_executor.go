@@ -36,9 +36,9 @@ import (
 func executePluginsAsDAG(ctx context.Context, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx)
 	for _, plugin := range plugins {
-		scoped, violations := datalayer.Scope(logger, fwkrc.DataProducerExtensionPoint, plugin, endpoints)
+		scopedRequest, scoped, violations := datalayer.ScopeInvocation(logger, fwkrc.DataProducerExtensionPoint, plugin, request, endpoints)
 		before := time.Now()
-		err := plugin.Produce(ctx, request, scoped)
+		err := plugin.Produce(ctx, scopedRequest, scoped)
 		metrics.RecordPluginProcessingLatency(fwkrc.DataProducerExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		if err != nil {
 			return fmt.Errorf("DataProducer %q failed: %w", plugin.TypedName().String(), err)

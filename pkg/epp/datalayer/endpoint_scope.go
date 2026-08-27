@@ -22,14 +22,12 @@ limitations under the License.
 // contract statically, over the declarations alone.
 //
 // The scope covers endpoint attributes reached through the extension points
-// that receive a []scheduling.Endpoint: filters, scorers, and DataProducers.
-// Two paths are deliberately outside it:
+// that receive a []scheduling.Endpoint -- filters, scorers, and DataProducers --
+// and, through request_scope.go, the per-request store at those points plus
+// PreRequest and the profile handler.
 //
-//   - The per-request store (InferenceRequest.PutAttribute/GetAttribute). It is
-//     typed by DataKey but not confined, because in-tree plugins currently
-//     exchange request attributes they do not declare.
-//   - Datalayer extractors, which write through Endpoint.GetAttributes()
-//     directly rather than through a scoped endpoint.
+// Datalayer extractors stay outside it: they write through
+// Endpoint.GetAttributes() directly rather than through a scoped endpoint.
 
 package datalayer
 
@@ -47,9 +45,10 @@ import (
 )
 
 // Violations records what a plugin did outside its declarations during one
-// extension-point invocation. Every endpoint wrapper produced by a single Scope
-// call shares one instance, so a plugin that reaches for the same undeclared key
-// on each of a hundred candidates is reported once rather than a hundred times.
+// extension-point invocation. The scoped request and every endpoint wrapper
+// produced by a single call share one instance, so a plugin that reaches for the
+// same undeclared key on each of a hundred candidates is reported once rather
+// than a hundred times.
 //
 // The lock is taken only on the rejection path. A conforming plugin never
 // touches it, so confinement costs an allowed access nothing beyond the map
@@ -105,9 +104,16 @@ func (v *Violations) recordRead() bool {
 // cannot fail the request still makes a misdeclared plugin visible in
 // production rather than leaving it to log verbosity.
 type ScopedEndpoint struct {
-	inner          fwksched.Endpoint
-	allowedPut     map[fwkplugin.DataKey]struct{}
-	allowedGet     map[fwkplugin.DataKey]struct{}
+	inner      fwksched.Endpoint
+	allowedPut map[fwkplugin.DataKey]struct{}
+	allowedGet map[fwkplugin.DataKey]struct{}
+	reporter
+}
+
+// reporter counts, logs, and accumulates the rejections of one plugin during one
+// extension-point invocation. ScopedEndpoint and requestScope share it so an
+// endpoint attribute and a request attribute are reported the same way.
+type reporter struct {
 	typedName      fwkplugin.TypedName
 	extensionPoint string
 	logger         logr.Logger
@@ -147,22 +153,22 @@ func (e *ScopedEndpoint) Get(key fwkplugin.DataKey) (fwkdl.Cloneable, bool) {
 // invocation is logged at Error, the rest at DEBUG: a plugin that misreaches on
 // every candidate endpoint would otherwise emit one error line per endpoint per
 // request.
-func (e *ScopedEndpoint) reject(access string, err error) {
-	metrics.RecordPluginDataScopeViolation(e.extensionPoint, e.typedName.Type, e.typedName.Name, access)
+func (r *reporter) reject(access string, err error) {
+	metrics.RecordPluginDataScopeViolation(r.extensionPoint, r.typedName.Type, r.typedName.Name, access)
 
 	first := false
 	if access == metrics.DataScopeAccessWrite {
-		first = e.violations.recordWrite(err)
+		first = r.violations.recordWrite(err)
 	} else {
-		first = e.violations.recordRead()
+		first = r.violations.recordRead()
 	}
 	if first {
-		e.logger.Error(err, "Rejected access outside the plugin's declared keys",
-			"extensionPoint", e.extensionPoint, "access", access)
+		r.logger.Error(err, "Rejected access outside the plugin's declared keys",
+			"extensionPoint", r.extensionPoint, "access", access)
 		return
 	}
-	e.logger.V(logging.DEBUG).Info("Rejected access outside the plugin's declared keys",
-		"extensionPoint", e.extensionPoint, "access", access, "error", err.Error())
+	r.logger.V(logging.DEBUG).Info("Rejected access outside the plugin's declared keys",
+		"extensionPoint", r.extensionPoint, "access", access, "error", err.Error())
 }
 
 // Keys returns only the declared keys that are present, so enumeration cannot
@@ -196,10 +202,6 @@ type scopeSpec struct {
 	allowedPut map[fwkplugin.DataKey]struct{}
 	allowedGet map[fwkplugin.DataKey]struct{}
 }
-
-// denyAllSpec confines an unregistered plugin the same way as one that
-// declares nothing.
-var denyAllSpec = &scopeSpec{}
 
 // scopeSpecs maps a plugin's TypedName().String() to the spec derived from its
 // declarations. RegisterScopeSpecs writes it during startup; Scope only reads.
@@ -253,22 +255,31 @@ func buildScopeSpec(plugin fwkplugin.Plugin) *scopeSpec {
 	return spec
 }
 
-// scopeSpecFor returns the registered spec for a plugin's typed name, or the
-// deny-all spec when none was registered. The miss is logged once per typed
-// name: it indicates a wiring bug, and the resulting confinement also shows up
-// through the violation counter as soon as the plugin touches an attribute.
-func scopeSpecFor(logger logr.Logger, name string) *scopeSpec {
+// scopeSpecFor returns the registered spec for a plugin, deriving and caching
+// one from its own declarations when startup registration missed it. The
+// declarations are fixed at construction, so a derived spec is the one
+// RegisterScopeSpecs would have stored; the miss is a wiring bug worth an error
+// log, reported once per typed name, but not a reason to cut a plugin off from
+// the data it declared.
+func scopeSpecFor(logger logr.Logger, p fwkplugin.Plugin) *scopeSpec {
+	name := p.TypedName().String()
 	scopeSpecsMu.RLock()
 	spec, ok := scopeSpecs[name]
 	scopeSpecsMu.RUnlock()
 	if ok {
 		return spec
 	}
+
+	spec = buildScopeSpec(p)
+	scopeSpecsMu.Lock()
+	scopeSpecs[name] = spec
+	scopeSpecsMu.Unlock()
+
 	if _, reported := unregisteredReported.LoadOrStore(name, struct{}{}); !reported {
 		logger.Error(fmt.Errorf("plugin %q has no registered scope spec; pass it to RegisterScopeSpecs", name),
-			"Confining an unregistered plugin to nothing")
+			"Deriving a plugin's scope from its declarations")
 	}
-	return denyAllSpec
+	return spec
 }
 
 // Scope confines endpoints to what plugin declares. extensionPoint labels the
@@ -281,29 +292,36 @@ func scopeSpecFor(logger logr.Logger, name string) *scopeSpec {
 //
 // The allowed-key sets come from the registry populated by RegisterScopeSpecs
 // at startup, treating Produces() and Consumes() as immutable after
-// construction. A plugin that was never registered is confined to nothing.
+// construction. A plugin missing from the registry has its spec derived from
+// its own declarations on first use.
 func Scope(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, endpoints []fwksched.Endpoint) ([]fwksched.Endpoint, *Violations) {
-	typedName := plugin.TypedName()
-	spec := scopeSpecFor(logger, typedName.String())
-
 	violations := &Violations{}
+	return scopeEndpoints(logger, extensionPoint, plugin, endpoints, violations), violations
+}
+
+func scopeEndpoints(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, endpoints []fwksched.Endpoint, violations *Violations) []fwksched.Endpoint {
+	typedName := plugin.TypedName()
+	spec := scopeSpecFor(logger, plugin)
+
 	// One backing array rather than an allocation per endpoint: this runs for
 	// every filter and scorer on every request, over the whole candidate set.
 	wrappers := make([]ScopedEndpoint, len(endpoints))
 	scoped := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
 		wrappers[i] = ScopedEndpoint{
-			inner:          endpoint,
-			allowedPut:     spec.allowedPut,
-			allowedGet:     spec.allowedGet,
-			typedName:      typedName,
-			extensionPoint: extensionPoint,
-			logger:         logger,
-			violations:     violations,
+			inner:      endpoint,
+			allowedPut: spec.allowedPut,
+			allowedGet: spec.allowedGet,
+			reporter: reporter{
+				typedName:      typedName,
+				extensionPoint: extensionPoint,
+				logger:         logger,
+				violations:     violations,
+			},
 		}
 		scoped[i] = &wrappers[i]
 	}
-	return scoped, violations
+	return scoped
 }
 
 // Unscope restores the underlying endpoints of a plugin's result.

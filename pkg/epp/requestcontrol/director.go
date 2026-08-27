@@ -627,7 +627,8 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 // its side effects and the caller sees all failures.
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.InferenceRequest,
 	schedulingResult *fwksched.SchedulingResult) error {
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	var errs []error
 	for _, plugin := range d.requestControlPlugins.preRequestPlugins {
@@ -635,9 +636,13 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 		if debugEnabled {
 			loggerDebug.Info("Running PreRequest plugin", "plugin", name)
 		}
+		scopedRequest, violations := datalayer.ScopeRequest(logger, fwkrc.PreRequestExtensionPoint, plugin, request)
 		before := time.Now()
-		err := plugin.PreRequest(ctx, request, schedulingResult)
+		err := plugin.PreRequest(ctx, scopedRequest, schedulingResult)
 		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, name.Type, name.Name, time.Since(before))
+		if err == nil {
+			err = violations.Write()
+		}
 		if err != nil {
 			if debugEnabled {
 				loggerDebug.Info("PreRequest plugin failed", "plugin", name, "error", err.Error())

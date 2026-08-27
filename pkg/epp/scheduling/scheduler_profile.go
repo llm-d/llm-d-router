@@ -171,13 +171,14 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 			verbose.Info("Running filter plugin", "plugin", typedName)
 		}
 		// The violations are dropped: Filter has no error return, so a rejected
-		// write cannot fail the request here. Scope has already dropped the write,
-		// logged it, and counted it under plugin_data_scope_violations_total, which
-		// is where a misdeclared filter surfaces in production. Producers run under
-		// executePluginsAsDAG, which does fail the request on one.
-		scoped, _ := datalayer.Scope(logger, filterExtensionPoint, filter, filteredEndpoints)
+		// write cannot fail the request here. The scope has already dropped the
+		// write, logged it, and counted it under
+		// plugin_data_scope_violations_total, which is where a misdeclared filter
+		// surfaces in production. Producers run under executePluginsAsDAG, which
+		// does fail the request on one.
+		scopedRequest, scoped, _ := datalayer.ScopeInvocation(logger, filterExtensionPoint, filter, request, filteredEndpoints)
 		before := time.Now()
-		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, request, scoped))
+		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, scopedRequest, scoped))
 		metrics.RecordPluginProcessingLatency(filterExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 		if debugEnabled {
 			debug.Info("Completed running filter plugin successfully", "plugin", typedName, "endpoints", filteredEndpoints)
@@ -276,11 +277,12 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	// embeds the Scorer interface, which does not carry Produces/Consumes, so
 	// scoping the wrapper would hide every declaration the scorer makes.
 	logger := log.FromContext(ctx)
-	scoped, _ := datalayer.Scope(logger, scorerExtensionPoint, scorer.Scorer, endpoints) // violations dropped: Score has no error return, see runFilterPlugins
+	// violations dropped: Score has no error return, see runFilterPlugins
+	scopedRequest, scoped, _ := datalayer.ScopeInvocation(logger, scorerExtensionPoint, scorer.Scorer, request, endpoints)
 
 	if !tracingActive {
 		before := time.Now()
-		scores := datalayer.UnscopeScores(scorer.Score(ctx, request, scoped))
+		scores := datalayer.UnscopeScores(scorer.Score(ctx, scopedRequest, scoped))
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 		return scores
 	}
@@ -295,7 +297,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	)
 
 	before := time.Now()
-	scores := datalayer.UnscopeScores(scorer.Score(ctx, request, scoped))
+	scores := datalayer.UnscopeScores(scorer.Score(ctx, scopedRequest, scoped))
 	metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 
 	if len(scores) > 0 {

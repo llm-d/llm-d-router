@@ -185,10 +185,17 @@ type mockPreRequestPlugin struct {
 	name     string
 	modifyFn func(request *fwksched.InferenceRequest)
 	err      error
+	// produces declares the request attributes modifyFn writes, so the scope
+	// the director applies at PreRequest lets them through.
+	produces map[fwkplugin.DataKey]any
 }
 
 func (m *mockPreRequestPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+}
+
+func (m *mockPreRequestPlugin) Produces() map[fwkplugin.DataKey]any {
+	return m.produces
 }
 
 func (m *mockPreRequestPlugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
@@ -2184,6 +2191,7 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 		modifyFn: func(r *fwksched.InferenceRequest) {
 			r.PutAttribute(fwkrc.ConditionalDecodeHandledAttributeKey, true)
 		},
+		produces: map[fwkplugin.DataKey]any{fwkrc.ConditionalDecodeHandledAttributeKey: false},
 	}
 
 	tests := []struct {
