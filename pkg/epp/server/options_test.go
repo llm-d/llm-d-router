@@ -27,6 +27,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 )
 
 const (
@@ -255,6 +257,27 @@ func TestValidateDirectValues(t *testing.T) {
 	opts.GRPCMaxSendMsgSize = -5
 	if err := opts.Validate(); err == nil {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.PoolName = testPoolName
+	opts.FairnessIDMetricLabelLimit = -1
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative FairnessIDMetricLabelLimit, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.FairnessIDMetricLabelLimit = 0
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to allow a zero FairnessIDMetricLabelLimit, got %v", err)
+	}
+}
+
+func TestFairnessIDMetricLabelLimitDefault(t *testing.T) {
+	if got := NewOptions().FairnessIDMetricLabelLimit; got != cardinality.DefaultFairnessIDLabelLimit {
+		t.Errorf("default FairnessIDMetricLabelLimit: got %d, want %d", got, cardinality.DefaultFairnessIDLabelLimit)
 	}
 }
 

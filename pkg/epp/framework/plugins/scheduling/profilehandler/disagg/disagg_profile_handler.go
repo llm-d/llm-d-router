@@ -241,11 +241,17 @@ func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() plugin.DataDependencies {
+func (h *Handler) Consumes() plugin.DataDependencies {
+	prefixMatchInfoDK := attrprefix.PrefixCacheMatchInfoDataKey
+	if h.pdDecider != nil {
+		if consumer, ok := h.pdDecider.(prefixMatchInfoConsumer); ok {
+			prefixMatchInfoDK = consumer.prefixMatchInfoDataKey()
+		}
+	}
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
-			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedRequest{},
+			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 		},
 	}
 }
