@@ -351,11 +351,12 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
-// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
-// The encode chat sub-request is built fresh from the request context and does
-// not carry the client's sampling fields, so max_completion_tokens is not
-// propagated and is never injected: max_tokens=1 alone caps output.
-func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T) {
+// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens verifies the
+// encode chat sub-request carries max_completion_tokens=1 unconditionally
+// (via capSingleTokenOutput/reqcommon.PrimeSingleTokenRequest), even though the
+// sub-request is built fresh from the request context and never copies the
+// client's own max_completion_tokens value.
+func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {
 	var receivedBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -404,8 +405,8 @@ func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T)
 	if receivedBody["max_tokens"] != float64(1) {
 		t.Fatalf("expected encode sub-request max_tokens capped to 1, got %v", receivedBody["max_tokens"])
 	}
-	if _, ok := receivedBody["max_completion_tokens"]; ok {
-		t.Fatalf("expected encode sub-request to omit max_completion_tokens, got %v", receivedBody["max_completion_tokens"])
+	if receivedBody["max_completion_tokens"] != float64(1) {
+		t.Fatalf("expected encode sub-request max_completion_tokens capped to 1, got %v", receivedBody["max_completion_tokens"])
 	}
 }
 

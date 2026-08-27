@@ -107,7 +107,7 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not add max_completion_tokens to the prefill leg when absent from the original request", func() {
+	It("should add max_completion_tokens=1 to the prefill leg even when absent from the original request", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
@@ -129,7 +129,7 @@ var _ = Describe("P2P Connector", func() {
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
 		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
+		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

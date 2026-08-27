@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
@@ -216,8 +217,7 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 // prefill routes a request to a prefill node
 func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, completionRequest map[string]any) error {
 	// Prepare prefill request
-	completionRequest[requestFieldMaxTokens] = 1
-	completionRequest[requestFieldMaxCompletionTokens] = 1
+	reqcommon.PrimeSingleTokenRequest(completionRequest)
 	completionRequest[requestFieldCacheHitThreshold] = 0
 
 	pbody, err := json.Marshal(completionRequest)

@@ -16,23 +16,25 @@ limitations under the License.
 
 package request
 
-const (
-	FieldMaxTokens           = "max_tokens"
-	FieldMaxCompletionTokens = "max_completion_tokens"
-	FieldStream              = "stream"
-	FieldStreamOptions       = "stream_options"
-)
+// CapMaxTokensField caps target's max_tokens to 1 and strips min_tokens.
+// min_tokens is stripped rather than clamped: it defaults to 0 in vLLM, so
+// removing it keeps min_tokens <= max_tokens=1 without raising the floor
+// above the cap (vLLM's SamplingParams rejects min_tokens > max_tokens).
+func CapMaxTokensField(target map[string]any) {
+	target[FieldMaxTokens] = 1
+	delete(target, FieldMinTokens)
+}
 
 // PrimeSingleTokenRequest mutates target in place into a synthetic,
-// non-streaming, single-output-token chat-completions request derived from
-// original (which may be the same map as target). max_tokens is always
-// capped to 1; max_completion_tokens is only added when original already
-// carries it, and leaves it untached otherwise.
-func PrimeSingleTokenRequest(target, original map[string]any) {
-	target[FieldMaxTokens] = 1
-	if _, ok := original[FieldMaxCompletionTokens]; ok {
-		target[FieldMaxCompletionTokens] = 1
-	}
+// non-streaming, single-output-token chat-completions or completions
+// request. max_completion_tokens is unconditionally capped to 1 alongside
+// max_tokens: vLLM and SGLang both accept the two fields together
+// (max_completion_tokens takes precedence over max_tokens when present),
+// so setting both guarantees the cap regardless of which field the serving
+// engine consults.
+func PrimeSingleTokenRequest(target map[string]any) {
+	CapMaxTokensField(target)
+	target[FieldMaxCompletionTokens] = 1
 
 	target[FieldStream] = false
 	delete(target, FieldStreamOptions)

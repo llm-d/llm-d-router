@@ -77,32 +77,29 @@ func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
 // capSingleTokenOutput rewrites body into a single-output-token, non-streaming
 // request for the synthetic prefill and encode legs.
 //
-// Intentionally distinct from the sidecar's reqcommon.PrimeSingleTokenRequest
-// for now.
-// TODO: unify the two into one shared single-token helper in a future refactor.
+// Chat-completions and completions bodies carry max_tokens/max_completion_tokens/
+// stream/stream_options at the top level, same as the sidecar's synthetic
+// requests, so they share reqcommon.PrimeSingleTokenRequest verbatim. The
+// generate format's token-limit fields live under sampling_params instead
+// (vLLM's GenerateRequest schema); stream/stream_options stay top-level there
+// too, and generate has no max_completion_tokens-equivalent field, so only the
+// max_tokens/min_tokens capping (reqcommon.CapMaxTokensField) is reusable for it.
+//
+// TODO: max_output_tokens is another client-supplied output cap (Responses
+// API) that a client can send instead of max_tokens/max_completion_tokens; it
+// should be capped to 1 here as well so the synthetic legs stay single-token.
 func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
-	target := body
-	if format == gateway.FormatGenerate {
-		sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any)
-		if !ok {
-			sp = map[string]any{}
-			body[reqcommon.FieldSamplingParams] = sp
-		}
-		target = sp
+	if format != gateway.FormatGenerate {
+		reqcommon.PrimeSingleTokenRequest(body)
+		return
 	}
 
-	target[reqcommon.FieldMaxTokens] = 1
-	// Strip rather than clamp min_tokens: it defaults to 0 in vLLM, so removing it
-	// keeps min_tokens <= max_tokens=1 without raising the floor above the cap.
-	delete(target, reqcommon.FieldMinTokens)
-
-	if _, ok := body[reqcommon.FieldMaxCompletionTokens]; ok {
-		body[reqcommon.FieldMaxCompletionTokens] = 1
+	sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any)
+	if !ok {
+		sp = map[string]any{}
+		body[reqcommon.FieldSamplingParams] = sp
 	}
-
-	// TODO: max_output_tokens is another client-supplied output cap (Responses
-	// API) that a client can send instead of max_tokens/max_completion_tokens; it
-	// should be capped to 1 here as well so the synthetic legs stay single-token.
+	reqcommon.CapMaxTokensField(sp)
 
 	body[reqcommon.FieldStream] = false
 	delete(body, reqcommon.FieldStreamOptions)

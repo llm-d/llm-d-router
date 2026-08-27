@@ -80,7 +80,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
+	reqcommon.PrimeSingleTokenRequest(prefillData)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
