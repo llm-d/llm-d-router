@@ -160,6 +160,7 @@ func TestExecutionPathAndProbes_Records(t *testing.T) {
 	IncConditionalDecodeProbes(ProbeResultDeferred)
 	IncConditionalDecodeProbes(ProbeResultDeferred)
 	IncConditionalDecodeProbes(ProbeResultError)
+	IncConditionalDecodeProbes(ProbeResultTransportError)
 	RecordRequestInputTokens("m", 512)
 
 	require.InDelta(t, 2.0,
@@ -176,5 +177,8 @@ func TestExecutionPathAndProbes_Records(t *testing.T) {
 	)
 	require.InDelta(t, 1.0,
 		promtestutil.ToFloat64(conditionalDecodeProbesTotal.WithLabelValues(ProbeResultError)), 1e-9,
+	)
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(conditionalDecodeProbesTotal.WithLabelValues(ProbeResultTransportError)), 1e-9,
 	)
 }

@@ -67,10 +67,14 @@ const (
 // (the worker answered the request inline). Deferred is exactly HTTP 412 (cache
 // miss, pipeline continues). Error covers any other 4xx/5xx: the worker's
 // response is still streamed to the client, but the outcome is not a hit.
+// TransportError covers a round-trip failure before headers arrive
+// (connection refused, timeout, TCP reset); no worker response was received
+// and the proxy answered the client 502.
 const (
-	ProbeResultServed   = "served"
-	ProbeResultDeferred = "deferred"
-	ProbeResultError    = "error"
+	ProbeResultServed         = "served"
+	ProbeResultDeferred       = "deferred"
+	ProbeResultError          = "error"
+	ProbeResultTransportError = "transport_error"
 )
 
 var (

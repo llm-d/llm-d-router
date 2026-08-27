@@ -252,6 +252,61 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	)
 }
 
+// TestConditionalDecodeStep_TransportError checks that a round-trip failure
+// (no response received) lands on the probe counter under
+// result="transport_error" and not under any of the response-based buckets.
+// The upstream gateway URL points at a listener that was closed before the
+// step runs, so the round trip fails at TCP connect and never reaches
+// ModifyResponse.
+func TestConditionalDecodeStep_TransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srvURL := srv.URL
+	srv.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srvURL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	var streamed *pipeline.UpstreamStreamedError
+	if !errors.As(err, &streamed) {
+		t.Fatalf("expected *pipeline.UpstreamStreamedError, got %T (%v)", err, err)
+	}
+	if streamed.Cause == nil {
+		t.Fatalf("expected Cause set on the streamed error, got nil")
+	}
+	if got := recorder.Result().StatusCode; got != http.StatusBadGateway {
+		t.Fatalf("expected 502 forwarded, got %d", got)
+	}
+
+	require.InDelta(t, 1.0,
+		probeCount(t, reg, coordmetrics.ProbeResultTransportError), 1e-9,
+		"transport_error must count round-trip failures",
+	)
+	for _, other := range []string{
+		coordmetrics.ProbeResultServed,
+		coordmetrics.ProbeResultDeferred,
+		coordmetrics.ProbeResultError,
+	} {
+		require.InDelta(t, 0.0,
+			probeCount(t, reg, other), 1e-9,
+			"response-based bucket %q must not increment on transport failure", other,
+		)
+	}
+}
+
 // TestConditionalDecodeStep_NilClientTransport builds a step around a
 // gateway.Client whose Transport() returns nil. gateway.NewWithTransport
 // documents that as valid and leaves the default-transport fallback to

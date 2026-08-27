@@ -106,6 +106,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return nil
 	}
 	if out.TransportErr != nil {
+		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultTransportError)
 		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, Cause: out.TransportErr}
 	}
 	if out.Status >= http.StatusBadRequest {
