@@ -195,7 +195,24 @@ var inspectedRequestFields = map[string]struct{}{
 	requestFieldCacheHitThreshold:    {},
 	requestFieldContinueFinalMessage: {},
 	requestFieldAddGenerationPrompt:  {},
-	requestFieldMessages:             {},
+}
+
+// requestMessages returns the request's messages array, decoding it from raw
+// bytes on first use. The second return value is false when the field is
+// absent or not an array.
+func requestMessages(req map[string]any) ([]any, bool) {
+	switch v := req[requestFieldMessages].(type) {
+	case []any:
+		return v, true
+	case json.RawMessage:
+		var messages []any
+		if err := json.Unmarshal(v, &messages); err != nil {
+			return nil, false
+		}
+		return messages, true
+	default:
+		return nil, false
+	}
 }
 
 // decodeRequestBody parses a JSON object body. Fields in inspectedRequestFields

@@ -176,7 +176,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		proxyBaseAddr := startProxy()
 
 		tools := `[{"type":"function","function":{"name":"example","parameters":{"properties":{"some-parameter":{"type":"string"},"xyz":{"type":"string"},"123":{"type":"string"},"another-parameter":{"type":"string"}}}}}]`
-		body := `{"model":"Qwen/Qwen2-0.5B","messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"tools":` + tools + `}`
+		messages := `[{"role":"user","content":[{"type":"text","text":"Hello"}]}]`
+		body := `{"model":"Qwen/Qwen2-0.5B","messages":` + messages + `,"max_tokens":50,"tools":` + tools + `}`
 
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
@@ -187,10 +188,14 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		defer rp.Body.Close()
 		Expect(rp.StatusCode).To(Equal(http.StatusOK))
 
-		Expect(testInfo.prefillHandler.CompletionRawBodies).To(HaveLen(1))
-		Expect(string(testInfo.prefillHandler.CompletionRawBodies[0])).To(ContainSubstring(`"tools":` + tools))
-		Expect(testInfo.decodeHandler.CompletionRawBodies).To(HaveLen(1))
-		Expect(string(testInfo.decodeHandler.CompletionRawBodies[0])).To(ContainSubstring(`"tools":` + tools))
+		prefillBodies := testInfo.prefillHandler.GetCompletionRawBodies()
+		Expect(prefillBodies).To(HaveLen(1))
+		Expect(string(prefillBodies[0])).To(ContainSubstring(`"tools":` + tools))
+		Expect(string(prefillBodies[0])).To(ContainSubstring(`"messages":` + messages))
+		decodeBodies := testInfo.decodeHandler.GetCompletionRawBodies()
+		Expect(decodeBodies).To(HaveLen(1))
+		Expect(string(decodeBodies[0])).To(ContainSubstring(`"tools":` + tools))
+		Expect(string(decodeBodies[0])).To(ContainSubstring(`"messages":` + messages))
 	})
 
 	It("should add prefiller cached tokens when decoder usage details omit cached_tokens", func() {

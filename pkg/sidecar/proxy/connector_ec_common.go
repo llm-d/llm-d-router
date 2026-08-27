@@ -56,7 +56,7 @@ func truncateLongStrings(v any, maxLen int) any {
 func extractMMItems(requestData map[string]any) []map[string]any {
 	var items []map[string]any
 
-	messages, ok := requestData["messages"].([]any)
+	messages, ok := requestMessages(requestData)
 	if !ok {
 		return items
 	}

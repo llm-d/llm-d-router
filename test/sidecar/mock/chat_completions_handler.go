@@ -71,6 +71,15 @@ func (cc *ChatCompletionHandler) GetCompletionRequests() []map[string]any {
 	return append([]map[string]any(nil), cc.CompletionRequests...)
 }
 
+// GetCompletionRawBodies returns a snapshot of the received request bodies as
+// sent on the wire, appended in lockstep with GetCompletionRequests, safe for
+// concurrent access.
+func (cc *ChatCompletionHandler) GetCompletionRawBodies() [][]byte {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return append([][]byte(nil), cc.CompletionRawBodies...)
+}
+
 // GetCompletionHeaders returns a snapshot of the received request headers,
 // appended in lockstep with GetCompletionRequests, safe for concurrent access.
 func (cc *ChatCompletionHandler) GetCompletionHeaders() []http.Header {

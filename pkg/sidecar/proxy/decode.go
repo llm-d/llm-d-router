@@ -423,7 +423,7 @@ func appendChunkToRequest(req map[string]any, text string) {
 	if text == "" {
 		return
 	}
-	messages, _ := req[requestFieldMessages].([]any)
+	messages, _ := requestMessages(req)
 	req[requestFieldMessages] = append(messages, map[string]any{
 		requestFieldRole:    roleAssistant,
 		requestFieldContent: text,
