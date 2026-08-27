@@ -205,8 +205,8 @@ func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, er
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	requestData, err := decodeRequestBody(body)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
 

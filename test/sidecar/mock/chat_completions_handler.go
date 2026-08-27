@@ -53,6 +53,7 @@ type ChatCompletionHandler struct {
 	MoRIIOWriteMode     bool
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
+	CompletionRawBodies [][]byte
 	CompletionHeaders   []http.Header
 	CompletionResponses []map[string]any
 	mu                  sync.Mutex
@@ -107,6 +108,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 	cc.mu.Lock()
 	cc.CompletionRequests = append(cc.CompletionRequests, completionRequest)
+	cc.CompletionRawBodies = append(cc.CompletionRawBodies, b)
 	cc.CompletionHeaders = append(cc.CompletionHeaders, r.Header.Clone())
 	cc.mu.Unlock()
 
