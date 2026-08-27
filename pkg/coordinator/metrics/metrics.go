@@ -48,7 +48,7 @@ const (
 // from each step file's own StepName constant (pkg/coordinator/steps/*.go).
 const (
 	UpstreamRender            = "render"
-	UpstreamMediaFetch        = "media-fetch"
+	UpstreamReplaceMediaURLs  = "replace-media-urls"
 	UpstreamEncode            = "encode"
 	UpstreamPrefill           = "prefill"
 	UpstreamConditionalDecode = "conditional-decode"

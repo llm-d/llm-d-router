@@ -120,7 +120,7 @@ var (
 
 // Upstream call family. Recorded once per outbound HTTP call by the step
 // that makes it: encode contributes one observation per multimodal entry
-// and media-fetch one per URL, so the counter multiplies past step_total
+// and replace-media-urls one per URL, so the counter multiplies past step_total
 // by the fan-out factor. Failures roll up into step_errors_total, so there
 // is no upstream_request_error_total.
 var (
