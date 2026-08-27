@@ -23,6 +23,14 @@ engines.
   them down as pods come and go.
 - **Decoding.** Each message is parsed by the engine adapter for its topic,
   producing canonical block-stored / block-removed / all-blocks-cleared events.
+- **Pod identity.** The topic `kv@<pod-id>@<model>` names the pod credited
+  with the blocks. Publishers for tiers not owned by one pod use a pseudo-pod
+  segment instead: `node:<nodeName>` for a cache shared by all pods on a node,
+  `pool:<name>` for a fleet-wide shared tier. The index stores these as opaque
+  identifiers; the [`kvcache`](../kvcache/README.md) scorer resolves them to
+  candidate endpoints at lookup. Pseudo-pod topics take effect on the shared
+  (`zmqEndpoint`) subscription only; a per-pod subscription attributes every
+  message to its own pod.
 - **Worker pool.** `Pool` fans messages out to workers keyed by a sharding key
   so events for the same block are processed in order, then applies them to the
   index.

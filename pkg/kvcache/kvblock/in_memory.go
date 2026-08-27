@@ -134,7 +134,7 @@ func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 			} else {
 				// Filter pods based on the provided pod identifiers
 				for _, pod := range pods.cache.Keys() {
-					if podIdentifierSet.Has(pod.PodIdentifier) {
+					if InPodFilter(podIdentifierSet, pod.PodIdentifier) {
 						podsPerKey[requestKey] = append(podsPerKey[requestKey], pod)
 					}
 				}

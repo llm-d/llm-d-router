@@ -155,7 +155,7 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 			if !ok {
 				continue
 			}
-			if !filterPods || podIdentifierSet.Has(pod.PodIdentifier) {
+			if !filterPods || InPodFilter(podIdentifierSet, pod.PodIdentifier) {
 				filteredPods = append(filteredPods, pod)
 			}
 		}

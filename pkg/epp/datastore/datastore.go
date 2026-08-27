@@ -339,6 +339,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				Name:        pod.Name,
 				Address:     pod.Status.PodIP,
 				NodeAddress: pod.Status.HostIP,
+				NodeName:    pod.Spec.NodeName,
 				Port:        strconv.Itoa(port),
 				MetricsHost: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 				Labels:      labels,

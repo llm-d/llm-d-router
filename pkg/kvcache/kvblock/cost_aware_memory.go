@@ -309,7 +309,7 @@ func (m *CostAwareMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHa
 				// Filter pods based on the provided pod identifiers
 				pods.cache.Range(func(k, value interface{}) bool {
 					if pod, ok := k.(PodEntry); ok {
-						if podIdentifierSet.Has(pod.PodIdentifier) {
+						if InPodFilter(podIdentifierSet, pod.PodIdentifier) {
 							podsPerKey[key] = append(podsPerKey[key], pod)
 						}
 					}

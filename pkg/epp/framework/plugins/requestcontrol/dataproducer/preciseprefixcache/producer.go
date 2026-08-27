@@ -174,8 +174,11 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	go indexer.Run(ctx)
 
 	scorerConfig := kvcache.DefaultKVBlockScorerConfig()
-	if config.IndexerConfig != nil && config.IndexerConfig.BackendConfigs != nil {
-		scorerConfig.BackendConfigs = config.IndexerConfig.BackendConfigs
+	if config.IndexerConfig != nil {
+		if config.IndexerConfig.BackendConfigs != nil {
+			scorerConfig.BackendConfigs = config.IndexerConfig.BackendConfigs
+		}
+		scorerConfig.DefaultWeight = config.IndexerConfig.DefaultBackendWeight
 	}
 	kvBlockScorer, err := kvcache.NewKVBlockScorer(scorerConfig)
 	if err != nil {
@@ -343,6 +346,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 ) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointSet := extractEndpointSet(endpoints)
+	byNode, allEndpoints := endpointsByNode(endpoints)
 
 	type promptLookup struct {
 		keys      []kvblock.BlockHash
@@ -358,6 +362,10 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to lookup block keys: %w", err)
 		}
+		// Shared-tier entries (node:<n>, pool:<name>) are credited to the
+		// candidate endpoints they cover so scoring and per-tier counts see
+		// only real endpoint identifiers.
+		keyToPods = kvblock.ResolvePseudoPods(keyToPods, byNode, allEndpoints)
 		scores, err := p.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
