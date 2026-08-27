@@ -36,6 +36,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -169,4 +170,21 @@ func (t *timedRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := t.inner.RoundTrip(r)
 	t.record(time.Since(start))
 	return resp, err
+}
+
+// instrumentedTransport wraps base in a timedRoundTripper that reports
+// upstream_request_total and upstream_request_duration_seconds for upstream.
+// base may be nil; http.DefaultTransport is substituted then, matching
+// http.Client.Do.
+func instrumentedTransport(base http.RoundTripper, upstream string) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	coordmetrics.IncUpstreamRequestTotal(upstream)
+	return &timedRoundTripper{
+		inner: base,
+		record: func(d time.Duration) {
+			coordmetrics.RecordUpstreamRequestDuration(upstream, d)
+		},
+	}
 }

@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -79,20 +78,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamDecode)
-	// The wrapper below calls inner.RoundTrip unconditionally; fall back to
-	// http.DefaultTransport when the client was built without a transport,
-	// matching http.Client.Do's own behavior.
-	inner := s.gwClient.Transport()
-	if inner == nil {
-		inner = http.DefaultTransport
-	}
-	transport := &timedRoundTripper{
-		inner: inner,
-		record: func(d time.Duration) {
-			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamDecode, d)
-		},
-	}
+	transport := instrumentedTransport(s.gwClient.Transport(), coordmetrics.UpstreamDecode)
 	proxy, out := newDecodeProxy(logger, transport, nil)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
 	if out.TransportErr != nil {

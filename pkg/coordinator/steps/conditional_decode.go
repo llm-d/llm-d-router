@@ -21,7 +21,6 @@ import (
 	"errors"
 	"maps"
 	"net/http"
-	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -70,20 +69,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	var cacheMiss bool
-	coordmetrics.IncUpstreamRequestTotal(coordmetrics.UpstreamConditionalDecode)
-	// The wrapper below calls inner.RoundTrip unconditionally; fall back to
-	// http.DefaultTransport when the client was built without a transport,
-	// matching http.Client.Do's own behavior.
-	inner := s.gwClient.Transport()
-	if inner == nil {
-		inner = http.DefaultTransport
-	}
-	transport := &timedRoundTripper{
-		inner: inner,
-		record: func(d time.Duration) {
-			coordmetrics.RecordUpstreamRequestDuration(coordmetrics.UpstreamConditionalDecode, d)
-		},
-	}
+	transport := instrumentedTransport(s.gwClient.Transport(), coordmetrics.UpstreamConditionalDecode)
 	proxy, out := newDecodeProxy(logger, transport, func(resp *http.Response) error {
 		switch {
 		case resp.StatusCode == http.StatusPreconditionFailed:
