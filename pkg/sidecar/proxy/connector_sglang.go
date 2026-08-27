@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -67,9 +66,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	roomID := s.generateSGLangRoomID()
 
 	// Inject bootstrap info for both prefill and decode
-	bootstrapInfo := s.addSGLangBootstrapInfo(requestData, prefillPodHostPort, roomID)
-
-	body, err := json.Marshal(bootstrapInfo)
+	body, err := s.addSGLangBootstrapInfo(requestData, prefillPodHostPort, roomID)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -177,40 +174,33 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 	}
 }
 
-func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
-	modifiedRequest := make(map[string]interface{})
-	for k, v := range requestData {
-		modifiedRequest[k] = v
-	}
-
+func (s *Server) addSGLangBootstrapInfo(requestData []byte, prefillHostPort string, roomID int64) ([]byte, error) {
 	// Generate bootstrap host from prefill host
 	bootstrapHost := extractHost(prefillHostPort)
-
-	// Add bootstrap information
-	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
-	modifiedRequest[requestFieldBootstrapPort] = sglangBootstrapPort
-	modifiedRequest[requestFieldBootstrapRoom] = roomID
 
 	s.logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)
 
-	return modifiedRequest
+	return editRequestBody(requestData).
+		set(requestFieldBootstrapHost, bootstrapHost).
+		set(requestFieldBootstrapPort, sglangBootstrapPort).
+		set(requestFieldBootstrapRoom, roomID).
+		bytes()
 }
 
-func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, error) {
+func (s *Server) parseSGLangRequest(r *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	if err := validateRequestBody(body); err != nil {
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
 
-	return requestData, nil
+	return body, nil
 }
 
 func (s *Server) generateSGLangRoomID() int64 {

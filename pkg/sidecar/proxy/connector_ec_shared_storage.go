@@ -28,7 +28,7 @@ import (
 // item, discarding the responses (status check only). Used by the
 // `ec-example` connector to prime the encoder cache before forwarding the
 // original request to the P/D connector.
-func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[string]any, encoderHostPorts []string, requestID string) error {
+func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest []byte, encoderHostPorts []string, requestID string) error {
 	items := s.mmItemsForFanout(originalRequest, requestID)
 	if len(items) == 0 {
 		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
@@ -41,7 +41,7 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, completionRequest, ok := s.readJSONBody(r, w)
+	completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}

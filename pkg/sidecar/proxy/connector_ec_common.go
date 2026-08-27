@@ -10,13 +10,13 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/tidwall/gjson"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // Multimodal content types that need encoder processing.
@@ -53,39 +53,17 @@ func truncateLongStrings(v any, maxLen int) any {
 }
 
 // extractMMItems extracts all multimodal items from the request messages.
-func extractMMItems(requestData map[string]any) []map[string]any {
-	var items []map[string]any
+func extractMMItems(requestData []byte) []gjson.Result {
+	var items []gjson.Result
 
-	messages, ok := requestData["messages"].([]any)
-	if !ok {
-		return items
-	}
-
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
+	for _, msg := range gjson.GetBytes(requestData, requestFieldMessages).Array() {
+		content := msg.Get(requestFieldContent)
+		if !content.IsArray() {
 			continue
 		}
-
-		content := msgMap["content"]
-		contentList, ok := content.([]any)
-		if !ok {
-			continue
-		}
-
-		for _, item := range contentList {
-			itemMap, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			itemType, ok := itemMap["type"].(string)
-			if !ok {
-				continue
-			}
-
-			if mmTypes[itemType] {
-				items = append(items, itemMap)
+		for _, item := range content.Array() {
+			if item.IsObject() && mmTypes[item.Get("type").Str] {
+				items = append(items, item)
 			}
 		}
 	}
@@ -93,42 +71,24 @@ func extractMMItems(requestData map[string]any) []map[string]any {
 	return items
 }
 
-// buildEncoderRequest creates a per-item encoder request: a deep copy of the
-// original chat-completions request with only the multimodal item in
+// buildEncoderRequest creates a per-item encoder request: the original
+// chat-completions request with only the multimodal item in
 // messages[0].content (text removed), capped to a single output token, and
 // stream disabled.
-func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := make(map[string]any)
-	for k, v := range originalRequest {
-		encoderRequest[k] = v
-	}
-
-	messages := []map[string]any{
-		{
-			"role": "user",
-			"content": []map[string]any{
-				mmItem,
-			},
-		},
-	}
-
-	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest, originalRequest)
-
-	return encoderRequest
+func buildEncoderRequest(originalRequest []byte, mmItem gjson.Result) ([]byte, error) {
+	messages := `[{"role":"user","content":[` + mmItem.Raw + `]}]`
+	return editRequestBody(originalRequest).
+		setRaw(requestFieldMessages, []byte(messages)).
+		singleToken().
+		bytes()
 }
 
 // mmItemURL returns the URL string for a URL-based multimodal item, or
 // empty string when the item carries inline data instead.
-func mmItemURL(item map[string]any) string {
-	itemType, _ := item["type"].(string)
-	switch itemType {
+func mmItemURL(item gjson.Result) string {
+	switch itemType := item.Get("type").Str; itemType {
 	case "image_url", "audio_url", "video_url":
-		if m, ok := item[itemType].(map[string]any); ok {
-			if u, ok := m["url"].(string); ok {
-				return u
-			}
-		}
+		return item.Get(itemType + ".url").Str
 	}
 	return ""
 }
@@ -138,13 +98,13 @@ func mmItemURL(item map[string]any) string {
 // items (e.g. inline input_audio) are kept verbatim. Returns nil when
 // there is no multimodal content. The caller should skip the encoder
 // stage in that case.
-func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
+func (s *Server) mmItemsForFanout(originalRequest []byte, requestID string) []gjson.Result {
 	raw := extractMMItems(originalRequest)
 	if len(raw) == 0 {
 		return nil
 	}
 	seenURLs := make(map[string]struct{})
-	items := make([]map[string]any, 0, len(raw))
+	items := make([]gjson.Result, 0, len(raw))
 	for _, item := range raw {
 		if url := mmItemURL(item); url != "" {
 			if _, seen := seenURLs[url]; seen {
@@ -170,8 +130,8 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 // grp.Wait returns the first non-nil error.
 func (s *Server) fanoutEncoder(
 	ctx context.Context,
-	originalRequest map[string]any,
-	items []map[string]any,
+	originalRequest []byte,
+	items []gjson.Result,
 	encoderHostPorts []string,
 	requestID string,
 	perItem func(idx int, pw *bufferedResponseWriter) error,
@@ -186,11 +146,9 @@ func (s *Server) fanoutEncoder(
 	for idx, mmItem := range items {
 		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
 		grp.Go(func() error {
-			encoderRequest := buildEncoderRequest(originalRequest, mmItem)
-
-			body, err := json.Marshal(encoderRequest)
+			body, err := buildEncoderRequest(originalRequest, mmItem)
 			if err != nil {
-				err = fmt.Errorf("failed to marshal encoder request for item %d: %w", idx, err)
+				err = fmt.Errorf("failed to build encoder request for item %d: %w", idx, err)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
@@ -244,14 +202,12 @@ func (s *Server) fanoutEncoder(
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
 	r *http.Request,
-	completionRequest map[string]any,
+	completionRequest []byte,
 	prefillEndPoint string,
 	requestID string,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
-	completionRequest[requestFieldCacheHitThreshold] = 0
-
-	modifiedBody, err := json.Marshal(completionRequest)
+	modifiedBody, err := editRequestBody(completionRequest).set(requestFieldCacheHitThreshold, 0).bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -275,8 +231,8 @@ func (s *Server) runPDPipeline(
 			"prefiller", prefillEndPoint,
 			"bodyBytes", len(modifiedBody),
 		}
-		if ec, ok := completionRequest[requestFieldECTransferParams]; ok {
-			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec, 64))
+		if ec := gjson.GetBytes(completionRequest, requestFieldECTransferParams); ec.Exists() {
+			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec.Value(), 64))
 		}
 		v.Info("forwarding request after encoder", kv...)
 	}

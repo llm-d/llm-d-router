@@ -53,6 +53,7 @@ type ChatCompletionHandler struct {
 	MoRIIOWriteMode     bool
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
+	CompletionRawBodies [][]byte
 	CompletionHeaders   []http.Header
 	CompletionResponses []map[string]any
 	mu                  sync.Mutex
@@ -68,6 +69,15 @@ func (cc *ChatCompletionHandler) GetCompletionRequests() []map[string]any {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	return append([]map[string]any(nil), cc.CompletionRequests...)
+}
+
+// GetCompletionRawBodies returns a snapshot of the received request bodies as
+// sent on the wire, appended in lockstep with GetCompletionRequests, safe for
+// concurrent access.
+func (cc *ChatCompletionHandler) GetCompletionRawBodies() [][]byte {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return append([][]byte(nil), cc.CompletionRawBodies...)
 }
 
 // GetCompletionHeaders returns a snapshot of the received request headers,
@@ -107,6 +117,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 	cc.mu.Lock()
 	cc.CompletionRequests = append(cc.CompletionRequests, completionRequest)
+	cc.CompletionRawBodies = append(cc.CompletionRawBodies, b)
 	cc.CompletionHeaders = append(cc.CompletionHeaders, r.Header.Clone())
 	cc.mu.Unlock()
 

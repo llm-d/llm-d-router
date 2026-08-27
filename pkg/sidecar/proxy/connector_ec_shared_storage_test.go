@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/tidwall/gjson"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -141,7 +143,7 @@ func TestExtractMMItems(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			items := extractMMItems(tt.request)
+			items := extractMMItems(mustJSON(t, tt.request))
 			assert.Equal(t, tt.expected, len(items), "unexpected number of MM items")
 		})
 	}
@@ -178,23 +180,22 @@ func TestBuildEncoderRequest(t *testing.T) {
 		},
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest, err := buildEncoderRequest(mustJSON(t, originalRequest), gjson.ParseBytes(mustJSON(t, mmItem)))
+	assert.NoError(t, err)
 
 	// Verify encoder request modifications
-	assert.Equal(t, 1, encoderRequest["max_tokens"])
-	assert.Equal(t, false, encoderRequest["stream"])
-	_, hasStreamOptions := encoderRequest["stream_options"]
-	assert.False(t, hasStreamOptions)
+	assert.Equal(t, int64(1), gjson.GetBytes(encoderRequest, "max_tokens").Int())
+	assert.False(t, gjson.GetBytes(encoderRequest, "stream").Bool())
+	assert.False(t, gjson.GetBytes(encoderRequest, "stream_options").Exists())
+	assert.Equal(t, "test-model", gjson.GetBytes(encoderRequest, "model").Str)
 
 	// Verify messages contain only the MM item
-	messages, ok := encoderRequest["messages"].([]map[string]any)
-	assert.True(t, ok)
+	messages := gjson.GetBytes(encoderRequest, "messages").Array()
 	assert.Equal(t, 1, len(messages))
 
-	content, ok := messages[0]["content"].([]map[string]any)
-	assert.True(t, ok)
+	content := messages[0].Get("content").Array()
 	assert.Equal(t, 1, len(content))
-	assert.Equal(t, "image_url", content[0]["type"])
+	assert.Equal(t, "image_url", content[0].Get("type").Str)
 }
 
 // TestBuildEncoderRequest_MaxCompletionTokens is a regression test: a shallow
@@ -228,10 +229,11 @@ func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
 		},
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest, err := buildEncoderRequest(mustJSON(t, originalRequest), gjson.ParseBytes(mustJSON(t, mmItem)))
+	assert.NoError(t, err)
 
-	assert.Equal(t, 1, encoderRequest["max_tokens"])
-	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
+	assert.Equal(t, int64(1), gjson.GetBytes(encoderRequest, "max_tokens").Int())
+	assert.Equal(t, int64(1), gjson.GetBytes(encoderRequest, "max_completion_tokens").Int())
 }
 
 func TestMMItemURL(t *testing.T) {
@@ -298,9 +300,19 @@ func TestMMItemURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, mmItemURL(tt.item))
+			assert.Equal(t, tt.expected, mmItemURL(gjson.ParseBytes(mustJSON(t, tt.item))))
 		})
 	}
+}
+
+// mustJSON marshals v, failing the test on error.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // imageURLItem builds an image_url content item.
@@ -318,17 +330,21 @@ func inlineAudioItem(data, format string) map[string]any {
 	return map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": data, "format": format}}
 }
 
-// userMessageRequest wraps content items in a minimal chat-completions request.
-func userMessageRequest(items ...map[string]any) map[string]any {
+// userMessageRequest wraps content items in a minimal chat-completions request body.
+func userMessageRequest(items ...map[string]any) []byte {
 	content := make([]any, len(items))
 	for i, item := range items {
 		content[i] = item
 	}
-	return map[string]any{
+	b, err := json.Marshal(map[string]any{
 		"messages": []any{
 			map[string]any{"role": "user", "content": content},
 		},
+	})
+	if err != nil {
+		panic(err)
 	}
+	return b
 }
 
 func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
@@ -350,7 +366,7 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		request       map[string]any
+		request       []byte
 		expectedCalls int32
 	}{
 		{

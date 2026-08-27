@@ -31,7 +31,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
@@ -49,8 +48,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		return
 	}
 
-	var requestData map[string]any
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	if err := validateRequestBody(body); err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
@@ -80,20 +78,12 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		"dp_rank", dpRank,
 		"engine_id", engineID)
 
-	// Build prefill request body
-	prefillData := make(map[string]any)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
-	prefillData[requestFieldKVTransferParams] = map[string]any{
+	// Prefill returns as soon as KV is stored; cap it to a single token.
+	prefillBody, err := editRequestBody(body).set(requestFieldKVTransferParams, map[string]any{
 		requestFieldDoRemotePrefill: false,
 		requestFieldDoRemoteDecode:  true,
 		requestFieldTransferID:      transferID,
-	}
-	// update fields from original body; return asap.
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
-
-	prefillBody, err := json.Marshal(prefillData)
+	}).singleToken().bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -107,20 +97,13 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		trace.Info("Prefill request", "body", string(prefillBody))
 	}
 
-	// Build decode request body
-	decodeData := make(map[string]any)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
-	decodeData[requestFieldKVTransferParams] = map[string]any{
+	decodeBody, err := editRequestBody(body).set(requestFieldKVTransferParams, map[string]any{
 		requestFieldDoRemotePrefill:     true,
 		requestFieldDoRemoteDecode:      false,
 		requestFieldTransferID:          transferID,
 		requestFieldRemoteBootstrapAddr: bootstrapAddr,
 		requestFieldRemoteEngineID:      engineID,
-	}
-
-	decodeBody, err := json.Marshal(decodeData)
+	}).bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")

@@ -8,6 +8,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/sjson"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
@@ -19,7 +21,7 @@ import (
 // Missing/non-object/empty ec_transfer_params is warn-and-skip.
 func (s *Server) fanoutEncoderCollect(
 	ctx context.Context,
-	originalRequest map[string]any,
+	originalRequest []byte,
 	encoderHostPorts []string,
 	requestID string,
 ) (map[string]any, int, int, error) {
@@ -86,7 +88,7 @@ func (s *Server) fanoutEncoderCollect(
 func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, completionRequest, ok := s.readJSONBody(r, w)
+	completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -117,7 +119,13 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 				s.logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
 					"requestID", requestID, "items", total)
 			} else {
-				completionRequest[requestFieldECTransferParams] = params
+				completionRequest, err = sjson.SetBytes(completionRequest, requestFieldECTransferParams, params)
+				if err != nil {
+					if err := errorJSONInvalid(err, w); err != nil {
+						s.logger.Error(err, "failed to send error response to client")
+					}
+					return
+				}
 				if contributed < total {
 					s.logger.Info("warning: ec_transfer_params partially populated; some items missing transfer metadata",
 						"requestID", requestID, "contributed", contributed, "items", total)

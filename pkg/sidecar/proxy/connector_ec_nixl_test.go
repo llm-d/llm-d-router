@@ -172,10 +172,10 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 		capturedBody = buf
 	}
 
-	reqBody, _ := json.Marshal(userMessageRequest(
+	reqBody := userMessageRequest(
 		imageURLItem("https://example.com/img1.jpg"),
 		imageURLItem("https://example.com/img2.jpg"),
-	))
+	)
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
@@ -228,10 +228,10 @@ func TestHandleECEPDAllMissingDoesNotAddField(t *testing.T) {
 		capturedBody = buf
 	}
 
-	reqBody, _ := json.Marshal(userMessageRequest(
+	reqBody := userMessageRequest(
 		imageURLItem("https://example.com/img1.jpg"),
 		imageURLItem("https://example.com/img2.jpg"),
-	))
+	)
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
@@ -290,10 +290,10 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 		capturedBody = buf
 	}
 
-	reqBody, _ := json.Marshal(userMessageRequest(
+	reqBody := userMessageRequest(
 		imageURLItem("https://example.com/img1.jpg"),
 		imageURLItem("https://example.com/img2.jpg"),
-	))
+	)
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
@@ -531,7 +531,7 @@ func TestHandleECNIXLEmptyEncodeEndPoints(t *testing.T) {
 		capturedBody = buf
 	}
 
-	reqBody, _ := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+	reqBody := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
@@ -637,7 +637,7 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 		pdConnectorCalled = true
 	}
 
-	reqBody, _ := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+	reqBody := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 

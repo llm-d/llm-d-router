@@ -76,10 +76,6 @@ func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
 
 // capSingleTokenOutput rewrites body into a single-output-token, non-streaming
 // request for the synthetic prefill and encode legs.
-//
-// Intentionally distinct from the sidecar's reqcommon.PrimeSingleTokenRequest
-// for now.
-// TODO: unify the two into one shared single-token helper in a future refactor.
 func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 	target := body
 	if format == gateway.FormatGenerate {

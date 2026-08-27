@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -58,31 +60,31 @@ const (
 // dispatchDecode routes a fully-prepared decode request to either chunked
 // decode or the regular decoder proxy. Chunked decode is only used for
 // chat completions requests when s.config.DecodeChunkSize > 0.
-// completionRequest is the already-parsed JSON map; callers that hold it
+// completionRequest is the validated JSON body of r; callers that hold it
 // should use this instead of calling s.decoderProxy directly.
-func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
+func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completionRequest []byte) {
 	if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
-		s.runChunkedDecodeFromMap(w, r, completionRequest)
+		s.runChunkedDecodeFromBody(w, r, completionRequest)
 		return
 	}
 	s.decoderProxy.ServeHTTP(w, r)
 }
 
-// runChunkedDecode reads and parses the body, then delegates to
-// runChunkedDecodeFromMap.
+// runChunkedDecode reads and validates the body, then delegates to
+// runChunkedDecodeFromBody.
 func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
-	original, completionRequest, ok := s.readJSONBody(r, w)
+	original, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
 
-	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), completionRequest)
+	s.runChunkedDecodeFromBody(w, cloneRequestWithBody(r.Context(), r, original), original)
 }
 
-// runChunkedDecodeFromMap executes chunked decode given an already-parsed completionRequest map.
+// runChunkedDecodeFromBody executes chunked decode given a validated JSON body.
 // Non-streaming: accumulated chunks are reassembled into a single JSON response.
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
-func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
+func (s *Server) runChunkedDecodeFromBody(w http.ResponseWriter, r *http.Request, completionRequest []byte) {
 	s.logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
 	ctx, span := tracing.Tracer(tracerScope).Start(r.Context(), "chunked_decode",
@@ -90,7 +92,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	)
 	defer span.End()
 
-	streamingEnabled, _ := completionRequest[requestFieldStream].(bool)
+	streamingEnabled := gjson.GetBytes(completionRequest, requestFieldStream).Bool()
 	originalMaxTokens := resolveMaxTokens(completionRequest)
 
 	span.SetAttributes(
@@ -145,21 +147,21 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			chunkBudget = remaining
 		}
 
-		chunkReq := maps.Clone(completionRequest)
-		chunkReq[requestFieldMaxTokens] = chunkBudget
-		chunkReq[requestFieldMaxCompletionTokens] = chunkBudget
-		chunkReq[requestFieldStream] = false
-		delete(chunkReq, requestFieldStreamOptions)
+		chunkReq := editRequestBody(completionRequest).
+			set(requestFieldMaxTokens, chunkBudget).
+			set(requestFieldMaxCompletionTokens, chunkBudget).
+			set(requestFieldStream, false).
+			del(requestFieldStreamOptions)
 
 		// From the second chunk onward: remove KV transfer params and instruct
 		// to continue the last assistant message rather than start a new one.
 		if chunkIndex > 0 {
-			delete(chunkReq, requestFieldKVTransferParams)
-			chunkReq[requestFieldContinueFinalMessage] = true
-			chunkReq[requestFieldAddGenerationPrompt] = false
+			chunkReq.del(requestFieldKVTransferParams).
+				set(requestFieldContinueFinalMessage, true).
+				set(requestFieldAddGenerationPrompt, false)
 		}
 
-		chunkBody, err := json.Marshal(chunkReq)
+		chunkBody, err := chunkReq.bytes()
 		if err != nil {
 			if err := errorJSONInvalid(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
@@ -234,7 +236,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Append the generated text to the request so the next chunk continues
 		// from where this one left off.
 		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
-		appendChunkToRequest(completionRequest, chunkText)
+		completionRequest, err = appendChunkToRequest(completionRequest, chunkText)
+		if err != nil {
+			if err := errorInternalServerError(err, w); err != nil {
+				s.logger.Error(err, "failed to send error response to client")
+			}
+			return
+		}
 	}
 
 	span.SetAttributes(
@@ -304,15 +312,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	w.Write(respBody) //nolint:errcheck
 }
 
-// resolveMaxTokens returns the effective max-tokens limit from the request map.
+// resolveMaxTokens returns the effective max-tokens limit from the request body.
 // Prefers max_completion_tokens (OpenAI v1) over max_tokens (legacy).
 // Returns -1 when neither field is set (no explicit limit).
-func resolveMaxTokens(req map[string]any) int {
+func resolveMaxTokens(req []byte) int {
 	for _, field := range []string{requestFieldMaxCompletionTokens, requestFieldMaxTokens} {
-		if v, ok := req[field]; ok {
-			if n, ok := toInt(v); ok && n > 0 {
-				return n
-			}
+		if v := gjson.GetBytes(req, field); v.Type == gjson.Number && v.Int() > 0 {
+			return int(v.Int())
 		}
 	}
 	return -1
@@ -419,12 +425,11 @@ func extractChoiceText(choice map[string]any) string {
 
 // appendChunkToRequest appends the generated text from a chunk to the request
 // so the next chunk continues from where this one left off.
-func appendChunkToRequest(req map[string]any, text string) {
+func appendChunkToRequest(req []byte, text string) ([]byte, error) {
 	if text == "" {
-		return
+		return req, nil
 	}
-	messages, _ := req[requestFieldMessages].([]any)
-	req[requestFieldMessages] = append(messages, map[string]any{
+	return sjson.SetBytes(req, requestFieldMessages+".-1", map[string]any{
 		requestFieldRole:    roleAssistant,
 		requestFieldContent: text,
 	})

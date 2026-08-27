@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +16,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/llm-d/llm-d-router/pkg/common"
@@ -163,21 +164,85 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 	return decoderProxy
 }
 
-func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
+func bodyAsJSON(r *http.Request) ([]byte, error) {
 	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
+	if err := validateRequestBody(raw); err != nil {
+		return nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
 	}
-	return raw, parsed, nil
+	return raw, nil
 }
 
-func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
-	raw, parsed, err := bodyAsJSON(r)
+// validateRequestBody reports an error when raw is not a JSON object.
+func validateRequestBody(raw []byte) error {
+	if !gjson.ValidBytes(raw) {
+		return errors.New("request body is not valid JSON")
+	}
+	if !gjson.ParseBytes(raw).IsObject() {
+		return errors.New("request body is not a JSON object")
+	}
+	return nil
+}
+
+// requestBody edits a JSON object body in place. Only the fields the sidecar
+// sets are rewritten; every other byte is forwarded unchanged, so nested key
+// order (for example tools[].function.parameters, which chat templates render
+// into the prompt verbatim) survives proxying. Each edit copies the body once;
+// the first error is kept and returned by bytes.
+type requestBody struct {
+	raw []byte
+	err error
+}
+
+func editRequestBody(raw []byte) *requestBody {
+	return &requestBody{raw: raw}
+}
+
+func (b *requestBody) get(path string) gjson.Result {
+	return gjson.GetBytes(b.raw, path)
+}
+
+func (b *requestBody) set(path string, value any) *requestBody {
+	if b.err == nil {
+		b.raw, b.err = sjson.SetBytes(b.raw, path, value)
+	}
+	return b
+}
+
+func (b *requestBody) setRaw(path string, value []byte) *requestBody {
+	if b.err == nil {
+		b.raw, b.err = sjson.SetRawBytes(b.raw, path, value)
+	}
+	return b
+}
+
+func (b *requestBody) del(path string) *requestBody {
+	if b.err == nil {
+		b.raw, b.err = sjson.DeleteBytes(b.raw, path)
+	}
+	return b
+}
+
+// singleToken turns the body into a non-streaming, single-output-token request
+// for legs that only need to run prefill or encoding. max_completion_tokens is
+// capped only when the client sent it.
+func (b *requestBody) singleToken() *requestBody {
+	b.set(requestFieldMaxTokens, 1)
+	if b.get(requestFieldMaxCompletionTokens).Exists() {
+		b.set(requestFieldMaxCompletionTokens, 1)
+	}
+	return b.set(requestFieldStream, false).del(requestFieldStreamOptions)
+}
+
+func (b *requestBody) bytes() ([]byte, error) {
+	return b.raw, b.err
+}
+
+func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, bool) {
+	raw, err := bodyAsJSON(r)
 	if err != nil {
 		if !errors.Is(err, errInvalidJSON) {
 			w.WriteHeader(http.StatusBadRequest)
@@ -185,9 +250,9 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
-		return nil, nil, false
+		return nil, false
 	}
-	return raw, parsed, true
+	return raw, true
 }
 
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {

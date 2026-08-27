@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -35,7 +34,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
@@ -52,8 +50,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 
-	var requestData map[string]any
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	if err := validateRequestBody(body); err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
@@ -69,20 +66,13 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 
 	// Prefill leg: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
-	prefillData := make(map[string]any, len(requestData)+1)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
 	prefillKVParams := map[string]any{
 		requestFieldRemoteDecoder: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 		},
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
-	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
-
-	prefillBody, err := json.Marshal(prefillData)
+	prefillBody, err := editRequestBody(body).set(requestFieldKVTransferParams, prefillKVParams).singleToken().bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -95,19 +85,13 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 
 	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
-	decodeData := make(map[string]any, len(requestData)+1)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
-	decodeData[requestFieldKVTransferParams] = map[string]any{
+	decodeBody, err := editRequestBody(body).set(requestFieldKVTransferParams, map[string]any{
 		requestFieldRemotePrefiller: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
 			requestFieldRemoteHost:  extractHost(prefillPodHostPort),
 			requestFieldRemotePort:  prefillP2PPort,
 		},
-	}
-
-	decodeBody, err := json.Marshal(decodeData)
+	}).bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -323,7 +307,7 @@ func (s *Server) p2pPortFor(targetHostPort string) int {
 // computing, so it decodes normally; another rank on the same pod is a
 // valid peer and does get the injection.
 func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sourceHostPort string) {
-	raw, requestData, ok := s.readJSONBody(r, w)
+	raw, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -333,21 +317,22 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	if source == self {
 		s.logger.V(logging.DEBUG).Info("KV cache source is this rank's endpoint, skipping p2p injection",
 			"source", sourceHostPort, "self", self)
-		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), requestData)
+		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), raw)
 		return
 	}
 
 	p2pParams := s.p2pSourceParams(source)
-	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
-	// client-supplied keys are dropped rather than forwarded to vLLM.
-	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
 
 	s.logger.Info("running P2P source protocol",
 		"source_host", extractHost(source),
 		"kv_request_id", p2pParams[requestFieldKVRequestID],
 		"p2p_connector_port", p2pParams[requestFieldRemotePort])
 
-	newBody, err := json.Marshal(requestData)
+	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
+	// client-supplied keys are dropped rather than forwarded to vLLM.
+	newBody, err := editRequestBody(raw).
+		set(requestFieldKVTransferParams, map[string]any{requestFieldRemoteKVSource: p2pParams}).
+		bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -358,5 +343,5 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		v.Info("decoder request body with p2p source", "body", string(newBody))
 	}
 
-	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData)
+	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), newBody)
 }

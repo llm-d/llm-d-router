@@ -29,6 +29,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+	"github.com/tidwall/gjson"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -284,12 +285,11 @@ var _ = Describe("Chunked Decode", func() {
 	Describe("helper functions", func() {
 
 		It("resolveMaxTokens prefers max_completion_tokens over max_tokens", func() {
-			req := map[string]any{requestFieldMaxTokens: float64(50), requestFieldMaxCompletionTokens: float64(100)}
-			Expect(resolveMaxTokens(req)).To(Equal(100))
+			Expect(resolveMaxTokens([]byte(`{"max_tokens":50,"max_completion_tokens":100}`))).To(Equal(100))
 		})
 
 		It("resolveMaxTokens returns -1 when neither field is set", func() {
-			Expect(resolveMaxTokens(map[string]any{})).To(Equal(-1))
+			Expect(resolveMaxTokens([]byte(`{}`))).To(Equal(-1))
 		})
 
 		It("remainingTokens returns -1 for unlimited budget", func() {
@@ -301,21 +301,19 @@ var _ = Describe("Chunked Decode", func() {
 		})
 
 		It("appendChunkToRequest appends assistant message to chat messages", func() {
-			req := map[string]any{
-				requestFieldMessages: []any{map[string]any{requestFieldRole: "user", requestFieldContent: "Hi"}},
-			}
-			appendChunkToRequest(req, "hello")
-			msgs := req[requestFieldMessages].([]any)
+			req, err := appendChunkToRequest([]byte(`{"messages":[{"role":"user","content":"Hi"}]}`), "hello")
+			Expect(err).ToNot(HaveOccurred())
+			msgs := gjson.GetBytes(req, requestFieldMessages).Array()
 			Expect(msgs).To(HaveLen(2))
-			last := msgs[1].(map[string]any)
-			Expect(last[requestFieldRole]).To(Equal("assistant"))
-			Expect(last[requestFieldContent]).To(Equal("hello"))
+			Expect(msgs[1].Get(requestFieldRole).Str).To(Equal("assistant"))
+			Expect(msgs[1].Get(requestFieldContent).Str).To(Equal("hello"))
 		})
 
 		It("appendChunkToRequest is a no-op for empty text", func() {
-			req := map[string]any{requestFieldMessages: []any{}}
-			appendChunkToRequest(req, "")
-			Expect(req[requestFieldMessages].([]any)).To(BeEmpty())
+			original := `{"messages":[]}`
+			req, err := appendChunkToRequest([]byte(original), "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(req)).To(Equal(original))
 		})
 	})
 })

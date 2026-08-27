@@ -24,13 +24,15 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(logging.DEBUG).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
-	original, completionRequest, ok := s.readJSONBody(r, w)
+	original, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -39,10 +41,10 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
-	if cacheHitThreshold, hasCacheHitThreshold := completionRequest[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
-		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
+	if cacheHitThreshold := gjson.GetBytes(original, requestFieldCacheHitThreshold); cacheHitThreshold.Exists() {
+		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold.Value())
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
-		needsPrefill, err := s.tryDecode(w, decodeReq, completionRequest)
+		needsPrefill, err := s.tryDecode(w, decodeReq, original)
 		if err != nil {
 			return
 		}
@@ -53,16 +55,13 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", requestFieldCacheHitThreshold, cacheHitThreshold)
 	}
 
-	// we clone the completion request to avoid modifying the original request
-	prefillRequest := maps.Clone(completionRequest)
-	if err := s.prefill(w, r, prefillPodHostPort, prefillRequest); err != nil {
+	if err := s.prefill(w, r, prefillPodHostPort, original); err != nil {
 		s.logger.Error(err, "prefill failed")
 		return
 	}
 
 	s.logger.V(logging.DEBUG).Info("forwarding to decoder after prefill")
-	completionRequest[requestFieldCacheHitThreshold] = 0
-	decodeRequestBody, err := json.Marshal(completionRequest)
+	decodeRequestBody, err := editRequestBody(original).set(requestFieldCacheHitThreshold, 0).bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
@@ -75,8 +74,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 }
 
 // tryDecode attempts to decode and returns whether prefill is needed.
-func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) (bool, error) {
-	if isStreaming, _ := completionRequest[requestFieldStream].(bool); isStreaming {
+func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, completionRequest []byte) (bool, error) {
+	if gjson.GetBytes(completionRequest, requestFieldStream).Bool() {
 		if flusher, ok := w.(flushableResponseWriter); ok {
 			bw := newResponseWriterWithBuffer(flusher)
 			return s.tryDecodeStreaming(bw, r)
@@ -214,13 +213,12 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 }
 
 // prefill routes a request to a prefill node
-func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, completionRequest map[string]any) error {
-	// Prepare prefill request
-	completionRequest[requestFieldMaxTokens] = 1
-	completionRequest[requestFieldMaxCompletionTokens] = 1
-	completionRequest[requestFieldCacheHitThreshold] = 0
-
-	pbody, err := json.Marshal(completionRequest)
+func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, completionRequest []byte) error {
+	pbody, err := editRequestBody(completionRequest).
+		set(requestFieldMaxTokens, 1).
+		set(requestFieldMaxCompletionTokens, 1).
+		set(requestFieldCacheHitThreshold, 0).
+		bytes()
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
