@@ -179,6 +179,10 @@ type ManagedQueue interface {
 	// Drain removes all items from the underlying queue.
 	Drain() []flowcontrol.QueueItemAccessor
 
+	// Rescore re-establishes the underlying queue's ordering invariant against its current
+	// OrderingPolicy. See SafeQueue.Rescore.
+	Rescore()
+
 	// FlowQueueAccessor returns a read-only, flow-aware accessor for this queue, used by policy plugins.
 	// Conformance: This method MUST NOT return nil.
 	FlowQueueAccessor() flowcontrol.FlowQueueAccessor

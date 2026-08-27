@@ -84,6 +84,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	programscore "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/program-score"
 	slodeadline "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
@@ -662,6 +663,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
 	fwkplugin.Register(priorityholdback.PolicyType, fwkplugin.StabilityAlpha, priorityholdback.PolicyFactory)
 	fwkplugin.Register(softreflectiveceiling.PolicyType, fwkplugin.StabilityAlpha, softreflectiveceiling.Factory)
+	fwkplugin.Register(programscore.ProgramScoreOrderingPolicyType, fwkplugin.StabilityAlpha, programscore.ProgramScoreOrderingPolicyFactory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
 	// Beta

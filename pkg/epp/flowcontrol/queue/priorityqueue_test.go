@@ -325,6 +325,38 @@ func TestPriorityQueue_Drain(t *testing.T) {
 	})
 }
 
+// TestPriorityQueue_Rescore verifies that Rescore re-establishes the heap property after external
+// state read by the OrderingPolicy changes, without Add or Remove being called - the scenario a
+// ScoringOrderingPolicy relies on to surface a time-decayed score at the queue root, since Peek
+// never re-runs comparisons and Add/Remove/Cleanup only ever compare the items directly involved.
+func TestPriorityQueue_Rescore(t *testing.T) {
+	t.Parallel()
+
+	scores := map[string]int{"r-1": 1, "r-2": 2, "r-3": 3}
+	scorePolicy := &mocks.MockOrderingPolicy{
+		TypedNameV: plugin.TypedName{Name: "external_score_asc"},
+		LessFunc: func(a, b flowcontrol.QueueItemAccessor) bool {
+			return scores[a.OriginalRequest().ID()] < scores[b.OriginalRequest().ID()]
+		},
+	}
+
+	q := New(scorePolicy)
+	q.Add(mocks.NewMockQueueItemAccessor(10, "r-1", testFlowKey))
+	q.Add(mocks.NewMockQueueItemAccessor(10, "r-2", testFlowKey))
+	q.Add(mocks.NewMockQueueItemAccessor(10, "r-3", testFlowKey))
+
+	require.Equal(t, "r-1", q.Peek().OriginalRequest().ID(), "r-1 has the lowest score initially")
+
+	// r-3 now has the lowest score. The stale root must persist until Rescore forces a
+	// re-heapify: Peek alone must not re-run comparisons.
+	scores["r-3"] = 0
+	assert.Equal(t, "r-1", q.Peek().OriginalRequest().ID(), "Peek alone must not re-run comparisons")
+
+	q.Rescore()
+	assert.Equal(t, "r-3", q.Peek().OriginalRequest().ID(), "Rescore must re-establish the heap property")
+	assert.Equal(t, 3, q.Len(), "Rescore must not change membership")
+}
+
 // TestPriorityQueue_Concurrency drives a mix of concurrent operations and verifies that the
 // accounting stays consistent: items drained at the end must equal initial + adds - removes.
 func TestPriorityQueue_Concurrency(t *testing.T) {

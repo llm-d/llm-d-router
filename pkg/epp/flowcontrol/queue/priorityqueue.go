@@ -237,6 +237,18 @@ func (pq *priorityQueue) Cleanup(predicate contracts.PredicateFunc) []flowcontro
 	return removedItems
 }
 
+// Rescore re-establishes the heap property against the current OrderingPolicy, without changing
+// which items are queued. Add, Remove, and Cleanup only ever compare the items directly involved
+// in that call, so an item whose relative order changes purely because time passed (as with a
+// ScoringOrderingPolicy) would otherwise sit at a stale position until an unrelated Add or Remove
+// happened to touch it.
+func (pq *priorityQueue) Rescore() {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	heap.Init(pq.heap)
+}
+
 // Drain removes all items from the queue.
 func (pq *priorityQueue) Drain() []flowcontrol.QueueItemAccessor {
 	pq.mu.Lock()

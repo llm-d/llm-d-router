@@ -27,6 +27,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	programscore "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/program-score"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
 )
 
@@ -37,9 +38,10 @@ func TestOrderingPolicyConformance(t *testing.T) {
 	t.Parallel()
 
 	policies := map[string]plugin.FactoryFunc{
-		fcfs.FCFSOrderingPolicyType:               fcfs.FCFSOrderingPolicyFactory,
-		edf.EDFOrderingPolicyType:                 edf.EDFOrderingPolicyFactory,
-		slodeadline.SLODeadlineOrderingPolicyType: slodeadline.SLODeadlineOrderingPolicyFactory,
+		fcfs.FCFSOrderingPolicyType:                 fcfs.FCFSOrderingPolicyFactory,
+		edf.EDFOrderingPolicyType:                   edf.EDFOrderingPolicyFactory,
+		slodeadline.SLODeadlineOrderingPolicyType:   slodeadline.SLODeadlineOrderingPolicyFactory,
+		programscore.ProgramScoreOrderingPolicyType: programscore.ProgramScoreOrderingPolicyFactory,
 	}
 
 	for name, factory := range policies {

@@ -49,4 +49,10 @@ type SafeQueue interface {
 	// Drain atomically removes all items from the queue and returns them in a slice.
 	// The handle for all removed items MUST be invalidated. The queue MUST be empty after this operation.
 	Drain() (drainedItems []flowcontrol.QueueItemAccessor)
+
+	// Rescore re-establishes the queue's ordering invariant against its current OrderingPolicy,
+	// without adding, removing, or otherwise changing membership. Callers use this to surface a
+	// ScoringOrderingPolicy's time-decayed score changes, which Add/Remove/Cleanup would not
+	// otherwise trigger for an item that is neither added nor removed.
+	Rescore()
 }

@@ -216,6 +216,16 @@ func (m *MockOrderingPolicy) Less(a, b flowcontrol.QueueItemAccessor) bool {
 
 var _ flowcontrol.OrderingPolicy = &MockOrderingPolicy{}
 
+// MockScoringOrderingPolicy is a behavioral mock for the ScoringOrderingPolicy interface.
+type MockScoringOrderingPolicy struct {
+	MockOrderingPolicy
+	RescoreIntervalV time.Duration
+}
+
+func (m *MockScoringOrderingPolicy) RescoreInterval() time.Duration { return m.RescoreIntervalV }
+
+var _ flowcontrol.ScoringOrderingPolicy = &MockScoringOrderingPolicy{}
+
 // MockFairnessPolicy is a behavioral mock for the FairnessPolicy interface.
 // Simple accessors are configured with public value fields (e.g., NameV).
 // Complex methods with logic are configured with function fields (e.g., PickFunc).

@@ -19,6 +19,7 @@ package flowcontrol
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -105,6 +106,24 @@ type OrderingPolicy interface {
 	//
 	// Invariant: returning true means 'a' has higher priority than 'b'.
 	Less(a, b QueueItemAccessor) bool
+}
+
+// ScoringOrderingPolicy is an OrderingPolicy whose Less result can change purely with elapsed
+// time (not only in response to an Add or Remove on the queue) — for example, a policy scoring
+// items by a decaying measure of resource consumption. Queues are not re-sorted on a schedule by
+// default, so without periodic re-heapification a stale score would sit at the wrong position
+// until the next Add or Remove happens to touch it. The FlowController detects this interface via
+// type assertion and periodically re-heapifies queues using such a policy so time-decayed score
+// changes surface at dispatch time.
+//
+// Conformance: implementations MUST also satisfy every conformance requirement of OrderingPolicy.
+type ScoringOrderingPolicy interface {
+	OrderingPolicy
+
+	// RescoreInterval returns the minimum interval at which queues using this policy should be
+	// re-sorted. A value <= 0 disables periodic rescoring for this policy. An interval finer than
+	// the controller's own expiry-sweep cadence is clamped to it.
+	RescoreInterval() time.Duration
 }
 
 // SaturationDetector provides real-time load signals.
