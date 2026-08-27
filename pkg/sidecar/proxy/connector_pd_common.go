@@ -35,9 +35,14 @@ import (
 // prefill runs in a goroutine and its response is discarded (only status and
 // duration are recorded on its span), while decode runs on the calling
 // goroutine and streams its response to w. connector is recorded on both
-// spans to identify the protocol. prepareRequests, if non-nil, is called
-// after both requests are built so a caller can attach protocol-specific
-// headers (e.g. Mooncake's DP-rank header) before dispatch.
+// spans to identify the protocol. The per-request "prefill request
+// completed" log line is unified at DEBUG for all three connectors,
+// deliberately dropping the prior per-connector split (Mooncake/SGLang at
+// TRACE, P2P at DEBUG): three verbosity levels for structurally identical
+// code was the inconsistency worth fixing, not a behavior worth preserving.
+// prepareRequests, if non-nil, is called after both requests are built so a
+// caller can attach protocol-specific headers (e.g. Mooncake's DP-rank
+// header) before dispatch.
 func (s *Server) runConcurrentPD(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -57,7 +62,7 @@ func (s *Server) runConcurrentPD(
 
 	// Prefill runs in a goroutine: response is discarded (status/duration only).
 	// Decode runs on the calling goroutine: writes the actual response back via w.
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -98,7 +103,7 @@ func (s *Server) runConcurrentPD(
 	}()
 
 	// Decode Stage
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
