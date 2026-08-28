@@ -112,6 +112,59 @@ func TestIsPodReady(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "Pod with an unsatisfied readiness gate",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					ReadinessGates: []corev1.PodReadinessGate{
+						{ConditionType: "custom.orchestrator.io/serving"},
+					},
+				},
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.ContainersReady,
+							Status: corev1.ConditionTrue,
+						},
+						// The kubelet ANDs every readiness gate into PodReady, so an
+						// unsatisfied gate holds PodReady at False even though the
+						// containers themselves are ready.
+						{
+							Type:   corev1.PodReady,
+							Status: corev1.ConditionFalse,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Pod with a satisfied readiness gate",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					ReadinessGates: []corev1.PodReadinessGate{
+						{ConditionType: "custom.orchestrator.io/serving"},
+					},
+				},
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   "custom.orchestrator.io/serving",
+							Status: corev1.ConditionTrue,
+						},
+						{
+							Type:   corev1.ContainersReady,
+							Status: corev1.ConditionTrue,
+						},
+						{
+							Type:   corev1.PodReady,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
