@@ -336,13 +336,21 @@ metadata:
 spec:
   replicas: {{ .Values.router.epp.replicas | default 1 }}
   strategy:
+    {{- with .Values.router.epp.deploymentStrategy }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
     # The current recommended EPP deployment pattern is to have a single active replica. This ensures
     # optimal performance of the stateful operations such prefix cache aware scorer.
     # The Recreate strategy the old replica is killed immediately, and allow the new replica(s) to
     # quickly take over. This is particularly important in the high availability set up with leader
     # election, as the rolling update strategy would prevent the old leader being killed because
     # otherwise the maxUnavailable would be 100%.
+    #
+    # With replicas > 1 this also means the Deployment never reports Available=True,
+    # because standby replicas stay NotReady by design. Set router.epp.deploymentStrategy
+    # if that blocks your tooling; see "Multi-replica EPP and Helm --wait" in the chart README.
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.selectorLabels" . | nindent 6 }}

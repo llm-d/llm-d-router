@@ -112,12 +112,75 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 > *   **Active-Active Mode**: You can explicitly disable leader-election by passing `ha-enable-leader-election: false` under `router.epp.flags`. In this mode, all replicas process traffic concurrently.
 >     *   *Warning*: In active-active mode, you **must only use active-active compatible plugins**—specifically plugins that pull real-time metrics/state dynamically from the backend model servers (such as the precise prefix cache, queue, and KV-cache utilization scorers). Avoid plugins that rely on local in-memory routing state, as this state is not synchronized across replicas.
 
+##### Multi-replica EPP and Helm `--wait`
+
+In active-passive mode only the elected leader passes its readiness probe; standby
+replicas answer the `readiness` gRPC service with `NOT_SERVING` on purpose, so they
+never become Service endpoints. That is deliberate, but it means the EPP Deployment
+settles at `readyReplicas: 1` out of `replicas: N`.
+
+With the default `Recreate` strategy, Kubernetes forces `maxUnavailable` to `0`, so
+the Deployment reports `Available=False` / `MinimumReplicasUnavailable` and never
+becomes available. Anything that gates on Deployment availability blocks:
+
+```console
+$ helm install my-release . --set router.epp.replicas=2 --wait --timeout 4m
+Error: INSTALLATION FAILED: resource Deployment/.../my-release-epp not ready.
+status: InProgress, message: Available: 1/2
+```
+
+With Flux, the `HelmRelease` stays `pending-upgrade` until its timeout and then
+rolls back, and while it is pending no further EPP configuration change can start
+a new upgrade.
+
+Pick whichever of these fits your tooling:
+
+**1. Let Helm treat the standbys as expected-unavailable** (Helm 3 and Flux only)
+
+```yaml
+router:
+  epp:
+    replicas: 2
+    deploymentStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1   # must cover the standby replicas, i.e. >= replicas - 1
+        maxSurge: 0
+```
+
+Helm 3 computes readiness as `readyReplicas >= replicas - maxUnavailable`, so the
+release converges as soon as the leader is ready. Standbys remain `NotReady` and
+stay out of the Service, so no traffic reaches them before they are elected.
+
+> [!IMPORTANT]
+> This does **not** help Helm 4, which uses `kstatus`. `kstatus` compares
+> `availableReplicas` against `spec.replicas` directly and ignores `maxUnavailable`,
+> so a multi-replica EPP still reports `Available: 1/2` there. Use option 2 on Helm 4.
+>
+> Moving off `Recreate` also changes upgrade behaviour: during a rollout the old
+> leader holds the lease until it is terminated, so a new replica cannot become
+> ready until the lease expires. Keep `maxSurge: 0` so the rollout does not stall
+> waiting on a surge replica that can never be elected.
+
+**2. Do not gate on Deployment availability**
+
+Install without `--wait` (Flux: `spec.install.disableWait` and
+`spec.upgrade.disableWait`), then gate on what actually indicates a serving EPP --
+an elected leader and a Ready Service endpoint:
+
+```bash
+kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
+  endpoints/<release>-epp -n <namespace> --timeout=5m
+```
+
+
 #### EPP Core Configuration Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. | `1` |
+| `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | `{type: Recreate}` |
 | `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |
 | `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker` |
