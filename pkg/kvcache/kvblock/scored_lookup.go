@@ -119,16 +119,14 @@ type scoredSlotRef struct {
 	slotRef uint32 // request-local slot plus one; zero marks an empty bucket
 }
 
-// scoredScratch reuses candidate-slot and cached-prefix-batch storage.
-// Candidate state scales with the first key's live entries rather than the
-// append-only pod interner.
+// scoredScratch reuses candidate-slot storage. Candidate state scales with the
+// first key's live entries rather than the append-only pod interner.
 type scoredScratch struct {
-	slots     []scoredSlotRef
-	podCaches []*PodCache
+	slots []scoredSlotRef
 }
 
 func newScoredScratch() any {
-	return &scoredScratch{podCaches: make([]*PodCache, 0, requestKeyBatchSize)}
+	return &scoredScratch{}
 }
 
 var scoredScratchPool = sync.Pool{New: newScoredScratch}
@@ -219,11 +217,7 @@ func (m *InMemoryIndex) ScoredLookup(ctx context.Context, requestKeys []BlockHas
 	}
 
 	sc, _ := scoredScratchPool.Get().(*scoredScratch)
-	defer func() {
-		clear(sc.podCaches)
-		sc.podCaches = sc.podCaches[:0]
-		scoredScratchPool.Put(sc)
-	}()
+	defer scoredScratchPool.Put(sc)
 
 	// The tier view is snapshotted per attempt. A record referencing a tier
 	// interned after the snapshot would score with a default weight and drop
@@ -258,21 +252,14 @@ retry:
 		active     []int32      // slots still in the any-tier chain
 		keyStamp   uint32
 	)
-	for idx := range requestKeys {
+	for idx, key := range requestKeys {
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		batchOffset := idx % requestKeyBatchSize
-		if batchOffset == 0 {
-			end := min(idx+requestKeyBatchSize, len(requestKeys))
-			// Batch promotion amortizes the LRU lock handoff. A scoring break
-			// can refresh the rest of this batch, but no subsequent batch.
-			sc.podCaches = m.data.GetPrefixBatch(requestKeys[idx:end], sc.podCaches)
-		}
-		if batchOffset >= len(sc.podCaches) {
+		pc, found := m.data.Get(key)
+		if !found || pc == nil {
 			break
 		}
-		pc := sc.podCaches[batchOffset]
 		keyStamp++
 		firstKey := idx == 0
 		pc.mu.Lock()

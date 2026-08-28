@@ -327,25 +327,9 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	defer m.mu.Unlock()
 
 	for _, requestKey := range requestKeys {
-		podCache, found := m.data.Get(requestKey)
-		if !found {
-			newPodCache := &PodCache{capacity: m.podCacheSize}
-
-			// Try to add, but use existing if another thread added it first
-			// This is a bounded retry (1) - not perfectly safe but for practical use-cases and scenarios
-			// this should be sufficient
-			contains, _ := m.data.ContainsOrAdd(requestKey, newPodCache)
-			if contains {
-				podCache, found = m.data.Get(requestKey)
-				if !found { // Extremely irregular workload pattern - key evicted
-					m.data.Add(requestKey, newPodCache)
-					podCache = newPodCache
-				}
-			} else {
-				// We successfully added our cache
-				podCache = newPodCache
-			}
-		}
+		podCache, _, _ := m.data.GetOrAdd(requestKey, func() *PodCache {
+			return &PodCache{capacity: m.podCacheSize}
+		})
 
 		podCache.addAll(records)
 
@@ -444,14 +428,18 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Clear")
 
-	for idx, requestKey := range m.data.Keys() {
+	idx := 0
+	var walkErr error
+	m.data.RangeKeys(func(requestKey BlockHash) bool {
 		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
-			return ctx.Err()
+			walkErr = ctx.Err()
+			return false
 		}
+		idx++
 		// Peek so a clear does not promote LRU recency on keys it scans.
 		podCache, found := m.data.Peek(requestKey)
 		if !found || podCache == nil {
-			continue
+			return true
 		}
 
 		matched := podCache.matching(podIdentifier)
@@ -459,6 +447,10 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 		if len(matched) > 0 {
 			m.evictPodsFromRequestKey(requestKey, EmptyBlockHash, matched, traceLogger)
 		}
+		return true
+	})
+	if walkErr != nil {
+		return walkErr
 	}
 
 	traceLogger.Info("cleared pod from index", "pod", podIdentifier)

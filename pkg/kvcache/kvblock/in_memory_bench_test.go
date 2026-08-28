@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
@@ -107,6 +108,69 @@ func BenchmarkInMemoryIndexLookupParallel(b *testing.B) {
 					}
 					if len(res) != numKeys {
 						b.Errorf("unexpected result size %d", len(res))
+						return
+					}
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkLookupAndScore measures the materialized lookup followed by the
+// longest-prefix scorer over the same workload as BenchmarkScoredLookup.
+func BenchmarkLookupAndScore(b *testing.B) {
+	const numKeys = 3750
+	tierWeights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
+	for _, numPods := range []int{8, 96} {
+		b.Run(fmt.Sprintf("keys=3750/pods=%d", numPods), func(b *testing.B) {
+			idx, keys := populateIndex(b, numKeys, numPods)
+			scorer := &kvcache.LongestPrefixScorer{MediumWeights: tierWeights}
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				keyToPods, err := idx.Lookup(ctx, keys, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				scores, err := scorer.Score(ctx, keys, keyToPods)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(scores) != numPods || scores["10.0.0.0:8000"] != numKeys {
+					b.Fatalf("unexpected scores: pods=%d first=%v", len(scores), scores["10.0.0.0:8000"])
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkLookupAndScoreParallel measures the materialized lookup and
+// longest-prefix scorer under concurrent request traffic sharing one index.
+func BenchmarkLookupAndScoreParallel(b *testing.B) {
+	const numKeys = 3750
+	tierWeights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
+	for _, numPods := range []int{8, 96} {
+		b.Run(fmt.Sprintf("keys=3750/pods=%d", numPods), func(b *testing.B) {
+			idx, keys := populateIndex(b, numKeys, numPods)
+			scorer := &kvcache.LongestPrefixScorer{MediumWeights: tierWeights}
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					keyToPods, err := idx.Lookup(ctx, keys, nil)
+					if err != nil {
+						b.Error(err)
+						return
+					}
+					scores, err := scorer.Score(ctx, keys, keyToPods)
+					if err != nil {
+						b.Error(err)
+						return
+					}
+					if len(scores) != numPods || scores["10.0.0.0:8000"] != numKeys {
+						b.Errorf("unexpected scores: pods=%d first=%v", len(scores), scores["10.0.0.0:8000"])
 						return
 					}
 				}
@@ -236,7 +300,7 @@ func BenchmarkScoredLookupParallel(b *testing.B) {
 }
 
 // BenchmarkScoredLookupEarlyBreak measures a cached request whose candidate
-// chain ends at the second key, so later request-key batches are not fetched.
+// chain ends at the second key, so later request keys are not fetched.
 func BenchmarkScoredLookupEarlyBreak(b *testing.B) {
 	const numKeys = 3750
 	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{

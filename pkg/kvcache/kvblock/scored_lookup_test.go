@@ -197,7 +197,7 @@ func TestScoredLookupCanceledDoesNotRefreshIndexLRU(t *testing.T) {
 	assert.Contains(t, newestStats, "pod-a")
 }
 
-func TestScoredLookupRefreshesFetchedRequestBatch(t *testing.T) {
+func TestScoredLookupRefreshesOnlyVisitedKeys(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 4, PodCacheSize: 1})
 	require.NoError(t, err)
@@ -223,8 +223,8 @@ func TestScoredLookupRefreshesFetchedRequestBatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, firstStats, "pod-a")
 	assert.Contains(t, breakStats, "pod-b")
-	assert.Contains(t, tailStats, "pod-c")
-	assert.Empty(t, coldStats)
+	assert.Empty(t, tailStats)
+	assert.Contains(t, coldStats, "pod-cold")
 }
 
 func TestScoredLookupConcurrentReadersAgree(t *testing.T) {
