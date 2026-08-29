@@ -204,8 +204,9 @@ func benchmarkScoredLookupShards(b *testing.B, shardCount int, skewed bool) {
 				b.Error(lookupErr)
 				return
 			}
-			if len(stats) != numPods {
-				b.Errorf("unexpected stats size %d", len(stats))
+			first, found := stats["pod-0"]
+			if len(stats) != numPods || !found || first.MatchedBlocks != numKeys {
+				b.Errorf("unexpected stats: pods=%d first-found=%t first-matched=%d", len(stats), found, first.MatchedBlocks)
 				return
 			}
 		}
