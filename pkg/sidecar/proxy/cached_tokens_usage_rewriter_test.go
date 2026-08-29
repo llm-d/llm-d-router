@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -214,4 +215,37 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(finalize()).To(Succeed())
 		Expect(recorder.Body.String()).To(ContainSubstring(`"cached_tokens":7`))
 	})
+
+	It("should preserve streamed content chunks without usage", func() {
+		body := []byte(`data: {"choices":[{"delta":{"content":" the"}}]}` + "\n\ndata: [DONE]\n")
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
+
+	It("should preserve streamed content chunks that mention usage in the content", func() {
+		// The guard matches on the JSON key, but content is free text: a chunk that
+		// merely contains the word must still come out byte-for-byte unchanged.
+		body := []byte(`data: {"choices":[{"delta":{"content":" \"usage\" is a word"}}]}` + "\n")
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
 })
+
+// Streamed responses send one SSE frame per token and only the final frame carries
+// usage, so these two benchmarks bracket the per-frame cost of the rewrite.
+var (
+	benchContentFrame = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[{"index":0,"delta":{"content":" the"},"logprobs":null,"finish_reason":null}]}` + "\n")
+	benchUsageFrame   = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[],"usage":{"prompt_tokens":1024,"completion_tokens":256,"total_tokens":1280,"prompt_tokens_details":{"cached_tokens":1024}}}` + "\n")
+)
+
+func BenchmarkReplaceCachedTokensSSELineContentFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchContentFrame, 512)
+	}
+}
+
+func BenchmarkReplaceCachedTokensSSELineUsageFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchUsageFrame, 512)
+	}
+}

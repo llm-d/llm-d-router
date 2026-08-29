@@ -39,6 +39,11 @@ type cachedTokensUsageRewriter struct {
 // See: https://platform.openai.com/docs/guides/prompt-caching
 const promptTokensDetailsField = "prompt_tokens_details"
 
+// usageKey is the JSON key that must be present before a frame can carry usage.
+// Streamed responses send one frame per token and only the final frame has usage,
+// so scanning for this is much cheaper than unmarshalling every frame to find out.
+var usageKey = []byte(`"usage"`)
+
 func newCachedTokensResponseWriter(w http.ResponseWriter, cachedTokens int) http.ResponseWriter {
 	writer, _ := newCachedTokensResponseWriterWithFinalize(w, cachedTokens)
 	return writer
@@ -278,6 +283,10 @@ func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
 		return line, false
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		return line, true
+	}
+	if !bytes.Contains(data, usageKey) {
+		// No usage in this frame, so unmarshalling it could not change anything.
 		return line, true
 	}
 	// Only JSON data frames can carry usage; other SSE frames pass through.
