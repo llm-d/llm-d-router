@@ -742,3 +742,68 @@ func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
 		t.Fatalf("expected 405 for GET on POST-only %s, got %d", gateway.PathChatCompletions, rec.Code)
 	}
 }
+
+func TestHandleInference_RecordsOrchestrationOverheadAndResponseBytes(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	rec := postInference(t, newTestServer(nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_orchestration_overhead_seconds", map[string]string{"route": coordmetrics.RouteChatCompletions}); hc != 1 {
+		t.Fatalf("expected 1 orchestration_overhead_seconds observation, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
+		t.Fatalf("expected 1 response_bytes observation, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs != 0 {
+		t.Fatalf("expected 0 response bytes on a silent success path, got %v", hs)
+	}
+}
+
+func TestHandleInference_ResponseBytesCountsStreamedAndErrorBodies(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	const streamedBody = "partial streamed body"
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		_, _ = rc.ResponseWriter.Write([]byte(streamedBody))
+		return &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, gateway.PathChatCompletions, strings.NewReader(`{"model":"m","stream":true}`))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, streamedBody, rec.Body.String())
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hc != 1 {
+		t.Fatalf("expected 1 streaming response_bytes observation, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hs != float64(len(streamedBody)) {
+		t.Fatalf("expected streamed length %d, got %v", len(streamedBody), hs)
+	}
+}
+
+func TestHandleInference_ErrorPathRecordsResponseBytes(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	req := httptest.NewRequest(http.MethodPost, gateway.PathCompletions, strings.NewReader("not-json"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_orchestration_overhead_seconds", map[string]string{"route": coordmetrics.RouteCompletions}); hc != 1 {
+		t.Fatalf("expected 1 orchestration_overhead_seconds observation on completions, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
+		t.Fatalf("expected 1 response_bytes observation on parse error, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs <= 0 {
+		t.Fatalf("expected error body bytes > 0, got %v", hs)
+	}
+}
+
+func TestInferenceRoute(t *testing.T) {
+	require.Equal(t, coordmetrics.RouteChatCompletions, inferenceRoute(gateway.PathChatCompletions))
+	require.Equal(t, coordmetrics.RouteCompletions, inferenceRoute(gateway.PathCompletions))
+	require.Equal(t, coordmetrics.RouteGenerate, inferenceRoute(gateway.DefaultGeneratePath))
+	require.Equal(t, coordmetrics.RouteUnknown, inferenceRoute("/other"))
+}

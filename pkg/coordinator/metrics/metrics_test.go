@@ -23,6 +23,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,4 +182,58 @@ func TestExecutionPathAndProbes_Records(t *testing.T) {
 	require.InDelta(t, 1.0,
 		promtestutil.ToFloat64(conditionalDecodeProbesTotal.WithLabelValues(ProbeResultTransportError)), 1e-9,
 	)
+}
+
+func TestPipelineAmplificationFamily_Records(t *testing.T) {
+	Reset()
+	RecordEncodeFanoutSize(0)
+	RecordEncodeFanoutSize(3)
+	RecordOrchestrationOverhead(RouteChatCompletions, 40*time.Millisecond)
+	RecordOrchestrationOverhead("/raw/path", -time.Second)
+	RecordMediaItems(MediaTypeImage, 2)
+	RecordMediaItems("image/png", 1)
+	RecordMediaDownloadDuration(DownloadResultSuccess, 10*time.Millisecond)
+	RecordMediaDownloadDuration(DownloadResultError, 5*time.Millisecond)
+	RecordMediaDownloadDuration(DownloadResultCancelled, time.Millisecond)
+	RecordMediaDownloadDuration("timeout", time.Millisecond)
+	RecordResponseBytes(true, 512)
+	RecordResponseBytes(false, 64)
+
+	require.InDelta(t, 2.0, histogramSampleCount(t, encodeFanoutSize, nil), 1e-9)
+	require.InDelta(t, 3.0, histogramSampleSum(t, encodeFanoutSize, nil), 1e-9)
+
+	require.InDelta(t, 1.0, histogramSampleCount(t, orchestrationOverhead, []string{RouteChatCompletions}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, orchestrationOverhead, []string{RouteUnknown}), 1e-9)
+	require.InDelta(t, 0.0, histogramSampleSum(t, orchestrationOverhead, []string{RouteUnknown}), 1e-9)
+
+	require.InDelta(t, 1.0, histogramSampleCount(t, mediaItems, []string{MediaTypeImage}), 1e-9)
+	require.InDelta(t, 2.0, histogramSampleSum(t, mediaItems, []string{MediaTypeImage}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, mediaItems, []string{MediaTypeOther}), 1e-9)
+
+	require.InDelta(t, 1.0, histogramSampleCount(t, mediaDownloadDuration, []string{DownloadResultSuccess}), 1e-9)
+	require.InDelta(t, 2.0, histogramSampleCount(t, mediaDownloadDuration, []string{DownloadResultError}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, mediaDownloadDuration, []string{DownloadResultCancelled}), 1e-9)
+
+	require.InDelta(t, 1.0, histogramSampleCount(t, responseBytes, []string{StreamTrue}), 1e-9)
+	require.InDelta(t, 512.0, histogramSampleSum(t, responseBytes, []string{StreamTrue}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, responseBytes, []string{StreamFalse}), 1e-9)
+	require.InDelta(t, 64.0, histogramSampleSum(t, responseBytes, []string{StreamFalse}), 1e-9)
+}
+
+func histogramSampleCount(t *testing.T, hv *prometheus.HistogramVec, labels []string) float64 {
+	t.Helper()
+	m, err := hv.GetMetricWithLabelValues(labels...)
+	require.NoError(t, err)
+	pb := &dto.Metric{}
+	require.NoError(t, m.(prometheus.Metric).Write(pb))
+	return float64(pb.GetHistogram().GetSampleCount())
+}
+
+func histogramSampleSum(t *testing.T, hv *prometheus.HistogramVec, labels []string) float64 {
+	t.Helper()
+	m, err := hv.GetMetricWithLabelValues(labels...)
+	require.NoError(t, err)
+	pb := &dto.Metric{}
+	require.NoError(t, m.(prometheus.Metric).Write(pb))
+	return pb.GetHistogram().GetSampleSum()
 }

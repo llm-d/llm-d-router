@@ -73,6 +73,14 @@ type RequestContext struct {
 	// request body before the pipeline ran. Execute reports it as the first
 	// entry in the step-timing summary.
 	ParseDuration time.Duration
+	// StepDuration is the sum of per-step wall times recorded by Execute.
+	// The handler subtracts ParseDuration and StepDuration from end-to-end
+	// latency to observe orchestration_overhead_seconds.
+	StepDuration time.Duration
+	// EncodeFanout is the number of Encode subrequests this request produced.
+	// EncodeStep sets it once fan-out size is known; 0 means Encode did not
+	// run, was skipped, or found no multimodal entries.
+	EncodeFanout int
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry

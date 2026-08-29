@@ -465,3 +465,99 @@ func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[s
 	t.Fatalf("gauge %s%v not present", name, labels)
 	return 0
 }
+
+func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			got := map[string]string{}
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			match := true
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+func histogramSampleSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			got := map[string]string{}
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			match := true
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				return m.GetHistogram().GetSampleSum()
+			}
+		}
+	}
+	return 0
+}
+
+func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", nil))
+	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", nil), 1e-9)
+
+	reg = newMetricsRegistry(t)
+	steps = []Step{
+		&mockStep{name: "encode", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.EncodeFanout = 3
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", nil))
+	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", nil), 1e-9)
+}
+
+func TestExecute_AccumulatesStepDuration(t *testing.T) {
+	reqCtx := &RequestContext{}
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reqCtx.StepDuration <= 0 {
+		t.Fatalf("expected StepDuration > 0, got %s", reqCtx.StepDuration)
+	}
+}

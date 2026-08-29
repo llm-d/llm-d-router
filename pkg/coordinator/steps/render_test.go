@@ -678,3 +678,35 @@ func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 		t.Errorf("expected ErrBadRequest, got %v", err)
 	}
 }
+
+func TestRenderStep_GenerateFormat_RecordsMediaItems(t *testing.T) {
+	reg := newStepMetricsRegistry(t)
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.DefaultGeneratePath,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(3), float64(41000), float64(41000), float64(2)},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []any{"abc123", "def456"}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": float64(1), "length": float64(2)},
+					map[string]any{"offset": float64(4), "length": float64(2)},
+				}},
+				"kwargs_data": map[string]any{"image": []any{"dGVuc29yMA==", "dGVuc29yMQ=="}},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": "image"}) != 1 {
+		t.Fatal("expected 1 media_items observation")
+	}
+	if sum := stepHistogramSum(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": "image"}); sum != 2 {
+		t.Fatalf("expected media_items sum 2, got %v", sum)
+	}
+}

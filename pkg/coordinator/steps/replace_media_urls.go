@@ -175,6 +175,8 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		}
 	}
 
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(imageURLs))
+
 	if len(imageURLs) == 0 {
 		return nil
 	}
@@ -251,7 +253,12 @@ func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 str
 	})
 }
 
-func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]byte, string, error) {
+func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) (data []byte, contentType string, err error) {
+	start := time.Now()
+	defer func() {
+		coordmetrics.RecordMediaDownloadDuration(coordmetrics.ClassifyDownloadResult(ctx, err), time.Since(start))
+	}()
+
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid URL: %w: %w", err, pipeline.ErrBadRequest)
@@ -284,14 +291,14 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", fmt.Errorf("response too large: Content-Length %d exceeds max %d: %w", resp.ContentLength, s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
 	if err != nil {
 		return nil, "", err
 	}
 	if int64(len(data)) > s.maxDownloadSize {
 		return nil, "", fmt.Errorf("response too large: body exceeds max %d: %w", s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
-	contentType := resp.Header.Get("Content-Type")
+	contentType = resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = defaultContentType
 	}

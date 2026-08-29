@@ -100,6 +100,8 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
+	reqCtx.EncodeFanout = len(reqCtx.MultimodalEntries)
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
 

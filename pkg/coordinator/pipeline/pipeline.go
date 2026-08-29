@@ -122,6 +122,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		if executed["render"] {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
+		coordmetrics.RecordEncodeFanoutSize(reqCtx.EncodeFanout)
 	}()
 
 	for idx, step := range p.steps {
@@ -165,6 +166,7 @@ func (p *Pipeline) runStep(
 		d := time.Since(start)
 		coordmetrics.RecordStepDuration(name, d)
 		coordmetrics.DecStepRunning(name)
+		reqCtx.StepDuration += d
 		timings[idx] = stepTiming{name: name, duration: d}
 		if r := recover(); r != nil {
 			coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)

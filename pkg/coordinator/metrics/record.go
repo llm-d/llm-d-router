@@ -99,3 +99,44 @@ func IncExecutionPath(modelName, path string) {
 func IncConditionalDecodeProbes(result string) {
 	conditionalDecodeProbesTotal.WithLabelValues(result).Inc()
 }
+
+// RecordEncodeFanoutSize observes the number of Encode subrequests for one
+// client request, including zero when Encode does not run.
+func RecordEncodeFanoutSize(n int) {
+	encodeFanoutSize.WithLabelValues().Observe(float64(n))
+}
+
+// RecordOrchestrationOverhead observes coordinator wall time outside parse
+// and pipeline step execution for one client request. Negative values are
+// recorded as zero so clock-resolution jitter cannot emit a negative sample.
+func RecordOrchestrationOverhead(route string, d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	orchestrationOverhead.WithLabelValues(boundRoute(route)).Observe(d.Seconds())
+}
+
+// RecordMediaItems observes the number of media items of one type found in
+// one client request.
+func RecordMediaItems(mediaType string, n int) {
+	mediaItems.WithLabelValues(boundMediaType(mediaType)).Observe(float64(n))
+}
+
+// RecordMediaDownloadDuration observes the duration of one media download
+// attempt.
+func RecordMediaDownloadDuration(result string, d time.Duration) {
+	mediaDownloadDuration.WithLabelValues(boundDownloadResult(result)).Observe(d.Seconds())
+}
+
+// RecordResponseBytes observes the number of bytes written to the client for
+// one request. stream must be a bounded StreamTrue / StreamFalse value.
+func RecordResponseBytes(stream bool, bytes int) {
+	responseBytes.WithLabelValues(streamLabelValue(stream)).Observe(float64(bytes))
+}
+
+func streamLabelValue(stream bool) string {
+	if stream {
+		return StreamTrue
+	}
+	return StreamFalse
+}

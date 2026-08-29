@@ -33,6 +33,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
@@ -46,6 +47,8 @@ var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	receivedAt := time.Now()
+	cw := newCountingResponseWriter(w)
+	route := inferenceRoute(r.URL.Path)
 	// model is the raw name from the request body, or "" when the client
 	// omitted it. Metric emitters normalize "" to ModelUnknown via
 	// boundModel; the pipeline sees the raw value so upstream requests
@@ -64,6 +67,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// branches land here with the full length. Success lands here with the
 	// parsed model.
 	var body []byte
+	var parseDuration time.Duration
+	var stream bool
+	var reqCtx *pipeline.RequestContext
 	defer func() {
 		// A pipeline panic bypasses the err-branch call to IncRequestErrorTotal
 		// below; recovering here records the panic under error_code=internal
@@ -75,6 +81,12 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		coordmetrics.IncRequestTotal(model)
 		coordmetrics.RecordRequestDuration(model, time.Since(receivedAt))
 		coordmetrics.RecordRequestSize(model, len(body))
+		stepDuration := time.Duration(0)
+		if reqCtx != nil {
+			stepDuration = reqCtx.StepDuration
+		}
+		coordmetrics.RecordOrchestrationOverhead(route, time.Since(receivedAt)-parseDuration-stepDuration)
+		coordmetrics.RecordResponseBytes(stream, cw.BytesWritten())
 		coordmetrics.DecRequestRunning(inflightModel)
 		if r != nil {
 			panic(r)
@@ -84,31 +96,34 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	parseStart := time.Now()
 	var err error
 	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
+	parseDuration = time.Since(parseStart)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		http.Error(cw, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 	if int64(len(body)) > s.maxRequestBodySize*config.BytesPerMB {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		http.Error(cw, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		parseDuration = time.Since(parseStart)
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	if parsed == nil {
+		parseDuration = time.Since(parseStart)
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	parseDuration := time.Since(parseStart)
+	parseDuration = time.Since(parseStart)
 
-	stream, _ := parsed[reqcommon.FieldStream].(bool)
+	stream, _ = parsed[reqcommon.FieldStream].(bool)
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
 	}
@@ -125,7 +140,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 	}
 
-	reqCtx := &pipeline.RequestContext{
+	reqCtx = &pipeline.RequestContext{
 		RequestID:        requestID,
 		OriginalPath:     r.URL.Path,
 		OriginalHeaders:  r.Header.Clone(),
@@ -134,7 +149,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		Model:            model,
 		Stream:           stream,
 		KVTransferParams: make(map[string]any),
-		ResponseWriter:   w,
+		ResponseWriter:   cw,
 		ParseDuration:    parseDuration,
 	}
 
@@ -169,7 +184,22 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status, msg := classifyPipelineError(err, reqCtx.RequestID)
-		http.Error(w, msg, status)
+		http.Error(cw, msg, status)
+	}
+}
+
+// inferenceRoute maps an inbound path onto the bounded route label used by
+// orchestration_overhead_seconds.
+func inferenceRoute(path string) string {
+	switch path {
+	case gateway.PathChatCompletions:
+		return coordmetrics.RouteChatCompletions
+	case gateway.PathCompletions:
+		return coordmetrics.RouteCompletions
+	case gateway.DefaultGeneratePath:
+		return coordmetrics.RouteGenerate
+	default:
+		return coordmetrics.RouteUnknown
 	}
 }
 

@@ -169,3 +169,59 @@ var (
 		[]string{"result"},
 	)
 )
+
+// Per-request pipeline amplification, orchestration cost, media processing,
+// and outbound response size. Recorded once per client request except
+// media_download_duration_seconds, which is one observation per download
+// attempt.
+var (
+	encodeFanoutSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "encode_fanout_size",
+			Help:      metricsutil.HelpMsgWithStability("Number of Encode subrequests produced by one client request. Observed once per pipeline execution after fan-out size is known; 0 when Encode does not run or is skipped. Unit: subrequests.", compbasemetrics.ALPHA),
+			Buckets:   CountBuckets,
+		},
+		[]string{},
+	)
+
+	orchestrationOverhead = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "orchestration_overhead_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Coordinator wall time outside request parsing and pipeline step execution. Observed once per client request as max(0, total-parse-sum(steps)). Unit: seconds.", compbasemetrics.ALPHA),
+			Buckets:   metricsutil.GeneralLatencyBuckets,
+		},
+		routeLabel,
+	)
+
+	mediaItems = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "media_items",
+			Help:      metricsutil.HelpMsgWithStability("Number of media items of one type found in one client request. Observed once per type after the request's media inventory is known. Unit: items.", compbasemetrics.ALPHA),
+			Buckets:   CountBuckets,
+		},
+		mediaTypeLabel,
+	)
+
+	mediaDownloadDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "media_download_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Duration of one outbound media download attempt. Observed at the end of each HTTP fetch, including failed and cancelled attempts; data URIs are not downloads. Unit: seconds.", compbasemetrics.ALPHA),
+			Buckets:   metricsutil.GeneralLatencyBuckets,
+		},
+		resultLabel,
+	)
+
+	responseBytes = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "response_bytes",
+			Help:      metricsutil.HelpMsgWithStability("Total bytes written to the client for one request, including partial writes on cancellation or disconnect. Observed once per client request. Unit: bytes.", compbasemetrics.ALPHA),
+			Buckets:   metricsutil.RequestSizeBuckets,
+		},
+		streamLabel,
+	)
+)
