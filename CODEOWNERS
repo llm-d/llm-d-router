@@ -28,6 +28,10 @@
 # Proxy sidecar
 /cmd/pd-sidecar/                                                          @roytman @llm-d/router-maintainers
 /pkg/sidecar/                                                             @roytman @llm-d/router-maintainers
+/pkg/sidecar/proxy/*p2p*                                                  @nilig @roytman @llm-d/router-maintainers
+
+# P2P request routing
+/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/          @nilig @llm-d/router-maintainers
 
 # SLO + latency-prediction subsystem
 /pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier/             @kaushikmitr @llm-d/router-maintainers
