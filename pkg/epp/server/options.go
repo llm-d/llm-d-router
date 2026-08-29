@@ -69,7 +69,7 @@ type Options struct {
 	//
 	// ext_proc configuration.
 	//
-	GRPCPort              int           // gRPC port used for communicating with Envoy proxy. (TODO: uint16?)
+	GRPCPort              uint16        // gRPC port used for communicating with Envoy proxy.
 	EnableLeaderElection  bool          // Enables leader election for high availability
 	DrainTimeout          time.Duration // Graceful shutdown drain window; ext_proc keeps serving this long after SIGTERM.
 	GRPCMaxRecvMsgSize    int           // Maximum size of a gRPC message to receive (parsed bytes).
@@ -110,8 +110,8 @@ type Options struct {
 	logging.LoggingOptions           // Logging configuration.
 	Tracing                 bool     // Enables emitting traces.
 	HealthChecking          bool     // Enables health checking.
-	MetricsPort             int      // The metrics port exposed by EPP. (TODO: uint16)
-	GRPCHealthPort          int      // The port used for gRPC liveness and readiness probes. (TODO: uint16)
+	MetricsPort             uint16   // The metrics port exposed by EPP.
+	GRPCHealthPort          uint16   // The port used for gRPC liveness and readiness probes.
 	EnablePprof             bool     // Enables pprof handlers.
 	CertPath                string   // The path to the certificate for secure serving.
 	EnableCertReload        bool     // Enables certificate reloading of the certificates specified in --cert-path.
@@ -177,7 +177,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	}
 	opts.fs = fs
 
-	fs.IntVar(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
+	fs.Uint16Var(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
 	fs.DurationVar(&opts.DrainTimeout, "drain-timeout", opts.DrainTimeout,
@@ -230,8 +230,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 
 	fs.BoolVar(&opts.Tracing, "tracing", opts.Tracing, "Enables emitting traces.")
 	fs.BoolVar(&opts.HealthChecking, "health-checking", opts.HealthChecking, "Enables health checking.")
-	fs.IntVar(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")
-	fs.IntVar(&opts.GRPCHealthPort, "grpc-health-port", opts.GRPCHealthPort,
+	fs.Uint16Var(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")
+	fs.Uint16Var(&opts.GRPCHealthPort, "grpc-health-port", opts.GRPCHealthPort,
 		"The port used for gRPC liveness and readiness probes.")
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")

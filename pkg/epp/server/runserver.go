@@ -100,7 +100,7 @@ func NewExtProcServerRunner(
 	priorityBandControlPlane contracts.PriorityBandControlPlane,
 ) *ExtProcServerRunner {
 	return &ExtProcServerRunner{
-		GrpcPort:                         opts.GRPCPort,
+		GrpcPort:                         int(opts.GRPCPort),
 		GKNN:                             gknn,
 		ControllerCfg:                    controllerCfg,
 		Datastore:                        ds,
