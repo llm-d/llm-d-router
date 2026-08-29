@@ -97,6 +97,14 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
+<<<<<<< HEAD
+=======
+	reqCtx.EncodeFanout = len(reqCtx.MultimodalEntries)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(s.maxParallel)
+
+>>>>>>> bc235004 (feat(coordinator): add pipeline amplification and media metrics)
 	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
 	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
 

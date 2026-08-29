@@ -122,6 +122,9 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	if int(requestCount.Load()) != 3 {
 		t.Fatalf("expected 3 gateway requests, got %d", requestCount.Load())
 	}
+	if reqCtx.EncodeFanout != 3 {
+		t.Fatalf("expected EncodeFanout=3, got %d", reqCtx.EncodeFanout)
+	}
 	if len(reqCtx.ECTransferParams) != 3 {
 		t.Fatalf("expected 3 ec_transfer_params entries, got %d", len(reqCtx.ECTransferParams))
 	}
@@ -350,6 +353,9 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	err := step.Execute(context.Background(), reqCtx)
 	if err == nil {
 		t.Fatal("expected error when one encode fails")
+	}
+	if reqCtx.EncodeFanout != 3 {
+		t.Fatalf("expected EncodeFanout=3 on partial failure, got %d", reqCtx.EncodeFanout)
 	}
 }
 
@@ -732,6 +738,9 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	if gatewayCallCount != 0 {
 		t.Fatalf("expected no gateway calls for text-only request, got %d", gatewayCallCount)
 	}
+	if reqCtx.EncodeFanout != 0 {
+		t.Fatalf("expected EncodeFanout=0 for text-only request, got %d", reqCtx.EncodeFanout)
+	}
 	if reqCtx.ECTransferParams != nil {
 		t.Fatalf("expected nil ECTransferParams for text-only request, got %v", reqCtx.ECTransferParams)
 	}
@@ -770,6 +779,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 				},
 			}
 
+<<<<<<< HEAD
 			if err := step.Execute(context.Background(), reqCtx); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -780,6 +790,19 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 				t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
 			}
 		})
+=======
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gatewayCallCount != 0 {
+		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
+	}
+	if reqCtx.EncodeFanout != 0 {
+		t.Fatalf("expected EncodeFanout=0 for generate skip, got %d", reqCtx.EncodeFanout)
+	}
+	if reqCtx.ECTransferParams != nil {
+		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+>>>>>>> bc235004 (feat(coordinator): add pipeline amplification and media metrics)
 	}
 }
 

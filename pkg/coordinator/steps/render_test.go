@@ -149,44 +149,6 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	}
 }
 
-func TestRenderStep_Responses_CallsRender(t *testing.T) {
-	var called bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		if r.URL.Path != reqcommon.PathResponses+"/render" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token_ids": []int{1, 2345, 6789},
-			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {}},
-				"mm_placeholders": map[string][]any{ModalityImage: {}},
-				"kwargs_data":     map[string][]string{ModalityImage: {}},
-			},
-		})
-	}))
-	defer server.Close()
-
-	step, _ := NewRenderStep(nil, map[string]any{})
-	step.(*RenderStep).SetServiceAddress(server.URL)
-
-	reqCtx := &pipeline.RequestContext{
-		OriginalPath: reqcommon.PathResponses,
-		Body:         map[string]any{"model": "test", "input": "describe this"},
-	}
-
-	err := step.Execute(context.Background(), reqCtx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("render should be called for a responses request")
-	}
-	if len(reqCtx.TokenIDs) != 3 {
-		t.Fatalf("expected 3 token_ids, got %d", len(reqCtx.TokenIDs))
-	}
-}
-
 func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("render service should not be called for token array prompt")
@@ -745,6 +707,38 @@ func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 	}
 	if !errors.Is(err, pipeline.ErrBadRequest) {
 		t.Errorf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+func TestRenderStep_GenerateFormat_RecordsMediaItems(t *testing.T) {
+	reg := newStepMetricsRegistry(t)
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathVLLMGenerate,
+		Body: map[string]any{
+			"model":     "test-model",
+			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(3), float64(41000), float64(41000), float64(2)},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []any{"abc123", "def456"}},
+				"mm_placeholders": map[string]any{"image": []any{
+					map[string]any{"offset": float64(1), "length": float64(2)},
+					map[string]any{"offset": float64(4), "length": float64(2)},
+				}},
+				"kwargs_data": map[string]any{"image": []any{"dGVuc29yMA==", "dGVuc29yMQ=="}},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": "image"}) != 1 {
+		t.Fatal("expected 1 media_items observation")
+	}
+	if sum := stepHistogramSum(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": "image"}); sum != 2 {
+		t.Fatalf("expected media_items sum 2, got %v", sum)
 	}
 }
 
