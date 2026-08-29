@@ -128,6 +128,19 @@ func TestKeysWithDifferentProducersAreDistinct(t *testing.T) {
 	assert.Equal(t, "foo", got.(*dummy).Text, "expected the original entry to be untouched")
 }
 
+func TestPutIsolatesFromCallerMutation(t *testing.T) {
+	attrs := NewAttributes()
+	original := &dummy{"before"}
+	attrs.Put(keyA, original)
+
+	// Mutate the value the caller passed to Put after the call returns.
+	original.Text = "after"
+
+	got, ok := attrs.Get(keyA)
+	assert.True(t, ok, "expected key to exist")
+	assert.Equal(t, "before", got.(*dummy).Text, "expected stored value to be unaffected by caller mutation")
+}
+
 func TestDynamicAttribute(t *testing.T) {
 	attrs := NewAttributes()
 
