@@ -54,8 +54,8 @@ func parseTopic(topic string) (string, string) {
 // getHashAsUint64 converts engine hash formats (any Go integer type or []byte)
 // to uint64. MessagePack may decode small Python int values into narrow Go
 // integer types (int8, uint8, etc.), so all integer widths are accepted.
-// Signed integer hashes must be non-negative. Byte hashes use the last 8
-// bytes, interpreted as a big-endian integer.
+// Signed integer hashes preserve their two's-complement bit pattern. Byte
+// hashes use the last 8 bytes, interpreted as a big-endian integer.
 func getHashAsUint64(raw any) (uint64, error) {
 	switch val := raw.(type) {
 	case uint64:
@@ -69,29 +69,19 @@ func getHashAsUint64(raw any) (uint64, error) {
 	case uint8:
 		return uint64(val), nil
 	case int:
-		if val < 0 {
-			return 0, fmt.Errorf("hash value is negative: %d", val)
-		}
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
 		return uint64(val), nil
 	case int32:
-		if val < 0 {
-			return 0, fmt.Errorf("hash value is negative: %d", val)
-		}
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
 		return uint64(val), nil
 	case int16:
-		if val < 0 {
-			return 0, fmt.Errorf("hash value is negative: %d", val)
-		}
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
 		return uint64(val), nil
 	case int8:
-		if val < 0 {
-			return 0, fmt.Errorf("hash value is negative: %d", val)
-		}
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
 		return uint64(val), nil
 	case int64:
-		if val < 0 {
-			return 0, fmt.Errorf("hash value is negative: %d", val)
-		}
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
 		return uint64(val), nil
 	case []byte:
 		if len(val) == 0 {

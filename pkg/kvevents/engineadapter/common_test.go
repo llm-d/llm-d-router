@@ -71,21 +71,22 @@ func TestGetHashAsUint64(t *testing.T) {
 		})
 	}
 
-	negativeIntegers := []struct {
+	signedIntegers := []struct {
 		name string
 		raw  any
+		want uint64
 	}{
-		{name: "int64", raw: int64(-1)},
-		{name: "int", raw: int(-1)},
-		{name: "int32", raw: int32(-1)},
-		{name: "int16", raw: int16(-1)},
-		{name: "int8", raw: int8(-1)},
+		{name: "int64_negative", raw: int64(-1), want: ^uint64(0)},
+		{name: "int_negative", raw: int(-1), want: ^uint64(0)},
+		{name: "int32_negative", raw: int32(-1), want: ^uint64(0)},
+		{name: "int16_negative", raw: int16(-1), want: ^uint64(0)},
+		{name: "int8_negative", raw: int8(-1), want: ^uint64(0)},
 	}
-	for _, tt := range negativeIntegers {
-		t.Run("negative_"+tt.name, func(t *testing.T) {
+	for _, tt := range signedIntegers {
+		t.Run(tt.name, func(t *testing.T) {
 			result, err := getHashAsUint64(tt.raw)
-			require.ErrorContains(t, err, "hash value is negative")
-			assert.Zero(t, result)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, result)
 		})
 	}
 
