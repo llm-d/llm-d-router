@@ -42,4 +42,32 @@ var _ = Describe("decodeRequestBody", func() {
 		_, err := decodeRequestBody([]byte(`[1,2]`))
 		Expect(err).To(HaveOccurred())
 	})
+
+	It("keeps messages raw and decodes them on use", func() {
+		messages := `[{"role":"user","content":"Hi"}]`
+		parsed, err := decodeRequestBody([]byte(`{"messages":` + messages + `}`))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(parsed[requestFieldMessages]).To(Equal(json.RawMessage(messages)))
+
+		decoded, err := requestMessages(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(decoded).To(HaveLen(1))
+	})
+
+	It("treats a null messages field as absent", func() {
+		parsed, err := decodeRequestBody([]byte(`{"messages":null}`))
+		Expect(err).ToNot(HaveOccurred())
+
+		decoded, err := requestMessages(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(decoded).To(BeNil())
+	})
+
+	It("reports a messages field that is not an array", func() {
+		_, err := requestMessages(map[string]any{requestFieldMessages: json.RawMessage(`{}`)})
+		Expect(err).To(HaveOccurred())
+
+		_, err = requestMessages(map[string]any{requestFieldMessages: 5})
+		Expect(err).To(HaveOccurred())
+	})
 })

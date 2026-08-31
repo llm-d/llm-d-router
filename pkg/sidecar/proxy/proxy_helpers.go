@@ -197,21 +197,24 @@ var inspectedRequestFields = map[string]struct{}{
 	requestFieldAddGenerationPrompt:  {},
 }
 
-// requestMessages returns the request's messages array, decoding it from raw
-// bytes on first use. The second return value is false when the field is
-// absent or not an array.
-func requestMessages(req map[string]any) ([]any, bool) {
+// requestMessages returns the request's messages, decoding the array on first
+// use and keeping each element as raw bytes so that re-marshaling the request
+// preserves the key order inside every message. An absent field yields a nil
+// slice and no error.
+func requestMessages(req map[string]any) ([]json.RawMessage, error) {
 	switch v := req[requestFieldMessages].(type) {
-	case []any:
-		return v, true
+	case nil:
+		return nil, nil
+	case []json.RawMessage:
+		return v, nil
 	case json.RawMessage:
-		var messages []any
+		var messages []json.RawMessage
 		if err := json.Unmarshal(v, &messages); err != nil {
-			return nil, false
+			return nil, err
 		}
-		return messages, true
+		return messages, nil
 	default:
-		return nil, false
+		return nil, fmt.Errorf("messages is %T, want a JSON array", v)
 	}
 }
 

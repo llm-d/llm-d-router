@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -234,7 +235,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Append the generated text to the request so the next chunk continues
 		// from where this one left off.
 		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
-		appendChunkToRequest(completionRequest, chunkText)
+		appendChunkToRequest(s.logger, completionRequest, chunkText)
 	}
 
 	span.SetAttributes(
@@ -418,16 +419,26 @@ func extractChoiceText(choice map[string]any) string {
 }
 
 // appendChunkToRequest appends the generated text from a chunk to the request
-// so the next chunk continues from where this one left off.
-func appendChunkToRequest(req map[string]any, text string) {
+// so the next chunk continues from where this one left off. The messages the
+// client sent are appended to as raw bytes, keeping their key order intact
+// across chunks.
+func appendChunkToRequest(logger logr.Logger, req map[string]any, text string) {
 	if text == "" {
 		return
 	}
-	messages, _ := requestMessages(req)
-	req[requestFieldMessages] = append(messages, map[string]any{
+	messages, err := requestMessages(req)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("chunked decode: cannot read request messages", "error", err)
+	}
+	chunk, err := json.Marshal(map[string]any{
 		requestFieldRole:    roleAssistant,
 		requestFieldContent: text,
 	})
+	if err != nil {
+		logger.V(logging.DEBUG).Info("chunked decode: cannot encode chunk text", "error", err)
+		return
+	}
+	req[requestFieldMessages] = append(messages, chunk)
 }
 
 // toInt converts a JSON number value (float64, int, or json.Number) to int.
