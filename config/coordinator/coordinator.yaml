@@ -138,9 +138,10 @@ pipeline:
     #     # fetch_grace_seconds: 60
 
     # -------------------------------------------------------------------
-    # replace-media-urls: first step. Downloads any http(s) image_url
-    # references, base64-inlines them as data: URIs, and seeds
-    # MultimodalEntries on the request context.
+    # replace-media-urls: an optional step executed prior to request
+    # content processing. Downloads any http(s) image_url references,
+    # base64-inlines them as data: URIs, and seeds MultimodalEntries on
+    # the request context.
     # -------------------------------------------------------------------
     - type: replace-media-urls
       params:

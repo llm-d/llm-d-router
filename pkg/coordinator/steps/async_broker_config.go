@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // asyncMode selects how an opted-in request is served.
@@ -41,6 +43,10 @@ const (
 )
 
 const (
+	// defaultModeHeader selects the serving mode when mode_header is not
+	// configured.
+	defaultModeHeader = "X-AP-Mode"
+
 	defaultAsyncTenant = "default"
 	// resultKeyPrefix scopes the per-request result keys the async processor
 	// delivers to; see resultKey.
@@ -158,7 +164,7 @@ type asyncBrokerConfig struct {
 
 func (c *asyncBrokerConfig) applyDefaults() {
 	if c.ModeHeader == "" {
-		c.ModeHeader = "X-AP-Mode"
+		c.ModeHeader = defaultModeHeader
 	}
 	if c.TenantHeader == "" {
 		c.TenantHeader = "X-Team"
@@ -185,15 +191,13 @@ func (c *asyncBrokerConfig) applyDefaults() {
 		c.WakeupMode = "auto"
 	}
 	if c.ForwardHeaders == nil {
-		c.ForwardHeaders = []string{"x-llm-d-slo-ttft-ms", "x-llm-d-slo-tpot-ms"}
+		c.ForwardHeaders = []string{metadata.TTFTSLOHeaderKey, metadata.TPOTSLOHeaderKey}
 	}
 	if c.ObjectiveHeader == "" {
-		c.ObjectiveHeader = "x-llm-d-inference-objective"
+		c.ObjectiveHeader = metadata.ObjectiveKey
 	}
 	if c.FairnessHeader == "" {
-		// Matches api.FairnessIDHeader in llm-d-async; the constant is not in
-		// the tagged api module yet.
-		c.FairnessHeader = "x-llm-d-inference-fairness-id"
+		c.FairnessHeader = metadata.FlowFairnessIDKey
 	}
 }
 

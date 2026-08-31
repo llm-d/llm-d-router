@@ -206,25 +206,25 @@ func TestAsyncBrokerRejections(t *testing.T) {
 		{
 			name:    "unknown mode",
 			body:    `{"model":"test-model"}`,
-			headers: map[string]string{"X-AP-Mode": "sideways"},
-			wantMsg: "unknown X-AP-Mode value",
+			headers: map[string]string{defaultModeHeader: "sideways"},
+			wantMsg: "unknown " + defaultModeHeader + " value",
 		},
 		{
 			name:    "stream in queued mode",
 			body:    `{"model":"test-model","stream":true}`,
-			headers: map[string]string{"X-AP-Mode": "enqueue"},
+			headers: map[string]string{defaultModeHeader: "enqueue"},
 			wantMsg: "stream is only supported in passthrough mode",
 		},
 		{
 			name:    "missing model",
 			body:    `{"messages":[]}`,
-			headers: map[string]string{"X-AP-Mode": "enqueue"},
+			headers: map[string]string{defaultModeHeader: "enqueue"},
 			wantMsg: "model is required",
 		},
 		{
 			name:    "tenant with colon",
 			body:    `{"model":"test-model"}`,
-			headers: map[string]string{"X-AP-Mode": "enqueue", "X-Team": "a:b"},
+			headers: map[string]string{defaultModeHeader: "enqueue", "X-Team": "a:b"},
 			wantMsg: "must not contain",
 		},
 	}
@@ -244,7 +244,7 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, nil)
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{
-			"X-AP-Mode":                 "enqueue",
+			defaultModeHeader:           "enqueue",
 			"X-Team":                    "team-a",
 			"X-Request-Timeout-Seconds": "120",
 			"x-llm-d-slo-ttft-ms":       "800",
@@ -295,7 +295,7 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, nil)
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{"X-AP-Mode": "wait", "X-Team": "team-a"})
+		map[string]string{defaultModeHeader: "wait", "X-Team": "team-a"})
 
 	// Pre-load the result so the wait loop's first check finds it.
 	res, err := json.Marshal(api.ResultMessage{StatusCode: 200, Payload: `{"object":"chat.completion"}`})
@@ -317,7 +317,7 @@ func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 func TestAsyncBrokerWaitCapFallsBackToPending(t *testing.T) {
 	step, _ := newAsyncTestStep(t, map[string]any{"wait_cap_seconds": 1})
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{"X-AP-Mode": "wait", "X-Team": "team-a"})
+		map[string]string{defaultModeHeader: "wait", "X-Team": "team-a"})
 
 	start := time.Now()
 	err := step.Execute(t.Context(), reqCtx)
@@ -332,7 +332,7 @@ func TestAsyncBrokerWaitDeadlineAnswersTimeout(t *testing.T) {
 		"timeouts": map[string]any{"wait": map[string]any{"default_seconds": 1}},
 	})
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{"X-AP-Mode": "wait", "X-Team": "team-a"})
+		map[string]string{defaultModeHeader: "wait", "X-Team": "team-a"})
 
 	start := time.Now()
 	err := step.Execute(t.Context(), reqCtx)
@@ -355,7 +355,7 @@ func TestAsyncBrokerDeadlineClamping(t *testing.T) {
 		return envelope.Data.Deadline
 	}
 	headers := map[string]string{
-		"X-AP-Mode":                 "enqueue",
+		defaultModeHeader:           "enqueue",
 		"X-Team":                    "team-a",
 		"X-Request-Timeout-Seconds": "1000000",
 	}
@@ -385,8 +385,8 @@ func TestAsyncBrokerDeadlineClamping(t *testing.T) {
 			"timeouts": map[string]any{"enqueue": map[string]any{"max_seconds": 7200}},
 		})
 		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-			"X-AP-Mode": "enqueue",
-			"X-Team":    "team-a",
+			defaultModeHeader: "enqueue",
+			"X-Team":          "team-a",
 		})
 		require.True(t, errors.Is(step.Execute(t.Context(), reqCtx), pipeline.ErrPipelineDone))
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -412,7 +412,7 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 	// context stays open so the quota slot is held.
 	ctx1, cancel1 := context.WithCancel(t.Context())
 	reqCtx1, rec1 := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		"X-AP-Mode":                     "passthrough",
+		defaultModeHeader:               "passthrough",
 		"X-Team":                        "limited-team",
 		"x-llm-d-inference-objective":   "self-assigned",
 		"x-llm-d-inference-fairness-id": "spoofed",
@@ -424,8 +424,8 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 
 	// Second concurrent request exceeds the reserved limit of 1: overflow.
 	reqCtx2, _ := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		"X-AP-Mode": "passthrough",
-		"X-Team":    "limited-team",
+		defaultModeHeader: "passthrough",
+		"X-Team":          "limited-team",
 	})
 	require.NoError(t, step.Execute(t.Context(), reqCtx2))
 	assert.Equal(t, "interactive-overflow", reqCtx2.OriginalHeaders.Get("x-llm-d-inference-objective"))
@@ -434,8 +434,8 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 	cancel1()
 	require.Eventually(t, func() bool {
 		reqCtx3, _ := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-			"X-AP-Mode": "passthrough",
-			"X-Team":    "limited-team",
+			defaultModeHeader: "passthrough",
+			"X-Team":          "limited-team",
 		})
 		ctx3, cancel3 := context.WithCancel(t.Context())
 		defer cancel3()
@@ -447,8 +447,8 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 
 	// An unlimited tenant is always reserved and never touches counters.
 	reqCtx4, _ := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		"X-AP-Mode": "passthrough",
-		"X-Team":    "team-free",
+		defaultModeHeader: "passthrough",
+		"X-Team":          "team-free",
 	})
 	require.NoError(t, step.Execute(t.Context(), reqCtx4))
 	assert.Equal(t, "interactive-reserved", reqCtx4.OriginalHeaders.Get("x-llm-d-inference-objective"))
@@ -628,7 +628,7 @@ func TestAsyncBrokerRetryReattaches(t *testing.T) {
 	post := func(t *testing.T, step *AsyncBrokerStep, mode, id string) *httptest.ResponseRecorder {
 		t.Helper()
 		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-			"X-AP-Mode": mode, "X-Team": "team-a", "X-Request-Id": id,
+			defaultModeHeader: mode, "X-Team": "team-a", "X-Request-Id": id,
 		})
 		reqCtx.RequestID = id
 		err := step.Execute(t.Context(), reqCtx)
