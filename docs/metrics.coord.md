@@ -173,12 +173,13 @@ This is reachable by any client, and it is a mitigation the implementation has t
 
 Capping the distinct values is the approach that fits: `model_name` is capped at 1000 over the
 process lifetime and further values are reported as `other`. The bounded-label helper lives in
-`pkg/common/observability/metrics/cardinality.go` (`BoundedLabel`, `OverflowValue = "other"`) and is
-instantiated with the same cap by both `pkg/coordinator/metrics/cardinality.go` and
-`pkg/epp/metrics/cardinality.go`, so the two components share one guard. An allowlist has no source
-of truth here, since the coordinator's config carries no model list and the coordinator is otherwise
-model-agnostic. The overflow value must not be `unknown`, which already means the request carried no
-model at all.
+[`pkg/common/observability/metrics/cardinality.go`](../pkg/common/observability/metrics/cardinality.go)
+(`BoundedLabel`, `OverflowValue = "other"`) and is instantiated with the same cap by both
+[`pkg/coordinator/metrics/cardinality.go`](../pkg/coordinator/metrics/cardinality.go) and
+[`pkg/epp/metrics/cardinality.go`](../pkg/epp/metrics/cardinality.go), so the two components share
+one guard. An allowlist has no source of truth here, since the coordinator's config carries no model
+list and the coordinator is otherwise model-agnostic. The overflow value must not be `unknown`,
+which already means the request carried no model at all.
 
 ## Related documentation
 
