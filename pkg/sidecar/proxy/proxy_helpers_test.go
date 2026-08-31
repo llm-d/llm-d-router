@@ -41,6 +41,9 @@ var _ = Describe("decodeRequestBody", func() {
 	It("rejects non-object bodies", func() {
 		_, err := decodeRequestBody([]byte(`[1,2]`))
 		Expect(err).To(HaveOccurred())
+
+		_, err = decodeRequestBody([]byte(`null`))
+		Expect(err).To(HaveOccurred())
 	})
 
 	It("keeps messages raw and decodes them on use", func() {

@@ -218,12 +218,14 @@ func requestMessages(req map[string]any) ([]json.RawMessage, error) {
 	}
 }
 
-// decodeRequestBody parses a JSON object body. Fields in inspectedRequestFields
-// are decoded to Go values; all others are kept as json.RawMessage.
+// decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("request body is not a JSON object")
 	}
 	parsed := make(map[string]any, len(fields))
 	for k, v := range fields {
