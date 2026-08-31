@@ -343,6 +343,12 @@ decode serve this directly" question. The step sends the decode request with the
 The 412 response may carry scheduling or cache-locality hints in headers or body; these
 are not yet consumed by the coordinator.
 
+The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode
+gate when configured. When no gate plugin is configured, the router still returns 412 by
+default for any `Prefer: if-available` request so a missing gate surfaces as the coordinator's
+cache-miss fallback rather than a silent forward. See
+[disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must

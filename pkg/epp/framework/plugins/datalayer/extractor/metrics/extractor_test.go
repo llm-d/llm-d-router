@@ -307,13 +307,15 @@ func TestBackwardCompatibility(t *testing.T) {
 func TestCacheInfoLabelAliasing(t *testing.T) {
 	ctx := context.Background()
 
-	// SGLang uses "page_size" and "num_pages" instead of "block_size" and "num_gpu_blocks"
+	// An engine config aliases the cache-info label names when the engine
+	// carries block size and block count under something other than
+	// "block_size" and "num_gpu_blocks".
 	registry := NewMappingRegistry()
 	mapping, err := NewMappingFromConfig(MappingConfig{
-		Queue:               "sglang:num_queue_reqs",
-		Running:             "sglang:num_running_reqs",
-		KVUsage:             "sglang:token_usage",
-		CacheInfo:           "sglang:cache_config_info",
+		Queue:               "myengine:num_queue_reqs",
+		Running:             "myengine:num_running_reqs",
+		KVUsage:             "myengine:token_usage",
+		CacheInfo:           "myengine:cache_config_info",
 		CacheBlockSizeLabel: "page_size",
 		CacheNumBlocksLabel: "num_pages",
 	})
@@ -327,7 +329,7 @@ func TestCacheInfoLabelAliasing(t *testing.T) {
 	extractor, _ := NewCoreMetricsExtractor(registry, "")
 
 	data := sourcemetrics.PrometheusMetricMap{
-		"sglang:cache_config_info": &dto.MetricFamily{
+		"myengine:cache_config_info": &dto.MetricFamily{
 			Type: dto.MetricType_GAUGE.Enum(),
 			Metric: []*dto.Metric{
 				{

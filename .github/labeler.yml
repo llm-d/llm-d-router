@@ -1,0 +1,86 @@
+# Path based area/* labels. .github/labeler.yml is the canonical source for
+# the path globs. docs/area_taxonomy.md covers what this file can't express
+# which is the /area directive and the additive overlap rule.
+
+# Endpoint Picker core
+area/epp:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/epp/**
+          - cmd/epp/**
+          - test/integration/epp/**
+
+# Dev tooling, CI/CD and shared test harness
+area/dev:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - hack/**
+          - scripts/**
+          - Makefile
+          - test/e2e/**
+          - test/framework/**
+          - test/utils/**
+          - test/scripts/**
+          - test/perf/**
+          - test/profiling/**
+
+# Scheduling and request routing decisions
+area/scheduling:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/epp/scheduling/**
+          - pkg/epp/framework/plugins/scheduling/**
+          - pkg/epp/requestcontrol/**
+          - pkg/epp/framework/plugins/requestcontrol/**
+
+# Admission, queuing and flow control
+area/flowcontrol:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/epp/flowcontrol/**
+          - pkg/epp/framework/plugins/flowcontrol/**
+
+# KV cache indexing and events
+area/kvcache:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/kvcache/**
+          - pkg/kvevents/**
+
+# Disaggregated inference coordinator
+area/coordinator:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/coordinator/**
+          - cmd/coordinator/**
+          - test/coordinator/**
+
+# PD sidecar proxy
+area/sidecar:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/sidecar/**
+          - cmd/pd-sidecar/**
+          - test/sidecar/**
+
+# EPP data layer and datastore
+area/datalayer:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/epp/datalayer/**
+          - pkg/epp/framework/plugins/datalayer/**
+          - pkg/epp/datastore/**
+
+# Telemetry and observability
+area/telemetry:
+  - changed-files:
+      - any-glob-to-any-file:
+          - pkg/common/observability/**
+
+# Documentation
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+          - "*.md"

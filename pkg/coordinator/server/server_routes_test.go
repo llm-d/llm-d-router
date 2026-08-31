@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -45,7 +46,7 @@ func (s *auxRouteStep) RegisterRoutes(r chi.Router) {
 func TestServerRegistersStepRoutes(t *testing.T) {
 	step := &auxRouteStep{stubStep: stubStep{name: "aux"}}
 	p := pipeline.New([]pipeline.Step{stubStep{name: "plain"}, step})
-	srv, err := New(config.ServerConfig{}, p)
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
