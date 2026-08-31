@@ -17,10 +17,14 @@ limitations under the License.
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"strconv"
 	"strings"
 
@@ -29,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
 const (
@@ -41,6 +46,9 @@ const (
 	embeddingsAPI      = "embeddings"
 	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
 	imagesGenerationsAPI = "images/generations"
+	// imagesEditsAPI is the OpenAI-compatible image edit (image-to-image) endpoint.
+	// Requests are multipart/form-data.
+	imagesEditsAPI = "images/edits"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -98,6 +106,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			chatCompletionsAPI + "/render",
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
+			imagesEditsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -114,16 +123,30 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	bodyMap := make(map[string]any)
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
-		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
-	}
 	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	if apiType == imagesEditsAPI {
+		return parseImagesEditsRequest(body, headers)
+	}
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error extracting request body: %w", err)
 	}
-	extractedBody.Payload = fwkrh.PayloadMap(bodyMap)
+
+	rawField := tokenInputField(extractedBody)
+	var bodyMap fwkrh.PayloadMap
+	if rawField == "" {
+		bodyMap = make(fwkrh.PayloadMap)
+		err = parserutil.Unmarshal(body, &bodyMap)
+	} else {
+		var payload map[string]any
+		payload, err = parserutil.UnmarshalMapWithRawField(body, rawField)
+		bodyMap = fwkrh.PayloadMap(payload)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
+	}
+
+	extractedBody.Payload = bodyMap
 	if model, ok := bodyMap["model"].(string); ok {
 		extractedBody.Model = model
 	}
@@ -132,6 +155,17 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		extractedBody.Stream = true
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+func tokenInputField(body *fwkrh.InferenceRequestBody) string {
+	switch {
+	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
+		return "prompt"
+	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
+		return "input"
+	default:
+		return ""
+	}
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
@@ -188,10 +222,31 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(string(chunk))
+	usage := extractUsageStreaming(chunk)
 	return &fwkrh.ParsedResponse{
-		Usage: usage,
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(chunk),
 	}, nil
+}
+
+// countStreamEvents counts the SSE data events in a chunk, excluding the terminator. An event
+// split across two chunks is counted with the half that carries the prefix; a split inside the
+// prefix drops the event and a split inside the terminator counts it, both a one-event error.
+func countStreamEvents(chunk []byte) int {
+	count := 0
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		if ok && !isStreamTerminator(content) {
+			count++
+		}
+	}
+	return count
+}
+
+// isStreamTerminator reports whether an SSE data payload is the [DONE] terminator, tolerating a
+// trailing \r left by CRLF line splitting.
+func isStreamTerminator(content []byte) bool {
+	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte("[DONE]"))
 }
 
 // determineAPITypeFromPath determines the API type based on the request path.
@@ -219,6 +274,9 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/images/generations") {
 		return imagesGenerationsAPI
 	}
+	if request.MatchPathSuffix(path, "/images/edits") {
+		return imagesEditsAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -229,51 +287,156 @@ func determineAPITypeFromPath(path string) string {
 func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequestBody, error) {
 	switch apiType {
 	case conversationsAPI:
+		validationErr := errors.New("invalid conversations request: must have items field")
 		var conversations fwkrh.ConversationsRequest
-		if err := json.Unmarshal(rawBody, &conversations); err == nil && len(conversations.Items) > 0 {
-			return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
+		if err := json.Unmarshal(rawBody, &conversations); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid conversations request: must have items field")
+		if len(conversations.Items) == 0 {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
 
 	case responsesAPI:
+		validationErr := errors.New("invalid responses request: must have input field")
 		var responses fwkrh.ResponsesRequest
-		if err := json.Unmarshal(rawBody, &responses); err == nil && responses.Input != nil {
-			return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
+		if err := json.Unmarshal(rawBody, &responses); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid responses request: must have input field")
+		if responses.Input == nil {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
 
 	case chatCompletionsAPI:
+		validationErr := errors.New("invalid chat completions request: must have valid messages field")
 		var chatCompletions fwkrh.ChatCompletionsRequest
-		if err := json.Unmarshal(rawBody, &chatCompletions); err == nil {
-			if err = validateChatCompletionsMessages(chatCompletions.Messages); err == nil {
-				return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
-			}
+		if err := json.Unmarshal(rawBody, &chatCompletions); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid chat completions request: must have valid messages field")
+		if err := validateChatCompletionsMessages(chatCompletions.Messages); err != nil {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
 
 	case completionsAPI:
+		validationErr := errors.New("invalid completions request: must have prompt field")
 		var completions fwkrh.CompletionsRequest
-		if err := json.Unmarshal(rawBody, &completions); err == nil && !completions.Prompt.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
+		if err := json.Unmarshal(rawBody, &completions); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid completions request: must have prompt field")
+		if completions.Prompt.IsEmpty() {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
 
 	case embeddingsAPI:
+		validationErr := errors.New("invalid embeddings request: must have input field")
 		var embeddings fwkrh.EmbeddingsRequest
-		if err := json.Unmarshal(rawBody, &embeddings); err == nil && !embeddings.Input.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
+		if err := json.Unmarshal(rawBody, &embeddings); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid embeddings request: must have input field")
+		if embeddings.Input.IsEmpty() {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
 
 	case imagesGenerationsAPI:
+		validationErr := errors.New("invalid images generations request: must have prompt field")
 		var images fwkrh.ImagesGenerationsRequest
-		if err := json.Unmarshal(rawBody, &images); err == nil && images.Prompt != "" {
-			return &fwkrh.InferenceRequestBody{Images: &images}, nil
+		if err := json.Unmarshal(rawBody, &images); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
 		}
-		return nil, errors.New("invalid images generations request: must have prompt field")
+		if images.Prompt == "" {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{Images: &images}, nil
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}
+}
+
+// parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
+func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	mediaType, params, err := mime.ParseMediaType(headerValue(headers, contentType))
+	if err != nil || mediaType != "multipart/form-data" {
+		return nil, errors.New("images edits request must have a multipart/form-data content-type")
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, errors.New("images edits request: content-type is missing the multipart boundary")
+	}
+
+	images := &fwkrh.ImagesGenerationsRequest{}
+	extractedBody := &fwkrh.InferenceRequestBody{
+		Images:  images,
+		Payload: fwkrh.RawPayload(body),
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading images edits multipart body: %w", err)
+		}
+		if part.FileName() != "" {
+			continue
+		}
+		value, err := io.ReadAll(part)
+		if err != nil {
+			return nil, fmt.Errorf("error reading images edits form field %q: %w", part.FormName(), err)
+		}
+		switch part.FormName() {
+		case "model":
+			extractedBody.Model = string(value)
+		case "prompt":
+			images.Prompt = string(value)
+		case "size":
+			images.Size = string(value)
+		case "n":
+			n, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid images edits n field: %w", err)
+			}
+			images.N = &n
+		case "num_inference_steps":
+			steps, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid images edits num_inference_steps field: %w", err)
+			}
+			images.NumInferenceSteps = &steps
+		case "stream":
+			stream, err := strconv.ParseBool(string(value))
+			if err != nil {
+				return nil, fmt.Errorf("invalid images edits stream field: %w", err)
+			}
+			extractedBody.Stream = stream
+		}
+	}
+	if images.Prompt == "" {
+		return nil, errors.New("invalid images edits request: must have prompt field")
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// headerValue returns the value of the named header, matching case-insensitively.
+func headerValue(headers map[string]string, name string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
+}
+
+func requestBodyDecodeError(err, validationErr error) error {
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return err
+	}
+	return validationErr
 }
 
 func validateChatCompletionsMessages(messages []fwkrh.Message) error {
@@ -369,8 +532,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	data: {"response":{"usage":{"input_tokens":31,..},...},"type":"response.completed"}
 //
 // It extracts usage from events with type="response.completed".
-func extractUsageStreaming(responseText string) *fwkrh.Usage {
-
+func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 	var streamResponse struct {
 		Usage    *fwkrh.Usage `json:"usage"`
 		Response struct {
@@ -379,18 +541,17 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 		Type string `json:"type"`
 	}
 
-	lines := strings.SplitSeq(responseText, "\n")
+	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := strings.CutPrefix(line, streamingRespPrefix)
+		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
 		if !ok {
 			continue
 		}
 		// When the stream is terminated with [DONE] or there's not any usage data, skip the line
-		if content == "[DONE]" || !strings.Contains(content, "usage") {
+		if isStreamTerminator(content) || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
-		byteSlice := []byte(content)
-		if err := json.Unmarshal(byteSlice, &streamResponse); err != nil {
+		if err := json.Unmarshal(content, &streamResponse); err != nil {
 			continue
 		}
 		// Standard ChatCompletion / vLLM usage format

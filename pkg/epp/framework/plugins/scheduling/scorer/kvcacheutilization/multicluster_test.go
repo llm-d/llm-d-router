@@ -40,15 +40,15 @@ func TestMultiClusterScorerFactory(t *testing.T) {
 	require.Equal(t, MultiClusterScorerType, p.TypedName().Type)
 	require.Equal(t, "mc", p.TypedName().Name)
 
-	_, ok := p.(*MultiClusterScorer).Consumes()[attrmetrics.MultiClusterKVCacheUtilizationKey]
-	require.True(t, ok, "Consumes must advertise the pool KV-cache utilization key")
+	_, ok := p.(*MultiClusterScorer).Consumes().Required[attrmetrics.MultiClusterKVCacheUtilizationDataKey]
+	require.True(t, ok, "Consumes must require the pool KV-cache utilization key")
 }
 
 func TestMultiClusterScorer_Score(t *testing.T) {
 	newEP := func(util float64, set bool) fwksched.Endpoint {
 		attr := fwkdl.NewAttributes()
 		if set {
-			attr.Put(attrmetrics.MultiClusterKVCacheUtilizationKey, attrmetrics.ScalarMetricValue(util))
+			attr.Put(attrmetrics.MultiClusterKVCacheUtilizationDataKey, attrmetrics.ScalarMetricValue(util))
 		}
 		return fwksched.NewEndpoint(nil, nil, attr)
 	}
@@ -65,7 +65,7 @@ func TestMultiClusterScorer_Score(t *testing.T) {
 		{name: "missing attribute is unscored", set: false, wantAbsent: true},
 	}
 
-	s := &MultiClusterScorer{name: "mc"}
+	s := &MultiClusterScorer{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ep := newEP(tt.util, tt.set)

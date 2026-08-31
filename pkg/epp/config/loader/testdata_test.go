@@ -262,6 +262,25 @@ featureGates:
 flowControl:
   maxBytes: "1024"
   defaultRequestTTL: 1m
+  noEndpointRequestTTL: 5m
+`
+
+// successFlowControlInheritedTTLText covers a config that names only defaultRequestTTL: the no-endpoint budget follows
+// it, so disabling the TTL is not silently narrowed to the regime where the pool has endpoints.
+const successFlowControlInheritedTTLText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+featureGates:
+- flowControl
+flowControl:
+  defaultRequestTTL: 0s
 `
 
 const successflowControlConfigDisabledText = `
@@ -417,6 +436,27 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
   - pluginRef: secondParser
+`
+
+// successExplicitPassthroughConfigText configures a fallback explicitly under a
+// custom name, alongside a claimed-path parser.
+const successExplicitPassthroughConfigText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+- name: myFallback
+  type: passthrough-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: myFallback
 `
 
 // successDataLayerAutoDefaultText has the datalayer enabled without data config.
@@ -891,6 +931,25 @@ schedulingProfiles:
   - pluginRef: scorer-Y
     weight: 20
   - pluginRef: maxScorePicker
+`
+
+// successDeprecatedDiscoveryPluginRefText tests that the deprecated bare
+// discovery.pluginRef is migrated to discovery.endpoints.pluginRef.
+const successDeprecatedDiscoveryPluginRefText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- name: my-disc
+  type: file-discovery
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+dataLayer:
+  discovery:
+    pluginRef: my-disc
 `
 
 // successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,

@@ -36,24 +36,30 @@ func MultiClusterScorerFactory(name string, params *json.Decoder, handle fwkplug
 	if err != nil {
 		return nil, err
 	}
-	return &MultiClusterScorer{KVCacheUtilizationScorer: inner.(*KVCacheUtilizationScorer), name: name}, nil
+	return &MultiClusterScorer{KVCacheUtilizationScorer: inner.(*KVCacheUtilizationScorer)}, nil
 }
 
 // MultiClusterScorer scores cluster endpoints from a pool-level KV-cache
 // utilization summary, read by name, instead of a single pod's scrape.
 type MultiClusterScorer struct {
 	*KVCacheUtilizationScorer
-	name string
 }
 
 // TypedName reports the multi-cluster type with this instance's name.
 func (s *MultiClusterScorer) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: MultiClusterScorerType, Name: s.name}
+	return fwkplugin.TypedName{Type: MultiClusterScorerType, Name: s.KVCacheUtilizationScorer.TypedName().Name}
 }
 
-// Consumes declares the pool KV-cache utilization attribute this scorer reads.
-func (s *MultiClusterScorer) Consumes() map[string]any {
-	return map[string]any{attrmetrics.MultiClusterKVCacheUtilizationKey: attrmetrics.ScalarMetricValue(0)}
+var _ fwkplugin.ConsumerPlugin = &MultiClusterScorer{}
+
+// Consumes marks the pool KV-cache utilization attribute Required, so a config missing
+// the multicluster metrics extractor fails at load rather than silently no-scoring.
+func (s *MultiClusterScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			attrmetrics.MultiClusterKVCacheUtilizationDataKey: attrmetrics.ScalarMetricValue(0),
+		},
+	}
 }
 
 // Score scores each cluster endpoint as 1 - its pool KV-cache utilization.
@@ -61,7 +67,7 @@ func (s *MultiClusterScorer) Consumes() map[string]any {
 func (s *MultiClusterScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, ep := range endpoints {
-		util, ok := attrmetrics.ReadScalarMetricValue(ep, attrmetrics.MultiClusterKVCacheUtilizationKey)
+		util, ok := attrmetrics.ReadScalarMetricValue(ep, attrmetrics.MultiClusterKVCacheUtilizationDataKey)
 		if !ok {
 			continue
 		}

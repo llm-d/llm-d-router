@@ -53,15 +53,6 @@ var (
 	modelWithPriorityLabels = []string{"model_name", "target_model_name", "priority"}
 	poolLabels              = []string{"name"}
 	endpointLabels          = []string{"pod_name", "namespace", "port"}
-
-	// --- Common Buckets ---
-
-	// generalLatencyBuckets for long running inference from 5ms to 1 hour
-	generalLatencyBuckets = []float64{
-		0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
-		8, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 360, 480, 600, 900, 1200,
-		1800, 2700, 3600,
-	}
 )
 
 // --- Inference Objective Metrics ---
@@ -95,7 +86,7 @@ var (
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_duration_seconds] Inference objective response latency distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		modelLabels,
 	)
@@ -107,12 +98,7 @@ var (
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_sizes",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_size_bytes] Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
-			// Use buckets ranging from 1000 bytes (1KB) to 10^9 bytes (1GB).
-			Buckets: []float64{
-				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, // More fine-grained up to 64KB
-				131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, // Exponential up to 8MB
-				16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, // Exponential up to 1GB
-			},
+			Buckets:   metricsutil.RequestSizeBuckets,
 		},
 		modelLabels,
 	)
@@ -126,7 +112,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_response_size_bytes] Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			// Most models have a response token < 8192 tokens. Each token, in average, has 4 characters.
 			// 8192 * 4 = 32768.
-			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
+			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
 		modelLabels,
 	)
@@ -139,7 +125,7 @@ var (
 			Name:      "input_tokens",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models have a input context window less than 1 million tokens.
-			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
+			Buckets: metricsutil.TokenCountBuckets,
 		},
 		modelLabels,
 	)
@@ -165,7 +151,7 @@ var (
 			Name:      "prompt_cached_tokens",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_cached_tokens] Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models have a input context window less than 1 million tokens.
-			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
+			Buckets: metricsutil.TokenCountBuckets,
 		},
 		modelLabels,
 	)
@@ -370,13 +356,15 @@ var (
 			Name:      "flow_control_pool_saturation",
 			Help: metricsutil.HelpMsgWithStability(
 				"[Deprecated: Use llm_d_epp_flow_control_pool_saturation] Pool saturation signal gating Flow Control "+
-					"dispatch. 1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
+					"dispatch. The stage label partitions by pipeline role: 'prefill' and 'decode' are per-stage "+
+					"signals, 'effective' is max(prefill, decode) and is the value used for gating. "+
+					"1.0 is the gating set point; values above 1.0 indicate the magnitude of oversubscription "+
 					"past it. An empty pool reads as 1.0. With the default utilization detector, endpoints with missing "+
 					"or stale metrics score as fully saturated (fail-closed; see "+
 					"llm_d_epp_flow_control_stale_endpoints).",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"inference_pool"},
+		[]string{"inference_pool", "stage"},
 	)
 )
 
@@ -464,6 +452,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
 		metrics.Registry.MustRegister(pluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
+		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
 		metrics.Registry.MustRegister(llmdResponseProcessingLatency)
 		metrics.Registry.MustRegister(inferenceExtensionInfo)
@@ -481,9 +470,18 @@ func Register(customCollectors ...prometheus.Collector) {
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
+		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
+		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(flowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestEnqueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlRequestsTotal)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationsIssuedTotal)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationsTotal)
+		metrics.Registry.MustRegister(llmdFlowControlReclaimTarget)
+		metrics.Registry.MustRegister(llmdFlowControlPendingReclaim)
+		metrics.Registry.MustRegister(llmdFlowControlRevocationConfirmationDuration)
 		metrics.Registry.MustRegister(inferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(DataLayerPollErrorsTotal)
@@ -539,6 +537,7 @@ func Reset() {
 	llmdSchedulerAttemptsTotal.Reset()
 	pluginProcessingLatencies.Reset()
 	llmdPluginProcessingLatencies.Reset()
+	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
 	llmdResponseProcessingLatency.Reset()
 	inferenceExtensionInfo.Reset()
@@ -552,11 +551,20 @@ func Reset() {
 	flowControlPoolSaturation.Reset()
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
+	llmdFlowControlCapacityUtilizationRequests.Reset()
+	llmdFlowControlCapacityUtilizationBytes.Reset()
+	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
+	llmdFlowControlGlobalCapacityUtilizationBytes.Reset()
 	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	flowControlDispatchCycleDuration.Reset()
 	llmdFlowControlDispatchCycleDuration.Reset()
 	llmdFlowControlRequestsTotal.Reset()
+	llmdFlowControlRevocationsIssuedTotal.Reset()
+	llmdFlowControlRevocationsTotal.Reset()
+	llmdFlowControlReclaimTarget.Reset()
+	llmdFlowControlPendingReclaim.Reset()
+	llmdFlowControlRevocationConfirmationDuration.Reset()
 	inferenceModelRewriteDecisionsTotal.Reset()
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	DataLayerPollErrorsTotal.Reset()
@@ -838,6 +846,18 @@ func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string
 	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
 }
 
+// Access kinds for RecordPluginDataScopeViolation.
+const (
+	DataScopeAccessRead  = "read"
+	DataScopeAccessWrite = "write"
+)
+
+// RecordPluginDataScopeViolation records an endpoint attribute access rejected
+// because the plugin did not declare the DataKey.
+func RecordPluginDataScopeViolation(extensionPoint, pluginType, pluginName, access string) {
+	llmdPluginDataScopeViolations.WithLabelValues(extensionPoint, pluginType, pluginName, access).Inc()
+}
+
 func RecordInferenceExtensionInfo(commitSha, buildRef string) {
 	inferenceExtensionInfo.WithLabelValues(commitSha, buildRef).Set(1)
 	llmdInferenceExtensionInfo.WithLabelValues(commitSha, buildRef).Set(1)
@@ -918,10 +938,17 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 	llmdFlowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Sub(float64(bytes))
 }
 
-// RecordFlowControlPoolSaturation records the current saturation level for an inference pool.
-func RecordFlowControlPoolSaturation(inferencePool string, saturation float64) {
-	flowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
-	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool).Set(saturation)
+// RecordFlowControlPoolSaturation records the current saturation level for an inference pool
+// partitioned by pipeline stage ("prefill", "decode", or "effective").
+func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation float64) {
+	flowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+}
+
+// DeleteFlowControlPoolSaturation removes the saturation gauge series for a pool/stage pair.
+func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
+	flowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
+	llmdFlowControlPoolSaturation.DeleteLabelValues(inferencePool, stage)
 }
 
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
@@ -930,9 +957,70 @@ func RecordFlowControlStaleEndpoints(detector string, count int) {
 	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
 }
 
+// RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
+// (occupancy/effective capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default
+// when unconfigured, so every configured band reports a series.
+func RecordFlowControlCapacityUtilizationRequests(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationRequests.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlCapacityUtilizationBytes sets the byte-size capacity utilization ratio (occupancy/effective
+// capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default when unconfigured, so
+// every configured band reports a series.
+func RecordFlowControlCapacityUtilizationBytes(priority, inferencePool string, ratio float64) {
+	llmdFlowControlCapacityUtilizationBytes.WithLabelValues(priority, inferencePool).Set(ratio)
+}
+
+// RecordFlowControlGlobalCapacityUtilizationRequests sets the all-bands request-count capacity utilization ratio
+// (occupancy/global capacity, 0.0-1.0). Global capacity is optional, so callers only invoke this when one is
+// configured; otherwise no series is emitted rather than a misleading 0.
+func RecordFlowControlGlobalCapacityUtilizationRequests(inferencePool string, ratio float64) {
+	llmdFlowControlGlobalCapacityUtilizationRequests.WithLabelValues(inferencePool).Set(ratio)
+}
+
+// RecordFlowControlGlobalCapacityUtilizationBytes sets the all-bands byte-size capacity utilization ratio
+// (occupancy/global capacity, 0.0-1.0). Global capacity is optional, so callers only invoke this when one is
+// configured; otherwise no series is emitted rather than a misleading 0.
+func RecordFlowControlGlobalCapacityUtilizationBytes(inferencePool string, ratio float64) {
+	llmdFlowControlGlobalCapacityUtilizationBytes.WithLabelValues(inferencePool).Set(ratio)
+}
+
 // IncFlowControlRequestsTotal increments the total request counter for a given outcome.
 func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
 	llmdFlowControlRequestsTotal.WithLabelValues(outcome, priority, inferencePool).Inc()
+}
+
+// Terminal revocation outcomes for the flow control revocations counter. Every issued revocation
+// eventually increments exactly one outcome.
+const (
+	RevocationOutcomeConfirmed = "confirmed"
+	RevocationOutcomeTimedOut  = "timed_out"
+)
+
+// RecordFlowControlRevocationsIssued counts revocations at issue time, labeled by the demand
+// band's priority.
+func RecordFlowControlRevocationsIssued(inferencePool, priority string, n int) {
+	llmdFlowControlRevocationsIssuedTotal.WithLabelValues(priority, inferencePool).Add(float64(n))
+}
+
+// RecordFlowControlRevocations increments the revocation counter for a terminal outcome.
+func RecordFlowControlRevocations(inferencePool, outcome string, n int) {
+	llmdFlowControlRevocationsTotal.WithLabelValues(outcome, inferencePool).Add(float64(n))
+}
+
+// RecordFlowControlReclaimTarget records the last computed reclamation deficit.
+func RecordFlowControlReclaimTarget(inferencePool string, target float64) {
+	llmdFlowControlReclaimTarget.WithLabelValues(inferencePool).Set(target)
+}
+
+// RecordFlowControlPendingReclaim records the capacity debited for unconfirmed revocations.
+func RecordFlowControlPendingReclaim(inferencePool string, pending float64) {
+	llmdFlowControlPendingReclaim.WithLabelValues(inferencePool).Set(pending)
+}
+
+// RecordFlowControlRevocationConfirmationDuration records issue-to-confirmation latency.
+func RecordFlowControlRevocationConfirmationDuration(inferencePool string, duration time.Duration) {
+	llmdFlowControlRevocationConfirmationDuration.WithLabelValues(inferencePool).Observe(duration.Seconds())
 }
 
 // DeleteFlowControlFlowSeries removes every flow-control series labeled with the given fairness ID
@@ -947,7 +1035,7 @@ func IncFlowControlRequestsTotal(outcome, priority, inferencePool string) {
 func DeleteFlowControlFlowSeries(fairnessID, priority string) {
 	// The overflow value aggregates every capped-out fairness ID, so a flow whose client-chosen ID
 	// equals it must not delete the shared series.
-	if fairnessID == overflowValue {
+	if fairnessID == metricsutil.OverflowValue {
 		return
 	}
 	labels := prometheus.Labels{"fairness_id": fairnessID, "priority": priority}

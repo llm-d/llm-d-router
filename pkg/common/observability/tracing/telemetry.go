@@ -49,51 +49,40 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	logger = logger.WithName("trace")
 	loggerWrap := &errorHandler{logger: logger}
 
-	_, ok := os.LookupEnv("OTEL_SERVICE_NAME")
-	if !ok {
-		os.Setenv("OTEL_SERVICE_NAME", defaultServiceName)
-	}
-
-	_, ok = os.LookupEnv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	if !ok {
-		os.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
-	}
-
-	traceExporter, err := initTraceExporter(ctx, logger)
+	// resource.New reports malformed OTEL_RESOURCE_ATTRIBUTES entries alongside a
+	// resource holding everything it could parse. Tracing degrades to that resource
+	// rather than stopping process startup.
+	res, err := newResource(ctx, defaultServiceName)
 	if err != nil {
-		loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
-		return nil, err
+		loggerWrap.Handle(fmt.Errorf("%s: %v", "build trace resource degraded", err))
 	}
 
-	// Go SDK doesn't have an automatic sampler, handle manually
-	samplerType, ok := os.LookupEnv("OTEL_TRACES_SAMPLER")
-	if !ok {
-		samplerType = "parentbased_traceidratio"
-	}
-	samplerARG, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG")
-	if !ok {
-		samplerARG = "0.1"
+	exporterType, err := traceExporterType()
+	if err != nil {
+		loggerWrap.Handle(fmt.Errorf("trace exporter configuration degraded: %w", err))
 	}
 
-	sampler := sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))
-	if samplerType == "parentbased_traceidratio" {
-		fraction, err := strconv.ParseFloat(samplerARG, 64)
-		if err != nil {
-			fraction = 0.1
-		}
+	logger.Info("init OTel trace exporter", "type", exporterType)
 
-		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(fraction))
-	} else {
-		loggerWrap.Handle(fmt.Errorf("unsupported sampler type: %s, fallback to parentbased_traceidratio with 0.1 Ratio", samplerType))
+	sampler, err := newSampler()
+	if err != nil {
+		loggerWrap.Handle(fmt.Errorf("trace sampler configuration degraded: %w", err))
 	}
 
 	opt := []sdktrace.TracerProviderOption{
-		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithSampler(sampler),
-		sdktrace.WithResource(resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceVersionKey.String(version.BuildRef),
-		)),
+		sdktrace.WithResource(res),
+	}
+
+	// "none" registers no span processor at all. Spans are still created and
+	// propagated, so instrumented code and context propagation are unaffected.
+	if exporterType != exporterTypeNone {
+		traceExporter, err := newTraceExporter(ctx, exporterType)
+		if err != nil {
+			loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
+			return nil, err
+		}
+		opt = append(opt, sdktrace.WithBatcher(traceExporter))
 	}
 
 	tracerProvider := sdktrace.NewTracerProvider(opt...)
@@ -104,31 +93,185 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	return tracerProvider.Shutdown, nil
 }
 
-// initTraceExporter create a SpanExporter
-// support exporter type
-// - console: export spans in console for development use case
-// - otlp: export spans through gRPC to an opentelemetry collector
-func initTraceExporter(ctx context.Context, logger logr.Logger) (sdktrace.SpanExporter, error) {
-	var traceExporter sdktrace.SpanExporter
-	traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdouttrace exporter: %w", err)
+// newResource builds the resource describing this process. Detectors are applied
+// in order and later ones win, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES
+// override the built-in defaults.
+//
+// resource.Default is deliberately not merged in: it carries a newer semantic
+// convention schema URL than the one used here, and merging conflicting schema
+// URLs drops the schema URL from the result.
+func newResource(ctx context.Context, defaultServiceName string) (*resource.Resource, error) {
+	return resource.New(ctx,
+		resource.WithSchemaURL(semconv.SchemaURL),
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String(defaultServiceName),
+			semconv.ServiceVersionKey.String(version.BuildRef),
+		),
+		resource.WithFromEnv(),
+	)
+}
+
+// Sampler defaults. The OpenTelemetry specification defaults OTEL_TRACES_SAMPLER
+// to parentbased_always_on; this package keeps a ratio instead, so a deployment
+// that sets neither variable samples a tenth of its requests rather than all of
+// them.
+const (
+	defaultSamplerType = "parentbased_traceidratio"
+	defaultSamplerArg  = 0.1
+)
+
+// newSampler builds the sampler from OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG.
+// The Go SDK has no built-in mapping from those variables to a Sampler, so the
+// specification's values are mapped here.
+//
+// A rejected value is returned as an error alongside a usable sampler: sampling is
+// a runtime knob, and refusing to start the process over a typo in it would be
+// worse than running at the documented default.
+//
+// jaeger_remote and parentbased_jaeger_remote are reported as unsupported. They
+// need go.opentelemetry.io/contrib/samplers/jaegerremote, which is not a dependency
+// of this module.
+func newSampler() (sdktrace.Sampler, error) {
+	samplerType, ok := os.LookupEnv("OTEL_TRACES_SAMPLER")
+	if !ok {
+		samplerType = defaultSamplerType
 	}
 
+	switch samplerType {
+	case "always_on":
+		return sdktrace.AlwaysSample(), nil
+	case "always_off":
+		return sdktrace.NeverSample(), nil
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample()), nil
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample()), nil
+	case "traceidratio":
+		fraction, err := samplerFraction()
+		return sdktrace.TraceIDRatioBased(fraction), err
+	case "parentbased_traceidratio":
+		fraction, err := samplerFraction()
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(fraction)), err
+	default:
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(defaultSamplerArg)),
+			fmt.Errorf("unsupported OTEL_TRACES_SAMPLER %q, falling back to %s at %v", samplerType, defaultSamplerType, defaultSamplerArg)
+	}
+}
+
+// samplerFraction reads the ratio for the traceidratio samplers, and is not consulted
+// for the samplers that take no argument. The returned fraction is always usable; an
+// error accompanies it when the configured value was rejected.
+//
+// The range check runs before the SDK sees the value. TraceIDRatioBased clamps a
+// fraction outside [0, 1] to always-on or always-off, so an operator who writes 10
+// meaning ten percent would otherwise sample everything with no diagnostic.
+func samplerFraction() (float64, error) {
+	arg, ok := os.LookupEnv("OTEL_TRACES_SAMPLER_ARG")
+	if !ok {
+		return defaultSamplerArg, nil
+	}
+
+	fraction, err := strconv.ParseFloat(arg, 64)
+	if err != nil {
+		return defaultSamplerArg, fmt.Errorf("invalid OTEL_TRACES_SAMPLER_ARG %q, falling back to %v: %w", arg, defaultSamplerArg, err)
+	}
+	if fraction < 0 || fraction > 1 {
+		return defaultSamplerArg, fmt.Errorf("OTEL_TRACES_SAMPLER_ARG %v outside [0, 1], falling back to %v", fraction, defaultSamplerArg)
+	}
+
+	return fraction, nil
+}
+
+// The exporter types OTEL_TRACES_EXPORTER selects between. The default sends spans
+// to a collector: console pretty print writes a multi-line JSON block per span onto
+// the same stream as the structured logs, so it is selected explicitly.
+const (
+	exporterTypeOTLP    = "otlp"
+	exporterTypeConsole = "console"
+	exporterTypeNone    = "none"
+
+	defaultExporterType = exporterTypeOTLP
+)
+
+// traceExporterType resolves OTEL_TRACES_EXPORTER to one of the types
+// newTraceExporter builds:
+//
+//   - otlp: export spans through gRPC to an opentelemetry collector
+//   - console: pretty print spans on stdout, for development
+//   - none: create spans but export nothing
+//
+// An unrecognised value is returned as an error alongside the default type, so a
+// typo is reported rather than quietly selecting an exporter the operator did not
+// ask for. The exporter is not worth failing startup over.
+func traceExporterType() (string, error) {
 	exporterType, ok := os.LookupEnv("OTEL_TRACES_EXPORTER")
 	if !ok {
-		exporterType = "console"
+		return defaultExporterType, nil
 	}
 
-	logger.Info("init OTel trace exporter", "type", exporterType)
-	if exporterType == "otlp" {
-		traceExporter, err = otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+	switch exporterType {
+	case exporterTypeOTLP, exporterTypeConsole, exporterTypeNone:
+		return exporterType, nil
+	default:
+		return defaultExporterType, fmt.Errorf("unsupported OTEL_TRACES_EXPORTER %q, falling back to %s", exporterType, defaultExporterType)
+	}
+}
+
+// newTraceExporter builds the exporter named by exporterType, which traceExporterType
+// has already narrowed. Exactly one exporter is constructed; exporterTypeNone builds
+// none and is handled by the caller.
+//
+// Transport security, authentication headers and timeouts for the otlp exporter come
+// from the standard OTEL_EXPORTER_OTLP_* environment variables. Passing any of them as
+// an explicit option here would override the operator's setting, since the exporter
+// applies explicit options after the environment. The one exception is the loopback
+// fallback in localCollectorOptions, which applies only when the environment sets none
+// of them.
+func newTraceExporter(ctx context.Context, exporterType string) (sdktrace.SpanExporter, error) {
+	if exporterType == exporterTypeConsole {
+		traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {
-			return nil, fmt.Errorf("failed to create otlp-grcp exporter: %w", err)
+			return nil, fmt.Errorf("failed to create stdouttrace exporter: %w", err)
+		}
+		return traceExporter, nil
+	}
+
+	traceExporter, err := otlptracegrpc.New(ctx, localCollectorOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create otlp-grpc exporter: %w", err)
+	}
+	return traceExporter, nil
+}
+
+// otlpTransportEnv are the variables that select where spans are sent and how the
+// connection is secured.
+var otlpTransportEnv = []string{
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_INSECURE",
+	"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+	"OTEL_EXPORTER_OTLP_CERTIFICATE",
+	"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+}
+
+// localCollectorOptions targets a plaintext collector on the loopback address when
+// the environment configures no transport. The SDK's own default reaches the same
+// host and port but negotiates TLS, which a local collector does not serve.
+//
+// The options are dropped as soon as any of the transport variables is set, so an
+// operator's endpoint and its scheme still decide where spans go and how the
+// connection is secured.
+func localCollectorOptions() []otlptracegrpc.Option {
+	for _, key := range otlpTransportEnv {
+		if _, ok := os.LookupEnv(key); ok {
+			return nil
 		}
 	}
 
-	return traceExporter, nil
+	return []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint("localhost:4317"),
+		otlptracegrpc.WithInsecure(),
+	}
 }
 
 const instrumentationName = "llm-d-router"

@@ -31,7 +31,6 @@ const MultiClusterPluginType = "multicluster-approx-prefix-cache-producer"
 // cluster-scoped type for a complete multicluster plugin family.
 type MultiClusterProducer struct {
 	*dataProducer
-	name string
 }
 
 // MultiClusterFactory builds the cluster-scoped approx-prefix producer.
@@ -40,11 +39,11 @@ func MultiClusterFactory(name string, rawParameters *json.Decoder, handle plugin
 	if err != nil {
 		return nil, err
 	}
-	return &MultiClusterProducer{dataProducer: inner.(*dataProducer), name: name}, nil
+	return &MultiClusterProducer{dataProducer: inner.(*dataProducer)}, nil
 }
 
 // TypedName reports the multi-cluster type with this instance's name. The
 // published data key stays name-based, so the prefix scorer binds unchanged.
 func (p *MultiClusterProducer) TypedName() plugin.TypedName {
-	return plugin.TypedName{Type: MultiClusterPluginType, Name: p.name}
+	return plugin.TypedName{Type: MultiClusterPluginType, Name: p.dataProducer.TypedName().Name}
 }

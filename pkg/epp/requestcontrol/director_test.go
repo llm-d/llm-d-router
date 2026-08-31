@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -46,6 +45,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -53,7 +53,6 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
@@ -86,7 +85,7 @@ type mockScheduler struct {
 
 func (m *mockScheduler) Schedule(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.SchedulingResult, error) {
 	if endpoints != nil && m.dataProduced {
-		data, ok := endpoints[0].Get(mockProducedDataKey.String())
+		data, ok := endpoints[0].Get(mockProducedDataKey)
 		if !ok || data.(mockProducedDataType).value != 42 {
 			return nil, errors.New("expected produced data not found in pod")
 		}
@@ -135,7 +134,7 @@ func (m *mockDataProducerPlugin) Consumes() fwkplugin.DataDependencies {
 }
 
 func (m *mockDataProducerPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	endpoints[0].Put(mockProducedDataKey.String(), mockProducedDataType{value: 42})
+	endpoints[0].Put(mockProducedDataKey, mockProducedDataType{value: 42})
 	return nil
 }
 
@@ -169,7 +168,7 @@ func (m *mockAdmissionPlugin) Admit(ctx context.Context, request *fwksched.Infer
 
 type mockRequestHeaderPlugin struct {
 	name           string
-	attributeKey   string
+	attributeKey   fwkplugin.DataKey
 	attributeValue string
 }
 
@@ -185,16 +184,18 @@ func (m *mockRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwks
 type mockPreRequestPlugin struct {
 	name     string
 	modifyFn func(request *fwksched.InferenceRequest)
+	err      error
 }
 
 func (m *mockPreRequestPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
 }
 
-func (m *mockPreRequestPlugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) {
+func (m *mockPreRequestPlugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	if m.modifyFn != nil {
 		m.modifyFn(request)
 	}
+	return m.err
 }
 
 type mockProducedDataType struct {
@@ -412,14 +413,17 @@ func TestDirector_HandleRequest(t *testing.T) {
 		initialTargetModelName  string // Initial target model in the reqCtx.
 		parser                  fwkrh.Parser
 		wantErrCode             string                   // Expected errcommon code string
+		wantDroppedReason       string                   // If non-empty, expected x-llm-d-request-dropped-reason header on the error
 		wantReqCtx              *handlers.RequestContext // Fields to check in the returned RequestContext
 		targetModelName         string                   // Expected model name after target model resolution
 		admitRequestDenialError error                    // Expected denial error from admission plugin
 		dataProducerPlugin      *mockDataProducerPlugin
 		screener                *mockScreener
-		preRequestPlugin        *mockPreRequestPlugin
+		emptyEndpoints          bool // If true, the director locates no endpoint candidates.
+		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
@@ -450,6 +454,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"model":  model,
 				"prompt": "critical prompt",
 			},
+			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -577,15 +582,100 @@ func TestDirector_HandleRequest(t *testing.T) {
 				"new_key": "new_value",
 			},
 			inferenceObjectiveName: objectiveName,
-			preRequestPlugin: &mockPreRequestPlugin{
+			preRequestPlugins: []*mockPreRequestPlugin{{
 				name: "test-pre-request-plugin",
 				modifyFn: func(request *fwksched.InferenceRequest) {
-					if payloadMap, ok := request.Body.Payload.(fwkrh.PayloadMap); ok {
-						payloadMap["new_key"] = "new_value"
-					}
+					request.Body.MutatePayloadMap(func(m fwkrh.PayloadMap) {
+						m["new_key"] = "new_value"
+					})
+				},
+			}},
+		},
+		{
+			name: "preRequest plugin returns typed error surfaces as its status code",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			preRequestPlugins: []*mockPreRequestPlugin{{
+				name: "failing-pre-request-plugin",
+				err:  errcommon.Error{Code: errcommon.PreconditionFailed, Msg: "plugin rejected request"},
+			}},
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name: "preRequest plugin returns untyped error collapses to Internal",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			preRequestPlugins: []*mockPreRequestPlugin{{
+				name: "failing-untyped-pre-request-plugin",
+				err:  errors.New("plugin exploded"),
+			}},
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name: "multiple typed preRequest plugin failures collapse to Internal",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			preRequestPlugins: []*mockPreRequestPlugin{
+				{
+					name: "failing-typed-a",
+					err:  errcommon.Error{Code: errcommon.PreconditionFailed, Msg: "a rejected"},
+				},
+				{
+					name: "failing-typed-b",
+					err:  errcommon.Error{Code: errcommon.BadRequest, Msg: "b rejected"},
 				},
 			},
-		}, {
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name: "mixed typed and untyped preRequest failures collapse to Internal",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			preRequestPlugins: []*mockPreRequestPlugin{
+				{
+					name: "failing-typed",
+					err:  errcommon.Error{Code: errcommon.PreconditionFailed, Msg: "typed rejected"},
+				},
+				{
+					name: "failing-untyped",
+					err:  errors.New("untyped exploded"),
+				},
+			},
+			wantErrCode: errcommon.Internal,
+		},
+		{
 			name: "successful request with model rewrite",
 			reqBodyMap: map[string]any{
 				"model":  modelToBeRewritten,
@@ -840,6 +930,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			inferenceObjectiveName:  "food-review-1",
+			wantRawBodyUnchanged:    true,
 		},
 		{
 			name: "request rejected by admission controller",
@@ -905,7 +996,21 @@ func TestDirector_HandleRequest(t *testing.T) {
 			screener: &mockScreener{name: "eliminate-all", screen: func([]fwksched.Endpoint) []fwksched.Endpoint {
 				return nil
 			}},
-			wantErrCode: errcommon.ServiceUnavailable,
+			wantErrCode:       errcommon.ServiceUnavailable,
+			wantDroppedReason: string(errcommon.RequestDroppedReasonNoEndpoints),
+		},
+		{
+			name: "no endpoint candidates located",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			initialTargetModelName:  model,
+			inferenceObjectiveName:  objectiveName,
+			emptyEndpoints:          true,
+			wantErrCode:             errcommon.ServiceUnavailable,
+			wantDroppedReason:       string(errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
 			name: "scheduler returns error",
@@ -918,6 +1023,30 @@ func TestDirector_HandleRequest(t *testing.T) {
 				m.scheduleErr = errors.New("simulated scheduler failure")
 			},
 			wantErrCode:            errcommon.ResourceExhausted,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			// The typed error inside a joined scheduler error, including its
+			// drop-reason header, must reach the caller instead of the
+			// untyped-error fallback.
+			name: "scheduler returns joined error with typed capacity rejection",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "prompt that causes scheduling drain",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleErr = errors.Join(
+					errors.New("failed to run scheduler profile 'default'"),
+					fmt.Errorf("profile %q: %w", "default", errcommon.Error{
+						Code:    errcommon.ResourceExhausted,
+						Msg:     "no endpoints available for the given request",
+						Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+					}),
+				)
+			},
+			wantErrCode:            errcommon.ResourceExhausted,
+			wantDroppedReason:      string(errcommon.RequestDroppedReasonSaturated),
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -981,13 +1110,18 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 				config := NewConfig()
 				if test.dataProducerPlugin != nil {
+					datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{test.dataProducerPlugin})
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
 				if test.screener != nil {
 					config = config.WithScreeners(test.screener)
 				}
-				if test.preRequestPlugin != nil {
-					config = config.WithPreRequestPlugins(test.preRequestPlugin)
+				if len(test.preRequestPlugins) > 0 {
+					plugins := make([]fwkrc.PreRequest, len(test.preRequestPlugins))
+					for i, p := range test.preRequestPlugins {
+						plugins[i] = p
+					}
+					config = config.WithPreRequestPlugins(plugins...)
 				}
 				if test.requestHeaderPlugin != nil {
 					config = config.WithRequestHeaderPlugins(test.requestHeaderPlugin)
@@ -996,6 +1130,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
+				if test.emptyEndpoints {
+					director.endpointCandidates = &mockEndpointCandidates{}
+				}
 				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
@@ -1019,6 +1156,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Error parsing the reqBodyMap, err is %v", err)
 				}
+				originalRawBody := append([]byte(nil), reqCtx.Request.RawBody...)
 
 				// Add appropriate path header based on request body content for path-based API detection
 				if _, hasPrompt := test.reqBodyMap["prompt"]; hasPrompt {
@@ -1045,6 +1183,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					var e errcommon.Error
 					if assert.ErrorAs(t, err, &e, "Error should be of type errcommon.Error") {
 						assert.Equal(t, test.wantErrCode, e.Code, "Error code mismatch")
+						if test.wantDroppedReason != "" {
+							assert.Equal(t, test.wantDroppedReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey], "drop-reason header mismatch")
+						}
 					}
 					return
 				}
@@ -1076,6 +1217,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
 					}
+				}
+				if test.wantRawBodyUnchanged {
+					assert.Equal(t, originalRawBody, returnedReqCtx.Request.RawBody,
+						"reqCtx.Request.RawBody should be byte-identical to the input when no rewrite applies")
 				}
 				assert.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 			})
@@ -1557,7 +1702,10 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
+	// Each dispatch snapshots the accumulator, so every invocation carries the total at call time.
+	reqCtx.StreamedEvents = 5
 	director.HandleResponseBody(ctx, reqCtx, false)
+	reqCtx.StreamedEvents = 6
 	director.HandleResponseBody(ctx, reqCtx, false)
 
 	// Intermediate chunks (endOfStream=false) run asynchronously, wait for them.
@@ -1568,6 +1716,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "async response body plugins should have been called for intermediate chunks")
 
 	// Final chunk (endOfStream=true) runs synchronously (drains queue first).
+	reqCtx.StreamedEvents = 7
 	director.HandleResponseBody(ctx, reqCtx, true)
 
 	ps1.mu.Lock()
@@ -1583,6 +1732,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		assert.Equal(t, "test-req-id-for-streaming", resp.RequestID)
 		assert.Equal(t, reqCtx.Response.Headers, resp.Headers)
 		assert.Equal(t, "namespace1/test-pod-name", targetPods[i])
+		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
 		if i < 2 {
 			assert.False(t, resp.EndOfStream, "EndOfStream should be false for chunk %d", i)
 		} else {
@@ -1605,7 +1755,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const numChunks = 50
-	reqCtx := newResponseBodyTestRequestContext("ordering-test-request", 0)
+	reqCtx := newResponseBodyTestRequestContext("ordering-test-request")
 
 	for i := range numChunks {
 		reqCtx.Usage = fwkrh.Usage{CompletionTokens: i}
@@ -1636,8 +1786,8 @@ func TestDirector_HandleResponseBody_DuplicateRequestIDQueuesAreIndependent(t *t
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
 
 	const requestID = "duplicate-request-id"
-	firstReqCtx := newResponseBodyTestRequestContext(requestID, 0)
-	secondReqCtx := newResponseBodyTestRequestContext(requestID, 0)
+	firstReqCtx := newResponseBodyTestRequestContext(requestID)
+	secondReqCtx := newResponseBodyTestRequestContext(requestID)
 
 	director.HandleResponseBody(ctx, firstReqCtx, false)
 	require.Eventually(t, func() bool {
@@ -1864,7 +2014,7 @@ func (p *blockingResponseStreamingPlugin) release() {
 	close(p.releaseCh)
 }
 
-func newResponseBodyTestRequestContext(requestID string, completionTokens int) *handlers.RequestContext {
+func newResponseBodyTestRequestContext(requestID string) *handlers.RequestContext {
 	return &handlers.RequestContext{
 		Request: &handlers.Request{
 			Headers: map[string]string{
@@ -1875,185 +2025,215 @@ func newResponseBodyTestRequestContext(requestID string, completionTokens int) *
 			Headers: map[string]string{},
 		},
 		TargetPod: &fwkdl.EndpointMetadata{},
-		Usage:     fwkrh.Usage{CompletionTokens: completionTokens},
 	}
 }
 
-// ── Conditional-decode gate (Prefer: if-available) ─────────────────────────
+// TestRunPreRequestPlugins_NoPlugins verifies that runPreRequestPlugins returns
+// nil when no PreRequest plugins are registered.
+func TestRunPreRequestPlugins_NoPlugins(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
-// wrongTypeAttr is a Cloneable that is NOT *attrprefix.PrefixCacheMatchInfo,
-// used to exercise the type-assertion failure branch.
-type wrongTypeAttr struct{}
+	dir := &Director{requestControlPlugins: *NewConfig()}
 
-func (w wrongTypeAttr) Clone() fwkdl.Cloneable { return w }
+	err := dir.runPreRequestPlugins(ctx, &fwksched.InferenceRequest{RequestID: "req-none"}, &fwksched.SchedulingResult{})
+	assert.NoError(t, err)
+}
 
-func TestPrimaryEndpointHasCachedPrefix(t *testing.T) {
-	endpointWith := func(matched, total int) fwksched.Endpoint {
-		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
-			attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, attrs,
-		)
+// TestRunPreRequestPlugins_AllSucceed verifies that runPreRequestPlugins invokes
+// every registered PreRequest plugin and returns nil when none fail.
+func TestRunPreRequestPlugins_AllSucceed(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	var invoked []string
+	record := func(name string) func(*fwksched.InferenceRequest) {
+		return func(*fwksched.InferenceRequest) { invoked = append(invoked, name) }
 	}
-	endpointBare := func() fwksched.Endpoint {
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, fwkdl.NewAttributes(),
-		)
-	}
-	endpointWithWrongType := func() fwksched.Endpoint {
-		attrs := fwkdl.NewAttributes()
-		attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), wrongTypeAttr{})
-		return fwksched.NewEndpoint(
-			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "p"}},
-			nil, attrs,
-		)
-	}
-	resultWith := func(eps ...fwksched.Endpoint) *fwksched.SchedulingResult {
-		return &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode": {TargetEndpoints: eps},
-			},
-		}
+	plugins := []fwkrc.PreRequest{
+		&mockPreRequestPlugin{name: "first", modifyFn: record("first")},
+		&mockPreRequestPlugin{name: "second", modifyFn: record("second")},
+		&mockPreRequestPlugin{name: "third", modifyFn: record("third")},
 	}
 
-	tests := []struct {
-		name string
-		in   *fwksched.SchedulingResult
-		want bool
+	dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(plugins...)}
+
+	err := dir.runPreRequestPlugins(ctx, &fwksched.InferenceRequest{RequestID: "req-ok"}, &fwksched.SchedulingResult{})
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"first", "second", "third"}, invoked, "every plugin must run")
+}
+
+// TestRunPreRequestPlugins_AggregatesErrors verifies that runPreRequestPlugins
+// invokes every registered PreRequest plugin regardless of individual failures
+// and returns the joined error covering all failed plugins.
+func TestRunPreRequestPlugins_AggregatesErrors(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	firstErr := errors.New("first plugin boom")
+	thirdErr := errors.New("third plugin boom")
+
+	var invoked []string
+	record := func(name string) func(*fwksched.InferenceRequest) {
+		return func(*fwksched.InferenceRequest) { invoked = append(invoked, name) }
+	}
+	plugins := []fwkrc.PreRequest{
+		&mockPreRequestPlugin{name: "first", modifyFn: record("first"), err: firstErr},
+		&mockPreRequestPlugin{name: "second", modifyFn: record("second")},
+		&mockPreRequestPlugin{name: "third", modifyFn: record("third"), err: thirdErr},
+	}
+
+	dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(plugins...)}
+
+	request := &fwksched.InferenceRequest{RequestID: "req-multi-err"}
+	err := dir.runPreRequestPlugins(ctx, request, &fwksched.SchedulingResult{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, firstErr, "aggregated error must wrap the first plugin's error")
+	assert.ErrorIs(t, err, thirdErr, "aggregated error must wrap the third plugin's error")
+	assert.Contains(t, err.Error(), `PreRequest "first/mock" failed`)
+	assert.Contains(t, err.Error(), `PreRequest "third/mock" failed`)
+	assert.Equal(t, []string{"first", "second", "third"}, invoked,
+		"every plugin must run; a failure in one must not short-circuit the rest")
+}
+
+func TestDirector_HandleResponseBody_TerminationCause(t *testing.T) {
+	testCases := []struct {
+		name     string
+		recorded fwkrc.TerminationCause
+		want     fwkrc.TerminationCause
 	}{
-		{"nil result", nil, false},
-		{"empty profile results", &fwksched.SchedulingResult{PrimaryProfileName: "decode"}, false},
-		{"primary profile missing", &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{"other": {TargetEndpoints: []fwksched.Endpoint{endpointWith(2, 4)}}},
-		}, false},
-		{"primary profile nil", &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": nil},
-		}, false},
-		{"primary has no endpoints", resultWith(), false},
-		{"endpoint has no match info", resultWith(endpointBare()), false},
-		{"wrong type in attribute", resultWith(endpointWithWrongType()), false},
-		{"zero match blocks", resultWith(endpointWith(0, 4)), false},
-		{"some match blocks", resultWith(endpointWith(2, 4)), true},
-		{"full match", resultWith(endpointWith(4, 4)), true},
+		{
+			name: "a stream that reached its end completed naturally",
+			want: fwkrc.TerminationCauseNatural,
+		},
+		{
+			name:     "a recorded cause survives to the record",
+			recorded: fwkrc.TerminationCauseEvicted,
+			want:     fwkrc.TerminationCauseEvicted,
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, primaryEndpointHasCachedPrefix(logr.Discard(), tt.in))
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps := newTestResponseStreaming("ps")
+			ctx := logutil.NewTestLoggerIntoContext(context.Background())
+			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+				NewConfig().WithResponseStreamingPlugins(ps))
+
+			reqCtx := newResponseBodyTestRequestContext("test-req-id")
+			reqCtx.TerminationCause = tc.recorded
+
+			director.HandleResponseBody(ctx, reqCtx, true)
+
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+			require.Len(t, ps.respsOnStreaming, 1)
+			assert.Equal(t, tc.want, ps.respsOnStreaming[0].TerminationCause)
 		})
 	}
 }
 
-// newConditionalDecodeDirector builds a minimal Director suitable for
-// exercising the conditional-decode gate end-to-end.
-func newConditionalDecodeDirector(t *testing.T, scheduleResult *fwksched.SchedulingResult) (*Director, context.Context) {
-	t.Helper()
+func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps))
 
-	period := time.Second
-	epf := datalayer.NewTestRuntime(t, period)
-	ds := datastore.NewDatastore(t.Context(), epf)
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	pool := &v1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
-		Spec: v1.InferencePoolSpec{
-			TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
-			Selector: v1.LabelSelector{
-				MatchLabels: map[v1.LabelKey]v1.LabelValue{"app": "inference"},
-			},
-		},
-	}
-	if err := ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)); err != nil {
-		t.Fatalf("PoolSet: %v", err)
-	}
-	_ = ds.PodUpdateOrAddIfNotExist(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: map[string]string{"app": "inference"}},
-		Status: corev1.PodStatus{
-			PodIP:      "192.168.1.100",
-			Phase:      corev1.PodRunning,
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-		},
-	})
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	reqCtx.TerminationCause = fwkrc.TerminationCauseClientDisconnect
 
-	mockSched := &mockScheduler{scheduleResults: scheduleResult}
-	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
-	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
-	dir := NewDirectorWithConfig(ds, mockSched, &mockAdmissionController{}, candidates, cfg)
-	return dir, ctx
+	director.HandleResponseBody(ctx, reqCtx, false)
+
+	require.Eventually(t, func() bool {
+		ps.mu.Lock()
+		defer ps.mu.Unlock()
+		return len(ps.respsOnStreaming) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	assert.Empty(t, ps.respsOnStreaming[0].TerminationCause,
+		"mid-stream chunks carry no cause: the stream has not ended")
 }
 
-func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
-	scheduleResultWith := func(matched, total int) *fwksched.SchedulingResult {
-		attrs := fwkdl.NewAttributes()
-		if matched >= 0 {
-			attrs.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(),
-				attrprefix.NewPrefixCacheMatchInfo(matched, total, 1))
-		}
-		return &fwksched.SchedulingResult{
-			PrimaryProfileName: "decode",
-			ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode": {TargetEndpoints: []fwksched.Endpoint{
-					fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-						Address:     "192.168.1.100",
-						Port:        "8000",
-						MetricsHost: "192.168.1.100:8000",
-						ID:          types.NamespacedName{Name: "pod1", Namespace: "default"},
-					}, nil, attrs),
-				}},
+// TestPrepareRequest_ConditionalDecodeDefaultDeny pins the director's
+// default-deny for "Prefer: if-available" requests: after PreRequest plugins
+// run, if no plugin marked ConditionalDecodeHandledAttributeKey, the request
+// is rejected with 412. Requests either without the header or where a plugin
+// claimed the header pass through.
+func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	scheduleResult := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address: "192.168.1.100",
+							Port:    "8000",
+							ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+						}, nil, nil),
+					},
+				},
 			},
-		}
+		},
+		PrimaryProfileName: "decode",
+	}
+
+	claimingPlugin := &mockPreRequestPlugin{
+		name: "claimer",
+		modifyFn: func(r *fwksched.InferenceRequest) {
+			r.PutAttribute(fwkrc.ConditionalDecodeHandledAttributeKey, true)
+		},
 	}
 
 	tests := []struct {
 		name        string
-		preferValue string // empty == no Prefer header
-		matched     int    // -1 == no PrefixCacheMatchInfo at all
-		total       int
+		headers     map[string]string
+		plugins     []fwkrc.PreRequest
 		wantErrCode string
 	}{
-		{"prefer if-available + cache hit forwards", "if-available", 2, 4, ""},
-		{"prefer if-available + zero match returns 412", "if-available", 0, 4, errcommon.PreconditionFailed},
-		{"prefer if-available + no match info returns 412", "if-available", -1, 0, errcommon.PreconditionFailed},
-		{"absent Prefer header proceeds even with no cache", "", -1, 0, ""},
-		{"unrelated Prefer token proceeds even with no cache", "return=minimal", -1, 0, ""},
+		{
+			name:    "no Prefer header is unaffected",
+			headers: map[string]string{},
+		},
+		{
+			name:        "conditional-decode with no plugin registered → 412",
+			headers:     map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins:     nil,
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name:    "conditional-decode with a plugin that does not claim → 412",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrc.PreRequest{
+				&mockPreRequestPlugin{name: "noop"},
+			},
+			wantErrCode: errcommon.PreconditionFailed,
+		},
+		{
+			name:    "conditional-decode with a plugin that claims → forward",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrc.PreRequest{claimingPlugin},
+		},
+		{
+			name:    "unrelated Prefer token is not a conditional-decode → unaffected",
+			headers: map[string]string{routing.PreferHeader: "return=minimal"},
+		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir, ctx := newConditionalDecodeDirector(t, scheduleResultWith(tt.matched, tt.total))
-
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(tt.plugins...)}
 			reqCtx := &handlers.RequestContext{
-				Request: &handlers.Request{
-					Headers: map[string]string{
-						reqcommon.RequestIDHeaderKey: "test-req-id",
-						":path":                      "/v1/completions",
-					},
-				},
+				Request:           &handlers.Request{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req-" + tt.name, Headers: tt.headers},
 			}
-			if tt.preferValue != "" {
-				reqCtx.Request.Headers["prefer"] = tt.preferValue
-			}
-			body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
-			require.NoError(t, err)
-			reqCtx.Request.RawBody = body
 
-			reqCtx.Parser = openai.NewOpenAIParser()
-			parseResult, err := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
-			require.NoError(t, err)
+			_, err := dir.prepareRequest(ctx, reqCtx, scheduleResult)
 
-			_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
 			if tt.wantErrCode == "" {
 				assert.NoError(t, err)
 				return
 			}
-			require.Error(t, err)
 			var e errcommon.Error
 			require.ErrorAs(t, err, &e)
 			assert.Equal(t, tt.wantErrCode, e.Code)

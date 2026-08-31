@@ -126,7 +126,7 @@ E2E_NUM_PROCS ?= 5
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
+               EXISTS_TIMEOUT E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -323,10 +323,10 @@ test-e2e: image-build-builder image-build ## Build images and run e2e tests
 
 
 .PHONY: bench-tokenizer
-bench-tokenizer: image-build-builder ## Run external tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
-	@printf "\033[33;1m==== Running External Tokenizer Benchmark ====\033[0m\n"
-	@printf "Ensure the kind cluster is running with the external tokenizer config.\n"
-	@printf "Run 'EXTERNAL_TOKENIZER_ENABLED=true KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
+bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
+	@printf "\033[33;1m==== Running Tokenizer Benchmark ====\033[0m\n"
+	@printf "Ensure the kind cluster is running with the KV cache config.\n"
+	@printf "Run 'KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke

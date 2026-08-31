@@ -332,9 +332,12 @@ The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/comple
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]`. | `[]` |
 | `router.tokenizer.args` | Override container args. Empty renders `["<modelName>", "--port=<port>"]`. | `[]` |
+| `router.tokenizer.extraArgs` | Extra args appended to the tokenizer container after the default or overridden args. | `[]` |
+| `router.tokenizer.initContainers` | Pod-level init containers rendered when the tokenizer is enabled. | `[]` |
 | `router.tokenizer.env` | Extra environment variables (e.g., HuggingFace token). | `[HF_TOKEN]` |
 | `router.tokenizer.resources` | Tokenizer container resource requests and limits. | `requests.cpu: "4"`, `requests.memory: 8Gi` |
 | `router.tokenizer.volumeMounts` | Extra volume mounts for the tokenizer container. | `[]` |
+| `router.tokenizer.volumes` | Pod-level volumes rendered alongside `model-cache` when the tokenizer is enabled. | `[]` |
 | `router.tokenizer.readinessProbe` | Readiness probe spec. | `httpGet /health on the render-http named port` |
 
 #### Complete Tokenizer Render Sidecar Example
@@ -492,6 +495,12 @@ Configures routing policies, target Gateway interfaces, and priority objectives 
 | `provider.name` | Name of Gateway implementation. Options: `[none, gke, istio]`. | `none` |
 | `provider.istio.destinationRule.host` | Custom host value for Istio DestinationRule. | `""` |
 | `provider.istio.destinationRule.trafficPolicy.connectionPool` | Connection pool settings for Istio DestinationRule. | `{}` |
+| `provider.gke.preferredBackends.enabled` | Enable Preferred Backends high availability routing for GKE. | `false` |
+| `provider.gke.preferredBackends.preferredReplicas` | Replica count for primary active pod ordinals pinned to PREFERRED tier. | `1` |
+| `provider.gke.preferredBackends.defaultReplicas` | Replica count for standby backup pod ordinals pinned to DEFAULT tier. | `1` |
+| `provider.gke.preferredBackends.balancingMode` | Load balancing calculation mode (`RATE`, `UTILIZATION`, `CONNECTION`). | `RATE` |
+| `provider.gke.preferredBackends.maxRatePerEndpoint` | Maximum requests per second per pod instance before spilling over. | `100` |
+| `provider.gke.preferredBackends.capacityScalerPercent` | Effective capacity ceiling percentage (`0` to `100`). | `100` |
 | `httpRoute.create` | Deploy an `HTTPRoute` resource as part of the gateway chart. | `false` |
 | `httpRoute.inferenceGatewayName` | Target Gateway name for the `HTTPRoute`. | `inference-gateway` |
 | `httpRoute.inferenceGatewayNamespace` | Target Gateway namespace for the `HTTPRoute`. | `""` |
@@ -502,6 +511,14 @@ Configures routing policies, target Gateway interfaces, and priority objectives 
 ```yaml
 provider:
   name: gke # Use GKE gateway implementation
+  gke:
+    preferredBackends:
+      enabled: true
+      preferredReplicas: 1
+      defaultReplicas: 1
+      balancingMode: RATE
+      maxRatePerEndpoint: 100
+      capacityScalerPercent: 100
   
 httpRoute:
   create: true

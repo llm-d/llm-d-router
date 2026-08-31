@@ -50,8 +50,9 @@ type GenericEvent interface {
 
 // EventBatch represents a batch of generic events from an inference engine.
 type EventBatch struct {
-	Timestamp float64
-	Events    []GenericEvent
+	Timestamp        float64
+	Events           []GenericEvent
+	DataParallelRank *int
 }
 
 // RawMessage holds the raw transport-level data from a received pub/sub message.
@@ -65,6 +66,8 @@ type RawMessage struct {
 	Payload []byte
 	// SourceEndpoint is the serving endpoint associated with the subscriber.
 	SourceEndpoint string
+	// reset clears the message's pod before later messages on the same queue.
+	reset bool
 }
 
 // EngineAdapter defines the interface for engine-specific message parsers.

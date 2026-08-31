@@ -22,12 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -37,6 +39,8 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -48,12 +52,11 @@ const (
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
-	// the in-flight token counter. Defaults to false.
+	// the in-flight token counter. Defaults to false. The per-request output
+	// estimate comes from the output-length bucket published by the outlen-bucket plugin; enable
+	// that plugin (ordered before this producer) so requests are classified rather
+	// than all estimated as UNKNOWN.
 	AddEstimatedOutputTokens bool `json:"addEstimatedOutputTokens"`
-	// OutputRatio is the estimated output-to-input token ratio used when
-	// AddEstimatedOutputTokens is true: estimated output = round(inputTokens * OutputRatio).
-	// Must be non-negative. Unset defaults to DefaultOutputRatio.
-	OutputRatio *float64 `json:"outputRatio,omitempty"`
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens added per
 	// request when AddEstimatedOutputTokens is true, regardless of input length or
 	// the client-requested output cap. Must be non-negative. Unset means no cap.
@@ -89,14 +92,6 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		}
 	}
 
-	outputRatio := DefaultOutputRatio
-	if cfg.OutputRatio != nil {
-		if *cfg.OutputRatio < 0 {
-			return nil, fmt.Errorf("outputRatio must be non-negative, got %v", *cfg.OutputRatio)
-		}
-		outputRatio = *cfg.OutputRatio
-	}
-
 	if cfg.MaxEstimatedOutputTokens != nil && *cfg.MaxEstimatedOutputTokens < 0 {
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
@@ -106,11 +101,15 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		syncCrossReplicaState = *cfg.SyncCrossReplicaState
 	}
 
+	if err := registerMetrics(handle.Metrics()); err != nil {
+		return nil, err
+	}
+
 	return &InFlightLoadProducer{
 		typedName:                fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:           newConcurrencyTracker(),
 		tokenTracker:             newConcurrencyTracker(),
-		tokenEstimator:           NewSimpleTokenEstimatorWithConfig(outputRatio, cfg.MaxEstimatedOutputTokens),
+		tokenEstimator:           NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens: cfg.AddEstimatedOutputTokens,
 		dk:                       attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
@@ -143,6 +142,10 @@ type InFlightLoadProducer struct {
 	uncachedRequestTokensDk  fwkplugin.DataKey
 	syncCrossReplicaState    bool
 	registeredEndpoints      sync.Map // key: string (NamespacedName), value: datalayer.Endpoint
+	// outlenBucketMissingWarn gates a single warning when AddEstimatedOutputTokens is
+	// enabled but no outlen-bucket attribute is present on requests (the outlen-bucket
+	// plugin is not configured or is ordered after this producer).
+	outlenBucketMissingWarn sync.Once
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -161,6 +164,11 @@ type addedTokensEntry struct {
 	tokenCounter   *atomic.Int64
 	requestCounter *atomic.Int64
 	requests       atomic.Int32
+	endpointName   string
+	namespace      string
+	producerName   string
+	fairnessID     string
+	priority       string
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -176,6 +184,11 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	clone := &addedTokensEntry{
 		tokenCounter:   e.tokenCounter,
 		requestCounter: e.requestCounter,
+		endpointName:   e.endpointName,
+		namespace:      e.namespace,
+		producerName:   e.producerName,
+		fairnessID:     e.fairnessID,
+		priority:       e.priority,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
@@ -185,9 +198,11 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	if t := e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
+		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
 	}
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
+		inflightRequests.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Dec()
 	}
 }
 
@@ -294,7 +309,7 @@ func (p *InFlightLoadProducer) RegisterDependencies(r datalayer.Registrar) error
 func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 	return datalayer.CrossReplicaSpec{
 		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
-		AttributeKey: p.dk.String(),
+		AttributeKey: p.dk,
 		SyncDisabled: !p.syncCrossReplicaState,
 		Supply: func(endpointID string) func() datalayer.Cloneable {
 			return func() datalayer.Cloneable {
@@ -336,11 +351,19 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 			break
 		}
 		p.registeredEndpoints.Delete(id)
+		endpointName, namespace := splitNamespacedName(event.Endpoint.GetMetadata().ID.String())
+		labels := prometheus.Labels{
+			"endpoint_name": endpointName,
+			"namespace":     namespace,
+			"producer_name": p.typedName.Name,
+		}
+		inflightTokens.DeletePartialMatch(labels)
+		inflightRequests.DeletePartialMatch(labels)
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
 		p.registeredEndpoints.Store(id, event.Endpoint)
-		event.Endpoint.GetAttributes().Put(p.dk.String(), &datalayer.DynamicAttribute{
+		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
 					Tokens:   p.GetTokens(id),
@@ -365,7 +388,7 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		}
 		if request != nil {
 			tokens := p.estimateRequestTokens(e, request, inputTokens)
-			e.Put(p.uncachedRequestTokensDk.String(), &attrconcurrency.UncachedRequestTokens{
+			e.Put(p.uncachedRequestTokensDk, &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
 		}
@@ -373,28 +396,54 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 	return nil
 }
 
-func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
+func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) error {
 	if result == nil || len(result.ProfileResults) == 0 {
-		return
+		return nil
 	}
 
 	if request == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: request is nil")
-		return
+		return nil
 	}
 
 	if request.RequestID == "" {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: missing RequestID")
-		return
+		return nil
 	}
 
 	if p.PluginState == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("Skipping in-flight load tracking: PluginState is nil", "requestID", request.RequestID)
-		return
+		return nil
 	}
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
+	// Bound the fairness_id label so a large number of distinct client IDs cannot grow this
+	// plugin's series set. The bounded value is stored on the entry, so the eviction-time
+	// decrement uses the same label as the increment here.
+	fairnessID := metricsutil.BoundFairnessID(request.FairnessID)
+	priority := strconv.Itoa(request.Objectives.Priority)
 
+	if request.Body != nil {
+		if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
+			// -1 signals "no client cap" so the log renders a value, not a pointer.
+			maxOutputTokens := int64(-1)
+			if request.Body.MaxOutputTokens != nil {
+				maxOutputTokens = *request.Body.MaxOutputTokens
+			}
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen estimate",
+				"requestID", request.RequestID,
+				"bucket", bucket.String(),
+				"maxOutputTokens", maxOutputTokens,
+			)
+		} else if p.addEstimatedOutputTokens {
+			// addEstimatedOutputTokens is on but no outlen-bucket attribute was
+			// published: every request is estimated as UNKNOWN. Warn once so the
+			// misconfiguration is visible without spamming per request.
+			p.warnMissingOutlenBucket(ctx)
+		}
+	}
+
+	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 			continue
@@ -405,6 +454,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			continue
 		}
 		eid := endpoint.GetMetadata().ID.String()
+		name, namespace := splitNamespacedName(eid)
+
 		requestCounter := p.requestTracker.inc(eid)
 
 		// Compute the uncached prompt portion this endpoint must actually compute.
@@ -415,9 +466,17 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
 
+		inflightRequests.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Inc()
+		inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Add(float64(tokens))
+
 		entry := &addedTokensEntry{
 			tokenCounter:   tokenCounter,
 			requestCounter: requestCounter,
+			endpointName:   name,
+			namespace:      namespace,
+			producerName:   p.typedName.Name,
+			fairnessID:     fairnessID,
+			priority:       priority,
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
@@ -426,25 +485,47 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
 			entry,
 		)
+		tracked = true
 	}
+
+	// ctx is the ext_proc stream context: it stays alive for the request's full
+	// lifetime and is canceled on stream end or client disconnect. Binding it
+	// keeps the janitor from reaping entries (and rolling back counters) for
+	// requests that are still in flight but have produced no response chunk,
+	// e.g. long prefill or a deep model-server queue.
+	// Bind only when an entry exists: an unbacked binding is never reclaimed.
+	if tracked {
+		p.PluginState.BindLiveness(ctx, request.RequestID)
+	}
+	return nil
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
-	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK.String())
+	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		var maxOutputTokens *int64
-		if request != nil && request.Body != nil {
-			maxOutputTokens = request.Body.MaxOutputTokens
-		}
-		// Output tokens are based on the full input, not the cached portion.
-		tokens += p.tokenEstimator.EstimateOutput(inputTokens, maxOutputTokens)
+		// Add the estimated output tokens from the output-length bucket the outlen-bucket plugin
+		// published; an absent bucket is estimated as UNKNOWN (see PreRequest, which
+		// warns once when that happens with this option enabled).
+		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return tokens
 }
 
+// warnMissingOutlenBucket logs a single warning when AddEstimatedOutputTokens is
+// enabled but no outlen-bucket attribute is present on the request, so every request
+// is estimated as UNKNOWN. This surfaces a missing outlen-bucket plugin without
+// emitting a log line per request.
+func (p *InFlightLoadProducer) warnMissingOutlenBucket(ctx context.Context) {
+	p.outlenBucketMissingWarn.Do(func() {
+		log.FromContext(ctx).V(logutil.DEFAULT).Info(
+			"addEstimatedOutputTokens is enabled but no outlen-bucket attribute is present; " +
+				"every request is estimated as UNKNOWN. Add outlen-bucket to the plugins list in the EndpointPickerConfig to fix this.")
+	})
+}
+
 func (p *InFlightLoadProducer) ResponseBody(
-	_ context.Context,
+	ctx context.Context,
 	request *fwksched.InferenceRequest,
 	resp *requestcontrol.Response,
 	_ *datalayer.EndpointMetadata,
@@ -500,6 +581,15 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
+		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
+			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
+				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",
+					"requestID", request.RequestID,
+					"estimatedBucket", bucket.String(),
+					"actualCompletionTokens", resp.Usage.CompletionTokens,
+				)
+			}
+		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
 		p.PluginState.Touch(request.RequestID)
@@ -544,6 +634,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
+			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
 		}
 	}
 }
@@ -564,7 +655,7 @@ func addedTokensKey(endpointID, profileName string) string {
 // still reflected.
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
-func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey string) int64 {
+func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey fwkplugin.DataKey) int64 {
 	if endpoint == nil {
 		return nonNeg(inputTokens)
 	}
@@ -609,16 +700,16 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 	}
 }
 
-// Consumes declares TokenizedPrompt as required so the data-layer DAG orders a
+// Consumes declares TokenizedRequest as required so the data-layer DAG orders a
 // token-producer ahead of this producer and auto-creates one when none is
 // configured; without it the input-token estimate silently reads zero.
-// PrefixCacheMatchInfo is optional — used to discount the already-cached prompt
+// PrefixCacheMatchInfo is optional -- used to discount the already-cached prompt
 // prefix from the prefix producer selected by prefixMatchInfoProducerName
 // (approximate by default, or a precise-prefix-cache producer).
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{},
+			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{},
 		},
 		Optional: map[fwkplugin.DataKey]any{
 			p.prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfo{},

@@ -87,7 +87,7 @@ type PredictedLatency struct {
 // flight and Requests the active request count. Returns false when the
 // attribute is absent (e.g. an endpoint added before the producer injected it).
 func (pl *PredictedLatency) endpointInFlightLoad(endpoint fwksched.Endpoint) (*attrconcurrency.InFlightLoad, bool) {
-	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey.String()); ok {
+	if raw, ok := endpoint.Get(pl.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load, true
 		}
@@ -227,7 +227,10 @@ func (pl *PredictedLatency) readInFlightLoad(endpoint fwksched.Endpoint) inFligh
 }
 
 type Config struct {
-	SamplingMean                       float64       `json:"samplingMean,omitempty"`
+	// Deprecated: no longer used. Mid-stream TPOT predictions were removed;
+	// the value is accepted for config compatibility and ignored.
+	SamplingMean float64 `json:"samplingMean,omitempty"`
+	// Deprecated: no longer used. Accepted for config compatibility and ignored.
 	MaxDecodeTokenSamplesForPrediction int           `json:"maxDecodeTokenSamplesForPrediction,omitempty"`
 	SLOBufferFactor                    float64       `json:"sloBufferFactor,omitempty"`
 	ContextTTL                         time.Duration `json:"contextTTL,omitempty"`
@@ -279,6 +282,9 @@ func PredictedLatencyFactory(name string, rawParameters *json.Decoder, handle pl
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
+	if parameters.SamplingMean != DefaultConfig.SamplingMean || parameters.MaxDecodeTokenSamplesForPrediction != DefaultConfig.MaxDecodeTokenSamplesForPrediction {
+		log.FromContext(handle.Context()).Info("Deprecated: samplingMean and maxDecodeTokenSamplesForPrediction are ignored; mid-stream TPOT predictions were removed")
+	}
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
@@ -293,14 +299,6 @@ func PredictedLatencyFactory(name string, rawParameters *json.Decoder, handle pl
 
 func (c *Config) validate() error {
 	var errs []error
-
-	if c.SamplingMean <= 0 {
-		errs = append(errs, fmt.Errorf("samplingMean must be > 0, got %f", c.SamplingMean))
-	}
-
-	if c.MaxDecodeTokenSamplesForPrediction < 0 {
-		errs = append(errs, fmt.Errorf("maxDecodeTokenSamplesForPrediction must be >= 0, got %d", c.MaxDecodeTokenSamplesForPrediction))
-	}
 
 	if c.SLOBufferFactor <= 0 {
 		errs = append(errs, fmt.Errorf("sloBufferFactor must be > 0, got %f", c.SLOBufferFactor))
@@ -383,8 +381,6 @@ type predictedLatencyCtx struct {
 	predictedTTFT             float64
 	avgTPOT                   float64
 	avgPredictedTPOT          float64
-	decodeTokenSampler        *decodeTokenSampler
-	tpotObservations          []float64
 	predictedTPOTObservations []float64
 
 	inputTokenCount int
@@ -421,7 +417,7 @@ type predictedLatencyCtx struct {
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
 	if request.Body != nil {
-		if tp := request.Body.TokenizedPrompt; tp != nil {
+		if tp := request.Body.TokenizedRequest; tp != nil {
 			inputTokenCount = tp.TokenCount()
 		}
 	}

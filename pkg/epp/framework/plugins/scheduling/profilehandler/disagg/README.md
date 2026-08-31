@@ -6,7 +6,6 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
 
 - [Profile Handlers](#profile-handlers)
   - [DisaggProfileHandler](#disaggprofilehandler)
-  - [PdProfileHandler (Deprecated)](#pdprofilehandler-deprecated)
 - [PreRequest Plugins](#prerequest-plugins)
   - [DisaggHeadersHandler (Deprecated)](#disaggheadershandler-deprecated)
   - [PrefillHeaderHandler (Deprecated)](#prefillheaderhandler-deprecated)
@@ -41,7 +40,7 @@ The handler is invoked repeatedly by the framework until all stages are complete
 
 #### Inputs consumed
 
-- `PrefixCacheMatchInfo` — endpoint attribute from `approx-prefix-cache-producer`, read by the configured prefill decider (e.g. `prefix-based-pd-decider`) when deciding whether to run the prefill stage.
+- `PrefixCacheMatchInfo` — endpoint attribute read by the configured prefill decider (e.g. `prefix-based-pd-decider`) when deciding whether to run the prefill stage. The decider selects which prefix producer it reads, and the handler declares that same key as its data-layer dependency.
 
 #### Configuration
 
@@ -86,15 +85,6 @@ plugins:
 - Without a configured decider, the corresponding stage is disabled for all requests — this is a static decision at startup, not per-request.
 - The names in `deciders.prefill` and `deciders.encode` must match plugin names declared earlier in the same configuration.
 - When using P/D disaggregation, a `PrefixCachePlugin` must be configured in the prefill and decode scheduling profiles.
-
----
-
-### PdProfileHandler (Deprecated)
-
-**Type:** `pd-profile-handler`
-**Interfaces**: `scheduling.ProfileHandler`
-
-> **Deprecated:** Use `disagg-profile-handler` instead.
 
 ---
 
@@ -170,25 +160,27 @@ plugins:
 
 **Type:** `prefix-based-pd-decider`
 
-Decides per-request whether P/D disaggregation should run, based on how much of the prompt is already cached on the selected decode pod.
+Decides per-request whether P/D disaggregation should run, based on prompt length and how much of the prompt is already cached on the selected decode pod.
 
 #### What it does
 
-Compares the uncached portion of the request prompt against a configurable threshold, triggering P/D disaggregation only when the uncached suffix is long enough to justify the overhead.
+Compares the uncached portion of the request prompt against a configurable threshold, triggering P/D disaggregation only when the uncached suffix is long enough to justify the overhead. A separate minimum prompt-length gate can skip short prompts before the prefix cache is even consulted.
 
-1. Read the prompt token count as `len(request.Body.TokenizedPrompt.TokenIDs)`.
-2. Read `PrefixCacheMatchInfo` from the decode endpoint attributes.
-3. Compute uncached suffix length.
-4. Return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
+1. If `nonCachedTokens` is `0`, return false (the decider is disabled).
+2. Read the prompt token count as `request.Body.TokenizedPrompt.TokenCount()`.
+3. If `promptTokens` is set and the prompt is shorter than it, return false.
+4. Read `PrefixCacheMatchInfo` from the decode endpoint attributes.
+5. Compute uncached suffix length.
+6. Return true (disaggregate) if uncached tokens ≥ `nonCachedTokens`.
 
 #### How It Works
 
-The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, populated by `approx-prefix-cache-producer`. If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
+The prompt token count is `request.Body.TokenizedPrompt.TokenCount()`, populated by a `token-producer` — auto-created with the tokenizer-free `estimate` backend when none is configured. `promptTokens` gates on this count directly: prompts shorter than it never disaggregate, regardless of cache state. Prefix cache state is read from the `PrefixCacheMatchInfo` attribute on the decode endpoint, from the prefix producer selected by `prefixMatchInfoProducerName` (the approximate-prefix producer by default). If the attribute is absent or malformed, disaggregation is skipped. Setting `nonCachedTokens: 0` disables the decider entirely (always returns false).
 
 #### Inputs consumed
 
-- `PrefixCacheMatchInfo` — endpoint attribute from `approx-prefix-cache-producer`, read from the decode endpoint.
-- `request.Body.TokenizedPrompt.TokenIDs` — token IDs from a `token-producer` plugin; their count is the prompt token count.
+- `PrefixCacheMatchInfo` — endpoint attribute from the prefix producer named by `prefixMatchInfoProducerName` (approximate by default), read from the decode endpoint.
+- `request.Body.TokenizedPrompt` — token data from a `token-producer` plugin; `TokenCount()` is the prompt token count.
 
 #### Configuration
 
@@ -196,13 +188,18 @@ The prompt token count is `len(request.Body.TokenizedPrompt.TokenIDs)`, populate
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `nonCachedTokens` | `int` | No | `0` | Uncached token threshold above which P/D disaggregation is triggered. `0` disables the decider. |
+| `promptTokens` | `int` | No | `0` | Minimum prompt token count required before disaggregation is considered. Prompts shorter than this never disaggregate. `0` disables this gate. |
+| `prefixMatchInfoProducerName` | `string` | No | `approx-prefix-cache-producer` | Prefix-cache producer instance whose `PrefixCacheMatchInfo` the decider reads. A named producer other than the default must be present in the configuration. |
 
 ##### Example
 ```yaml
 plugins:
+  - type: precise-prefix-cache-producer
   - type: prefix-based-pd-decider
     parameters:
       nonCachedTokens: 512
+      promptTokens: 1024
+      prefixMatchInfoProducerName: precise-prefix-cache-producer
   - type: disagg-profile-handler
     parameters:
       deciders:
@@ -212,6 +209,7 @@ plugins:
 #### Limitations
 
 - `nonCachedTokens: 0` disables disaggregation entirely (the decider always returns false).
+- `promptTokens` gates on total prompt length, not on the uncached suffix; it only ever rules out short prompts, never overrides the `nonCachedTokens` check.
 - A `token-producer` populates `TokenizedPrompt`; when none is configured the framework auto-creates one with the `estimate` backend, so disaggregation works without extra setup.
 - Requires `PrefixCacheMatchInfo` on the decode endpoint; if absent, disaggregation is skipped with an error log.
 

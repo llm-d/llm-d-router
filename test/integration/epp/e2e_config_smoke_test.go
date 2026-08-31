@@ -40,39 +40,6 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
-	"deprecatedPdConfig": `apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- type: prefill-header-handler
-- type: approx-prefix-cache-producer
-  parameters:
-    blockSizeTokens: 16
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: prefill-filter
-- type: decode-filter
-- type: max-score-picker
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
-- type: pd-profile-handler
-  parameters:
-    deciderPluginName: prefix-based-pd-decider
-schedulingProfiles:
-- name: prefill
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`,
 	"pdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -105,6 +72,49 @@ schedulingProfiles:
   - pluginRef: max-score-picker
   - pluginRef: prefix-cache-scorer
     weight: 2
+`,
+	"pdTopologyConfig": `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: approx-prefix-cache-producer
+  parameters:
+    maxPrefixTokensToMatch: 16384
+    lruCapacityPerServer: 31250
+- type: prefix-cache-scorer
+- type: queue-scorer
+- type: prefill-filter
+- type: decode-filter
+- type: max-score-picker
+- type: topology-extractor
+- type: topology-affinity-filter
+- type: topology-affinity-scorer
+- type: disagg-profile-handler
+  parameters:
+    deciders:
+      prefill: prefix-based-pd-decider
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
+schedulingProfiles:
+- name: prefill
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: topology-affinity-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+  - pluginRef: queue-scorer
+    weight: 1
+  - pluginRef: topology-affinity-scorer
+    weight: 1
+- name: decode
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+  - pluginRef: queue-scorer
+    weight: 1
 `,
 	"epdConfig": `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
@@ -178,7 +188,8 @@ plugins:
 - type: endpoint-attribute-filter
   name: gpu-utilization-filter
   parameters:
-    attribute: "GPUUtilization/dcgm-extractor"
+    attribute: "GPUUtilization"
+    producer: "dcgm-extractor"
     onMissing: "Pass"
     fallbackOnEmpty: true
     algorithm:
@@ -189,7 +200,8 @@ plugins:
 - type: endpoint-attribute-scorer
   name: gpu-utilization-scorer
   parameters:
-    attributeKey: "GPUUtilization/dcgm-extractor"
+    attributeKey: "GPUUtilization"
+    producer: "dcgm-extractor"
     algorithm:
       type: "linear_lower_is_better"
       normalization:

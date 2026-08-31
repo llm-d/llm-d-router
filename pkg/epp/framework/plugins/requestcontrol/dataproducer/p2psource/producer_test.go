@@ -44,7 +44,7 @@ func endpoint(p *Producer, name, address string, cachedBlocks int) scheduling.En
 		Address: address,
 		Port:    "8080",
 	}, nil, nil)
-	e.Put(p.prefixMatchDataKey.String(),
+	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
 	return e
 }
@@ -149,7 +149,7 @@ func TestProduce_MetadataNilMax_DoesNotSuppressStash(t *testing.T) {
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	noMD := scheduling.NewEndpoint(nil, nil, nil)
-	noMD.Put(p.prefixMatchDataKey.String(),
+	noMD.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(10, 4, testBlockSize).WithCachedBlockCount(10))
 
 	req := &scheduling.InferenceRequest{RequestID: "req-nil-md"}
@@ -168,7 +168,7 @@ func TestPreRequest_SetsKVCacheSourceHeader(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-hdr", Headers: map[string]string{}}
 	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
 
-	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
+	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
 
 	assert.Equal(t, "10.0.0.2:8080", req.Headers[routing.KVCacheSourceHeader])
 }
@@ -181,7 +181,7 @@ func TestPreRequest_DeltaBelowThreshold_NoHeader(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-low", Headers: map[string]string{}}
 	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 32})
 
-	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
+	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
 
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
 }
@@ -194,7 +194,7 @@ func TestPreRequest_BestIsChosen_NoHeader(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-self", Headers: map[string]string{}}
 	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.1:8080", cachedTokens: 32})
 
-	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2)))
+	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2)))
 
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
 }
@@ -215,7 +215,7 @@ func TestPreRequest_PrefillProfile_BestIsPrefill_NoHeader(t *testing.T) {
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
 		},
 	}
-	p.PreRequest(ctx, req, result)
+	_ = p.PreRequest(ctx, req, result)
 
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
 }
@@ -235,7 +235,7 @@ func TestPreRequest_PrefillProfile_HeaderFromThirdPod(t *testing.T) {
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 1)}},
 		},
 	}
-	p.PreRequest(ctx, req, result)
+	_ = p.PreRequest(ctx, req, result)
 
 	assert.Equal(t, "10.0.0.3:8080", req.Headers[routing.KVCacheSourceHeader])
 }
@@ -251,7 +251,7 @@ func TestPreRequest_DeletesInboundHeader(t *testing.T) {
 		Headers:   map[string]string{routing.KVCacheSourceHeader: "evil:1234"},
 	}
 
-	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0)))
+	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0)))
 
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
 }
@@ -276,7 +276,7 @@ func TestPreRequest_IPv6HeaderBracketed(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-ipv6", Headers: map[string]string{}}
 	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: best, cachedTokens: 48})
 
-	p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "fd00::1", 1)))
+	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "fd00::1", 1)))
 
 	assert.Equal(t, best, req.Headers[routing.KVCacheSourceHeader])
 	// Round-trips through the same validation the sidecar applies.
@@ -314,7 +314,7 @@ func TestPreRequest_ConfiguredPrefillProfileName(t *testing.T) {
 			"P":      {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
 		},
 	}
-	p.PreRequest(ctx, req, result)
+	_ = p.PreRequest(ctx, req, result)
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
 }
 
@@ -338,7 +338,7 @@ func endpointWithLoad(p *Producer, name, address string, cachedBlocks, waiting i
 		Address: address,
 		Port:    "8080",
 	}, &fwkdl.Metrics{WaitingQueueSize: waiting}, nil)
-	e.Put(p.prefixMatchDataKey.String(),
+	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).WithCachedBlockCount(cachedBlocks))
 	return e
 }
@@ -489,4 +489,85 @@ func TestProduce_NilMetrics_NeutralLoad(t *testing.T) {
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
 	require.True(t, ok)
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
+}
+
+// tierEndpoint builds a candidate whose PrefixCacheMatchInfo carries a
+// per-tier cached-block map alongside the unweighted total.
+func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier map[string]int) scheduling.Endpoint {
+	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      k8stypes.NamespacedName{Name: name},
+		Address: address,
+		Port:    "8080",
+	}, nil, nil)
+	e.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).
+			WithCachedBlockCount(cachedBlocks).
+			WithCachedBlocksByTier(byTier))
+	return e
+}
+
+// A GPU-only holder cannot serve a pull and must lose to a CPU-tier holder.
+func TestProduce_GPUOnlySource_NotChosen(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-gpu-only"}
+	eps := []scheduling.Endpoint{
+		tierEndpoint(p, "pod-gpu", "10.0.0.1", 10, map[string]int{"gpu": 10}),
+		tierEndpoint(p, "pod-cpu", "10.0.0.2", 3, map[string]int{"gpu": 3, cpuDeviceTier: 3}),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
+	assert.Equal(t, 3*testBlockSize, best.cachedTokens)
+}
+
+// Speculative entries must not make an endpoint a pull source.
+func TestProduce_SpeculativeOnlySource_NoStash(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-spec"}
+	eps := []scheduling.Endpoint{
+		tierEndpoint(p, "pod-spec", "10.0.0.1", 10,
+			map[string]int{attrprefix.SpeculativeTierKey: 10}),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	_, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	assert.False(t, ok)
+}
+
+// Producers without tier data keep the unweighted count.
+func TestProduce_NoTierData_FallsBackToUnweighted(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-no-tier"}
+	eps := []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 4),
+	}
+	require.NoError(t, p.Produce(ctx, req, eps))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, 4*testBlockSize, best.cachedTokens)
+}
+
+// The computing side of the delta stays tier-blind.
+func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 2 * testBlockSize})
+
+	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
+	computing := tierEndpoint(p, "pod-comp", "10.0.0.2", 5, map[string]int{"gpu": 5})
+
+	req := &scheduling.InferenceRequest{RequestID: "req-comp-tiers"}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
+	_ = p.PreRequest(ctx, req, decodeOnly(computing))
+
+	// source 6 cpu blocks minus computing 5 (gpu, but local) = 1 block < delta.
+	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
 }

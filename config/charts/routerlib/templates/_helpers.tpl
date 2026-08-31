@@ -53,19 +53,14 @@ llm-d.ai/igw-mode: llm-d-router-gateway
 Return the monitoring provider name.
 
 If router.monitoring.provider.name is unset/empty, default to
-prometheusoperator. For backwards compatibility, provider.name=gke still maps
-to gmp when no monitoring provider is explicitly set.
+prometheusoperator.
 */}}
 {{- define "llm-d-router.monitoring.provider.name" -}}
 {{- $monitoring := .Values.router.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := index $mp "name" | default "" -}}
-{{- $gatewayProvider := .Values.provider | default dict -}}
-{{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
 {{- if and (kindIs "string" $mpName) (ne (trim $mpName) "") -}}
 {{- $mpName -}}
-{{- else if eq (lower $gatewayProviderName) "gke" -}}
-gmp
 {{- else -}}
 prometheusoperator
 {{- end -}}
@@ -74,24 +69,17 @@ prometheusoperator
 {{/*
 Return the monitoring provider config object.
 
-When router.monitoring.provider.name is unset/empty, use defaults.
-For backwards compatibility, provider.gke.autopilot is still honored when
-provider.name=gke and no monitoring provider is explicitly set.
+When router.monitoring.provider.name is unset/empty, use the
+prometheusoperator defaults.
 */}}
 {{- define "llm-d-router.monitoring.provider" -}}
 {{- $monitoring := .Values.router.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := include "llm-d-router.monitoring.provider.name" . -}}
-{{- $gatewayProvider := .Values.provider | default dict -}}
-{{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
 {{- $resolved := dict "name" $mpName -}}
 {{- if eq (lower $mpName) "gmp" -}}
   {{- $gmp := index $mp "gmp" | default dict -}}
-  {{- $legacyGke := dict -}}
-  {{- if and (eq (lower $gatewayProviderName) "gke") (index $gatewayProvider "gke") -}}
-    {{- $legacyGke = index $gatewayProvider "gke" -}}
-  {{- end -}}
-  {{- $_ := set $resolved "gmp" (mergeOverwrite (deepCopy $legacyGke) (deepCopy $gmp)) -}}
+  {{- $_ := set $resolved "gmp" (deepCopy $gmp) -}}
 {{- else -}}
   {{- $_ := set $resolved "prometheusoperator" (index $mp "prometheusoperator" | default dict) -}}
 {{- end -}}
@@ -443,13 +431,37 @@ EPP resource validations
 {{- end -}}
 
 {{/*
+Helper to retrieve GKE preferredBackends configuration safely across chart contexts.
+*/}}
+{{- define "llm-d-router.gkePreferredBackends" -}}
+{{- $provider := .Values.provider | default dict -}}
+{{- $gke := index $provider "gke" | default dict -}}
+{{- index $gke "preferredBackends" | default dict | toYaml -}}
+{{- end -}}
+
+{{/*
 EPP generic validations
 */}}
+{{- define "llm-d-router.validations.epp.preferredBackends" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled }}
+  {{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
+  {{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
+  {{- if lt $preferredReplicas 1 }}
+    {{- fail ".Values.provider.gke.preferredBackends.preferredReplicas must be at least 1 when preferredBackends.enabled is true" }}
+  {{- end }}
+  {{- if lt $defaultReplicas 1 }}
+    {{- fail ".Values.provider.gke.preferredBackends.defaultReplicas must be at least 1 when preferredBackends.enabled is true" }}
+  {{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "llm-d-router.validations.epp" -}}
 {{- include "llm-d-router.validations.deprecations" . }}
 {{- include "llm-d-router.validations.epp.resources" . }}
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
 {{- include "llm-d-router.validations.epp.tokenizer" . }}
+{{- include "llm-d-router.validations.epp.preferredBackends" . }}
 {{- end -}}
 
 {{/*

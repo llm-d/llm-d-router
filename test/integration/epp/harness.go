@@ -56,8 +56,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	integration "github.com/llm-d/llm-d-router/test/integration"
-	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // Global State (Initialized in TestMain)
@@ -228,7 +228,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	// Reserve the ext_proc port once, up front: the server serves on this listener, so
 	// the port stays bound for the lifetime of the test and no other process can take
 	// it (issue #1066).
-	lis, err := testutils.ReserveListener()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err, "failed to reserve ext_proc port")
 	t.Cleanup(func() { _ = lis.Close() })
 	grpcPort := lis.Addr().(*net.TCPAddr).Port

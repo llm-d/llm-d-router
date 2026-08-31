@@ -126,12 +126,12 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency so the data-layer DAG orders
+// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
 // is configured.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
 	}
 }
 
@@ -240,7 +240,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 	for _, pod := range pods {
 		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().ID)]
-		pod.Put(p.dk.String(), attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
 	}
 
 	state := &SchedulingContextState{
@@ -255,12 +255,12 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
-func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) {
+func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	// Delete the state to avoid memory leak.
 	defer p.pluginState.Delete(request.RequestID)
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
-		return
+		return nil
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
@@ -275,7 +275,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
-		return
+		return nil
 	}
 
 	// Update indexer asynchronously to avoid blocking the request path.
@@ -296,6 +296,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	return nil
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
@@ -344,8 +345,11 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 	blockSize := p.config.BlockSizeTokens
 	if p.config.AutoTune && len(endpoints) > 0 {
 		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-			if metric := endpoint.GetMetrics().CacheBlockSize; metric > 0 {
-				blockSize = metric
+			m := endpoint.GetMetrics()
+			if pmu := m.CachePrefixMatchUnit; pmu > 0 {
+				blockSize = pmu
+			} else if bs := m.CacheBlockSize; bs > 0 {
+				blockSize = bs
 			}
 		}
 	}

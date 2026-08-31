@@ -148,8 +148,9 @@ func (s *SessionAffinity) Score(ctx context.Context, request *scheduling.Inferen
 	return s.strategy.score(ctx, request, endpoints)
 }
 
-func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	s.strategy.preRequest(ctx, request, schedulingResult)
+	return nil
 }
 
 func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {

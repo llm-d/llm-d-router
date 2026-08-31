@@ -34,7 +34,7 @@ func MultiClusterFactory(name string, params *json.Decoder, handle fwkplugin.Han
 	if err != nil {
 		return nil, err
 	}
-	return &MultiClusterFilter{SessionAffinity: inner.(*SessionAffinity), name: name}, nil
+	return &MultiClusterFilter{SessionAffinity: inner.(*SessionAffinity)}, nil
 }
 
 // MultiClusterFilter is the explicit cluster-scoped session-affinity filter.
@@ -42,10 +42,9 @@ func MultiClusterFactory(name string, params *json.Decoder, handle fwkplugin.Han
 // right cluster-endpoint and this delegates without translation.
 type MultiClusterFilter struct {
 	*SessionAffinity
-	name string
 }
 
 // TypedName reports the multi-cluster type with this instance's name.
 func (f *MultiClusterFilter) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: MultiClusterFilterType, Name: f.name}
+	return fwkplugin.TypedName{Type: MultiClusterFilterType, Name: f.SessionAffinity.TypedName().Name}
 }

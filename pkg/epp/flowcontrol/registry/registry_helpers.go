@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -38,11 +39,14 @@ type priorityBand struct {
 	// It is initialized once at creation via fairnessPolicy.NewState() and exposed via GetPolicyState().
 	policyState any
 
-	// --- State Protected by the registry's mu ---
-
-	// config is the local copy of the band's definition.
-	// It is updated during dynamic scaling events (updateConfig), protected by the registry's mutex.
+	// config is the local copy of the band's definition. It is immutable after the band is published to the
+	// registry; hot-path readers (CapacitySnapshot) rely on this to read capacities lock-free.
 	config PriorityBandConfig
+
+	// stats aggregates the occupancy of this band's queues (see occupancyStats).
+	stats occupancyStats
+
+	// --- State Protected by the registry's mu ---
 
 	// queues holds all managedQueue instances within this band, keyed by their logical ID string.
 	// The priority is implicit from the parent priorityBand.
@@ -50,11 +54,45 @@ type priorityBand struct {
 
 	// priorityBandAccessor is a preallocated flowcontrol.PriorityBandAccessor for this priorityBand
 	priorityBandAccessor *priorityBandAccessor
+
+	// activeQueues indexes the subset of `queues` that currently hold items, keyed by logical ID
+	// (values are *managedQueue). It is maintained by each queue's empty<->non-empty transitions
+	// (serialized per queue under the queue's own mutex) and read lock-free by IterateQueues, which
+	// keeps the dispatch hot path O(active flows) with zero allocation instead of O(registered
+	// flows) with a snapshot. The view is eventually consistent: a queue is always present here by
+	// the time an Add returns, but may linger briefly after draining; readers must tolerate
+	// observing an empty queue.
+	activeQueues sync.Map
+}
+
+// capacityDimension returns this band's current occupancy against its configured limits.
+func (b *priorityBand) capacityDimension() contracts.CapacityDimension {
+	return contracts.CapacityDimension{
+		Len:              uint64(b.stats.len.Load()),
+		ByteSize:         uint64(b.stats.byteSize.Load()),
+		CapacityRequests: b.config.MaxRequests,
+		CapacityBytes:    b.config.MaxBytes,
+	}
+}
+
+// setQueueActivity is the onActiveTransition callback for this band's queues. It runs inside the
+// queue's critical section, so it must remain lock-free (sync.Map only, never the registry mutex).
+// applyAndPropagateLocked invokes it, and applies the stats delta, while the queue mutex is held.
+func (b *priorityBand) setQueueActivity(mq *managedQueue, active bool) {
+	if active {
+		b.activeQueues.Store(mq.key.ID, mq)
+	} else {
+		// Deactivation must be conditional on the entry still belonging to this queue. A cleanup-sweep
+		// worker can drain a queue through a handle resolved before deleteFlow removed it, and a
+		// successor queue may have been registered under the same ID in the interim; an unconditional
+		// delete would hide that live, non-empty successor from IterateQueues.
+		b.activeQueues.CompareAndDelete(mq.key.ID, mq)
+	}
 }
 
 // initPriorityBand constructs the runtime state for a single priority level and registers it within the registry.
 // This is used during registry initialization and by addPriorityBand (dynamic provisioning).
-// The caller MUST hold fr.mu (Write Lock) as this method modifies the orderedPriorityLevels slice.
+// The caller MUST hold fr.mu (Write Lock) as this method republishes the orderedPriorityLevels slice.
 func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 	policyState := bandConfig.FairnessPolicy.NewState(context.Background())
 	band := &priorityBand{
@@ -65,14 +103,18 @@ func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 	}
 	band.priorityBandAccessor = &priorityBandAccessor{registry: fr, band: band}
 	fr.priorityBands.Store(bandConfig.Priority, band)
-	fr.orderedPriorityLevels = append(fr.orderedPriorityLevels, bandConfig.Priority)
-	sort.Slice(fr.orderedPriorityLevels, func(i, j int) bool {
-		return fr.orderedPriorityLevels[i] > fr.orderedPriorityLevels[j]
-	})
+
+	// Copy-on-write: the published slice is shared with lock-free readers and must not be mutated.
+	current := *fr.orderedPriorityLevels.Load()
+	updated := make([]int, 0, len(current)+1)
+	updated = append(append(updated, current...), bandConfig.Priority)
+	sort.Slice(updated, func(i, j int) bool { return updated[i] > updated[j] })
+	fr.orderedPriorityLevels.Store(&updated)
 }
 
 // addPriorityBand dynamically provisions a new priority band.
-// It looks up the definition in fr.config, which must have been updated by the Registry via updateConfig/repartition.
+// It looks up the definition in fr.config, which the caller must already have populated
+// (see provisionPriorityBandLocked).
 // addPriorityBand must be called with the registry mutex acquired for writing
 func (fr *FlowRegistry) addPriorityBand(priority int) {
 	// Idempotency check.
@@ -128,15 +170,11 @@ func (fr *FlowRegistry) PriorityBandAccessor(priority int) (flowcontrol.Priority
 	return band.priorityBandAccessor, nil
 }
 
-// AllOrderedPriorityLevels returns a snapshot of all configured priority levels,
-// sorted in descending order. The returned slice is a copy, safe for the caller to iterate
-// without holding any lock.
+// AllOrderedPriorityLevels returns all configured priority levels, sorted in descending order.
+// The returned slice is the shared, immutable published snapshot: callers MUST treat it as
+// read-only. The read is a single atomic pointer load, with no lock and no allocation.
 func (fr *FlowRegistry) AllOrderedPriorityLevels() []int {
-	fr.mu.RLock()
-	defer fr.mu.RUnlock()
-	result := make([]int, len(fr.orderedPriorityLevels))
-	copy(result, fr.orderedPriorityLevels)
-	return result
+	return *fr.orderedPriorityLevels.Load()
 }
 
 //  --- Internal Administrative/Lifecycle Methods ---
@@ -161,7 +199,7 @@ func (fr *FlowRegistry) synchronizeFlow(
 
 	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.", "flowKey", key)
 
-	mq := newManagedQueue(q, policy, key, fr.logger, fr.propagateStatsDelta)
+	mq := newManagedQueue(q, policy, key, fr.logger, &band.stats, &fr.totals, band.setQueueActivity)
 	band.queues[key.ID] = mq
 }
 
@@ -171,20 +209,22 @@ func (fr *FlowRegistry) deleteFlow(key flowcontrol.FlowKey) {
 	fr.logger.V(logging.DEBUG).Info("Deleting queue instance.", "flowKey", key)
 	if val, ok := fr.priorityBands.Load(key.Priority); ok {
 		band := val.(*priorityBand)
-		// Requests in a queue that are asynchronously finalized (e.g., due to client
-		// stream cancellation or context timeout), they are left in the queue for the
-		// GC process to clean them up, including updating the capacity. Here we remove
-		// a flow queue, potentially with such requests waiting for GC, therefor the
-		// capacity stats are updated here before removing the queue.
+		// Requests that are asynchronously finalized (e.g., due to client stream
+		// cancellation or context timeout) are left in the queue for the cleanup sweep.
+		// A queue deleted here may still hold such items, and the sweep may still hold a
+		// ManagedQueue handle to it (handles are resolved before processing, without
+		// registry locks). Draining through the wrapper both empties the queue and
+		// deducts the stats in one critical section, so a later mutation through a stale
+		// handle observes an empty queue and propagates nothing.
 		if mq, ok := band.queues[key.ID]; ok && mq != nil {
-			// Safe-guard: Deduct any unswept capacity before destroying the queue
-			if mqLen := int64(mq.Len()); mqLen > 0 {
-				fr.logger.V(logging.DEBUG).Info("Deregistering non-empty queue during GC, flushing stats",
-					"flowKey", key, "unsweptCount", mqLen)
-				fr.propagateStatsDelta(key.Priority, -mqLen, -int64(mq.ByteSize()))
+			if mq.Len() > 0 {
+				fr.logger.V(logging.DEBUG).Info("Deregistering non-empty queue during GC, draining unswept items",
+					"flowKey", key, "unsweptCount", mq.Len())
+				mq.Drain()
 			}
 		}
 		delete(band.queues, key.ID)
+		band.activeQueues.Delete(key.ID)
 	}
 }
 
@@ -244,22 +284,16 @@ func (a *priorityBandAccessor) Queue(id string) flowcontrol.FlowQueueAccessor {
 	return mq.FlowQueueAccessor()
 }
 
-// IterateQueues executes the given `callback` for each FlowQueueAccessor in this priority band.
+// IterateQueues executes the given `callback` for each active (non-empty) FlowQueueAccessor in
+// this priority band.
 //
-// To minimize lock contention, this implementation snapshots the queue accessors under a read lock and then executes
-// the callback on the snapshot, outside of the lock. This ensures that a potentially slow policy (the callback) does
-// not block other operations on the registry.
+// It ranges over the band's lock-free active-queue index, so it takes no registry lock and
+// performs no allocation, and its cost scales with the number of flows that currently hold items
+// rather than the number of registered flows. The view is eventually consistent: a queue drained
+// concurrently with iteration may still be visited, so callbacks must tolerate Len() == 0; a
+// queue is guaranteed to be visible once the Add that made it non-empty has returned.
 func (a *priorityBandAccessor) IterateQueues(callback func(queue flowcontrol.FlowQueueAccessor) bool) {
-	a.registry.mu.RLock()
-	accessors := make([]flowcontrol.FlowQueueAccessor, 0, len(a.band.queues))
-	for _, mq := range a.band.queues {
-		accessors = append(accessors, mq.FlowQueueAccessor())
-	}
-	a.registry.mu.RUnlock()
-
-	for _, accessor := range accessors {
-		if !callback(accessor) {
-			return
-		}
-	}
+	a.band.activeQueues.Range(func(_, v any) bool {
+		return callback(v.(*managedQueue).FlowQueueAccessor())
+	})
 }
