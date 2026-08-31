@@ -83,12 +83,8 @@ ContainersReady=True
 and the EPP does not route to it. Once the condition flips to `True`, the
 kubelet sets `Ready=True` and the pod joins the pool on the next reconcile.
 
-This is a **fail-closed** contract, which is what makes readiness gates useful
-for out-of-band lifecycle managers -- checkpoint restorers, warm-up agents, and
-dynamic weight loaders -- that need to hold traffic back until work that the
-container probes cannot observe has finished. Note that a gated pod still shows
-`1/1` in `kubectl get pods`, because that column counts ready *containers*; the
-`Ready` **condition** is the one the EPP reads.
+Note that a gated pod still shows `1/1` in `kubectl get pods`: that column counts
+ready *containers*, while the EPP reads the `Ready` condition.
 
 ---
 

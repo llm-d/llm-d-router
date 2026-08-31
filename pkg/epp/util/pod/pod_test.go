@@ -126,9 +126,6 @@ func TestIsPodReady(t *testing.T) {
 							Type:   corev1.ContainersReady,
 							Status: corev1.ConditionTrue,
 						},
-						// The kubelet ANDs every readiness gate into PodReady, so an
-						// unsatisfied gate holds PodReady at False even though the
-						// containers themselves are ready.
 						{
 							Type:   corev1.PodReady,
 							Status: corev1.ConditionFalse,
