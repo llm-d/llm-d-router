@@ -83,23 +83,19 @@ func (s *LoraAffinityScorer) WithName(name string) *LoraAffinityScorer {
 func (s *LoraAffinityScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 
-	// Assign a score to each endpoint for loading the target adapter.
+	// Score by whether the target adapter has active or waiting requests on each endpoint.
 	for _, endpoint := range endpoints {
 		_, active := endpoint.GetMetrics().ActiveModels[request.TargetModel]
 		_, waiting := endpoint.GetMetrics().WaitingModels[request.TargetModel]
 
-		// Determine the model server's suitability score based on adapter load status and capacity.
 		switch {
-		// Ideal: The adapter is already active on this model server.
+		// Ideal: the adapter is already active on this model server.
 		case active:
 			scores[endpoint] = 1.0
-		// Good: The model server has capacity to load at least one more adapter.
-		case len(endpoint.GetMetrics().ActiveModels)+len(endpoint.GetMetrics().WaitingModels) < endpoint.GetMetrics().MaxActiveModels:
-			scores[endpoint] = 0.8
-		// Moderate: The adapter is already in the queue to be loaded on this model server.
+		// Moderate: the adapter has queued requests on this model server.
 		case waiting:
-			scores[endpoint] = 0.6
-		// Unsuitable: The model server has reached its maximum capacity and cannot load the adapter.
+			scores[endpoint] = 0.8
+		// No signal: the adapter has no request activity on this model server.
 		default:
 			scores[endpoint] = 0.0
 		}

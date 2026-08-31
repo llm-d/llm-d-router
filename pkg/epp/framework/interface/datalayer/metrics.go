@@ -24,10 +24,12 @@ import (
 
 // Metrics holds the latest metrics snapshot scraped from a pod.
 type Metrics struct {
-	// ActiveModels is a set of models(including LoRA adapters) that are currently cached to GPU.
-	ActiveModels  map[string]int
+	// ActiveModels tracks adapters with running requests (not GPU residency).
+	// Idle adapters loaded on GPU but with no in-flight requests do not appear.
+	ActiveModels map[string]int
+	// WaitingModels tracks adapters with queued-but-not-yet-running requests.
 	WaitingModels map[string]int
-	// MaxActiveModels is the maximum number of models that can be loaded to GPU.
+	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
 	MaxActiveModels         int
 	RunningRequestsSize     int
 	WaitingQueueSize        int

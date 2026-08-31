@@ -63,11 +63,11 @@ func TestLoraAffinityScorer(t *testing.T) {
 					}, nil),
 			},
 			expectedScoresEndpoint: map[string]float64{
-				"pod1": 0.6,
+				"pod1": 0.8,
 			},
 		},
 		{
-			name:    "Endpoints have no space for new model",
+			name:    "Target model not active or waiting",
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
@@ -133,8 +133,8 @@ func TestLoraAffinityScorer(t *testing.T) {
 			expectedScoresEndpoint: map[string]float64{
 				"pod1": 1.0,
 				"pod2": 0.8,
-				"pod3": 0.8,
-				"pod4": 0.6,
+				"pod3": 0.0,
+				"pod4": 0.8,
 				"pod5": 0.0,
 			},
 		},
