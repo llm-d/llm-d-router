@@ -266,6 +266,72 @@ func TestExtractorMultiEngine(t *testing.T) {
 	}
 }
 
+func TestBuiltinAtomEngine(t *testing.T) {
+	ctx := context.Background()
+
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, "atom-test", &modelServerExtractorParams{
+		DefaultEngine: "atom",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	gauge := func(v float64) *dto.MetricFamily {
+		return &dto.MetricFamily{
+			Type: dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{
+				{Gauge: &dto.Gauge{Value: ptr.To(v)}},
+			},
+		}
+	}
+
+	data := sourcemetrics.PrometheusMetricMap{
+		"atom:requests_waiting":     gauge(7),
+		"atom:requests_running":     gauge(3),
+		"atom:kv_cache_usage_ratio": gauge(0.25),
+		"atom:cache_config_info": {
+			Type: dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{
+				{
+					Label: []*dto.LabelPair{
+						{Name: proto.String("block_size"), Value: proto.String("16")},
+						{Name: proto.String("num_gpu_blocks"), Value: proto.String("138302")},
+					},
+					Gauge: &dto.Gauge{Value: ptr.To(1.0)},
+				},
+			},
+		},
+	}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels: map[string]string{DefaultEngineTypeLabelKey: "atom"},
+	}, nil)
+
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Payload:  data,
+		Endpoint: ep,
+	}); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	metrics := ep.GetMetrics()
+	if metrics.WaitingQueueSize != 7 {
+		t.Errorf("WaitingQueueSize = %v, want 7", metrics.WaitingQueueSize)
+	}
+	if metrics.RunningRequestsSize != 3 {
+		t.Errorf("RunningRequestsSize = %v, want 3", metrics.RunningRequestsSize)
+	}
+	if metrics.KVCacheUsagePercent != 0.25 {
+		t.Errorf("KVCacheUsagePercent = %v, want 0.25", metrics.KVCacheUsagePercent)
+	}
+	if metrics.CacheBlockSize != 16 {
+		t.Errorf("CacheBlockSize = %v, want 16", metrics.CacheBlockSize)
+	}
+	if metrics.CacheNumBlocks != 138302 {
+		t.Errorf("CacheNumBlocks = %v, want 138302", metrics.CacheNumBlocks)
+	}
+}
+
 func TestBackwardCompatibility(t *testing.T) {
 	ctx := context.Background()
 
@@ -449,6 +515,14 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			},
 			wantErr:      false,
 			checkDefault: "sglang",
+		},
+		{
+			name: "defaultEngine atom",
+			params: map[string]any{
+				"defaultEngine": "atom",
+			},
+			wantErr:      false,
+			checkDefault: "atom",
 		},
 		{
 			name: "defaultEngine vllm explicit",
