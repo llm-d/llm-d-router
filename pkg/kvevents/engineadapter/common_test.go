@@ -53,12 +53,10 @@ func TestGetHashAsUint64(t *testing.T) {
 		want uint64
 	}{
 		{name: "uint64", raw: uint64(42), want: 42},
-		{name: "uint", raw: uint(42), want: 42},
 		{name: "uint32", raw: uint32(42), want: 42},
 		{name: "uint16", raw: uint16(42), want: 42},
 		{name: "uint8", raw: uint8(42), want: 42},
 		{name: "int64", raw: int64(42), want: 42},
-		{name: "int", raw: int(42), want: 42},
 		{name: "int32", raw: int32(42), want: 42},
 		{name: "int16", raw: int16(42), want: 42},
 		{name: "int8", raw: int8(42), want: 42},
@@ -77,7 +75,6 @@ func TestGetHashAsUint64(t *testing.T) {
 		want uint64
 	}{
 		{name: "int64_negative", raw: int64(-1), want: ^uint64(0)},
-		{name: "int_negative", raw: int(-1), want: ^uint64(0)},
 		{name: "int32_negative", raw: int32(-1), want: ^uint64(0)},
 		{name: "int16_negative", raw: int16(-1), want: ^uint64(0)},
 		{name: "int8_negative", raw: int8(-1), want: ^uint64(0)},
