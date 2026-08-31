@@ -11,7 +11,7 @@ A metric's full Prometheus name is `<subsystem>_<name>`. The coordinator uses a 
 
 | Prefix | Scope |
 |---|---|
-| `llm_d_coordinator_` | Canonical, coordinator-wide: request, response, pipeline step and latency, and the remaining coordinator metrics. |
+| `llm_d_coordinator_` | Canonical, coordinator-wide: request, pipeline step and latency, and the remaining coordinator metrics. |
 
 Naming mirrors the EPP request family so PromQL expressions and dashboard panels
 translate between the two components. Where a name matches an EPP metric, the
@@ -25,10 +25,12 @@ translate between the two components. Where a name matches an EPP metric, the
 
 Every metric on this page is exposed on a single `/metrics` endpoint served by the coordinator
 process on the metrics port (default 9090, configurable with `--metrics-port`), separate from the listener
-carrying the inference paths and `/healthz` and `/readyz`.
+carrying the inference paths and `/healthz` and `/readyz`. A non-positive port disables the
+endpoint.
 
-TBD: the registry the endpoint serves and whether it is authenticated. Authenticating it costs RBAC
-for TokenReview and SubjectAccessReview on the coordinator's ServiceAccount.
+The endpoint serves the shared controller-runtime registry, so controller-runtime's process
+collectors appear alongside the coordinator metrics. It is unauthenticated. Authenticating it costs
+RBAC for TokenReview and SubjectAccessReview on the coordinator's ServiceAccount.
 
 ### Other scrape targets
 
@@ -44,24 +46,25 @@ three: what this page does not list is on EPP's endpoint (see [Metrics](metrics.
 
 ## Labels
 
-The `step` and `upstream` labels share most of their values, but measure different boundaries: a step is a pipeline stage, while an upstream is a single outbound call. They diverge where a stage is not one call: the `encode` step fans out one concurrent sub-request per multimodal entry, so a request with six images records one `step="encode"` observation and six `upstream="encode"` observations.
+The `step` and `upstream` labels carry the same values, but measure different boundaries: a step is a pipeline stage, while an upstream is a single outbound call. They diverge where a stage is not one call: the `encode` step fans out one concurrent sub-request per multimodal entry, so a request with six images records one `step="encode"` observation and six `upstream="encode"` observations.
 
 - **`step`**: A stage of the internal pipeline, observed once per request per stage. Covers local work and all outbound calls made by that stage. The label value is the step's registered `Name()` (see `pipeline.Register`), so its cardinality is bounded by the set of registered pipeline steps. Values in the built-in registry: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. See [Coordinator Architecture](coordinator_architecture.md).
-- **`upstream`**: A single outbound call, whatever its destination. Values: `render`, `media-fetch`, `encode`, `prefill`, `conditional-decode`, `decode`. A step that gains an outbound call gains a value here.
+- **`upstream`**: A single outbound call, whatever its destination. Values: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. A step that gains an outbound call gains a value here.
 - **`path`**: The sequence of disaggregation phases a request actually executed. Values: `decode-only`, `prefill-decode`, `encode-prefill-decode`. `encode-decode` is intentionally unreachable because encode implies prefill.
 
 ## Error classes
 
-The `error_code` label on `request_error_total` and `step_errors_total` uses four values:
+The `error_code` label on `request_error_total` and `step_errors_total` uses five values:
 
 - **`bad_request`**: Client-side errors (e.g., malformed body).
 - **`upstream_4xx`**: 4xx errors from upstream (e.g., render, prefill, encode).
 - **`upstream_5xx`**: 5xx errors from upstream.
-- **`internal`**: All other coordinator-internal faults.
+- **`upstream_transport`**: The round trip failed before a response arrived (connection refused, timeout, TCP reset), so no status code was received.
+- **`internal`**: All other coordinator-internal faults. Not used for reachability failures, which are `upstream_transport`.
 
 **Key behaviors:**
 - The conditional-decode probe's HTTP 412 (the worker declined to serve it) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
-- `upstream_4xx` and `upstream_5xx` are recorded for every step that calls out, including `decode` and `conditional-decode`: their reverse proxy captures the upstream status in `ModifyResponse` and transport failures in `ErrorHandler`, and both steps translate a 4xx/5xx or transport error into an `UpstreamStreamedError` before any bytes are forwarded. What stays uncountable is a failure that surfaces after streaming has begun, since the 200 and a partial body are already on the wire.
+- `upstream_4xx`, `upstream_5xx` and `upstream_transport` are recorded for every step that calls out, including `decode` and `conditional-decode`: their reverse proxy captures the upstream status in `ModifyResponse` and transport failures in `ErrorHandler`, and both steps translate a 4xx/5xx or transport error into an `UpstreamStreamedError` before any bytes are forwarded. A transport failure carries no status code, so it classifies as `upstream_transport` instead of by status band. What stays uncountable is a failure that surfaces after streaming has begun, since the 200 and a partial body are already on the wire.
 
 ## Metrics catalog
 
@@ -108,7 +111,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 
 | Name | Type | Notes |
 |---|---|---|
-| `upstream_request_total` | Counter | Outbound calls, one per call (encode contributes one per image, media-fetch one per URL). |
+| `upstream_request_total` | Counter | Outbound calls, one per call (encode contributes one per image, replace-media-urls one per URL). |
 | `upstream_request_duration_seconds` | Histogram | Latency of one call; `GeneralLatencyBuckets` (5 ms to 1 h). |
 
 **Key details:**
@@ -123,11 +126,12 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 *   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator.
 
 #### `conditional_decode_probes_total` (Counter)
-*   **Labels:** `result` (`served`, `deferred`, or `error`)
+*   **Labels:** `result` (`served`, `deferred`, `error`, or `transport_error`)
 *   **Description:** Counts conditional-decode probes by the worker's answer. The coordinator sees the status code, not the reason behind it.
     *   `served`: The worker handled the request itself, whether because the prompt was cached or too short to disaggregate. The pipeline stops early (`decode-only`).
     *   `deferred`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
-    *   `error`: Any other 4xx/5xx status or a transport failure on the probe. The step then returns an `UpstreamStreamedError` and the request is classified in the `upstream_4xx`/`upstream_5xx`/`internal` error buckets.
+    *   `error`: Any other 4xx/5xx status. The step returns an `UpstreamStreamedError` carrying that status, and the request is classified as `upstream_4xx` or `upstream_5xx`.
+    *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an `UpstreamStreamedError` with no status code, and the request is classified as `upstream_transport`.
 *   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
 
 ## Relationship to EPP metrics
@@ -165,11 +169,12 @@ Neither the coordinator nor EPP tracks per-request image count or size. Image co
 
 ## Cardinality
 
-`model_name` labels every request-family metric and `execution_path_total` — every metric that
-carries `model_name` — and the handler takes it straight from the request body without validation.
-Each distinct value creates its own set of series, and a histogram multiplies that by its bucket
-count, so a client looping over invented model names grows the coordinator's memory without bound.
-This is reachable by any client, and it is a mitigation the implementation has to carry.
+`model_name` labels every request-family metric and `execution_path_total`, which together are
+every metric that carries it. The handler takes the value straight from the request body without
+validation. Each distinct value creates its own set of series, and a histogram multiplies that by
+its bucket count, so a client looping over invented model names grows the coordinator's memory
+without bound. This is reachable by any client, and it is a mitigation the implementation has to
+carry.
 
 Capping the distinct values is the approach that fits: `model_name` is capped at 1000 over the
 process lifetime and further values are reported as `other`. The bounded-label helper lives in
