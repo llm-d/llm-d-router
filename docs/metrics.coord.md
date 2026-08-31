@@ -46,9 +46,9 @@ three: what this page does not list is on EPP's endpoint (see [Metrics](metrics.
 
 The `step` and `upstream` labels share most of their values, but measure different boundaries: a step is a pipeline stage, while an upstream is a single outbound call. They diverge where a stage is not one call: the `encode` step fans out one concurrent sub-request per multimodal entry, so a request with six images records one `step="encode"` observation and six `upstream="encode"` observations.
 
-- **`step`**: A stage of the internal pipeline, observed once per request per stage. Covers local work and all outbound calls made by that stage. Values: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. See [Coordinator Architecture](coordinator_architecture.md).
+- **`step`**: A stage of the internal pipeline, observed once per request per stage. Covers local work and all outbound calls made by that stage. The label value is the step's registered `Name()` (see `pipeline.Register`), so its cardinality is bounded by the set of registered pipeline steps. Values in the built-in registry: `render`, `replace-media-urls`, `encode`, `prefill`, `conditional-decode`, `decode`. See [Coordinator Architecture](coordinator_architecture.md).
 - **`upstream`**: A single outbound call, whatever its destination. Values: `render`, `media-fetch`, `encode`, `prefill`, `conditional-decode`, `decode`. A step that gains an outbound call gains a value here.
-- **`decision_type`**: The sequence of disaggregation phases a request actually executed. Values: `decode-only`, `prefill-decode`, `encode-prefill-decode`.
+- **`path`**: The sequence of disaggregation phases a request actually executed. Values: `decode-only`, `prefill-decode`, `encode-prefill-decode`. `encode-decode` is intentionally unreachable because encode implies prefill.
 
 ## Error classes
 
@@ -61,7 +61,7 @@ The `error_code` label on `request_error_total` and `step_errors_total` uses fou
 
 **Key behaviors:**
 - The conditional-decode probe's HTTP 412 (the worker declined to serve it) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
-- `upstream_4xx` and `upstream_5xx` are recorded for the `render`, `prefill`, and `encode` steps, which read the upstream status before continuing. The `decode` and `conditional-decode` steps stream the upstream response straight to the client, and today only the conditional-decode probe inspects its status (to detect the 412 miss), so a decode-phase status error reaches the client uncounted. The status is available to both: it can be read in the reverse proxy's `ModifyResponse` hook before any bytes are forwarded. What stays uncountable is a failure that occurs after streaming has begun, since the 200 and a partial body are already on the wire.
+- `upstream_4xx` and `upstream_5xx` are recorded for every step that calls out, including `decode` and `conditional-decode`: their reverse proxy captures the upstream status in `ModifyResponse` and transport failures in `ErrorHandler`, and both steps translate a 4xx/5xx or transport error into an `UpstreamStreamedError` before any bytes are forwarded. What stays uncountable is a failure that surfaces after streaming has begun, since the 200 and a partial body are already on the wire.
 
 ## Metrics catalog
 
@@ -80,9 +80,9 @@ error, 413, invalid JSON) count as `bad_request` with `model_name=unknown`.
 |---|---|---|
 | `request_total` | Counter | Every inbound client request, including malformed ones. |
 | `request_error_total` | Counter | Failed requests; adds label `error_code`. |
-| `request_duration_seconds` | Histogram | End-to-end request latency. |
-| `request_size_bytes` | Histogram | Request body size. |
-| `response_size_bytes` | Histogram | Bytes streamed to the client, measured by a counting `ResponseWriter` wrapper in the handler rather than by parsing the body. |
+| `request_duration_seconds` | Histogram | End-to-end request latency; `GeneralLatencyBuckets` (5 ms to 1 h). |
+| `request_size_bytes` | Histogram | Request body size; `RequestSizeBuckets` (64 B to 1 GiB, powers of two). |
+| `request_input_tokens` | Histogram | Prompt token count, recorded after the render step; `TokenCountBuckets` (1 to ~1 M). |
 | `request_running` | Gauge | Requests in flight. |
 
 ### Pipeline step family
@@ -93,7 +93,7 @@ Recorded by the pipeline executor, which brackets every step it runs. This famil
 
 | Name | Type | Notes |
 |---|---|---|
-| `step_duration_seconds` | Histogram | Per-step latency. |
+| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). |
 | `step_errors_total` | Counter | Step failures; adds label `error_code`. |
 | `step_running` | Gauge | Requests currently executing the step. Saturation rather than latency: `decode` stays in flight for the whole stream, so its value is the number of active streams. |
 
@@ -109,45 +109,42 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 | Name | Type | Notes |
 |---|---|---|
 | `upstream_request_total` | Counter | Outbound calls, one per call (encode contributes one per image, media-fetch one per URL). |
-| `upstream_request_duration_seconds` | Histogram | Latency of one call. |
+| `upstream_request_duration_seconds` | Histogram | Latency of one call; `GeneralLatencyBuckets` (5 ms to 1 h). |
 
 **Key details:**
 *   **Fan-out:** A single client request can result in multiple outbound calls (e.g., three image fetches, one conditional-decode probe, three encode calls, one prefill, one decode). For the fan-out upstreams this is the only per-call latency available, since the step duration covers the whole concurrent batch.
 *   **No `upstream_request_error_total`:** A failed call aborts its step and is already counted by `step_errors_total`.
 *   **Conditional-decode:** The probe gets its own value rather than counting as `decode`, keeping fan-out ratios accurate.
 
-### Disaggregation decision and conditional decode
+### Execution path and conditional decode
 
-#### `disagg_decision_total` (Counter)
-*   **Labels:** `model_name`, `decision_type` (`decode-only`, `prefill-decode`, `encode-prefill-decode`)
-*   **Description:** Records which phases actually ran for a request. Unlike EPP, it lacks `encode-decode` because encode always implies prefill in the coordinator.
+#### `execution_path_total` (Counter)
+*   **Labels:** `model_name`, `path` (`decode-only`, `prefill-decode`, `encode-prefill-decode`)
+*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator.
 
 #### `conditional_decode_probes_total` (Counter)
-*   **Labels:** `result` (`served` or `deferred`)
+*   **Labels:** `result` (`served`, `deferred`, or `error`)
 *   **Description:** Counts conditional-decode probes by the worker's answer. The coordinator sees the status code, not the reason behind it.
     *   `served`: The worker handled the request itself, whether because the prompt was cached or too short to disaggregate. The pipeline stops early (`decode-only`).
     *   `deferred`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
-*   **Note:** Not redundant with `disagg_decision_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
+    *   `error`: Any other 4xx/5xx status or a transport failure on the probe. The step then returns an `UpstreamStreamedError` and the request is classified in the `upstream_4xx`/`upstream_5xx`/`internal` error buckets.
+*   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
 
 ## Relationship to EPP metrics
 
 | Coordinator metric | EPP counterpart | Difference |
 |---|---|---|
 | Request family (`llm_d_coordinator_request_total`, etc.) | `llm_d_epp_*` (same names) | Coordinator counts single client requests at entry; EPP counts every sub-request reaching the gateway. EPP adds flow-control labels (`fairness_id`, `priority`). |
-| `llm_d_coordinator_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Coordinator counts phases *executed*; EPP counts routing decisions *made* and adds plugin labels. |
+| `llm_d_coordinator_execution_path_total` | `llm_d_epp_disagg_decision_total` | Coordinator observes the phases that actually ran on the client request; EPP records the routing decision that was made and adds plugin labels. |
 | `llm_d_coordinator_step_*`, `llm_d_coordinator_upstream_request_*`, `llm_d_coordinator_conditional_decode_probes_total` | None | Unique to coordinator. |
 
 **EPP-only metrics:** Scheduling, flow control, and pool aggregates have no coordinator counterpart. EPP's token counts and TTFT do, but they are per leg: the same prompt reaches EPP on more than one leg, and decode-leg TTFT starts after render, encode, and prefill have finished, so neither describes a client request. Only the coordinator sees a client request as one request. See [Deliberate omissions](#deliberate-omissions) for what it could report and why it does not today.
 
 ## Deliberate omissions
 
-### Token counts
+### Output and cached token counts
 
-The coordinator emits no token-count metrics. Output and cached counts live in the vLLM `usage` block, and reading it means parsing the streamed SSE response, which the decode step does not do: it proxies bytes straight to the client, and `response_size_bytes` is the byte-level stand-in.
-
-Input tokens are a different case. The renderer returns the token IDs, so the count is already in hand after render, with no response parsing and no dependency on EPP.
-
-*Future candidate:* `request_input_tokens` (Histogram, after render). It is the per-client-request prompt size, which EPP cannot report from its per-leg view, and it correlates prompt size with encode fan-out without a cross-component join.
+The coordinator emits no output or cached token-count metrics. Those values live in the vLLM `usage` block, and reading them means parsing the streamed SSE response, which the decode step does not do: it proxies bytes straight to the client. Input tokens are recorded (see [`request_input_tokens`](#request-family)): the renderer returns the token IDs, so the count is in hand after render, with no response parsing and no dependency on EPP.
 
 ### Time to first token
 
@@ -168,17 +165,20 @@ Neither the coordinator nor EPP tracks per-request image count or size. Image co
 
 ## Cardinality
 
-`model_name` labels every request-family metric, three of them histograms, and the handler takes it
-straight from the request body without validation. Each distinct value creates its own set of series,
-and a histogram multiplies that by its bucket count, so a client looping over invented model names
-grows the coordinator's memory without bound. This is reachable by any client, and it is a mitigation
-the implementation has to carry.
+`model_name` labels every request-family metric and `execution_path_total` — every metric that
+carries `model_name` — and the handler takes it straight from the request body without validation.
+Each distinct value creates its own set of series, and a histogram multiplies that by its bucket
+count, so a client looping over invented model names grows the coordinator's memory without bound.
+This is reachable by any client, and it is a mitigation the implementation has to carry.
 
-Capping the distinct values is the approach that fits: EPP caps `model_name` at 1000 over the process
-lifetime and reports further values as `other`, and matching that keeps the two components
-consistent. An allowlist has no source of truth here, since the coordinator's config carries no model
-list and the coordinator is otherwise model-agnostic. The overflow value must not be `unknown`, which
-already means the request carried no model at all.
+Capping the distinct values is the approach that fits: `model_name` is capped at 1000 over the
+process lifetime and further values are reported as `other`. The bounded-label helper lives in
+`pkg/common/observability/metrics/cardinality.go` (`BoundedLabel`, `OverflowValue = "other"`) and is
+instantiated with the same cap by both `pkg/coordinator/metrics/cardinality.go` and
+`pkg/epp/metrics/cardinality.go`, so the two components share one guard. An allowlist has no source
+of truth here, since the coordinator's config carries no model list and the coordinator is otherwise
+model-agnostic. The overflow value must not be `unknown`, which already means the request carried no
+model at all.
 
 ## Related documentation
 
