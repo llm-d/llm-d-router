@@ -127,10 +127,16 @@ func (p *SchedulerProfile) String() string {
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
-		// Filters draining a non-empty candidate set means the pool is busy, not
-		// broken: an empty pool is rejected in the director before scheduling
-		// runs. Report it with the same status and drop-reason vocabulary as a
-		// flow control capacity rejection.
+		eligibleEndpoints, hasEligibilityFilters := p.runEndpointEligibilityFilters(ctx, request, candidateEndpoints)
+		if hasEligibilityFilters && len(eligibleEndpoints) == 0 {
+			return nil, errcommon.Error{
+				Code:    errcommon.ServiceUnavailable,
+				Msg:     "no eligible endpoints available for the given request",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+			}
+		}
+		// A drain not explained by endpoint eligibility uses the same status and
+		// drop reason as a flow control capacity rejection.
 		return nil, errcommon.Error{
 			Code:    errcommon.ResourceExhausted,
 			Msg:     "no endpoints available for the given request",
@@ -198,6 +204,45 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	}
 
 	return filteredEndpoints
+}
+
+func (p *SchedulerProfile) runEndpointEligibilityFilters(ctx context.Context, request *fwksched.InferenceRequest,
+	endpoints []fwksched.Endpoint,
+) ([]fwksched.Endpoint, bool) {
+	logger := log.FromContext(ctx)
+	eligibleEndpoints := endpoints
+	hasEligibilityFilters := false
+
+	for _, filter := range p.filters {
+		eligibilityFilter, ok := filter.(fwksched.EndpointEligibilityFilter)
+		if !ok {
+			continue
+		}
+		hasEligibilityFilters = true
+		scoped, _ := datalayer.Scope(logger, filterExtensionPoint, filter, endpoints)
+		matchingEndpoints := datalayer.Unscope(eligibilityFilter.EligibleEndpoints(ctx, request, scoped))
+		eligibleEndpoints = intersectEndpoints(eligibleEndpoints, matchingEndpoints)
+		if len(eligibleEndpoints) == 0 {
+			break
+		}
+	}
+
+	return eligibleEndpoints, hasEligibilityFilters
+}
+
+func intersectEndpoints(endpoints, matchingEndpoints []fwksched.Endpoint) []fwksched.Endpoint {
+	matches := make(map[fwksched.Endpoint]struct{}, len(matchingEndpoints))
+	for _, endpoint := range matchingEndpoints {
+		matches[endpoint] = struct{}{}
+	}
+
+	intersection := make([]fwksched.Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if _, ok := matches[endpoint]; ok {
+			intersection = append(intersection, endpoint)
+		}
+	}
+	return intersection
 }
 
 func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {

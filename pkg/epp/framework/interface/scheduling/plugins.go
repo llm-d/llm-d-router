@@ -61,6 +61,17 @@ type Filter interface {
 	Filter(ctx context.Context, request *InferenceRequest, pods []Endpoint) []Endpoint
 }
 
+// EndpointEligibilityFilter identifies stable endpoint constraints rather than
+// transient capacity constraints. EligibleEndpoints must return a subset of the
+// supplied endpoints without side effects. It may only read request and endpoint
+// state that remains unchanged while the filter chain runs. The scheduler calls
+// it with the original candidates after the complete filter chain returns no
+// endpoint and intersects the results from all eligibility filters.
+type EndpointEligibilityFilter interface {
+	Filter
+	EligibleEndpoints(ctx context.Context, request *InferenceRequest, endpoints []Endpoint) []Endpoint
+}
+
 // Scorer defines the interface for scoring a list of pods based on context.
 // Scorers must score pods with a value within the range of [0,1] where 1 is the highest score.
 // If a scorer returns value greater than 1, it will be treated as score 1.

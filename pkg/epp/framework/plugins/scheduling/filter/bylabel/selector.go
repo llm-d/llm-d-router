@@ -26,6 +26,7 @@ const (
 
 // compile-time type assertion
 var _ scheduling.Filter = &Selector{}
+var _ scheduling.EndpointEligibilityFilter = &Selector{}
 
 // LabelSelectorFilterFactory is an alias for SelectorFactory using the canonical name.
 var LabelSelectorFilterFactory = SelectorFactory
@@ -89,6 +90,15 @@ func (blf *Selector) TypedName() plugin.TypedName {
 
 // Filter filters out all endpoints that do not satisfy the label selector
 func (blf *Selector) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	return blf.eligibleEndpoints(endpoints)
+}
+
+// EligibleEndpoints returns endpoints satisfying the configured selector.
+func (blf *Selector) EligibleEndpoints(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	return blf.eligibleEndpoints(endpoints)
+}
+
+func (blf *Selector) eligibleEndpoints(endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filtered := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {

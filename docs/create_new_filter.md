@@ -35,6 +35,17 @@ type Filter interface {
 }
 ```
 
+Filters that enforce stable endpoint constraints, such as labels or model capabilities, may also implement `EndpointEligibilityFilter`:
+
+```go
+type EndpointEligibilityFilter interface {
+    Filter
+    EligibleEndpoints(ctx context.Context, request *InferenceRequest, endpoints []Endpoint) []Endpoint
+}
+```
+
+When the complete filter chain returns no endpoint, the scheduler calls each `EligibleEndpoints` method with the original candidate set and intersects the results. An empty intersection is reported as `503/rejected-no-endpoints`; otherwise the result remains `429/rejected-saturated`. The method must return a subset of the supplied endpoints without side effects. It may only read request and endpoint state that remains unchanged while the filter chain runs. Capacity, load, and preference filters should not implement this interface.
+
 Key types used in the filter signature:
 - `scheduling.InferenceRequest` — parsed request with model, body, headers, and objectives
 - `scheduling.Endpoint` — candidate endpoint interface exposing metadata (including labels) and metrics
@@ -82,6 +93,7 @@ const (
 )
 
 var _ scheduling.Filter = &Selector{}
+var _ scheduling.EndpointEligibilityFilter = &Selector{}
 
 // Selector filters out endpoints that do not match its label selector criteria.
 type Selector struct {
@@ -90,10 +102,7 @@ type Selector struct {
 }
 ```
 
-> Note the compile-time interface check `var _ scheduling.Filter = &Selector{}`.
- This asserts at compile time that `Selector` implements the `scheduling.Filter`
- interface and is useful for catching errors early, especially when refactoring
- (e.g., interface methods or signatures change).
+> The compile-time interface checks assert that `Selector` implements both scheduling interfaces.
 
 ### Factory function
 
@@ -131,6 +140,7 @@ func NewSelector(name string, selector *metav1.LabelSelector) (*Selector, error)
 Next, we define the required interface methods:
 - `TypedName()` from `plugin.Plugin`
 - `Filter()` from `scheduling.Filter`
+- `EligibleEndpoints()` from `scheduling.EndpointEligibilityFilter`
 
 ```go
 func (blf *Selector) TypedName() plugin.TypedName {
@@ -138,6 +148,14 @@ func (blf *Selector) TypedName() plugin.TypedName {
 }
 
 func (blf *Selector) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+    return blf.eligibleEndpoints(endpoints)
+}
+
+func (blf *Selector) EligibleEndpoints(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+    return blf.eligibleEndpoints(endpoints)
+}
+
+func (blf *Selector) eligibleEndpoints(endpoints []scheduling.Endpoint) []scheduling.Endpoint {
     filtered := []scheduling.Endpoint{}
 
     for _, endpoint := range endpoints {

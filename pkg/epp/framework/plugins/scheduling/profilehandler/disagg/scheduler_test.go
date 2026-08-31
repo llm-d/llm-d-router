@@ -2,6 +2,7 @@ package disagg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -12,6 +13,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -110,12 +112,14 @@ func TestPDSchedule(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		req      *fwksched.InferenceRequest
-		input    []fwksched.Endpoint
-		wantRes  *fwksched.SchedulingResult
-		wantRes2 *fwksched.SchedulingResult // a subsequent call to check prefix cache and how it affects PD
-		err      bool
+		name              string
+		req               *fwksched.InferenceRequest
+		input             []fwksched.Endpoint
+		wantRes           *fwksched.SchedulingResult
+		wantRes2          *fwksched.SchedulingResult // a subsequent call to check prefix cache and how it affects PD
+		err               bool
+		wantErrCode       string
+		wantDroppedReason errcommon.RequestDroppedReason
 	}{
 		{
 			name: "no candidate endpoints",
@@ -137,8 +141,10 @@ func TestPDSchedule(t *testing.T) {
 			// The long, uncached prompt makes the decider pick the prefill profile,
 			// but no Prefill-role endpoint is present: the request must fail rather
 			// than silently complete decode-only.
-			input: []fwksched.Endpoint{endpoint2},
-			err:   true,
+			input:             []fwksched.Endpoint{endpoint2},
+			err:               true,
+			wantErrCode:       errcommon.ServiceUnavailable,
+			wantDroppedReason: errcommon.RequestDroppedReasonNoEndpoints,
 		},
 		{
 			name: "one prefill endpoint, long prompt",
@@ -148,8 +154,10 @@ func TestPDSchedule(t *testing.T) {
 				Body:        completionsBody("12345678901"),
 			},
 			// no Decode endpoint
-			input: []fwksched.Endpoint{endpoint1},
-			err:   true,
+			input:             []fwksched.Endpoint{endpoint1},
+			err:               true,
+			wantErrCode:       errcommon.ServiceUnavailable,
+			wantDroppedReason: errcommon.RequestDroppedReasonNoEndpoints,
 		},
 		{
 			name: "1P1D - long prompt",
@@ -263,6 +271,14 @@ func TestPDSchedule(t *testing.T) {
 
 			if test.err != (err != nil) {
 				t.Errorf("Unexpected error, got %v, want %v", err, test.err)
+			}
+			if test.wantErrCode != "" {
+				var typedErr errcommon.Error
+				if !errors.As(err, &typedErr) {
+					t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
+				}
+				assert.Equal(t, test.wantErrCode, typedErr.Code)
+				assert.Equal(t, string(test.wantDroppedReason), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 			}
 
 			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
