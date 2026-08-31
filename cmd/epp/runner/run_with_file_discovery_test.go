@@ -197,7 +197,7 @@ dataLayer:
 	syncer, ok := r.PluginHandle.Plugin("local-syncer").(fwkdl.CrossReplicaSyncer)
 	require.True(t, ok)
 	require.Eventually(t, func() bool {
-		_, found, err := syncer.Get(ctx, fwkdl.StateKey("inflight:inflight-load-producer"), "test-ns/stub", nil)
+		_, found, err := syncer.Get(ctx, fwkdl.StateKey("inflight:inflight-load-producer"), "test-ns/stub")
 		return err == nil && found
 	}, 2*time.Second, 10*time.Millisecond, "file-discovery endpoints should publish cross-replica state")
 

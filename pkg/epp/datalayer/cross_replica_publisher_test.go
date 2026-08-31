@@ -39,29 +39,36 @@ type setCall struct {
 	key        fwkdl.StateKey
 	endpointID string
 	value      any
+	aggregate  func([]any) any
 }
 
 type fakeSyncer struct {
-	mu   sync.Mutex
-	sets []setCall
+	mu      sync.Mutex
+	sets    []setCall
+	deletes []setCall
 }
 
 func (s *fakeSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "fake-syncer", Name: "fake-syncer"}
 }
 
-func (s *fakeSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID string, value any) error {
+func (s *fakeSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sets = append(s.sets, setCall{key: key, endpointID: endpointID, value: value})
+	s.sets = append(s.sets, setCall{key: key, endpointID: endpointID, value: value, aggregate: aggregate})
 	return nil
 }
 
-func (s *fakeSyncer) Get(context.Context, fwkdl.StateKey, string, func([]any) any) (any, bool, error) {
+func (s *fakeSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
 	return nil, false, nil
 }
 
-func (s *fakeSyncer) Delete(context.Context, fwkdl.StateKey, string) error { return nil }
+func (s *fakeSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletes = append(s.deletes, setCall{key: key, endpointID: endpointID})
+	return nil
+}
 
 // fakeContributor is a Plugin + CrossReplicaContributor whose supplied value
 // echoes the endpoint ID, so tests can assert routing to the right key.
@@ -75,6 +82,18 @@ type fakeEndpointContributor struct {
 }
 
 func (fakeEndpointContributor) Extract(context.Context, fwkdl.EndpointEvent) error {
+	return nil
+}
+
+type callbackEndpointContributor struct {
+	fakeContributor
+	onDelete func()
+}
+
+func (c callbackEndpointContributor) Extract(_ context.Context, event fwkdl.EndpointEvent) error {
+	if event.Type == fwkdl.EventDelete && c.onDelete != nil {
+		c.onDelete()
+	}
 	return nil
 }
 
@@ -92,13 +111,33 @@ type deadlineSyncer struct {
 	deadlineObserved chan bool
 }
 
-func (s *deadlineSyncer) Set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any) error {
+type parallelSyncer struct {
+	fakeSyncer
+	started chan setCall
+	release chan struct{}
+}
+
+func (s *deadlineSyncer) Set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	_, ok := ctx.Deadline()
 	select {
 	case s.deadlineObserved <- ok:
 	default:
 	}
-	return s.fakeSyncer.Set(ctx, key, endpointID, value)
+	return s.fakeSyncer.Set(ctx, key, endpointID, value, aggregate)
+}
+
+func (s *parallelSyncer) Set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
+	select {
+	case s.started <- setCall{key: key, endpointID: endpointID, value: value}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.fakeSyncer.Set(ctx, key, endpointID, value, aggregate)
 }
 
 func newBlockingSyncer() *blockingSyncer {
@@ -113,7 +152,7 @@ func (s *blockingSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "blocking-syncer", Name: "blocking-syncer"}
 }
 
-func (s *blockingSyncer) Set(_ context.Context, _ fwkdl.StateKey, endpointID string, value any) error {
+func (s *blockingSyncer) Set(_ context.Context, _ fwkdl.StateKey, endpointID string, value any, _ func([]any) any) error {
 	s.startOnce.Do(func() { close(s.setStarted) })
 	<-s.allowSet
 	s.mu.Lock()
@@ -123,7 +162,7 @@ func (s *blockingSyncer) Set(_ context.Context, _ fwkdl.StateKey, endpointID str
 	return nil
 }
 
-func (s *blockingSyncer) Get(_ context.Context, _ fwkdl.StateKey, endpointID string, _ func([]any) any) (any, bool, error) {
+func (s *blockingSyncer) Get(_ context.Context, _ fwkdl.StateKey, endpointID string) (any, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	value, ok := s.state[endpointID]
@@ -149,6 +188,7 @@ func (c fakeContributor) CrossReplicaState() fwkdl.CrossReplicaSpec {
 		Supply: func(id string) func() fwkdl.Cloneable {
 			return func() fwkdl.Cloneable { return fakeCloneable{id: id} }
 		},
+		Aggregate: func(values []any) any { return len(values) },
 	}
 }
 
@@ -172,13 +212,16 @@ func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {
 		syncer:       syncer,
 		contributors: []fwkdl.CrossReplicaContributor{fakeContributor{key: "inflight:test"}},
 	}
+	endpointID := types.NamespacedName{Namespace: "ns", Name: "ep-a"}
+	require.True(t, pub.RegisterEndpoint(endpointID))
 
-	pub.publish(context.Background(), "ns/ep-a")
+	pub.publish(context.Background(), endpointID)
 
 	require.Len(t, syncer.sets, 1)
 	assert.Equal(t, fwkdl.StateKey("inflight:test"), syncer.sets[0].key)
 	assert.Equal(t, "ns/ep-a", syncer.sets[0].endpointID)
 	assert.Equal(t, fakeCloneable{id: "ns/ep-a"}, syncer.sets[0].value)
+	assert.Equal(t, 2, syncer.sets[0].aggregate([]any{"a", "b"}))
 }
 
 func TestCrossReplicaPublisher_SkipsSyncDisabled(t *testing.T) {
@@ -236,6 +279,89 @@ func TestCrossReplicaPublisher_PublishesAllEndpoints(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond, "every registered endpoint should be published")
 }
 
+func TestCrossReplicaPublisher_PublishesContributorsConcurrently(t *testing.T) {
+	syncer := &parallelSyncer{
+		started: make(chan setCall, 2),
+		release: make(chan struct{}),
+	}
+	pub := &crossReplicaPublisher{
+		syncer: syncer,
+		contributors: []fwkdl.CrossReplicaContributor{
+			fakeContributor{key: "inflight:test"},
+			fakeContributor{key: "queue:test"},
+		},
+	}
+	endpointID := testEndpoint("ep-a").GetMetadata().GetID()
+	require.True(t, pub.RegisterEndpoint(endpointID))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pub.publish(context.Background(), endpointID)
+	}()
+
+	started := map[fwkdl.StateKey]bool{}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for len(started) < 2 {
+		select {
+		case call := <-syncer.started:
+			started[call.key] = true
+		case <-timer.C:
+			close(syncer.release)
+			<-done
+			t.Fatalf("contributor publishing was sequential; started keys: %v", started)
+		}
+	}
+
+	close(syncer.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parallel contributor publishing did not complete")
+	}
+}
+
+func TestCrossReplicaPublisher_SkipsEndpointDeletedAfterSnapshot(t *testing.T) {
+	syncer := &fakeSyncer{}
+	pub := &crossReplicaPublisher{
+		syncer:       syncer,
+		contributors: []fwkdl.CrossReplicaContributor{fakeContributor{key: "inflight:test"}},
+	}
+	endpointID := testEndpoint("ep-gone").GetMetadata().GetID()
+	require.True(t, pub.RegisterEndpoint(endpointID))
+
+	snapshot := pub.endpointSnapshot()
+	require.Len(t, snapshot, 1)
+	removed, err := pub.delete(context.Background(), endpointID)
+	require.NoError(t, err)
+	require.True(t, removed)
+
+	pub.publish(context.Background(), snapshot[0])
+	assert.Empty(t, syncer.sets)
+}
+
+func TestCrossReplicaPublisher_DeletesAllContributorState(t *testing.T) {
+	syncer := &fakeSyncer{}
+	pub := &crossReplicaPublisher{
+		syncer: syncer,
+		contributors: []fwkdl.CrossReplicaContributor{
+			fakeContributor{key: "inflight:test"},
+			fakeContributor{key: "queue:test"},
+		},
+	}
+	endpointID := testEndpoint("ep-gone").GetMetadata().GetID()
+	require.True(t, pub.RegisterEndpoint(endpointID))
+
+	removed, err := pub.delete(context.Background(), endpointID)
+	require.NoError(t, err)
+	require.True(t, removed)
+	require.ElementsMatch(t, []setCall{
+		{key: "inflight:test", endpointID: "ns/ep-gone"},
+		{key: "queue:test", endpointID: "ns/ep-gone"},
+	}, syncer.deletes)
+}
+
 func TestCrossReplicaPublisher_SetsPerPublishDeadline(t *testing.T) {
 	syncer := &deadlineSyncer{deadlineObserved: make(chan bool, 1)}
 	r := NewRuntime(time.Second)
@@ -261,7 +387,7 @@ func TestCrossReplicaPublisher_SetsPerPublishDeadline(t *testing.T) {
 
 // Releasing an endpoint stops its publishing without tearing down a goroutine,
 // so removed endpoints cannot keep writing stale state.
-func TestCrossReplicaPublisher_StopsAfterUnregister(t *testing.T) {
+func TestCrossReplicaPublisher_StopsAfterDelete(t *testing.T) {
 	syncer := &fakeSyncer{}
 	r := NewRuntime(time.Second)
 	r.crossReplicaPub = &crossReplicaPublisher{
@@ -280,7 +406,9 @@ func TestCrossReplicaPublisher_StopsAfterUnregister(t *testing.T) {
 		return syncer.endpointIDs()["ns/ep-gone"] > 0
 	}, 2*time.Second, 5*time.Millisecond, "endpoint should publish while registered")
 
-	r.crossReplicaPub.UnregisterEndpoint(ep.GetMetadata().GetID(), nil)
+	removed, err := r.crossReplicaPub.delete(context.Background(), ep.GetMetadata().GetID())
+	require.NoError(t, err)
+	require.True(t, removed)
 	// Let any tick already in flight drain before sampling the baseline.
 	time.Sleep(50 * time.Millisecond)
 	baseline := syncer.endpointIDs()["ns/ep-gone"]
@@ -338,8 +466,41 @@ func TestReleaseEndpointWaitsForInFlightPublish(t *testing.T) {
 		t.Fatal("ReleaseEndpoint did not complete")
 	}
 
-	_, found, err := syncer.Get(context.Background(), "inflight:test", "ns/ep-gone", nil)
+	_, found, err := syncer.Get(context.Background(), "inflight:test", "ns/ep-gone")
 	require.NoError(t, err)
 	assert.False(t, found, "released endpoint state must remain deleted")
 	assert.Equal(t, []string{"set", "delete"}, syncer.events)
+}
+
+func TestReleaseEndpointDispatchesDeleteOutsidePublisherLock(t *testing.T) {
+	syncer := &fakeSyncer{}
+	r := NewRuntime(time.Second)
+	contributor := callbackEndpointContributor{
+		fakeContributor: fakeContributor{key: "inflight:test"},
+		onDelete: func() {
+			_, _, _ = r.crossReplicaPub.get(context.Background(), fakeContributor{key: "inflight:test"}.CrossReplicaState(), "ns/ep-gone")
+		},
+	}
+	r.crossReplicaPub = &crossReplicaPublisher{
+		syncer:       syncer,
+		contributors: []fwkdl.CrossReplicaContributor{contributor},
+	}
+	source := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "endpoint-source")
+	r.endpoint.Set(source)
+	r.extractors.Append(source.TypedName().Name, contributor)
+
+	ep := r.NewEndpoint(context.Background(), testEndpoint("ep-gone").GetMetadata())
+	require.NotNil(t, ep)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ReleaseEndpoint(ep)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("endpoint delete event was dispatched while holding the publisher lock")
+	}
 }

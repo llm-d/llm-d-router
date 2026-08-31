@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -45,9 +46,9 @@ type crossReplicaPublisher struct {
 	contributors []fwkdl.CrossReplicaContributor
 	interval     time.Duration
 
-	// mu guards registered and serializes publishing with endpoint removal.
-	mu         sync.Mutex
-	registered sets.Set[types.NamespacedName]
+	// mu guards endpoints and orders syncer operations with endpoint removal.
+	mu        sync.RWMutex
+	endpoints sets.Set[types.NamespacedName]
 }
 
 // newCrossReplicaPublisher collects the opted-in CrossReplicaContributors, or
@@ -89,28 +90,13 @@ func (p *crossReplicaPublisher) Start(ctx context.Context) {
 func (p *crossReplicaPublisher) RegisterEndpoint(key types.NamespacedName) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.registered == nil {
-		p.registered = sets.New[types.NamespacedName]()
+	if p.endpoints == nil {
+		p.endpoints = sets.New[types.NamespacedName]()
 	}
-	if p.registered.Has(key) {
+	if p.endpoints.Has(key) {
 		return false
 	}
-	p.registered.Insert(key)
-	return true
-}
-
-// UnregisterEndpoint waits for an in-flight publish, runs finalize, and removes
-// key before a replacement with the same key can publish.
-func (p *crossReplicaPublisher) UnregisterEndpoint(key types.NamespacedName, finalize func()) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.registered.Has(key) {
-		return false
-	}
-	p.registered.Delete(key)
-	if finalize != nil {
-		finalize()
-	}
+	p.endpoints.Insert(key)
 	return true
 }
 
@@ -128,23 +114,17 @@ func (p *crossReplicaPublisher) run(ctx context.Context) {
 }
 
 func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
-	for _, endpointID := range p.registeredEndpoints() {
-		p.mu.Lock()
-		if !p.registered.Has(endpointID) {
-			p.mu.Unlock()
-			continue
-		}
+	for _, endpointID := range p.endpointSnapshot() {
 		dispatchCtx, cancel := context.WithTimeout(ctx, defaultCrossReplicaPublishTimeout)
-		p.publish(dispatchCtx, endpointID.String())
+		p.publish(dispatchCtx, endpointID)
 		cancel()
-		p.mu.Unlock()
 	}
 }
 
-func (p *crossReplicaPublisher) registeredEndpoints() []types.NamespacedName {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.registered.UnsortedList()
+func (p *crossReplicaPublisher) endpointSnapshot() []types.NamespacedName {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.endpoints.UnsortedList()
 }
 
 // HandleEndpointEvent installs aggregate state readers.
@@ -157,33 +137,70 @@ func (p *crossReplicaPublisher) HandleEndpointEvent(ctx context.Context, event f
 	if spec.SyncDisabled {
 		return nil
 	}
-	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
-	switch event.Type {
-	case fwkdl.EventAddOrUpdate:
-		event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
-			Get: func() fwkdl.Cloneable {
-				if value, ok, _ := p.syncer.Get(ctx, spec.StateKey, endpointID, spec.Aggregate); ok {
-					if cloneable, ok := value.(fwkdl.Cloneable); ok {
-						return cloneable
-					}
-				}
-				return nil
-			},
-		})
-	case fwkdl.EventDelete:
-		if err := p.syncer.Delete(ctx, spec.StateKey, endpointID); err != nil {
-			return fmt.Errorf("delete shared state for key %s: %w", spec.StateKey, err)
-		}
+	if event.Type != fwkdl.EventAddOrUpdate {
+		return nil
 	}
+	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
+	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
+		Get: func() fwkdl.Cloneable {
+			if value, ok, _ := p.get(ctx, spec, endpointID); ok {
+				if cloneable, ok := value.(fwkdl.Cloneable); ok {
+					return cloneable
+				}
+			}
+			return nil
+		},
+	})
 	return nil
 }
 
-func (p *crossReplicaPublisher) publish(ctx context.Context, endpointID string) {
-	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
+func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	// The endpoint may have been deleted after publishAll took its snapshot.
+	if !p.endpoints.Has(key) {
+		return nil
+	}
+	endpointID := key.String()
+	return p.syncer.Set(ctx, spec.StateKey, endpointID, spec.Supply(endpointID)(), spec.Aggregate)
+}
+
+func (p *crossReplicaPublisher) get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.syncer.Get(ctx, spec.StateKey, endpointID)
+}
+
+func (p *crossReplicaPublisher) delete(ctx context.Context, key types.NamespacedName) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.endpoints.Has(key) {
+		return false, nil
+	}
+	p.endpoints.Delete(key)
+
+	endpointID := key.String()
+	var errs []error
 	for _, c := range p.contributors {
 		spec := c.CrossReplicaState()
-		if err := p.syncer.Set(ctx, spec.StateKey, endpointID, spec.Supply(endpointID)()); err != nil {
-			logger.V(logging.DEBUG).Info("cross-replica publish failed", "key", spec.StateKey, "err", err)
+		if err := p.syncer.Delete(ctx, spec.StateKey, endpointID); err != nil {
+			errs = append(errs, fmt.Errorf("delete shared state for key %s: %w", spec.StateKey, err))
 		}
 	}
+	return true, errors.Join(errs...)
+}
+
+func (p *crossReplicaPublisher) publish(ctx context.Context, key types.NamespacedName) {
+	endpointID := key.String()
+	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
+	var wg sync.WaitGroup
+	for _, c := range p.contributors {
+		spec := c.CrossReplicaState()
+		wg.Go(func() {
+			if err := p.set(ctx, spec, key); err != nil {
+				logger.V(logging.DEBUG).Info("cross-replica publish failed", "key", spec.StateKey, "err", err)
+			}
+		})
+	}
+	wg.Wait()
 }

@@ -61,12 +61,12 @@ func (s *LocalSyncer) syncKey(key fwkdl.StateKey, endpointID string) string {
 	return s.replicaID + ":" + string(key) + ":" + endpointID
 }
 
-func (s *LocalSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID string, value any) error {
-	s.data.Store(s.syncKey(key, endpointID), value)
+func (s *LocalSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
+	s.data.Store(s.syncKey(key, endpointID), aggregate([]any{value}))
 	return nil
 }
 
-func (s *LocalSyncer) Get(_ context.Context, key fwkdl.StateKey, endpointID string, _ func([]any) any) (any, bool, error) {
+func (s *LocalSyncer) Get(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
 	v, ok := s.data.Load(s.syncKey(key, endpointID))
 	return v, ok, nil
 }
