@@ -775,8 +775,8 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 	ctx := context.Background()
 
 	tieringSpecs := []AttributeMetric{
-		{AttributeKey: "tiering_block_hits", Spec: mustSpec(t, "vllm:kv_offload_tiering_block_hits_total{tier=\"1:fs\"}")},
-		{AttributeKey: "tiering_block_queries", Spec: mustSpec(t, "vllm:kv_offload_tiering_block_queries_total{tier=\"1:fs\"}")},
+		{AttributeKey: "tiering_chunk_hits", Spec: mustSpec(t, "vllm:kv_offload_tiering_chunk_hits_total{tier=\"1:fs\"}")},
+		{AttributeKey: "tiering_chunk_queries", Spec: mustSpec(t, "vllm:kv_offload_tiering_chunk_queries_total{tier=\"1:fs\"}")},
 		{AttributeKey: "tiering_allocation_failures", Spec: mustSpec(t, "vllm:kv_offload_tiering_promotion_allocation_failures_total")},
 	}
 
@@ -805,11 +805,11 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 		data := sourcemetrics.PrometheusMetricMap{
 			defaultTotalQueuedRequestsMetric:  gaugeFamily(5),
 			defaultTotalRunningRequestsMetric: gaugeFamily(1),
-			"vllm:kv_offload_tiering_block_hits_total": &dto.MetricFamily{
+			"vllm:kv_offload_tiering_chunk_hits_total": &dto.MetricFamily{
 				Type:   dto.MetricType_COUNTER.Enum(),
 				Metric: []*dto.Metric{{Label: tierLabel, Counter: &dto.Counter{Value: ptr.To(100.0)}}},
 			},
-			"vllm:kv_offload_tiering_block_queries_total": &dto.MetricFamily{
+			"vllm:kv_offload_tiering_chunk_queries_total": &dto.MetricFamily{
 				Type:   dto.MetricType_COUNTER.Enum(),
 				Metric: []*dto.Metric{{Label: tierLabel, Counter: &dto.Counter{Value: ptr.To(200.0)}}},
 			},
@@ -824,8 +824,8 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 
-		assertScalarMetric(t, ep, "tiering_block_hits", 100.0)
-		assertScalarMetric(t, ep, "tiering_block_queries", 200.0)
+		assertScalarMetric(t, ep, "tiering_chunk_hits", 100.0)
+		assertScalarMetric(t, ep, "tiering_chunk_queries", 200.0)
 		assertScalarMetric(t, ep, "tiering_allocation_failures", 0.0)
 	})
 
@@ -841,8 +841,8 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 			t.Errorf("unexpected error on non-tiering deployment: %v", err)
 		}
 
-		assertNoScalarMetric(t, ep, "tiering_block_hits")
-		assertNoScalarMetric(t, ep, "tiering_block_queries")
+		assertNoScalarMetric(t, ep, "tiering_chunk_hits")
+		assertNoScalarMetric(t, ep, "tiering_chunk_queries")
 		assertNoScalarMetric(t, ep, "tiering_allocation_failures")
 	})
 
@@ -851,7 +851,7 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 		data := sourcemetrics.PrometheusMetricMap{
 			defaultTotalQueuedRequestsMetric:  gaugeFamily(5),
 			defaultTotalRunningRequestsMetric: gaugeFamily(1),
-			"vllm:kv_offload_tiering_block_hits_total": &dto.MetricFamily{
+			"vllm:kv_offload_tiering_chunk_hits_total": &dto.MetricFamily{
 				Type:   dto.MetricType_COUNTER.Enum(),
 				Metric: []*dto.Metric{{Label: tierLabel, Counter: &dto.Counter{Value: ptr.To(50.0)}}},
 			},
@@ -862,8 +862,8 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 			t.Error("expected error for partial tiering metrics, got nil")
 		}
 
-		assertScalarMetric(t, ep, "tiering_block_hits", 50.0)
-		assertNoScalarMetric(t, ep, "tiering_block_queries")
+		assertScalarMetric(t, ep, "tiering_chunk_hits", 50.0)
+		assertNoScalarMetric(t, ep, "tiering_chunk_queries")
 		assertNoScalarMetric(t, ep, "tiering_allocation_failures")
 	})
 }
