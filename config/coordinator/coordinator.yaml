@@ -103,7 +103,7 @@ pipeline:
     # enqueue answers 202 with the request id; wait holds the connection
     # until the result lands or the wait cap expires. Without the mode
     # header the step is a no-op. It also serves GET/DELETE
-    # /v1/requests/{id} and GET /v1/models.
+    # /v1/requests/{id}.
     # All params and their defaults are documented in
     # pkg/coordinator/steps/asyncbroker/config.go.
     # -------------------------------------------------------------------

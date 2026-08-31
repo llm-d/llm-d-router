@@ -471,13 +471,8 @@ func TestAsyncBrokerRoutes(t *testing.T) {
 		return rec
 	}
 
-	// Models derive from the configured routes.
-	rec := do(http.MethodGet, "/v1/models", "")
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "test-model")
-
 	// Unknown id: gone.
-	rec = do(http.MethodGet, "/v1/requests/nope", "team-a")
+	rec := do(http.MethodGet, "/v1/requests/nope", "team-a")
 	assert.Equal(t, http.StatusGone, rec.Code)
 
 	// Pending: active token exists, no result yet.

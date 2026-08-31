@@ -67,7 +67,7 @@ const waitBackupPollInterval = 2 * time.Second
 // the broker queue and serve the response themselves; without the header the
 // step is a no-op (see Execute). The step must run first in the pipeline
 // (enforced by the builder), and it registers the result retrieval routes
-// (GET/DELETE /v1/requests/{id}, GET /v1/models) on the coordinator listener.
+// (GET/DELETE /v1/requests/{id}) on the coordinator listener.
 type Step struct {
 	cfg    *asyncBrokerConfig
 	rdb    *redis.Client

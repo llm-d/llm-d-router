@@ -44,11 +44,9 @@ var validAsyncRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 const resultFetchGraceTTL = 60 * time.Second
 
 // RegisterRoutes serves the async result lifecycle from the coordinator
-// listener: fetch and delete for queued results, and the OpenAI models list
-// derived from the configured routes. These handlers never run the pipeline;
-// they are plain Redis reads and writes.
+// listener: fetch and delete for queued results. These handlers never run
+// the pipeline; they are plain Redis reads and writes.
 func (s *Step) RegisterRoutes(r chi.Router) {
-	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/requests/{id}", s.handleFetch)
 	r.Delete("/v1/requests/{id}", s.handleDelete)
 }
@@ -58,25 +56,6 @@ func (s *Step) tenantOf(r *http.Request) string {
 		return t
 	}
 	return defaultAsyncTenant
-}
-
-func (s *Step) handleModels(w http.ResponseWriter, _ *http.Request) {
-	type model struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		OwnedBy string `json:"owned_by"`
-	}
-	seen := map[string]bool{}
-	models := []model{}
-	for _, rt := range s.cfg.Routes {
-		if rt.Model == "" || seen[rt.Model] {
-			continue
-		}
-		seen[rt.Model] = true
-		models = append(models, model{ID: rt.Model, Object: "model", OwnedBy: "llm-d-async"})
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": models})
 }
 
 // checkFetchParams applies the enqueue path's tenant and id validation to

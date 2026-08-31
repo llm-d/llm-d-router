@@ -55,11 +55,10 @@ After a successful fetch delivery the result's TTL is shrunk to a grace window (
 
 ## Endpoints
 
-The step registers three routes on the coordinator listener:
+The step registers two routes on the coordinator listener:
 
 - `GET /v1/requests/{id}` fetches a queued result, tenant scoped and non-destructive
 - `DELETE /v1/requests/{id}` cancels a still queued request and reclaims its result. A request already dispatched runs to completion, and its result then sits out the mailbox TTL
-- `GET /v1/models` serves the model list derived from the configured routes
 
 ## Broker state
 
@@ -135,7 +134,7 @@ The three lifecycle clocks hand off without overlap: the deadline ends where the
 
 ## Deployment notes
 
-- The gateway must route `GET/DELETE /v1/requests/*` and `GET /v1/models` to the coordinator. Stock llm-d routing forwards only the inference paths, so these need adding to the coordinator's HTTPRoute.
+- The gateway must route `GET/DELETE /v1/requests/*` to the coordinator. Stock llm-d routing forwards only the inference paths, so these need adding to the coordinator's HTTPRoute.
 - The tenant header is trusted as asserted, the same as everywhere else on the llm-d serving path. Request id is the only secret protecting a stored result, so clients that need an unguessable handle should omit `X-Request-Id` and use the minted UUID.
 - Set `result_ttl_seconds` on every AP queue the step feeds, or unfetched results never expire.
 - Redis needs keyspace notifications enabled for the wait wake-up (`notify-keyspace-events Kl`). The step detects their absence and falls back to polling.
