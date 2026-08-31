@@ -21,12 +21,13 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
 
 func TestValidatePipeline(t *testing.T) {
 	render := config.StepConfig{Type: steps.RenderStepName}
 	decode := config.StepConfig{Type: steps.DecodeStepName}
-	broker := config.StepConfig{Type: steps.AsyncBrokerStepName}
+	broker := config.StepConfig{Type: asyncbroker.StepName}
 
 	tests := []struct {
 		name    string

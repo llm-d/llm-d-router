@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package steps
+package asyncbroker
 
 import (
 	"context"
@@ -35,11 +35,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 )
 
 // newAsyncTestStep builds the step through its factory against a miniredis,
 // with poll wake-up for determinism. extra merges over the base params.
-func newAsyncTestStep(t *testing.T, extra map[string]any) (*AsyncBrokerStep, *redis.Client) {
+func newAsyncTestStep(t *testing.T, extra map[string]any) (*Step, *redis.Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	params := map[string]any{
@@ -56,11 +57,11 @@ func newAsyncTestStep(t *testing.T, extra map[string]any) (*AsyncBrokerStep, *re
 	for k, v := range extra {
 		params[k] = v
 	}
-	step, err := NewAsyncBrokerStep(nil, params)
+	step, err := New(nil, params)
 	require.NoError(t, err)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	return step.(*AsyncBrokerStep), rdb
+	return step.(*Step), rdb
 }
 
 // asyncReqCtx builds a RequestContext the way the coordinator server does.
@@ -161,7 +162,7 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			params := base()
 			tc.mutate(params)
-			_, err := NewAsyncBrokerStep(nil, params)
+			_, err := New(nil, params)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
@@ -170,10 +171,10 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 	// The injected connector and format params must not trip unknown-key
 	// rejection.
 	params := base()
-	params[ParamKVConnector] = "kv-shared-storage"
-	params[ParamECConnector] = "ec-shared-storage"
+	params[steps.ParamKVConnector] = "kv-shared-storage"
+	params[steps.ParamECConnector] = "ec-shared-storage"
 	params["use_openai_format"] = true
-	_, err := NewAsyncBrokerStep(nil, params)
+	_, err := New(nil, params)
 	require.NoError(t, err)
 }
 
@@ -565,7 +566,7 @@ func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
 		require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
 		return key
 	}
-	fetch := func(t *testing.T, step *AsyncBrokerStep, id string) {
+	fetch := func(t *testing.T, step *Step, id string) {
 		t.Helper()
 		r := chi.NewRouter()
 		step.RegisterRoutes(r)
@@ -625,7 +626,7 @@ func TestAsyncQuotaFailsOpen(t *testing.T) {
 // delivered to a wait retry. None of them enqueue a duplicate.
 func TestAsyncBrokerRetryReattaches(t *testing.T) {
 	const queue = "team-default-queue"
-	post := func(t *testing.T, step *AsyncBrokerStep, mode, id string) *httptest.ResponseRecorder {
+	post := func(t *testing.T, step *Step, mode, id string) *httptest.ResponseRecorder {
 		t.Helper()
 		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
 			defaultModeHeader: mode, "X-Team": "team-a", "X-Request-Id": id,

@@ -117,7 +117,7 @@ To enable the step, add this block as the first entry under `steps:` in the coor
 | `wakeup_mode` | `auto` | `notify`, `poll`, or `auto` which probes for keyspace notification support |
 | `forward_headers` | SLO headers | allowlisted client headers forwarded on queued messages. The mode, objective, and fairness headers are rejected here |
 
-All params and their defaults are documented in `pkg/coordinator/steps/async_broker_config.go`, and a commented example lives in `config/coordinator/coordinator.yaml`.
+All params and their defaults are documented in `pkg/coordinator/steps/asyncbroker/config.go`, and a commented example lives in `config/coordinator/coordinator.yaml`.
 
 ## Timeouts and TTLs
 

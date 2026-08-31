@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package steps
+package asyncbroker
 
 import (
 	"context"
@@ -38,10 +38,11 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-const AsyncBrokerStepName = "async-broker"
+// StepName is the step's type string in the pipeline config.
+const StepName = "async-broker"
 
 func init() {
-	pipeline.Register(AsyncBrokerStepName, NewAsyncBrokerStep)
+	pipeline.Register(StepName, New)
 }
 
 // asyncSubmitter is the subset of producer.Producer the step needs.
@@ -59,7 +60,7 @@ const waitPollInterval = 200 * time.Millisecond
 // recovered on the next backup tick rather than never.
 const waitBackupPollInterval = 2 * time.Second
 
-// AsyncBrokerStep bridges the coordinator to the llm-d-async broker. A
+// Step bridges the coordinator to the llm-d-async broker. A
 // request that carries the mode header opts into async serving: passthrough
 // labels it (quota classification, objective and fairness headers) and lets
 // the pipeline continue; enqueue and wait hand it to the async processor via
@@ -67,7 +68,7 @@ const waitBackupPollInterval = 2 * time.Second
 // step is a no-op (see Execute). The step must run first in the pipeline
 // (enforced by the builder), and it registers the result retrieval routes
 // (GET/DELETE /v1/requests/{id}, GET /v1/models) on the coordinator listener.
-type AsyncBrokerStep struct {
+type Step struct {
 	cfg    *asyncBrokerConfig
 	rdb    *redis.Client
 	sub    asyncSubmitter
@@ -78,12 +79,12 @@ type AsyncBrokerStep struct {
 	logger logr.Logger
 }
 
-var _ pipeline.Step = (*AsyncBrokerStep)(nil)
+var _ pipeline.Step = (*Step)(nil)
 
-// NewAsyncBrokerStep builds the step from its params block. It connects to
+// New builds the step from its params block. It connects to
 // the Redis broker at construction; wakeup_mode auto probes the server's
 // keyspace-notification support once at startup.
-func NewAsyncBrokerStep(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
+func New(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	cfg, err := parseAsyncBrokerConfig(params)
 	if err != nil {
 		return nil, fmt.Errorf("async-broker: %w", err)
@@ -103,8 +104,8 @@ func NewAsyncBrokerStep(_ *gateway.Client, params map[string]any) (pipeline.Step
 		return nil, fmt.Errorf("async-broker: failed to create producer: %w", err)
 	}
 
-	logger := ctrl.Log.WithName(AsyncBrokerStepName)
-	s := &AsyncBrokerStep{
+	logger := ctrl.Log.WithName(StepName)
+	s := &Step{
 		cfg:    cfg,
 		rdb:    rdb,
 		sub:    prod,
@@ -129,9 +130,9 @@ func NewAsyncBrokerStep(_ *gateway.Client, params map[string]any) (pipeline.Step
 	return s, nil
 }
 
-func (s *AsyncBrokerStep) Name() string { return AsyncBrokerStepName }
+func (s *Step) Name() string { return StepName }
 
-func (s *AsyncBrokerStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
 	if headerVal == "" {
 		// No mode header means the request did not opt into async serving:
@@ -185,10 +186,10 @@ func (s *AsyncBrokerStep) Execute(ctx context.Context, reqCtx *pipeline.RequestC
 // overflow objective for the request's tier, and the fairness header carries
 // the tenant. The stamped headers reach the EPP on every phase call via
 // ForwardedHeaders.
-func (s *AsyncBrokerStep) passthrough(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string) error {
+func (s *Step) passthrough(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string) error {
 	classification, release, err := s.quota.classify(ctx, tenant)
 	if err != nil {
-		log.FromContext(ctx).WithName(AsyncBrokerStepName).Error(err, "quota classification failed open", "tenant", tenant)
+		log.FromContext(ctx).WithName(StepName).Error(err, "quota classification failed open", "tenant", tenant)
 	}
 	if release != nil {
 		// Hold the reserved slot until the request finishes: the request
@@ -223,7 +224,7 @@ func (s *AsyncBrokerStep) passthrough(ctx context.Context, reqCtx *pipeline.Requ
 // serveQueued enqueues onto the broker with a per-request result key. Mode
 // enqueue responds 202 immediately. Mode wait holds the connection up to the
 // wait cap, then falls back to the 202 response.
-func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext, mode asyncMode, tenant string) error {
+func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext, mode asyncMode, tenant string) error {
 	w := reqCtx.ResponseWriter
 
 	bounds := s.cfg.timeoutBounds(mode)
@@ -276,7 +277,7 @@ func (s *AsyncBrokerStep) serveQueued(ctx context.Context, reqCtx *pipeline.Requ
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
 	if err := s.sub.SubmitRequest(ctx, msg); err != nil {
-		log.FromContext(ctx).WithName(AsyncBrokerStepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
+		log.FromContext(ctx).WithName(StepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", "ENQUEUE_FAILED",
 			"failed to enqueue request")
 		return pipeline.ErrPipelineDone
@@ -310,8 +311,8 @@ return 0
 // it writes ends the hold with 499 and the next retry lands on the fresh
 // path. Returns true when the response was written here; false sends the
 // caller to the fresh enqueue, which is also the fallback on lookup errors.
-func (s *AsyncBrokerStep) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContext, mode asyncMode, tenant string, timeout time.Duration) bool {
-	logger := log.FromContext(ctx).WithName(AsyncBrokerStepName)
+func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContext, mode asyncMode, tenant string, timeout time.Duration) bool {
+	logger := log.FromContext(ctx).WithName(StepName)
 	id := reqCtx.RequestID
 	state, res, err := lookupResult(ctx, s.rdb, tenant, id)
 	if err != nil {
@@ -343,8 +344,8 @@ func (s *AsyncBrokerStep) reattachRetry(ctx context.Context, reqCtx *pipeline.Re
 	return true
 }
 
-func (s *AsyncBrokerStep) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string, timeout time.Duration) {
-	logger := log.FromContext(ctx).WithName(AsyncBrokerStepName)
+func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string, timeout time.Duration) {
+	logger := log.FromContext(ctx).WithName(StepName)
 	w := reqCtx.ResponseWriter
 	id := reqCtx.RequestID
 

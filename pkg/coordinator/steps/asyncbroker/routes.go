@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package steps
+package asyncbroker
 
 import (
 	"context"
@@ -47,20 +47,20 @@ const resultFetchGraceTTL = 60 * time.Second
 // listener: fetch and delete for queued results, and the OpenAI models list
 // derived from the configured routes. These handlers never run the pipeline;
 // they are plain Redis reads and writes.
-func (s *AsyncBrokerStep) RegisterRoutes(r chi.Router) {
+func (s *Step) RegisterRoutes(r chi.Router) {
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/requests/{id}", s.handleFetch)
 	r.Delete("/v1/requests/{id}", s.handleDelete)
 }
 
-func (s *AsyncBrokerStep) tenantOf(r *http.Request) string {
+func (s *Step) tenantOf(r *http.Request) string {
 	if t := r.Header.Get(s.cfg.TenantHeader); t != "" {
 		return t
 	}
 	return defaultAsyncTenant
 }
 
-func (s *AsyncBrokerStep) handleModels(w http.ResponseWriter, _ *http.Request) {
+func (s *Step) handleModels(w http.ResponseWriter, _ *http.Request) {
 	type model struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -83,7 +83,7 @@ func (s *AsyncBrokerStep) handleModels(w http.ResponseWriter, _ *http.Request) {
 // the fetch/delete routes, so the read side never composes a Redis key the
 // write side could not have produced. Writes the 400 itself and reports
 // whether the request may proceed.
-func (s *AsyncBrokerStep) checkFetchParams(w http.ResponseWriter, tenant, id string) bool {
+func (s *Step) checkFetchParams(w http.ResponseWriter, tenant, id string) bool {
 	if strings.Contains(tenant, ":") {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", api.ErrCodeInvalidRequest,
 			fmt.Sprintf("%s must not contain %q", s.cfg.TenantHeader, ":"))
@@ -97,7 +97,7 @@ func (s *AsyncBrokerStep) checkFetchParams(w http.ResponseWriter, tenant, id str
 	return true
 }
 
-func (s *AsyncBrokerStep) handleFetch(w http.ResponseWriter, r *http.Request) {
+func (s *Step) handleFetch(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	tenant := s.tenantOf(r)
 	if !s.checkFetchParams(w, tenant, id) {
@@ -135,7 +135,7 @@ func (s *AsyncBrokerStep) handleFetch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *AsyncBrokerStep) handleDelete(w http.ResponseWriter, r *http.Request) {
+func (s *Step) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	tenant := s.tenantOf(r)
 	if !s.checkFetchParams(w, tenant, id) {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package steps
+package asyncbroker
 
 import (
 	"bytes"
@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -307,8 +308,8 @@ func parseAsyncBrokerConfig(params map[string]any) (*asyncBrokerConfig, error) {
 	}
 	// The entrypoint injects connector and format defaults into every step's
 	// params; they are not async-broker settings.
-	delete(clean, ParamKVConnector)
-	delete(clean, ParamECConnector)
+	delete(clean, steps.ParamKVConnector)
+	delete(clean, steps.ParamECConnector)
 	delete(clean, "use_openai_format")
 
 	raw, err := json.Marshal(clean)

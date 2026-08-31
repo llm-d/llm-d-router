@@ -105,7 +105,7 @@ pipeline:
     # header the step is a no-op. It also serves GET/DELETE
     # /v1/requests/{id} and GET /v1/models.
     # All params and their defaults are documented in
-    # pkg/coordinator/steps/async_broker_config.go.
+    # pkg/coordinator/steps/asyncbroker/config.go.
     # -------------------------------------------------------------------
     # - type: async-broker
     #   params:

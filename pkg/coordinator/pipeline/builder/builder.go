@@ -26,6 +26,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
 
 // validatePipeline rejects configurations that cannot work before any step runs.
@@ -36,8 +37,8 @@ import (
 // produces, so it requires a render step in the pipeline.
 func validatePipeline(p config.PipelineConfig) error {
 	for i, s := range p.Steps {
-		if s.Type == steps.AsyncBrokerStepName && i > 0 {
-			return fmt.Errorf("the %q step must be the first pipeline step, found it at position %d", steps.AsyncBrokerStepName, i+1)
+		if s.Type == asyncbroker.StepName && i > 0 {
+			return fmt.Errorf("the %q step must be the first pipeline step, found it at position %d", asyncbroker.StepName, i+1)
 		}
 	}
 	if p.UseOpenAIFormat {
