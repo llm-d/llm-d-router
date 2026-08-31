@@ -35,9 +35,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 )
 
 const (
@@ -162,7 +162,7 @@ func NewOptions() *Options {
 		LoggingOptions:                   *logging.NewOptions(),
 		Tracing:                          true,
 		MetricsPort:                      9090,
-		FairnessIDMetricLabelLimit:       cardinality.DefaultFairnessIDLabelLimit,
+		FairnessIDMetricLabelLimit:       metricsutil.DefaultFairnessIDLabelLimit,
 		GRPCHealthPort:                   9003,
 		EnablePprof:                      true,
 		SecureServing:                    true,
