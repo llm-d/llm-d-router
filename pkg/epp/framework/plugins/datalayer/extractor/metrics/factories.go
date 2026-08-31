@@ -105,11 +105,11 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "vllm:cache_config_info",
 		// Defaults target tier "1:fs" (single filesystem tier).
 		// Multi-tier deployments override via engineConfigs JSON with
-		// per-tier attribute keys (e.g. "tiering_block_hits_fs",
-		// "tiering_block_hits_p2p").
+		// per-tier attribute keys (e.g. "tiering_chunk_hits_fs",
+		// "tiering_chunk_hits_p2p").
 		TieredOffloadingSpecs: []attributeMetricConfigParams{
-			{AttributeKey: "tiering_block_hits", MetricSpec: "vllm:kv_offload_tiering_block_hits_total{tier=\"1:fs\"}"},
-			{AttributeKey: "tiering_block_queries", MetricSpec: "vllm:kv_offload_tiering_block_queries_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_chunk_hits", MetricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"1:fs\"}"},
+			{AttributeKey: "tiering_chunk_queries", MetricSpec: "vllm:kv_offload_tiering_chunk_queries_total{tier=\"1:fs\"}"},
 			{AttributeKey: "tiering_read_bytes", MetricSpec: "vllm:kv_offload_tiering_read_bytes_total{tier=\"1:fs\"}"},
 			{AttributeKey: "tiering_read_time", MetricSpec: "vllm:kv_offload_tiering_read_time_total{tier=\"1:fs\"}"},
 			{AttributeKey: "tiering_promotion_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_job_failures_total{tier=\"1:fs\"}"},
