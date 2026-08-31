@@ -54,8 +54,8 @@ The EPP exposes the same values per endpoint, see [Inference pool metrics](../..
 
 When tiered offloading metrics are detected, the following scalar metric attributes are also produced (stored via `ScalarMetricDataKey`):
 
--   `tiering_block_hits` (float64)
--   `tiering_block_queries` (float64)
+-   `tiering_chunk_hits` (float64)
+-   `tiering_chunk_queries` (float64)
 -   `tiering_read_bytes` (float64)
 -   `tiering_read_time` (float64)
 -   `tiering_promotion_failures` (float64)
@@ -152,12 +152,12 @@ parameters:
       cacheInfoSpec: "vllm:cache_config_info"
       # Per-tier offloading specs
       tieredOffloadingSpecs:
-        - attributeKey: "tiering_block_hits_fs"
-          metricSpec: "vllm:kv_offload_tiering_block_hits_total{tier=\"1:fs\"}"
-        - attributeKey: "tiering_block_hits_p2p"
-          metricSpec: "vllm:kv_offload_tiering_block_hits_total{tier=\"2:p2p\"}"
-        - attributeKey: "tiering_block_hits_obj"
-          metricSpec: "vllm:kv_offload_tiering_block_hits_total{tier=\"3:obj\"}"
+        - attributeKey: "tiering_chunk_hits_fs"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"1:fs\"}"
+        - attributeKey: "tiering_chunk_hits_p2p"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"2:p2p\"}"
+        - attributeKey: "tiering_chunk_hits_obj"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"3:obj\"}"
 ```
 
 ## Multi-cluster support
