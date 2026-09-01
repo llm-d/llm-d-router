@@ -261,6 +261,72 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 		})
 	}))
 
+	ginkgo.When("Decode or required Prefill endpoints disappear while an aggregated worker remains",
+		ginkgo.Ordered, ginkgo.Label("decode-fallback"), testWrapper(func() {
+			ginkgo.It("should use fallback and return to P/D after recovery", func() {
+				nsName := getNamespace()
+
+				infPoolObjects := createInferencePool(1)
+				modelServers := createModelServersPDAggregatedFallback()
+				epp := createEndPointPicker(aggregatedFallbackConfig)
+
+				decodePods := getPodNames(decodeSelector, nsName)
+				fallbackPods := getPodNames(prefillDecodeSelector, nsName)
+				gomega.Expect(decodePods).Should(gomega.HaveLen(1))
+				gomega.Expect(fallbackPods).Should(gomega.HaveLen(1))
+				gomega.Expect(getPodNames(prefillSelector, nsName)).Should(gomega.HaveLen(1))
+
+				ginkgo.By("Verifying P/D is preferred while both stages are available")
+				nsHdr, podHdr, _ := runCompletion(simplePrompt, simModelName)
+				gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+				gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
+
+				for _, stage := range []struct {
+					name       string
+					deployment string
+					selector   map[string]string
+				}{
+					{name: "Prefill", deployment: "Deployment/vllm-p", selector: prefillSelector},
+					{name: "Decode", deployment: "Deployment/vllm-d", selector: decodeSelector},
+				} {
+					ginkgo.By(fmt.Sprintf("Scaling %s to zero", stage.name))
+					deployment := []string{stage.deployment}
+					scaleDeployment(nsName, deployment, -1)
+					gomega.Eventually(func() int {
+						return len(getPodNames(stage.selector, nsName))
+					}, podRemovalTimeout, time.Second).Should(gomega.Equal(0))
+
+					ginkgo.By("Verifying requests route to the aggregated fallback")
+					gomega.Eventually(func() string {
+						_, pod, err := tryCompletion(simplePrompt, simModelName)
+						if err != nil {
+							return ""
+						}
+						return pod
+					}, eppRecoveryTimeout, time.Second).Should(gomega.BeElementOf(fallbackPods))
+
+					ginkgo.By(fmt.Sprintf("Scaling %s back up", stage.name))
+					scaleDeployment(nsName, deployment, 1)
+					podsInDeploymentsReady(nsName, deployment)
+					decodePods = getPodNames(decodeSelector, nsName)
+					gomega.Expect(decodePods).Should(gomega.HaveLen(1))
+
+					ginkgo.By("Verifying requests return to P/D")
+					gomega.Eventually(func() string {
+						_, pod, err := tryCompletion(simplePrompt, simModelName)
+						if err != nil {
+							return ""
+						}
+						return pod
+					}, eppRecoveryTimeout, time.Second).Should(gomega.BeElementOf(decodePods))
+				}
+
+				testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+				testutils.DeleteObjects(testConfig, modelServers, nsName)
+				testutils.DeleteObjects(testConfig, epp, nsName)
+			})
+		}))
+
 	ginkgo.When("The EPP is killed while requests are in flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and resume routing after restart", func() {
 			nsName := getNamespace()

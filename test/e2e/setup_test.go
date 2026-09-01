@@ -94,6 +94,18 @@ func createModelServersPDSharedStorage(decodeReplicas int) []string {
 	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorSharedStorage)
 }
 
+// The simulator validates routing; it does not validate inference-engine capabilities.
+func createModelServersPDAggregatedFallback() []string {
+	objects := createModelServersPDSharedStorage(1)
+	fallback := createModelServersFromKustomize(epdDeploymentDir, map[string]string{
+		"${VLLM_REPLICA_COUNT_D}":    "1",
+		"${DECODE_ROLE}":             "prefill-decode",
+		"name: vllm-d":               "name: vllm-fallback",
+		"llm-d.ai/component: decode": "llm-d.ai/component: fallback",
+	})
+	return append(objects, fallback...)
+}
+
 func createModelServersPDMooncake(decodeReplicas int) []string {
 	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorMooncake)
 }
