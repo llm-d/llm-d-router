@@ -167,6 +167,51 @@ schedulingProfiles:
     weight: 2
 `
 
+// decodeFallbackConfig routes directly to a full-capability worker only when
+// no endpoint with the decode role is eligible.
+const decodeFallbackConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: decode-only
+  type: label-selector-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: decode
+- name: full-capability-fallback
+  type: label-selector-filter
+  parameters:
+    matchExpressions:
+    - key: llm-d.ai/role
+      operator: In
+      values: [prefill-decode, encode-prefill-decode]
+- type: prefill-filter
+- type: max-score-picker
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
+- type: disagg-profile-handler
+  parameters:
+    profiles:
+      decode: decode
+      prefill: prefill
+      fallback: aggregated-fallback
+    deciders:
+      prefill: prefix-based-pd-decider
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: decode-only
+  - pluginRef: max-score-picker
+- name: prefill
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: max-score-picker
+- name: aggregated-fallback
+  plugins:
+  - pluginRef: full-capability-fallback
+  - pluginRef: max-score-picker
+`
+
 // EPP configuration for running decode-only using disagg-profile-handler (no prefill, no encode)
 const decodeOnlyConfig = `apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig

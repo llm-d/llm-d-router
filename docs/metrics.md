@@ -189,6 +189,7 @@ Two variants are emitted. The current `llm_d_epp_disagg_decision_total` carries
     *   `model_name`: the target model name, or "unknown" if empty
     *   `decision_type`: one of
         *   `decode-only` - decode-only path (no disaggregation)
+        *   `decode-fallback` - complete request routed through the configured full-capability fallback profile
         *   `prefill-decode` - split into prefill and decode stages (P/D or EP/D)
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)

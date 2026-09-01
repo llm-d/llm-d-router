@@ -94,6 +94,16 @@ func createModelServersPDSharedStorage(decodeReplicas int) []string {
 	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorSharedStorage)
 }
 
+func createModelServersPDDecodeFallback() []string {
+	return createModelServersFromKustomize(pdDisaggDir, map[string]string{
+		"${KV_CACHE_ENABLED}":     "false",
+		"${CONNECTOR_TYPE}":       proxy.KVConnectorSharedStorage,
+		"${VLLM_REPLICA_COUNT_D}": "1",
+		"${VLLM_REPLICA_COUNT_P}": "1",
+		"${VLLM_EXTRA_ARGS_P}":    "--mode=echo",
+	})
+}
+
 func createModelServersPDMooncake(decodeReplicas int) []string {
 	return createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorMooncake)
 }

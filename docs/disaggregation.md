@@ -504,6 +504,7 @@ The `disagg-profile-handler` plugin is the entry point for all disaggregation to
   - `decode` (default: `decode`)
   - `prefill` (default: `prefill`)
   - `encode` (default: `encode`)
+  - `fallback` (optional): full-capability profile used when the Decode profile produces no target. Supported with `decode-first` only.
 - `deciders` (optional): decider plugins that control whether each stage runs.
   - `prefill`: enables P/D disaggregation when set (used in `decode-first` mode).
   - `encode`: enables E disaggregation when set.
@@ -538,6 +539,53 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
     deciders:
       prefill: prefix-based-pd-decider
 ```
+
+#### P/D with Decode Fallback
+
+The fallback profile must select workers that can execute the complete request locally. A worker with the `prefill` role alone cannot be a fallback target. The Decode profile should exclude fallback workers from its normal candidates so the fallback capacity remains reserved.
+
+```yaml
+plugins:
+- name: decode-only
+  type: label-selector-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: decode
+- name: full-capability-fallback
+  type: label-selector-filter
+  parameters:
+    matchExpressions:
+    - key: llm-d.ai/role
+      operator: In
+      values: [prefill-decode, encode-prefill-decode]
+- type: prefill-filter
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
+- type: max-score-picker
+- type: disagg-profile-handler
+  parameters:
+    profiles:
+      fallback: aggregated-fallback
+    deciders:
+      prefill: prefix-based-pd-decider
+
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: decode-only
+  - pluginRef: max-score-picker
+- name: prefill
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: max-score-picker
+- name: aggregated-fallback
+  plugins:
+  - pluginRef: full-capability-fallback
+  - pluginRef: max-score-picker
+```
+
+Each request runs the Decode profile first. If no endpoint satisfies the Decode profile's eligibility filters, the handler runs `aggregated-fallback` and routes the complete request to that endpoint without remote Prefill or Encode headers. Capacity rejection does not trigger fallback. A later request uses the normal decode-first path as soon as the Decode profile succeeds again.
 
 #### P/D (Prefill/Decode, Prefill-First)
 

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -28,9 +29,10 @@ const (
 	testPodPort = "8000"
 
 	// Custom profile names for testing user-defined configurations.
-	customDecodeProfile  = "my-decode"
-	customPrefillProfile = "my-prefill"
-	customEncodeProfile  = "my-encode"
+	customDecodeProfile   = "my-decode"
+	customPrefillProfile  = "my-prefill"
+	customEncodeProfile   = "my-encode"
+	customFallbackProfile = "my-fallback"
 
 	// Test prompts
 	testLongPrompt = "hello world hello world hello world"
@@ -53,6 +55,13 @@ func makeProfileRunResult(names ...string) *scheduling.ProfileRunResult {
 		))
 	}
 	return &scheduling.ProfileRunResult{TargetEndpoints: eps}
+}
+
+func noEligibleEndpointsError() error {
+	return errcommon.Error{
+		Code:    errcommon.ServiceUnavailable,
+		Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	}
 }
 
 type mockProfile struct{}
@@ -237,6 +246,10 @@ func TestHandlerFactory(t *testing.T) {
 			"profiles": map[string]any{"decode": "my-decode", "prefill": "my-prefill"},
 			"deciders": map[string]any{"prefill": PrefixBasedPDDeciderPluginType},
 		}, false},
+		{"PD with decode fallback", map[string]any{
+			"profiles": map[string]any{"fallback": customFallbackProfile},
+			"deciders": map[string]any{"prefill": AlwaysDisaggPDDeciderPluginType},
+		}, false},
 
 		// E/PD style (encode + decode)
 		{"EPD style", map[string]any{
@@ -271,6 +284,19 @@ func TestHandlerFactory(t *testing.T) {
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
 		}, true},
+		{"decode fallback rejects prefill-first", map[string]any{
+			"stageOrder": StageOrderPrefillFirst,
+			"profiles":   map[string]any{"fallback": customFallbackProfile},
+		}, true},
+		{"decode fallback differs from decode", map[string]any{
+			"profiles": map[string]any{"decode": customFallbackProfile, "fallback": customFallbackProfile},
+		}, true},
+		{"decode fallback differs from prefill", map[string]any{
+			"profiles": map[string]any{"prefill": customFallbackProfile, "fallback": customFallbackProfile},
+		}, true},
+		{"decode fallback differs from encode", map[string]any{
+			"profiles": map[string]any{"encode": customFallbackProfile, "fallback": customFallbackProfile},
+		}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -283,6 +309,80 @@ func TestHandlerFactory(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, p)
 			}
+		})
+	}
+}
+
+func TestHandler_Pick_DecodeFallback(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+		customFallbackProfile: &mockProfile{},
+	}
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+		newAlwaysDisaggPDDecider(), nil).WithDecodeFallbackProfile(customFallbackProfile)
+
+	tests := []struct {
+		name       string
+		results    map[string]*scheduling.ProfileRunResult
+		profileErr error
+		want       []string
+	}{
+		{
+			name:    "decode has not run",
+			results: map[string]*scheduling.ProfileRunResult{},
+			want:    []string{defaultDecodeProfile},
+		},
+		{
+			name: "decode unavailable",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: nil,
+			},
+			profileErr: noEligibleEndpointsError(),
+			want:       []string{customFallbackProfile},
+		},
+		{
+			name: "decode returned no endpoints without unavailable status",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: {TargetEndpoints: []scheduling.Endpoint{}},
+			},
+			want: []string{},
+		},
+		{
+			name: "decode saturated",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: nil,
+			},
+			profileErr: errcommon.Error{Code: errcommon.ResourceExhausted},
+			want:       []string{},
+		},
+		{
+			name: "fallback unavailable",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile:  nil,
+				customFallbackProfile: nil,
+			},
+			profileErr: noEligibleEndpointsError(),
+			want:       []string{},
+		},
+		{
+			name: "decode recovered",
+			results: map[string]*scheduling.ProfileRunResult{
+				defaultDecodeProfile: makeProfileRunResult("decode-pod"),
+			},
+			want: []string{defaultPrefillProfile},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := completionsRequest(testLongPrompt)
+			if tt.profileErr != nil {
+				h.ObserveProfileRun(req, defaultDecodeProfile, tt.results[defaultDecodeProfile], tt.profileErr)
+			}
+			got := h.Pick(ctx, req, profiles, tt.results)
+			assert.ElementsMatch(t, tt.want, profileNames(got))
 		})
 	}
 }
@@ -580,6 +680,53 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 			tt.check(t, res)
 		})
 	}
+}
+
+func TestHandler_ProcessResults_DecodeFallback(t *testing.T) {
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+		newAlwaysDisaggPDDecider(), nil).WithDecodeFallbackProfile(customFallbackProfile)
+	req := &scheduling.InferenceRequest{Headers: map[string]string{
+		routing.PrefillEndpointHeader:  "stale-prefill:8000",
+		routing.EncoderEndpointsHeader: "stale-encoder:8000",
+	}}
+	h.ObserveProfileRun(req, defaultDecodeProfile, nil, noEligibleEndpointsError())
+	picked := h.Pick(context.Background(), req, map[string]scheduling.SchedulerProfile{
+		customFallbackProfile: &mockProfile{},
+	}, map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: nil})
+	require.Contains(t, picked, customFallbackProfile)
+
+	res, err := h.ProcessResults(context.Background(), req, map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile:  nil,
+		customFallbackProfile: makeProfileRunResult("fallback-pod"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, customFallbackProfile, res.PrimaryProfileName)
+	assert.Equal(t, "fallback-pod", res.ProfileResults[customFallbackProfile].TargetEndpoints[0].GetMetadata().ID.Name)
+	assert.NotContains(t, res.ProfileResults, defaultDecodeProfile)
+	assert.NotContains(t, res.ProfileResults, defaultPrefillProfile)
+
+	require.NoError(t, h.PreRequest(context.Background(), req, res))
+	assert.NotContains(t, req.Headers, routing.PrefillEndpointHeader)
+	assert.NotContains(t, req.Headers, routing.EncoderEndpointsHeader)
+}
+
+func TestHandler_ProcessResults_DecodeAndFallbackUnavailable(t *testing.T) {
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+		newAlwaysDisaggPDDecider(), nil).WithDecodeFallbackProfile(customFallbackProfile)
+
+	req := &scheduling.InferenceRequest{}
+	h.ObserveProfileRun(req, defaultDecodeProfile, nil, noEligibleEndpointsError())
+	picked := h.Pick(context.Background(), req, map[string]scheduling.SchedulerProfile{
+		customFallbackProfile: &mockProfile{},
+	}, map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: nil})
+	require.Contains(t, picked, customFallbackProfile)
+
+	_, err := h.ProcessResults(context.Background(), req, map[string]*scheduling.ProfileRunResult{
+		defaultDecodeProfile:  nil,
+		customFallbackProfile: nil,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode or fallback workers")
 }
 
 // TestHandler_PD_PrefillRequiredButUnavailable exercises the real Pick ->

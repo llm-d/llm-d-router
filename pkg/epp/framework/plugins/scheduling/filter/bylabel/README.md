@@ -1,8 +1,10 @@
 # Label-Based Filter Plugins
 
-**Interfaces**: `scheduling.Filter`
+**Interfaces**: `scheduling.Filter`, `scheduling.EndpointEligibilityFilter`
 
 Label-based filters that retain or remove candidate pods based on Kubernetes label values.
+
+Label constraints describe endpoint eligibility. If the complete filter chain returns no endpoint, the scheduler returns `503` with `rejected-no-endpoints` when no original candidate satisfies these constraints. It returns `429` with `rejected-saturated` when eligible endpoints existed before capacity filters removed them.
 
 ---
 

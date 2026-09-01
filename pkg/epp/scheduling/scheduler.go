@@ -95,6 +95,9 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 			}
 			// run the selected profiles and collect results (current code runs all profiles)
 			profileRunResult, err := runSchedulerProfile(ctx, name, profile, request, candidateEndpoints)
+			if observer, ok := s.profileHandler.(fwksched.ProfileRunObserver); ok {
+				observer.ObserveProfileRun(request, name, profileRunResult, err)
+			}
 			if err != nil {
 				if verboseEnabled {
 					loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())

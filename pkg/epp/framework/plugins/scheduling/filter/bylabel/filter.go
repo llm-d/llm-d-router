@@ -26,6 +26,7 @@ type byLabelParameters struct {
 }
 
 var _ scheduling.Filter = &ByLabel{} // validate interface conformance
+var _ scheduling.EndpointEligibilityFilter = &ByLabel{}
 
 // Factory defines the factory function for the ByLabel filter.
 //
@@ -102,6 +103,15 @@ func (f *ByLabel) WithName(name string) *ByLabel {
 // Filter filters out all endpoints that are not marked with one of roles from the validRoles collection
 // or has no role label in case allowsNoRolesLabel is true
 func (f *ByLabel) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	return f.eligibleEndpoints(endpoints)
+}
+
+// EligibleEndpoints returns endpoints satisfying the configured label constraint.
+func (f *ByLabel) EligibleEndpoints(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	return f.eligibleEndpoints(endpoints)
+}
+
+func (f *ByLabel) eligibleEndpoints(endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filteredEndpoints := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {

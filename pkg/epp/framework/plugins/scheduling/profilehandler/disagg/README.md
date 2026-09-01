@@ -36,7 +36,7 @@ Runs each scheduling stage in sequence and assembles the final result from all s
 
 #### How It Works
 
-The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. If the decode stage finds no suitable endpoint, all remaining stages are skipped and the request fails.
+The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. If no endpoint satisfies the Decode profile's eligibility filters, the handler runs the optional fallback profile. Without a configured fallback profile, the request fails.
 
 #### Inputs consumed
 
@@ -50,6 +50,7 @@ The handler is invoked repeatedly by the framework until all stages are complete
 | `profiles.decode` | `string` | No | `"decode"` | Name of the decode scheduling profile. |
 | `profiles.prefill` | `string` | No | `"prefill"` | Name of the prefill scheduling profile. |
 | `profiles.encode` | `string` | No | `"encode"` | Name of the encode scheduling profile. |
+| `profiles.fallback` | `string` | No | — | Name of a full-capability fallback profile used when no Decode endpoint is eligible. Supported with `decode-first` only. |
 | `deciders.prefill` | `string` | No | — | Name of the prefill decider plugin. When set, enables P/D disaggregation. |
 | `deciders.encode` | `string` | No | — | Name of the encode decider plugin. When set, enables E disaggregation. |
 
@@ -80,11 +81,27 @@ plugins:
         encode: always-disagg-multimodal-decider
 ```
 
+Decode fallback:
+
+```yaml
+plugins:
+  - type: disagg-profile-handler
+    parameters:
+      profiles:
+        fallback: aggregated-fallback
+      deciders:
+        prefill: prefix-based-pd-decider
+```
+
+The fallback scheduling profile must filter for endpoints that can execute Prefill and Decode locally. The fallback result becomes the primary profile and does not produce remote Prefill or Encode headers. Every request attempts Decode first, so later requests return to the normal decode-first path when Decode becomes available. Capacity rejection does not trigger fallback.
+
 #### Limitations
 
 - Without a configured decider, the corresponding stage is disabled for all requests — this is a static decision at startup, not per-request.
 - The names in `deciders.prefill` and `deciders.encode` must match plugin names declared earlier in the same configuration.
 - When using P/D disaggregation, a `PrefixCachePlugin` must be configured in the prefill and decode scheduling profiles.
+- Decode fallback handles scheduling failures before forwarding. It does not migrate in-flight requests or retry failures after forwarding.
+- Decode fallback does not support `prefill-first` stage order.
 
 ---
 

@@ -35,6 +35,17 @@ type Filter interface {
 }
 ```
 
+Filters that define stable endpoint constraints can also implement `EndpointEligibilityFilter`:
+
+```go
+type EndpointEligibilityFilter interface {
+    Filter
+    EligibleEndpoints(ctx context.Context, request *InferenceRequest, endpoints []Endpoint) []Endpoint
+}
+```
+
+The scheduler evaluates eligibility filters against the original candidates when the complete filter chain returns no endpoint. No eligible endpoint produces `503` with `rejected-no-endpoints`. An eligible endpoint removed by a capacity filter produces `429` with `rejected-saturated`. `EligibleEndpoints` must be side-effect free and read state that remains stable during the filter chain.
+
 Key types used in the filter signature:
 - `scheduling.InferenceRequest` — parsed request with model, body, headers, and objectives
 - `scheduling.Endpoint` — candidate endpoint interface exposing metadata (including labels) and metrics
@@ -82,6 +93,7 @@ const (
 )
 
 var _ scheduling.Filter = &Selector{}
+var _ scheduling.EndpointEligibilityFilter = &Selector{}
 
 // Selector filters out endpoints that do not match its label selector criteria.
 type Selector struct {

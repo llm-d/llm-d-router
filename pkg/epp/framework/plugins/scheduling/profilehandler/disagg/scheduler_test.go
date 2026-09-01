@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
@@ -35,6 +36,16 @@ const (
 	// prompt fixtures in tests.
 	averageCharactersPerToken = 4
 )
+
+type rejectAllFilter struct{}
+
+func (*rejectAllFilter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "reject-all", Name: "reject-all"}
+}
+
+func (*rejectAllFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) []fwksched.Endpoint {
+	return nil
+}
 
 // completionsBody builds a completions request body whose tokenized prompt carries
 // len(prompt)/averageCharactersPerToken token IDs, which the decider reads as
@@ -296,6 +307,97 @@ func TestPDSchedule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPDSchedule_DecodeFallback(t *testing.T) {
+	const fallback = "fallback"
+	ctx := context.Background()
+
+	fallbackEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "fallback-endpoint"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	decodeEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "decode-endpoint"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	prefillOnlyEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "prefill-only-endpoint"},
+			Address: "9.10.11.12",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+
+	prefillProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewPrefillRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	decodeProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewByLabel("strict-decode", bylabel.RoleLabel, false, bylabel.RoleDecode)).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	fallbackProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewByLabel("full-capability", bylabel.RoleLabel, false, bylabel.RolePrefillDecode)).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	pdDecider, err := disagg.NewPrefixBasedPDDecider(disagg.PrefixBasedPDDeciderConfig{NonCachedTokens: 2})
+	require.NoError(t, err)
+	decodeEndpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(0, 3, 1))
+	handler := disagg.NewDisaggProfileHandler(decode, prefill, "", pdDecider, nil).
+		WithDecodeFallbackProfile(fallback)
+	scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{
+		decode:   decodeProfile,
+		prefill:  prefillProfile,
+		fallback: fallbackProfile,
+	}))
+
+	req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901")}
+	got, err := scheduler.Schedule(ctx, req, []fwksched.Endpoint{fallbackEndpoint})
+	require.NoError(t, err)
+	assert.Equal(t, fallback, got.PrimaryProfileName)
+	assert.Equal(t, "fallback-endpoint", got.ProfileResults[fallback].TargetEndpoints[0].GetMetadata().ID.Name)
+	assert.NotContains(t, got.ProfileResults, decode)
+	assert.NotContains(t, got.ProfileResults, prefill)
+
+	recoveredReq := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901")}
+	got, err = scheduler.Schedule(ctx, recoveredReq, []fwksched.Endpoint{fallbackEndpoint, decodeEndpoint})
+	require.NoError(t, err)
+	assert.Equal(t, decode, got.PrimaryProfileName)
+	assert.Equal(t, "decode-endpoint", got.ProfileResults[decode].TargetEndpoints[0].GetMetadata().ID.Name)
+	assert.Contains(t, got.ProfileResults, prefill)
+	assert.NotContains(t, got.ProfileResults, fallback)
+
+	saturatedDecodeProfile := scheduling.NewSchedulerProfile().
+		WithFilters(
+			bylabel.NewByLabel("strict-decode", bylabel.RoleLabel, false, bylabel.RoleDecode),
+			&rejectAllFilter{},
+		).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	saturatedScheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{
+		decode:   saturatedDecodeProfile,
+		prefill:  prefillProfile,
+		fallback: fallbackProfile,
+	}))
+	saturatedReq := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901")}
+	got, err = saturatedScheduler.Schedule(ctx, saturatedReq, []fwksched.Endpoint{fallbackEndpoint, decodeEndpoint})
+	require.Error(t, err)
+	assert.Nil(t, got, "Decode saturation must not trigger fallback")
+
+	prefillOnlyReq := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901")}
+	got, err = scheduler.Schedule(ctx, prefillOnlyReq, []fwksched.Endpoint{prefillOnlyEndpoint})
+	require.Error(t, err)
+	assert.Nil(t, got, "a Prefill-only endpoint must not satisfy the fallback profile")
 }
 
 func TestPDSchedule_PrefillFirst(t *testing.T) {

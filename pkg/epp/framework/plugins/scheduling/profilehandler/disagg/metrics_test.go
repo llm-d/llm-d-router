@@ -36,11 +36,13 @@ func TestRecordDisaggDecision(t *testing.T) {
 	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
 	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
 	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeDecodeFallback)
 
 	expected := `
 		# HELP llm_d_inference_scheduler_disagg_decision_total [ALPHA] [Deprecated: Use llm_d_epp_disagg_decision_total] Total number of disaggregation routing decisions made
 		# TYPE llm_d_inference_scheduler_disagg_decision_total counter
 		llm_d_inference_scheduler_disagg_decision_total{decision_type="decode-only",model_name="test-model"} 1
+		llm_d_inference_scheduler_disagg_decision_total{decision_type="decode-fallback",model_name="test-model"} 1
 		llm_d_inference_scheduler_disagg_decision_total{decision_type="encode-decode",model_name="test-model"} 1
 		llm_d_inference_scheduler_disagg_decision_total{decision_type="encode-prefill-decode",model_name="test-model"} 3
 		llm_d_inference_scheduler_disagg_decision_total{decision_type="prefill-decode",model_name="test-model"} 2
@@ -55,6 +57,7 @@ func TestRecordDisaggDecision(t *testing.T) {
 		# HELP llm_d_epp_disagg_decision_total [ALPHA] Total number of disaggregation routing decisions made
 		# TYPE llm_d_epp_disagg_decision_total counter
 		llm_d_epp_disagg_decision_total{decision_type="decode-only",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 1
+		llm_d_epp_disagg_decision_total{decision_type="decode-fallback",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 1
 		llm_d_epp_disagg_decision_total{decision_type="encode-decode",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 1
 		llm_d_epp_disagg_decision_total{decision_type="encode-prefill-decode",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 3
 		llm_d_epp_disagg_decision_total{decision_type="prefill-decode",model_name="test-model",plugin_name="test-plugin",plugin_type="test-type"} 2

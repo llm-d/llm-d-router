@@ -36,6 +36,8 @@ const (
 	DecisionTypeEncodeDecode = "encode-decode"
 	// DecisionTypeEncodePrefillDecode is for requests that are gone through E/P/D.
 	DecisionTypeEncodePrefillDecode = "encode-prefill-decode"
+	// DecisionTypeDecodeFallback is for requests routed to a full-capability fallback profile.
+	DecisionTypeDecodeFallback = "decode-fallback"
 )
 
 var (
@@ -84,8 +86,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 }
 
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.
-// The decisionType must be one of the DecisionType* constants (DecisionTypeDecodeOnly,
-// DecisionTypePrefillDecode, DecisionTypeEncodeDecode, DecisionTypeEncodePrefillDecode).
+// The decisionType must be one of the DecisionType* constants.
 // The model parameter should be the target model name; if empty, "unknown" is used.
 func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string) {
 	if modelName == "" {

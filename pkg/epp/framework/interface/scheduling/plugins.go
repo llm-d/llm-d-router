@@ -55,10 +55,25 @@ type ProfileHandler interface {
 		profileResults map[string]*ProfileRunResult) (*SchedulingResult, error)
 }
 
+// ProfileRunObserver receives each scheduling profile outcome before the next
+// ProfileHandler.Pick call. Implementations may retain request-scoped failure
+// state needed to choose a later profile.
+type ProfileRunObserver interface {
+	ObserveProfileRun(request *InferenceRequest, profileName string, result *ProfileRunResult, err error)
+}
+
 // Filter defines the interface for filtering a list of pods based on context.
 type Filter interface {
 	plugin.Plugin
 	Filter(ctx context.Context, request *InferenceRequest, pods []Endpoint) []Endpoint
+}
+
+// EndpointEligibilityFilter identifies stable endpoint constraints. The
+// scheduler evaluates these filters against the original candidates when the
+// complete filter chain produces no endpoint.
+type EndpointEligibilityFilter interface {
+	Filter
+	EligibleEndpoints(ctx context.Context, request *InferenceRequest, endpoints []Endpoint) []Endpoint
 }
 
 // Scorer defines the interface for scoring a list of pods based on context.

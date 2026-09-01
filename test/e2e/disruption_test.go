@@ -96,6 +96,21 @@ func completionRoutedToNamespace(nsName string) error {
 	return nil
 }
 
+func setDeploymentRole(nsName, deploymentName, role string) {
+	ginkgo.By(fmt.Sprintf("Setting deployment %s role to %s", deploymentName, role))
+	deployment, err := testConfig.KubeCli.AppsV1().Deployments(nsName).Get(
+		testConfig.Context, deploymentName, metav1.GetOptions{})
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	deployment.Spec.Template.Labels["llm-d.ai/role"] = role
+	_, err = testConfig.KubeCli.AppsV1().Deployments(nsName).Update(
+		testConfig.Context, deployment, metav1.UpdateOptions{})
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+
+	gomega.Eventually(func() int {
+		return len(getPodNames(map[string]string{"llm-d.ai/role": role}, nsName))
+	}, readyTimeout, time.Second).Should(gomega.Equal(1))
+}
+
 var _ = ginkgo.Describe("Disruption tests", func() {
 	ginkgo.When("A decode pod is killed mid-request", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and route to surviving pods", func() {
@@ -260,6 +275,64 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			testutils.DeleteObjects(testConfig, epp, nsName)
 		})
 	}))
+
+	ginkgo.When("Decode endpoints disappear while a full-capability worker remains",
+		ginkgo.Ordered, ginkgo.Label("decode-fallback"), testWrapper(func() {
+			ginkgo.It("should use fallback and return to Decode after recovery", func() {
+				nsName := getNamespace()
+
+				infPoolObjects := createInferencePool(1)
+				modelServers := createModelServersPDDecodeFallback()
+				setDeploymentRole(nsName, "vllm-p", "prefill-decode")
+				epp := createEndPointPicker(decodeFallbackConfig)
+
+				decodePods := getPodNames(decodeSelector, nsName)
+				fallbackPods := getPodNames(prefillDecodeSelector, nsName)
+				gomega.Expect(decodePods).Should(gomega.HaveLen(1))
+				gomega.Expect(fallbackPods).Should(gomega.HaveLen(1))
+
+				ginkgo.By("Verifying Decode is preferred while it is available")
+				nsHdr, podHdr, _ := runCompletion(simplePrompt, simModelName)
+				gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+				gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
+
+				ginkgo.By("Scaling Decode to zero")
+				decodeDeployment := []string{"Deployment/vllm-d"}
+				scaleDeployment(nsName, decodeDeployment, -1)
+				gomega.Eventually(func() int {
+					return len(getPodNames(decodeSelector, nsName))
+				}, podRemovalTimeout, time.Second).Should(gomega.Equal(0))
+
+				ginkgo.By("Verifying requests route to the full-capability fallback")
+				gomega.Eventually(func() string {
+					_, pod, err := tryCompletion(simplePrompt, simModelName)
+					if err != nil {
+						return ""
+					}
+					return pod
+				}, eppRecoveryTimeout, time.Second).Should(gomega.BeElementOf(fallbackPods))
+
+				ginkgo.By("Scaling Decode back up")
+				scaleDeployment(nsName, decodeDeployment, 1)
+				gomega.Eventually(func() int {
+					return len(getPodNames(decodeSelector, nsName))
+				}, readyTimeout, time.Second).Should(gomega.Equal(1))
+				decodePods = getPodNames(decodeSelector, nsName)
+
+				ginkgo.By("Verifying requests return to Decode")
+				gomega.Eventually(func() string {
+					_, pod, err := tryCompletion(simplePrompt, simModelName)
+					if err != nil {
+						return ""
+					}
+					return pod
+				}, eppRecoveryTimeout, time.Second).Should(gomega.BeElementOf(decodePods))
+
+				testutils.DeleteObjects(testConfig, infPoolObjects, nsName)
+				testutils.DeleteObjects(testConfig, modelServers, nsName)
+				testutils.DeleteObjects(testConfig, epp, nsName)
+			})
+		}))
 
 	ginkgo.When("The EPP is killed while requests are in flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and resume routing after restart", func() {
