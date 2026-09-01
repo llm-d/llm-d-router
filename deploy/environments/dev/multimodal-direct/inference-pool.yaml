@@ -1,0 +1,22 @@
+# InferencePool for multimodal workloads.
+#
+# Targets pods labelled app: ${POOL_NAME} (which includes both text-only and
+# omni workers). The EPP's modality-filter plugin handles per-request
+# filtering by llm-d.ai/model-arch — the pool itself does not need to
+# separate modalities; it collects all candidate pods and lets the EPP's
+# Filter-Score-Pick pipeline narrow the set per request.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: ${POOL_NAME}
+spec:
+  selector:
+    matchLabels:
+      app: ${POOL_NAME}
+  endpointPickerRef:
+    name: ${EPP_NAME}
+    kind: Service
+    port:
+      number: 9002
+  targetPorts:
+  - number: 8000

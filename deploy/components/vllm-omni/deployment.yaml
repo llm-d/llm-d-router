@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-omni
+  labels:
+    app: ${POOL_NAME}
+spec:
+  replicas: ${VLLM_OMNI_REPLICA_COUNT}
+  selector:
+    matchLabels:
+      app: ${POOL_NAME}
+      llm-d.ai/model-arch: omni-llm
+  template:
+    metadata:
+      labels:
+        app: ${POOL_NAME}
+        llm-d.ai/model-arch: omni-llm
+    spec:
+      containers:
+      - name: vllm-omni
+        image: ${VLLM_OMNI_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--port=8000"
+        - "--model=${OMNI_MODEL_NAME}"
+        - "--served-model-name=${OMNI_SERVED_MODEL_NAME}"
+        - "--trust-remote-code"
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            nvidia.com/gpu: "${OMNI_GPU_COUNT}"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: model-cache
+        emptyDir: {}
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-omni
+  labels:
+    app: ${POOL_NAME}
+spec:
+  selector:
+    app: ${POOL_NAME}
+    llm-d.ai/model-arch: omni-llm
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP

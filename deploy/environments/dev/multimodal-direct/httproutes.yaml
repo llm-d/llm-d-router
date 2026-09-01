@@ -1,0 +1,103 @@
+# Direct-path HTTPRoutes for multimodal inference.
+#
+# Each multimodal endpoint gets an exact-path match straight to the
+# InferencePool — one gateway hop, no coordinator. The EPP's modality-filter
+# plugin reads the :path header from Envoy's ext_proc call and drops
+# endpoints whose llm-d.ai/model-arch label is incompatible with the
+# request path (see pkg/common/multimodal.go for the mapping).
+#
+# Text chat completions also route directly; disaggregated E/P/D is not
+# active in this environment, so the coordinator adds no value for that path.
+#
+# Paths not listed here (e.g. /v1/completions, /v1/inference) fall through
+# to the catch-all PathPrefix route, which can point at the coordinator or
+# directly at the pool depending on the environment overlay.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${POOL_NAME}-multimodal-routes
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  # Text chat completions — direct to pool, no coordinator.
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/chat/completions
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 120s
+  # TTS — omni-llm and autoregressive-tts pods.
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/audio/speech
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 300s
+  # STT — encoder-decoder-stt pods.
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/audio/transcriptions
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 300s
+  # Image generation — diffusion pods.
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/images/generations
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 600s
+  # Embeddings — no arch restriction, all pool pods eligible.
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/embeddings
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 120s
+---
+# Catch-all for paths not covered by exact matches above.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${POOL_NAME}-catchall
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 120s

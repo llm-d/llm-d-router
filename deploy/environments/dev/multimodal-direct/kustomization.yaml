@@ -1,0 +1,20 @@
+# Multimodal direct-routing dev environment.
+#
+# Routes /v1/audio/speech, /v1/audio/transcriptions, /v1/images/generations,
+# /v1/embeddings, and /v1/chat/completions directly to a single InferencePool
+# by exact-path match. The EPP's modality-filter plugin selects pods by
+# llm-d.ai/model-arch label per request — no coordinator hop required.
+#
+# Requires:
+#   - Gateway API CRDs (inference.networking.k8s.io/v1 InferencePool)
+#   - A Gateway named "inference-gateway"
+#   - Worker pods with app: ${POOL_NAME} and llm-d.ai/model-arch labels
+#   - EPP deployment referencing the multimodal epp-config ConfigMap
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- inference-pool.yaml
+- httproutes.yaml
+- epp-configmap.yaml
+- ../../../components/vllm-omni/
