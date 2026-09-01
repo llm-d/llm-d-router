@@ -63,9 +63,11 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
   `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
   is `latencyPredictor`
-- If no endpoints have the TTFT source attribute (`LatencyPredictionInfo` or `InFlightLoad`),
-  the TTFT load gate is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix
-  scores default to 0 and no endpoints pass the affinity threshold, so all are kept (no-op)
+- If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
+  (`LatencyPredictionInfo` or `InFlightLoad`), the TTFT load gate is skipped and the sticky
+  set is kept; the `missing_signal` outcome is recorded. If no endpoints have
+  `PrefixCacheMatchInfo`, all prefix scores default to 0 and no endpoints pass the affinity
+  threshold, so all are kept (no-op)
 
 ## Composition requirements
 
@@ -110,7 +112,7 @@ documents the strategy and its calibration.
 ## Config
 
 | Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
+| ----------- | ------ | ---------- | --------- | ------------- |
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0` | Probability of skipping the gate |
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
@@ -130,6 +132,7 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
+
 ```yaml
 plugins:
   - type: prefix-cache-affinity-filter
