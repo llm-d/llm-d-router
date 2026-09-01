@@ -112,7 +112,7 @@ documents the strategy and its calibration.
 ## Config
 
 | Parameter | Type | Required | Default | Description |
-| ----------- | ------ | ---------- | --------- | ------------- |
+|-----------|------|----------|---------|-------------|
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0` | Probability of skipping the gate |
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
@@ -132,7 +132,6 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
-
 ```yaml
 plugins:
   - type: prefix-cache-affinity-filter
