@@ -565,6 +565,12 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
+	// DefaultRequestTTL bounds how long a request may wait in this priority band before it is evicted.
+	// If omitted, the global DefaultRequestTTL is used. An explicit value replaces the global default;
+	// "0s" makes queue wait unbounded for this band.
+	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
+
+	// +optional
 	// FairnessPolicyRef specifies the name of the policy that governs flow selection.
 	// If omitted, the system default ("global-strict-fairness-policy") is used.
 	FairnessPolicyRef string `json:"fairnessPolicyRef,omitempty"`
@@ -585,6 +591,10 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequests != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.DefaultRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", pbc.DefaultRequestTTL.Duration))
 	}
 
 	if pbc.FairnessPolicyRef != "" {

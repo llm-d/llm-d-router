@@ -19,6 +19,7 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	requtil "github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
@@ -163,15 +165,24 @@ func (fcac *FlowControlAdmissionController) Admit(
 	logger.V(logutil.TRACE).Info("Executing FlowControlAdmissionController",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "priority", priority, "fairnessID", reqCtx.SchedulingRequest.FairnessID)
 
+	initialEffectiveTTL := time.Duration(0)
+	if rawTTL, ok := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.InferenceTTLHeaderKey); ok {
+		parsedTTL, err := time.ParseDuration(strings.TrimSpace(rawTTL))
+		if err == nil && parsedTTL > 0 {
+			initialEffectiveTTL = parsedTTL
+		}
+	}
+
 	fcReq := &flowControlRequest{
-		fairnessID:        reqCtx.SchedulingRequest.FairnessID,
-		priority:          priority,
-		requestByteSize:   uint64(reqCtx.RequestSize),
-		inferenceRequest:  reqCtx.SchedulingRequest,
-		receivedTimestamp: reqCtx.RequestReceivedTimestamp,
-		reqMetadata:       reqCtx.Request.Metadata,
-		inferencePoolName: fcac.poolName,
-		modelName:         reqCtx.IncomingModelName,
+		fairnessID:          reqCtx.SchedulingRequest.FairnessID,
+		priority:            priority,
+		requestByteSize:     uint64(reqCtx.RequestSize),
+		inferenceRequest:    reqCtx.SchedulingRequest,
+		receivedTimestamp:   reqCtx.RequestReceivedTimestamp,
+		reqMetadata:         reqCtx.Request.Metadata,
+		inferencePoolName:   fcac.poolName,
+		modelName:           reqCtx.IncomingModelName,
+		initialEffectiveTTL: initialEffectiveTTL,
 	}
 
 	// Measure at the admission boundary: wall time around enqueue-and-wait covers queue residency plus
@@ -195,14 +206,15 @@ func (fcac *FlowControlAdmissionController) Admit(
 
 // flowControlRequest is an adapter that implements the FlowControlRequest interface.
 type flowControlRequest struct {
-	fairnessID        string
-	priority          int
-	requestByteSize   uint64
-	inferenceRequest  *scheduling.InferenceRequest
-	receivedTimestamp time.Time
-	reqMetadata       map[string]any
-	inferencePoolName string
-	modelName         string
+	fairnessID          string
+	priority            int
+	requestByteSize     uint64
+	inferenceRequest    *scheduling.InferenceRequest
+	receivedTimestamp   time.Time
+	reqMetadata         map[string]any
+	inferencePoolName   string
+	modelName           string
+	initialEffectiveTTL time.Duration
 }
 
 var _ flowcontrol.FlowControlRequest = &flowControlRequest{}
@@ -214,12 +226,7 @@ func (r *flowControlRequest) ID() string {
 	return r.inferenceRequest.RequestID
 }
 
-// InitialEffectiveTTL returns 0 to defer to the controller-level default TTL, which is therefore the only TTL
-// source for every request today.
-// TODO(https://github.com/llm-d/llm-d-router/issues/1090): plumb more specific TTL scopes and resolve
-// most-specific-wins: per-request (clamped), then per-band (effectively priority band config, eventually
-// codifiable in the InferenceObjective CRD), then the controller default.
-func (r *flowControlRequest) InitialEffectiveTTL() time.Duration { return 0 }
+func (r *flowControlRequest) InitialEffectiveTTL() time.Duration { return r.initialEffectiveTTL }
 func (r *flowControlRequest) ByteSize() uint64                   { return r.requestByteSize }
 
 func (r *flowControlRequest) InferenceRequest() *scheduling.InferenceRequest {

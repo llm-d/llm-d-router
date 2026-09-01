@@ -745,6 +745,11 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.NotNil(t, cfg.FlowControlConfig, "FlowControl config should be loaded")
 				require.Contains(t, cfg.FlowControlConfig.Registry.PriorityBands, 100, "Should contain priority band 100")
 				band := cfg.FlowControlConfig.Registry.PriorityBands[100]
+				require.NotNil(t, band.DefaultRequestTTL)
+				require.Equal(t, 5*time.Minute, *band.DefaultRequestTTL)
+				unboundedBand := cfg.FlowControlConfig.Registry.PriorityBands[-1]
+				require.NotNil(t, unboundedBand.DefaultRequestTTL)
+				require.Zero(t, *unboundedBand.DefaultRequestTTL)
 
 				// Verify custom policies.
 				require.Equal(t, "customFCFS", band.OrderingPolicy.TypedName().Name,

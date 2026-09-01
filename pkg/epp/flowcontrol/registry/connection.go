@@ -17,6 +17,8 @@ limitations under the License.
 package registry
 
 import (
+	"time"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
@@ -39,4 +41,19 @@ func (c *connection) GetDataPlane() contracts.FlowRegistryDataPlane {
 // FlowKey returns the immutable identity of the flow this connection is pinned to.
 func (c *connection) FlowKey() flowcontrol.FlowKey {
 	return c.key
+}
+
+// DefaultRequestTTL returns the queue-wait bound configured for the leased priority band and whether it was set.
+func (c *connection) DefaultRequestTTL() (time.Duration, bool) {
+	c.registry.mu.RLock()
+	defer c.registry.mu.RUnlock()
+	bandValue, ok := c.registry.priorityBands.Load(c.key.Priority)
+	if !ok {
+		return 0, false
+	}
+	defaultRequestTTL := bandValue.(*priorityBand).config.DefaultRequestTTL
+	if defaultRequestTTL == nil {
+		return 0, false
+	}
+	return *defaultRequestTTL, true
 }

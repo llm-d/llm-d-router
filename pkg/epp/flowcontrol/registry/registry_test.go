@@ -196,6 +196,25 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+
+	t.Run("Handle_DefaultRequestTTL_ShouldReturnBandConfiguration", func(t *testing.T) {
+		t.Parallel()
+		defaults := newTestPriorityBandPolicyDefaults()
+		configuredBand, err := NewPriorityBandConfig(highPriority, defaults, WithBandDefaultRequestTTL(5*time.Second))
+		require.NoError(t, err)
+		cfg, err := NewConfig(defaults, WithPriorityBand(configuredBand))
+		require.NoError(t, err)
+		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+		key := flowcontrol.FlowKey{ID: "ttl-flow", Priority: highPriority}
+
+		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+			ttl, set := conn.DefaultRequestTTL()
+			assert.True(t, set)
+			assert.Equal(t, 5*time.Second, ttl)
+			return nil
+		})
+		require.NoError(t, err)
+	})
 }
 
 // --- `FlowRegistryAdmin` API Tests ---
