@@ -30,10 +30,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -42,6 +44,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // collector records the spans and request metadata an exporter delivers.
@@ -458,21 +462,57 @@ func TestOTLPProtocol(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "a supported value matches case-insensitively",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "HTTP/PROTOBUF"},
+			want: protocolHTTP,
+		},
+		{
+			name: "grpc matches case-insensitively",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "GRPC"},
+			want: protocolGRPC,
+		},
+		{
 			name:    "an unrecognised protocol is reported",
 			env:     map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "thrift"},
 			want:    protocolGRPC,
 			wantErr: true,
 		},
 		{
-			name:    "an empty value is reported rather than treated as unset",
-			env:     map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": ""},
-			want:    protocolGRPC,
+			name: "an empty value counts as unset",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": ""},
+			want: protocolGRPC,
+		},
+		{
+			name: "a blank value counts as unset",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "   "},
+			want: protocolGRPC,
+		},
+		{
+			name: "surrounding whitespace does not reject a supported value",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "  http/protobuf  "},
+			want: protocolHTTP,
+		},
+		{
+			name: "an empty per-signal value falls through to the generic one",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
+				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "",
+			},
+			want: protocolHTTP,
+		},
+		{
+			name: "a rejected per-signal value is ignored so the generic one applies",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
+				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "thrift",
+			},
+			want:    protocolHTTP,
 			wantErr: true,
 		},
 		{
-			name: "a rejected per-signal value does not fall through to the generic one",
+			name: "gRPC applies when no variable names a supported protocol",
 			env: map[string]string{
-				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/json",
 				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "thrift",
 			},
 			want:    protocolGRPC,
@@ -602,4 +642,31 @@ func TestOTLPHTTPExporterUsesTLSFromEnvironment(t *testing.T) {
 	if requests, _ := c.received(); requests != 1 {
 		t.Errorf("collector received %d requests, want 1", requests)
 	}
+}
+
+// A rejected protocol reaches the operator only through the error handler: the exporter
+// is still built, so nothing downstream reports the value that was ignored.
+func TestUnsupportedProtocolReachesErrorHandler(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, otlpProtocolEnv...)
+
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "thrift")
+
+	var handled []string
+	h := &errorHandler{logger: funcr.New(func(_, args string) {
+		handled = append(handled, args)
+	}, funcr.Options{Verbosity: logging.DEBUG})}
+
+	exporter, err := newTraceExporter(context.Background(), h, exporterTypeOTLP)
+	if err != nil {
+		t.Fatalf("newTraceExporter() error = %v", err)
+	}
+	t.Cleanup(func() { _ = exporter.Shutdown(context.Background()) })
+
+	for _, line := range handled {
+		if strings.Contains(line, "thrift") {
+			return
+		}
+	}
+	t.Errorf("error handler received %q, want a report naming the rejected protocol", handled)
 }

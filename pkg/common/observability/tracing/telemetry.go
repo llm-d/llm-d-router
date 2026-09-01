@@ -18,9 +18,11 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
@@ -75,7 +77,9 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 
 	// "none" registers no span processor at all. Spans are still created and
 	// propagated, so instrumented code and context propagation are unaffected.
-	if exporterType != exporterTypeNone {
+	if exporterType == exporterTypeNone {
+		logger.Info("init OTel trace exporter", "type", exporterType)
+	} else {
 		traceExporter, err := newTraceExporter(ctx, loggerWrap, exporterType)
 		if err != nil {
 			loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
@@ -217,7 +221,8 @@ func traceExporterType() (string, error) {
 }
 
 // The OTLP transports OTEL_EXPORTER_OTLP_PROTOCOL selects between. http/json is not
-// listed: the Go SDK ships no JSON encoder for OTLP, so it cannot be served.
+// among them: the Go SDK ships no JSON encoder for OTLP, so it is unsupported like any
+// value outside this set.
 const (
 	protocolGRPC = "grpc"
 	protocolHTTP = "http/protobuf"
@@ -231,28 +236,38 @@ var otlpProtocolEnv = []string{
 	"OTEL_EXPORTER_OTLP_PROTOCOL",
 }
 
-// otlpProtocol resolves the OTLP transport. The per-signal variable wins when both are
-// set, as the specification requires.
+// otlpProtocol resolves the OTLP transport. The per-signal variable wins when both name
+// a supported one.
 //
-// An unsupported value is returned as an error alongside the default, and resolution
-// stops at the first variable that is set: a rejected per-signal value is a
-// misconfiguration to report, not a reason to consult the generic one.
+// The specification governs the rest: an empty value reads the same as unset, enum
+// values match case-insensitively, and a value the implementation does not recognise is
+// reported and then ignored, leaving the next variable to apply. gRPC applies when none
+// of them resolves.
+//
+// Ignored values are returned alongside the protocol that won, so a misconfiguration is
+// still reported even when a later variable supplies a usable transport.
 func otlpProtocol() (string, error) {
+	var ignored []error
+
 	for _, key := range otlpProtocolEnv {
-		protocol, ok := os.LookupEnv(key)
-		if !ok {
+		protocol := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+		if protocol == "" {
 			continue
 		}
 
 		switch protocol {
 		case protocolGRPC, protocolHTTP:
-			return protocol, nil
+			return protocol, errors.Join(ignored...)
 		default:
-			return defaultProtocol, fmt.Errorf("unsupported %s %q, falling back to %s", key, protocol, defaultProtocol)
+			ignored = append(ignored, fmt.Errorf("unsupported %s %q, ignored", key, protocol))
 		}
 	}
 
-	return defaultProtocol, nil
+	if len(ignored) > 0 {
+		ignored = append(ignored, fmt.Errorf("no supported OTLP protocol configured, falling back to %s", defaultProtocol))
+	}
+
+	return defaultProtocol, errors.Join(ignored...)
 }
 
 // newTraceExporter builds the exporter named by exporterType, which traceExporterType
@@ -341,7 +356,7 @@ func localGRPCCollectorOptions() []otlptracegrpc.Option {
 }
 
 // localHTTPCollectorOptions is localGRPCCollectorOptions for the HTTP transport, which
-// the SDK defaults to a different port.
+// serves on its own port and takes an unrelated option type.
 func localHTTPCollectorOptions() []otlptracehttp.Option {
 	if transportConfigured() {
 		return nil
