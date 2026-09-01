@@ -501,6 +501,7 @@ The `disagg-profile-handler` plugin is the entry point for all disaggregation to
   - `decode` (default: `decode`)
   - `prefill` (default: `prefill`)
   - `encode` (default: `encode`)
+  - `fallback` (optional): [experimental aggregated P/D fallback profile](../pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md#experimental-aggregated-pd-fallback).
 - `deciders` (optional): decider plugins that control whether each stage runs.
   - `prefill`: enables P/D disaggregation when set (used in `decode-first` mode).
   - `encode`: enables E disaggregation when set.
@@ -535,6 +536,10 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
     deciders:
       prefill: prefix-based-pd-decider
 ```
+
+#### P/D with Experimental Aggregated Fallback
+
+See [experimental aggregated P/D fallback](../pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md#experimental-aggregated-pd-fallback) for configuration, scheduling triggers, and engine capability requirements.
 
 #### P/D (Prefill/Decode, Prefill-First)
 
