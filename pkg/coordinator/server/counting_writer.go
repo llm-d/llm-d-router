@@ -19,7 +19,7 @@ package server
 import "net/http"
 
 // countingResponseWriter counts bytes written to the client so
-// response_bytes can include partial writes on cancellation or disconnect.
+// response_size_bytes can include partial writes on cancellation or disconnect.
 type countingResponseWriter struct {
 	http.ResponseWriter
 	n int

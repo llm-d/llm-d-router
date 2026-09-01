@@ -99,7 +99,7 @@ const (
 	DownloadResultCancelled = "cancelled"
 )
 
-// Stream label values for response_bytes. Fixed boolean-like strings, not
+// Stream label values for response_size_bytes. Fixed boolean-like strings, not
 // the request's raw stream field.
 const (
 	StreamTrue  = "true"
@@ -156,11 +156,11 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
-		encodeFanoutSize,
+		encodeSubrequests,
 		orchestrationOverhead,
 		mediaItems,
 		mediaDownloadDuration,
-		responseBytes,
+		responseSize,
 	}
 }
 
