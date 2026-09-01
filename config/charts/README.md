@@ -324,7 +324,8 @@ The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/comple
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.tokenizer.enabled` | Enable the vLLM `/render` tokenizer sidecar in the EPP deployment. | `false` |
-| `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's `vllm launch render` command. | `""` |
+| `router.tokenizer.flavor` | Renderer backend: `"python"` runs `vllm launch render`; `"rust"` runs `vllm-rs render`. | `"python"` |
+| `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
 | `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |

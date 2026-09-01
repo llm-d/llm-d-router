@@ -65,6 +65,8 @@ test_cases_llm_d_router_gateway["basic"]="--set router.modelServers.matchLabels.
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
 # Run the install command in case this script runs from a different bash
 # source (such as in the verify-all script)
@@ -100,6 +102,19 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ "${key}" == "triton" ]; then
     if ! grep -q "passthrough-parser" "${output_dir}/llm-d-router-gateway/templates/inferenceextension.yaml"; then
       echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "tokenizer-rust" ]; then
+    if ! grep -q "vllm-rs" "${output_dir}/llm-d-router-gateway/templates/epp.yaml"; then
+      echo "Validation failed: vllm-rs not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "tokenizer-python" ]; then
+    if ! grep -q "vllm" "${output_dir}/llm-d-router-gateway/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-gateway/templates/epp.yaml"; then
+      echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
       exit 1
     fi
   fi
@@ -146,6 +161,8 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
 
 echo "Processing dependencies for llm-d-router-standalone chart..."
@@ -172,6 +189,18 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   if [ $? -ne 0 ]; then
     echo "Kubectl validation failed for test: ${key}"
     exit 1
+  fi
+  if [ "${key}" == "tokenizer-rust" ]; then
+    if ! grep -q "vllm-rs" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
+      echo "Validation failed: vllm-rs not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "tokenizer-python" ]; then
+    if ! grep -q "vllm" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
+      echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
   fi
   echo "Test case ${key} passed validation."
 done
@@ -223,6 +252,13 @@ invalid_failopen_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-ro
 echo "Executing: ${invalid_failopen_command}"
 if eval "${invalid_failopen_command}"; then
   echo "Helm template unexpectedly succeeded for non-boolean router.proxy.failOpen"
+  exit 1
+fi
+
+invalid_tokenizer_flavor_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model --set router.tokenizer.flavor=invalid >/dev/null"
+echo "Executing: ${invalid_tokenizer_flavor_command}"
+if eval "${invalid_tokenizer_flavor_command}"; then
+  echo "Helm template unexpectedly succeeded for invalid router.tokenizer.flavor"
   exit 1
 fi
 

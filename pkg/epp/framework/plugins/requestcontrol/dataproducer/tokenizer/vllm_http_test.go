@@ -514,3 +514,34 @@ func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
 		assert.Equal(t, "tokenize_render /v1/completions/render", s.Name)
 	}
 }
+
+// TestVLLMHTTPRenderer_RustStandaloneRenderer verifies compatibility with the
+// response shapes produced by the standalone Rust renderer (`vllm-rs render`).
+// The Rust renderer returns {"token_ids": [...]} without multimodal features.
+func TestVLLMHTTPRenderer_RustStandaloneRenderer(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"token_ids":[101, 2054, 2003, 1037, 3231, 102]}`))
+	})
+	mux.HandleFunc(completionsRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"token_ids":[101, 2054, 2003, 1037, 3231, 102]}]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+
+	chatTokens, features, err := r.RenderChat(context.Background(), fwkrh.PayloadMap{
+		"messages": []any{map[string]any{"role": "user", "content": "hello world"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{101, 2054, 2003, 1037, 3231, 102}, chatTokens)
+	assert.Nil(t, features)
+
+	compTokens, offsets, err := r.Render(context.Background(), fwkrh.PayloadMap{
+		"prompt": "hello world",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{101, 2054, 2003, 1037, 3231, 102}}, compTokens)
+	assert.Nil(t, offsets)
+}

@@ -140,7 +140,7 @@ func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayl
 	}
 	// Shallow copy is sufficient because only the top-level model field is stamped in.
 	body := maps.Clone(pm)
-	body["model"] = r.modelName // `vllm launch render` requires the base model name
+	body["model"] = r.modelName // `vllm launch render` and `vllm-rs render` require the base model name
 	return r.postCompletionsRender(ctx, body)
 }
 
@@ -168,7 +168,7 @@ func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.Request
 	}
 	// Shallow copy is sufficient because only the top-level model field is stamped in.
 	body := maps.Clone(pm)
-	body["model"] = r.modelName // `vllm launch render` requires the base model name
+	body["model"] = r.modelName // `vllm launch render` and `vllm-rs render` require the base model name
 	return r.postChatRender(ctx, body, r.chatTimeout(pm))
 }
 
