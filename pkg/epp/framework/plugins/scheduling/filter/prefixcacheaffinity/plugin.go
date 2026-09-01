@@ -300,8 +300,7 @@ func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) (float64, bool) {
 // endpointTTFT returns the predicted TTFT (ms) for an endpoint, either from the
 // latency predictor or estimated from in-flight tokens and peak prefill
 // throughput. Endpoints missing the required attribute contribute no signal:
-// MaxFloat64 on the predictor path (never the fastest), 0 in-flight tokens on
-// the throughput path (no observed load). Returns the ttft and false if predictiond data was missing.
+// the function returns false and the endpoint is excluded from the bestTTFT calculation.
 func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if p.config.usesLatencyPredictor() {
 		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey); ok {
@@ -317,8 +316,8 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
-// inFlightTokens returns an endpoint's in-flight token count, or 0 when the
-// attribute is absent (no observed load).
+// inFlightTokens returns an endpoint's in-flight token count. If the attribute is
+// absent, it returns ok=false so the caller can treat the signal as missing.
 func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {

@@ -92,7 +92,7 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 		},
 	}
 
-	allOutcomes := []string{outcomeSticky, outcomeNoMatch, outcomeLoadOverride, outcomeExploration, outcomeNotApplicable}
+	allOutcomes := []string{outcomeSticky, outcomeNoMatch, outcomeLoadOverride, outcomeExploration, outcomeNotApplicable, outcomeMissingSignal}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
