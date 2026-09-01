@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"mime/multipart"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -30,6 +31,65 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
+
+var (
+	benchmarkOpenAIParseResult *fwkrh.ParseResult
+	benchmarkOpenAIPayload     []byte
+)
+
+func makeOpenAITokenArrayBody(tokenCount int) []byte {
+	tokens := strings.Repeat("12345,", tokenCount-1) + "12345"
+	return []byte(`{"model":"test","prompt":[` + tokens + `],"max_tokens":1}`)
+}
+
+func benchmarkOpenAIRequestParsing(b *testing.B, rewrite bool) {
+	parser := NewOpenAIParser()
+	headers := map[string]string{":path": "/v1/completions"}
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{name: "String/24KiB", body: []byte(`{"model":"test","prompt":"` + strings.Repeat("a", 24*1024) + `","max_tokens":1}`)},
+		{name: "TokenIDs/4K", body: makeOpenAITokenArrayBody(4 * 1024)},
+		{name: "TokenIDs/32K", body: makeOpenAITokenArrayBody(32 * 1024)},
+		{name: "TokenIDs/256K", body: makeOpenAITokenArrayBody(256 * 1024)},
+		{name: "TokenIDs/1M", body: makeOpenAITokenArrayBody(1_000_000)},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tc.body)))
+			for b.Loop() {
+				result, err := parser.ParseRequest(context.Background(), tc.body, headers)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if !rewrite {
+					benchmarkOpenAIParseResult = result
+					continue
+				}
+				payload := result.Body.Payload.(fwkrh.MarshalablePayload)
+				rewritten, err := parser.RewriteModelName(payload, "backend-model")
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkOpenAIPayload, err = rewritten.Marshal()
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkOpenAIParser_ParseRequest(b *testing.B) {
+	benchmarkOpenAIRequestParsing(b, false)
+}
+
+func BenchmarkOpenAIParser_ParseRequestAndRewrite(b *testing.B) {
+	benchmarkOpenAIRequestParsing(b, true)
+}
 
 func TestNewOpenAIParser(t *testing.T) {
 	parser := NewOpenAIParser()
@@ -118,7 +178,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":  "test",
-					"prompt": []any{json.Number("1"), json.Number("2"), json.Number("3")},
+					"prompt": json.RawMessage(`[1,2,3]`),
 				},
 			},
 		},
@@ -894,7 +954,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model": "text-embedding-3-small",
-					"input": []any{json.Number("1"), json.Number("2"), json.Number("3")},
+					"input": json.RawMessage(`[1,2,3]`),
 				},
 			},
 		},
@@ -1200,6 +1260,31 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 	}
 }
 
+func TestOpenAIParser_ParseRequestPreservesJSONError(t *testing.T) {
+	parser := NewOpenAIParser()
+	headers := map[string]string{":path": "/v1/completions"}
+
+	_, err := parser.ParseRequest(
+		context.Background(),
+		[]byte("no healthy upstream"),
+		headers,
+	)
+	if err == nil {
+		t.Fatal("ParseRequest() error = nil, want JSON syntax error")
+	}
+	if !strings.Contains(err.Error(), "invalid character 'o' in literal null") {
+		t.Fatalf("ParseRequest() error = %q, want JSON syntax error", err)
+	}
+
+	_, err = parser.ParseRequest(context.Background(), []byte(`{"prompt":123}`), headers)
+	if err == nil {
+		t.Fatal("ParseRequest() error = nil, want prompt validation error")
+	}
+	if got, want := err.Error(), "error extracting request body: invalid completions request: must have prompt field"; got != want {
+		t.Fatalf("ParseRequest() error = %q, want %q", got, want)
+	}
+}
+
 func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
 	const seed = json.Number("9007199254740993")
 
@@ -1237,6 +1322,58 @@ func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
 	}
 	if string(got["seed"]) != seed.String() {
 		t.Errorf("repackaged seed = %s, want %s", got["seed"], seed)
+	}
+}
+
+func TestOpenAIParser_RewriteModelNamePreservesTokenInput(t *testing.T) {
+	parser := NewOpenAIParser()
+	tests := []struct {
+		name, path, tokenField, body, wantTokens string
+	}{
+		{
+			name:       "nested completions",
+			path:       "/v1/completions",
+			tokenField: "prompt",
+			body:       `{"model":"client-model","prompt":[[1,2],[3,4294967295]],"max_tokens":8}`,
+			wantTokens: `[[1,2],[3,4294967295]]`,
+		},
+		{
+			name:       "embeddings exponent",
+			path:       "/v1/embeddings",
+			tokenField: "input",
+			body:       `{"model":"client-model","input":[1e0],"encoding_format":"float"}`,
+			wantTokens: `[1e0]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parser.ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": tt.path})
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			payload, ok := result.Body.Payload.(fwkrh.PayloadMap)
+			if !ok {
+				t.Fatalf("Payload type = %T, want PayloadMap", result.Body.Payload)
+			}
+
+			rewritten, err := parser.RewriteModelName(payload, "backend-model")
+			if err != nil {
+				t.Fatalf("RewriteModelName() error = %v", err)
+			}
+			gotBytes, err := rewritten.Marshal()
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(gotBytes, &got); err != nil {
+				t.Fatalf("unmarshal rewritten payload: %v", err)
+			}
+			if string(got[tt.tokenField]) != tt.wantTokens {
+				t.Errorf("rewritten %s = %s, want %s", tt.tokenField, got[tt.tokenField], tt.wantTokens)
+			}
+		})
 	}
 }
 

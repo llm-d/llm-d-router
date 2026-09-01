@@ -33,6 +33,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -44,30 +45,78 @@ import (
 var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,128}$`)
 
 func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
+	receivedAt := time.Now()
+	// model is the raw name from the request body, or "" when the client
+	// omitted it. Metric emitters normalize "" to ModelUnknown via
+	// boundModel; the pipeline sees the raw value so upstream requests
+	// carry what the client actually sent.
+	var model string
+	// inflightModel tracks the request_running label under which this
+	// request currently counts. The gauge is incremented at entry (before
+	// body read) so slow uploads and 413/parse rejections are visible in
+	// "requests being processed"; after JSON parse the label is swapped
+	// from "unknown" to the parsed model when they differ.
+	inflightModel := ""
+	coordmetrics.IncRequestRunning(inflightModel)
+	// body is declared before the defer so RecordRequestSize can observe its
+	// final length even when an early validation branch returns. Read
+	// failures land here with the partial length; 413/invalid-JSON/null
+	// branches land here with the full length. Success lands here with the
+	// parsed model.
+	var body []byte
+	defer func() {
+		// A pipeline panic bypasses the err-branch call to IncRequestErrorTotal
+		// below; recovering here records the panic under error_code=internal
+		// and re-panics so chi Recoverer at the server edge still answers 500.
+		r := recover()
+		if r != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeInternal)
+		}
+		coordmetrics.IncRequestTotal(model)
+		coordmetrics.RecordRequestDuration(model, time.Since(receivedAt))
+		coordmetrics.RecordRequestSize(model, len(body))
+		coordmetrics.DecRequestRunning(inflightModel)
+		if r != nil {
+			panic(r)
+		}
+	}()
+
 	parseStart := time.Now()
-	body, err := io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
+	var err error
+	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
 	if int64(len(body)) > s.maxRequestBodySize*config.BytesPerMB {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	if parsed == nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	parseDuration := time.Since(parseStart)
 
 	stream, _ := parsed[reqcommon.FieldStream].(bool)
-	model, _ := parsed["model"].(string)
+	if m, ok := parsed["model"].(string); ok && m != "" {
+		model = m
+	}
+	if model != inflightModel {
+		coordmetrics.DecRequestRunning(inflightModel)
+		coordmetrics.IncRequestRunning(model)
+		inflightModel = model
+	}
 
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
@@ -112,6 +161,13 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		logger.Error(err, "pipeline execution failed")
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
+		var streamed *pipeline.UpstreamStreamedError
+		if errors.As(err, &streamed) {
+			// Response bytes were already streamed to the client (or 502
+			// written by the reverse proxy's ErrorHandler); do not overwrite.
+			return
+		}
 		status, msg := classifyPipelineError(err, reqCtx.RequestID)
 		http.Error(w, msg, status)
 	}

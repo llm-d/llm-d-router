@@ -26,9 +26,9 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -322,9 +322,9 @@ func TestInflightGauges_FairnessIDCardinalityBounded(t *testing.T) {
 	const testCap = 3
 	inflightRequests.Reset()
 	inflightTokens.Reset()
-	cardinality.SetFairnessIDLabelLimit(testCap)
+	metricsutil.SetFairnessIDLabelLimit(testCap)
 	t.Cleanup(func() {
-		cardinality.SetFairnessIDLabelLimit(cardinality.DefaultFairnessIDLabelLimit)
+		metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit)
 		inflightRequests.Reset()
 		inflightTokens.Reset()
 	})

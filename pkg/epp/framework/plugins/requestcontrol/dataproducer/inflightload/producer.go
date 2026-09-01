@@ -29,11 +29,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -351,9 +351,14 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 			break
 		}
 		p.registeredEndpoints.Delete(id)
-		endpointName, _ := splitNamespacedName(event.Endpoint.GetMetadata().ID.String())
-		inflightTokens.DeletePartialMatch(prometheus.Labels{"endpoint_name": endpointName})
-		inflightRequests.DeletePartialMatch(prometheus.Labels{"endpoint_name": endpointName})
+		endpointName, namespace := splitNamespacedName(event.Endpoint.GetMetadata().ID.String())
+		labels := prometheus.Labels{
+			"endpoint_name": endpointName,
+			"namespace":     namespace,
+			"producer_name": p.typedName.Name,
+		}
+		inflightTokens.DeletePartialMatch(labels)
+		inflightRequests.DeletePartialMatch(labels)
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:
@@ -415,7 +420,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	// Bound the fairness_id label so a large number of distinct client IDs cannot grow this
 	// plugin's series set. The bounded value is stored on the entry, so the eviction-time
 	// decrement uses the same label as the increment here.
-	fairnessID := cardinality.BoundFairnessID(request.FairnessID)
+	fairnessID := metricsutil.BoundFairnessID(request.FairnessID)
 	priority := strconv.Itoa(request.Objectives.Priority)
 
 	if request.Body != nil {

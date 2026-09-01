@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 )
 
 // ErrPipelineDone is returned by a step to signal successful early exit.
@@ -52,6 +53,29 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("%s: upstream returned HTTP %d", e.Step, e.StatusCode)
 }
 
+// UpstreamStreamedError signals that a streaming step (decode,
+// conditional-decode) saw an upstream failure after the response was already
+// committed to the client. The reverse proxy either streamed a 4xx/5xx body
+// from the worker (StatusCode carries that status) or wrote 502 via its
+// ErrorHandler on a transport failure (StatusCode is 0, Cause carries the
+// transport error). Callers must classify this for request_error_total /
+// step_errors_total but must not write another response body: the client is
+// already committed.
+type UpstreamStreamedError struct {
+	Step       string
+	StatusCode int
+	Cause      error
+}
+
+func (e *UpstreamStreamedError) Error() string {
+	if e.StatusCode == 0 {
+		return fmt.Sprintf("%s: upstream transport error: %v", e.Step, e.Cause)
+	}
+	return fmt.Sprintf("%s: upstream returned HTTP %d (response already streamed to client)", e.Step, e.StatusCode)
+}
+
+func (e *UpstreamStreamedError) Unwrap() error { return e.Cause }
+
 // Pipeline orchestrates the sequential execution of steps.
 type Pipeline struct {
 	steps []Step
@@ -62,15 +86,20 @@ func New(steps []Step) *Pipeline {
 	return &Pipeline{steps: steps}
 }
 
+// stepTiming holds one step's per-request timing for the summary log line
+// emitted by Execute.
+type stepTiming struct {
+	name     string
+	duration time.Duration
+}
+
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
 
-	type stepTiming struct {
-		name     string
-		duration time.Duration
-	}
 	timings := make([]stepTiming, len(p.steps))
+	started := map[string]bool{}
+	executed := map[string]bool{}
 	defer func() {
 		stats := make([]any, 0, (len(timings)+1)*2)
 		if reqCtx.ParseDuration > 0 {
@@ -80,23 +109,107 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			stats = append(stats, t.name, t.duration.String())
 		}
 		logger.V(logutil.DEFAULT).Info("pipeline step timings", stats...)
+
+		// Classify path from steps that ran, success or failure, so a
+		// request that reached decode and failed there still contributes
+		// to path totals.
+		if path, ok := classifyExecutionPath(started); ok {
+			coordmetrics.IncExecutionPath(reqCtx.Model, path)
+		}
+		// Render populates TokenIDs on every success path (including a valid
+		// empty prompt array in the completions branch), so gate on the step
+		// having run rather than on len > 0.
+		if executed["render"] {
+			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
+		}
 	}()
 
 	for idx, step := range p.steps {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("pipeline cancelled: %w", err)
 		}
-		logger.V(logutil.TRACE).Info("step starting", "step", step.Name())
-		start := time.Now()
-		err := step.Execute(ctx, reqCtx)
-		timings[idx] = stepTiming{name: step.Name(), duration: time.Since(start)}
-		if err != nil {
+		name := step.Name()
+		started[name] = true
+		logger.V(logutil.TRACE).Info("step starting", "step", name)
+		if err := p.runStep(ctx, reqCtx, step, idx, timings); err != nil {
 			if errors.Is(err, ErrPipelineDone) {
+				// Clean early exit (e.g. conditional-decode cache hit); not an error.
+				executed[name] = true
 				return nil
 			}
-			return fmt.Errorf("step %q failed: %w", step.Name(), err)
+			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
+			return fmt.Errorf("step %q failed: %w", name, err)
 		}
-		logger.V(logutil.TRACE).Info("step complete", "step", step.Name())
+		executed[name] = true
+		logger.V(logutil.TRACE).Info("step complete", "step", name)
 	}
 	return nil
+}
+
+// runStep executes one step with per-iteration observability. The defer
+// covers all three step-observability signals on every exit path (normal
+// return, error return, panic). On panic recovery, step_errors_total
+// records the failure under error_code=internal and the panic
+// re-propagates into the chi Recoverer at the server edge.
+func (p *Pipeline) runStep(
+	ctx context.Context,
+	reqCtx *RequestContext,
+	step Step,
+	idx int,
+	timings []stepTiming,
+) error {
+	name := step.Name()
+	coordmetrics.IncStepRunning(name)
+	start := time.Now()
+	defer func() {
+		d := time.Since(start)
+		coordmetrics.RecordStepDuration(name, d)
+		coordmetrics.DecStepRunning(name)
+		timings[idx] = stepTiming{name: name, duration: d}
+		if r := recover(); r != nil {
+			coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)
+			panic(r)
+		}
+	}()
+	return step.Execute(ctx, reqCtx)
+}
+
+// classifyExecutionPath maps the set of steps that ran (success or failure)
+// to the execution_path_total label. Returns false when no decode-ish step
+// started, so pipelines aborted before decode do not spuriously record a
+// path. Step-name strings are hardcoded here because the pipeline package
+// cannot import the steps package without introducing a dependency cycle.
+// They match each step file's own StepName constant by contract; keep the
+// two in sync.
+func classifyExecutionPath(executed map[string]bool) (string, bool) {
+	decodeIsh := executed["decode"] || executed["conditional-decode"]
+	if !decodeIsh {
+		return "", false
+	}
+	switch {
+	case executed["encode"] && executed["prefill"]:
+		return coordmetrics.PathEncodePrefillDecode, true
+	case executed["prefill"]:
+		return coordmetrics.PathPrefillDecode, true
+	default:
+		return coordmetrics.PathDecodeOnly, true
+	}
+}
+
+// ClassifyOpts injects the pipeline's error sentinels into the shared
+// coordmetrics.ClassifyErrorCode. Exported so step_errors_total (pipeline)
+// and request_error_total (server) share one mapping. Treat as immutable.
+var ClassifyOpts = coordmetrics.ClassifyOptions{
+	BadRequest: ErrBadRequest,
+	IsUpstream: func(err error) (int, bool) {
+		var u *UpstreamError
+		if errors.As(err, &u) {
+			return u.StatusCode, true
+		}
+		var s *UpstreamStreamedError
+		if errors.As(err, &s) {
+			return s.StatusCode, true
+		}
+		return 0, false
+	},
 }

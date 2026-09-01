@@ -157,6 +157,10 @@ func parseCacheSalt(data json.RawMessage) (string, error) {
 }
 
 func parseInputIDs(data json.RawMessage) ([]uint32, error) {
+	if ids, ok := fwkrh.ParseCanonicalTokenIDs(data); ok {
+		return ids, nil
+	}
+
 	var ids []uint32
 	if err := json.Unmarshal(data, &ids); err != nil {
 		return nil, errors.New("input_ids must be an array of uint32 integers")

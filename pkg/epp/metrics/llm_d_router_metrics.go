@@ -60,7 +60,7 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("End-to-end request latency distribution in seconds.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		modelLabelsWithFairnessPriority,
 	)
@@ -70,11 +70,7 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Incoming request body size distribution in bytes.", compbasemetrics.ALPHA),
-			Buckets: []float64{
-				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-				131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608,
-				16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824,
-			},
+			Buckets:   metricsutil.RequestSizeBuckets,
 		},
 		modelLabelsWithFairnessPriority,
 	)
@@ -84,7 +80,7 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "response_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Outgoing response body size distribution in bytes.", compbasemetrics.ALPHA),
-			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
+			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
 		modelLabelsWithFairnessPriority,
 	)
@@ -94,7 +90,7 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_input_tokens",
 			Help:      metricsutil.HelpMsgWithStability("Input token count distribution per request.", compbasemetrics.ALPHA),
-			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
+			Buckets:   metricsutil.TokenCountBuckets,
 		},
 		modelLabelsWithFairnessPriority,
 	)
@@ -114,7 +110,7 @@ var (
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "request_cached_tokens",
 			Help:      metricsutil.HelpMsgWithStability("Distribution of prompt tokens read from cache per request, as reported by the model server in the response.", compbasemetrics.ALPHA),
-			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
+			Buckets:   metricsutil.TokenCountBuckets,
 		},
 		modelLabelsWithFairnessPriority,
 	)

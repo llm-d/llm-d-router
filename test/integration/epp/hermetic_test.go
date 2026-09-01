@@ -224,7 +224,7 @@ dataLayer:
 					},
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - error unmarshaling request bodyMap: invalid character 'o' in literal null (expecting 'u')",
+						"inference error: BadRequest - error extracting request body: invalid character 'o' in literal null (expecting 'u')",
 					),
 				},
 				{
@@ -442,7 +442,7 @@ dataLayer:
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16384"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32778"} 1
+              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32768"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="65536"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="131072"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="262144"} 1
