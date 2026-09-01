@@ -530,8 +530,8 @@ func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", nil))
-	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", nil), 1e-9)
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_subrequests", nil))
+	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_subrequests", nil), 1e-9)
 
 	reg = newMetricsRegistry(t)
 	steps = []Step{
@@ -544,8 +544,8 @@ func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", nil))
-	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", nil), 1e-9)
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_subrequests", nil))
+	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_subrequests", nil), 1e-9)
 }
 
 func TestExecute_AccumulatesStepDuration(t *testing.T) {

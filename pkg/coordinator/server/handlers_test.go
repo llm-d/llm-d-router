@@ -751,10 +751,10 @@ func TestHandleInference_RecordsOrchestrationOverheadAndResponseBytes(t *testing
 	if hc := histogramCount(t, reg, "llm_d_coordinator_orchestration_overhead_seconds", map[string]string{"route": coordmetrics.RouteChatCompletions}); hc != 1 {
 		t.Fatalf("expected 1 orchestration_overhead_seconds observation, got %d", hc)
 	}
-	if hc := histogramCount(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
-		t.Fatalf("expected 1 response_bytes observation, got %d", hc)
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
+		t.Fatalf("expected 1 response_size_bytes observation, got %d", hc)
 	}
-	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs != 0 {
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs != 0 {
 		t.Fatalf("expected 0 response bytes on a silent success path, got %v", hs)
 	}
 }
@@ -775,10 +775,10 @@ func TestHandleInference_ResponseBytesCountsStreamedAndErrorBodies(t *testing.T)
 	srv.handleInference(rec, req)
 	require.Equal(t, streamedBody, rec.Body.String())
 
-	if hc := histogramCount(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hc != 1 {
-		t.Fatalf("expected 1 streaming response_bytes observation, got %d", hc)
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hc != 1 {
+		t.Fatalf("expected 1 streaming response_size_bytes observation, got %d", hc)
 	}
-	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hs != float64(len(streamedBody)) {
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hs != float64(len(streamedBody)) {
 		t.Fatalf("expected streamed length %d, got %v", len(streamedBody), hs)
 	}
 }
@@ -793,10 +793,10 @@ func TestHandleInference_ErrorPathRecordsResponseBytes(t *testing.T) {
 	if hc := histogramCount(t, reg, "llm_d_coordinator_orchestration_overhead_seconds", map[string]string{"route": coordmetrics.RouteCompletions}); hc != 1 {
 		t.Fatalf("expected 1 orchestration_overhead_seconds observation on completions, got %d", hc)
 	}
-	if hc := histogramCount(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
-		t.Fatalf("expected 1 response_bytes observation on parse error, got %d", hc)
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
+		t.Fatalf("expected 1 response_size_bytes observation on parse error, got %d", hc)
 	}
-	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs <= 0 {
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs <= 0 {
 		t.Fatalf("expected error body bytes > 0, got %v", hs)
 	}
 }

@@ -175,11 +175,11 @@ var (
 // media_download_duration_seconds, which is one observation per download
 // attempt.
 var (
-	encodeFanoutSize = prometheus.NewHistogramVec(
+	encodeSubrequests = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
-			Name:      "encode_fanout_size",
-			Help:      metricsutil.HelpMsgWithStability("Number of Encode subrequests produced by one client request. Observed once per pipeline execution after fan-out size is known; 0 when Encode does not run or is skipped. Unit: subrequests.", compbasemetrics.ALPHA),
+			Name:      "encode_subrequests",
+			Help:      metricsutil.HelpMsgWithStability("Number of Encode subrequests produced by one client request. Observed once per pipeline execution after fan-out is known; 0 when Encode does not run or is skipped. Unit: subrequests.", compbasemetrics.ALPHA),
 			Buckets:   CountBuckets,
 		},
 		[]string{},
@@ -215,10 +215,10 @@ var (
 		resultLabel,
 	)
 
-	responseBytes = prometheus.NewHistogramVec(
+	responseSize = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
-			Name:      "response_bytes",
+			Name:      "response_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Total bytes written to the client for one request, including partial writes on cancellation or disconnect. Observed once per client request. Unit: bytes.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.RequestSizeBuckets,
 		},

@@ -86,7 +86,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			stepDuration = reqCtx.StepDuration
 		}
 		coordmetrics.RecordOrchestrationOverhead(route, time.Since(receivedAt)-parseDuration-stepDuration)
-		coordmetrics.RecordResponseBytes(stream, cw.BytesWritten())
+		coordmetrics.RecordResponseSize(stream, cw.BytesWritten())
 		coordmetrics.DecRequestRunning(inflightModel)
 		if r != nil {
 			panic(r)
