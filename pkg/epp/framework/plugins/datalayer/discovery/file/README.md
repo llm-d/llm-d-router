@@ -18,17 +18,18 @@ datastore on each change.
 ## How It Works
 
 - **Initial load.** On `Start`, the file is read once. Each entry is
-  validated (address must be a parseable IP, port must be in `[1, 65535]`)
-  and applied via `notifier.Upsert`. Per-entry validation errors are logged
-  and the entry is skipped; file-level problems (open, parse, size > 1 MiB)
-  abort startup.
+  validated (address must be a literal IPv4 address, port must be in
+  `[1, 65535]`). Valid entries are applied via `notifier.Upsert`, and the
+  loader returns all validation errors together. Any validation error, or a
+  file-level problem (open, parse, size > 1 MiB), aborts startup and leaves the
+  discovery plugin not ready.
 - **Reload (optional).** When `watchFile: true`, fsnotify Write / Create /
   Remove events trigger a reload. After an atomic rename or ConfigMap-style
   symlink swap (which destroys the inode being watched), the watcher is
-  re-attached so subsequent changes still fire. Reload semantics match the
-  initial load: invalid entries are logged and skipped, valid entries are
-  applied. Endpoints present in the previous load but absent from the new
-  one are deleted via `notifier.Delete`.
+  re-attached so subsequent changes still fire. Invalid entries are logged
+  and skipped, valid entries are applied, and endpoints absent from the valid
+  entries are deleted via `notifier.Delete`. A reload error does not stop the
+  plugin.
 - **Readiness.** The plugin closes its `Ready()` channel after the first
   successful load so callers can gate request-serving components on the
   datastore being populated.
@@ -100,8 +101,8 @@ endpoints:
   and `InferenceObjective` reconcilers do not run, and any
   `k8s-notification-source` plugin in the data layer config will not bind.
   The runner emits a startup log naming the inactive features.
-- A single bad entry on initial load is logged and skipped, not fatal. If
-  the entire file is not readable or fails to parse, startup fails.
+- Any invalid address or port causes the initial load to fail. An unreadable,
+  oversized, or malformed file also causes startup to fail.
 
 ## Related Documentation
 
