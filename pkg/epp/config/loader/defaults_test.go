@@ -33,11 +33,10 @@ import (
 // metricsPlugins returns an allPlugins map with mock stubs for both default metrics plugins.
 // Providing them prevents ensureDataLayer from calling registerDefaultPlugin (which needs the
 // global factory registry). The function still injects the DataLayer.Sources entries.
-func metricsPlugins() map[string]fwkplugin.Plugin {
-	return map[string]fwkplugin.Plugin{
-		sourcemetrics.MetricsDataSourceType:   &mockPlugin{t: fwkplugin.TypedName{Type: sourcemetrics.MetricsDataSourceType, Name: sourcemetrics.MetricsDataSourceType}},
-		extractormetrics.MetricsExtractorType: &mockPlugin{t: fwkplugin.TypedName{Type: extractormetrics.MetricsExtractorType, Name: extractormetrics.MetricsExtractorType}},
-	}
+func metricsPlugins(handle fwkplugin.Handle) map[string]fwkplugin.Plugin {
+	handle.AddPlugin(sourcemetrics.MetricsDataSourceType, &mockPlugin{t: fwkplugin.TypedName{Type: sourcemetrics.MetricsDataSourceType, Name: sourcemetrics.MetricsDataSourceType}})
+	handle.AddPlugin(extractormetrics.MetricsExtractorType, &mockPlugin{t: fwkplugin.TypedName{Type: extractormetrics.MetricsExtractorType, Name: extractormetrics.MetricsExtractorType}})
+	return handle.GetAllPluginsWithNames()
 }
 
 func TestEnsureDataLayer(t *testing.T) {
@@ -47,7 +46,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.NotNil(t, cfg.DataLayer)
@@ -63,7 +62,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 1)
@@ -80,13 +79,31 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 2)
 		refs := []string{cfg.DataLayer.Sources[0].PluginRef, cfg.DataLayer.Sources[1].PluginRef}
 		require.Contains(t, refs, "k8s-notification-source")
 		require.Contains(t, refs, sourcemetrics.MetricsDataSourceType)
+	})
+
+	t.Run("source of another type does not suppress injection", func(t *testing.T) {
+		cfg := &configapi.EndpointPickerConfig{
+			DataLayer: &configapi.DataLayerConfig{
+				Sources: []configapi.DataLayerSource{
+					{PluginRef: "dcgmSource"},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+		allPlugins := metricsPlugins(handle)
+		handle.AddPlugin("dcgmSource", &mockPlugin{t: fwkplugin.TypedName{Type: "dcgm-data-source", Name: "dcgmSource"}})
+
+		err := ensureDataLayer(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.DataLayer.Sources, 2)
 	})
 
 	t.Run("existing metrics-data-source is not double-injected", func(t *testing.T) {
@@ -99,10 +116,34 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 1, "no duplicate metrics source")
+	})
+
+	t.Run("metrics source under a custom instance name is not double-injected", func(t *testing.T) {
+		cfg := &configapi.EndpointPickerConfig{
+			DataLayer: &configapi.DataLayerConfig{
+				Sources: []configapi.DataLayerSource{
+					{
+						PluginRef:  "metricsSource",
+						Extractors: []configapi.DataLayerExtractor{{PluginRef: "customMetricsExtractor"}},
+					},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+		handle.AddPlugin("metricsSource", &mockPlugin{t: fwkplugin.TypedName{Type: sourcemetrics.MetricsDataSourceType, Name: "metricsSource"}})
+		handle.AddPlugin("customMetricsExtractor", &mockPlugin{t: fwkplugin.TypedName{Type: extractormetrics.MetricsExtractorType, Name: "customMetricsExtractor"}})
+
+		err := ensureDataLayer(cfg, handle, handle.GetAllPluginsWithNames())
+
+		require.NoError(t, err)
+		require.Len(t, cfg.DataLayer.Sources, 1, "no duplicate metrics source")
+		require.Equal(t, "metricsSource", cfg.DataLayer.Sources[0].PluginRef)
+		require.Len(t, cfg.DataLayer.Sources[0].Extractors, 1, "no duplicate metrics extractor")
+		require.Equal(t, "customMetricsExtractor", cfg.DataLayer.Sources[0].Extractors[0].PluginRef)
 	})
 
 	t.Run("injectDefaults: false suppresses injection", func(t *testing.T) {
@@ -113,7 +154,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Empty(t, cfg.DataLayer.Sources)

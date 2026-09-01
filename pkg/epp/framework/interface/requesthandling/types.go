@@ -323,6 +323,12 @@ func parseArrayInput(v []any, errorPrefix string) (arrayInputResult, error) {
 }
 
 func (p *Prompt) UnmarshalJSON(data []byte) error {
+	if tokenIDs, ok := parseCanonicalTokenIDArrays(data); ok {
+		p.Strings = nil
+		p.TokenIDs = tokenIDs
+		return nil
+	}
+
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -476,6 +482,12 @@ type EmbeddingsInput struct {
 }
 
 func (e *EmbeddingsInput) UnmarshalJSON(data []byte) error {
+	if tokenIDs, ok := parseCanonicalTokenIDArrays(data); ok {
+		e.Strings = nil
+		e.TokenIDs = tokenIDs
+		return nil
+	}
+
 	var raw any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -572,6 +584,39 @@ type GenerateRequest struct {
 	CacheSalt string `json:"cache_salt,omitempty"`
 }
 
+type wirePlaceholder struct {
+	Offset int `json:"offset"`
+	Length int `json:"length"`
+}
+
+type wireFeatures struct {
+	MMHashes       map[string][]string          `json:"mm_hashes"`
+	MMPlaceholders map[string][]wirePlaceholder `json:"mm_placeholders"`
+}
+
+var errNonCanonicalTokenIDs = errors.New("non-canonical token IDs")
+
+type generateRequestCanonicalTokenIDs struct {
+	Values []uint32
+	Seen   bool
+}
+
+func (t *generateRequestCanonicalTokenIDs) UnmarshalJSON(data []byte) error {
+	t.Seen = true
+	tokenIDs, ok := ParseCanonicalTokenIDs(data)
+	if !ok {
+		return errNonCanonicalTokenIDs
+	}
+	t.Values = tokenIDs
+	return nil
+}
+
+type generateRequestFastWire struct {
+	TokenIDs  generateRequestCanonicalTokenIDs `json:"token_ids"`
+	CacheSalt string                           `json:"cache_salt,omitempty"`
+	Features  *wireFeatures                    `json:"features,omitempty"`
+}
+
 func (r *GenerateRequest) String() string {
 	if r == nil {
 		return nilStr
@@ -598,17 +643,21 @@ func (r *GenerateRequest) String() string {
 }
 
 func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
-	type wirePlaceholder struct {
-		Offset int `json:"offset"`
-		Length int `json:"length"`
+	var raw generateRequestFastWire
+	if err := json.Unmarshal(data, &raw); err == nil && raw.TokenIDs.Seen {
+		r.CacheSalt = raw.CacheSalt
+		r.TokenIDs = raw.TokenIDs.Values
+		r.setGenerateRequestFeatures(raw.Features)
+		return nil
 	}
+	return r.unmarshalJSONFallback(data)
+}
+
+func (r *GenerateRequest) unmarshalJSONFallback(data []byte) error {
 	var raw struct {
-		TokenIDs  []float64 `json:"token_ids"`
-		CacheSalt string    `json:"cache_salt,omitempty"`
-		Features  *struct {
-			MMHashes       map[string][]string          `json:"mm_hashes"`
-			MMPlaceholders map[string][]wirePlaceholder `json:"mm_placeholders"`
-		} `json:"features,omitempty"`
+		TokenIDs  []float64     `json:"token_ids"`
+		CacheSalt string        `json:"cache_salt,omitempty"`
+		Features  *wireFeatures `json:"features,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -621,21 +670,26 @@ func (r *GenerateRequest) UnmarshalJSON(data []byte) error {
 		}
 		r.TokenIDs[i] = uint32(v)
 	}
-	if raw.Features != nil {
-		ranges := make(map[string][]kvblock.PlaceholderRange, len(raw.Features.MMPlaceholders))
-		for modality, ws := range raw.Features.MMPlaceholders {
-			out := make([]kvblock.PlaceholderRange, len(ws))
-			for i, w := range ws {
-				out[i] = kvblock.PlaceholderRange{Offset: w.Offset, Length: w.Length}
-			}
-			ranges[modality] = out
-		}
-		r.Features = &tokenization.MultiModalFeatures{
-			MMHashes:       raw.Features.MMHashes,
-			MMPlaceholders: ranges,
-		}
-	}
+	r.setGenerateRequestFeatures(raw.Features)
 	return nil
+}
+
+func (r *GenerateRequest) setGenerateRequestFeatures(features *wireFeatures) {
+	if features == nil {
+		return
+	}
+	ranges := make(map[string][]kvblock.PlaceholderRange, len(features.MMPlaceholders))
+	for modality, placeholders := range features.MMPlaceholders {
+		out := make([]kvblock.PlaceholderRange, len(placeholders))
+		for i, placeholder := range placeholders {
+			out[i] = kvblock.PlaceholderRange{Offset: placeholder.Offset, Length: placeholder.Length}
+		}
+		ranges[modality] = out
+	}
+	r.Features = &tokenization.MultiModalFeatures{
+		MMHashes:       features.MMHashes,
+		MMPlaceholders: ranges,
+	}
 }
 
 // ConversationItem represents a single item in a conversation
