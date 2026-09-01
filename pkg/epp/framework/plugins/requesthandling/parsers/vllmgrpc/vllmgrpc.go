@@ -220,7 +220,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		copy(copiedTokenIDsInt, inputIDs)
 		body = &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
+				Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
 			TokenizedRequest: &fwkrh.TokenizedRequest{
@@ -284,7 +284,7 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 		body = &fwkrh.InferenceRequestBody{
 			Embeddings: &fwkrh.EmbeddingsRequest{
 				Input: fwkrh.EmbeddingsInput{
-					TokenIDs: tokenIDs,
+					TokenIDs: [][]uint32{tokenIDs},
 				},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},

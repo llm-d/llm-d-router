@@ -26,7 +26,8 @@ import (
 type StateKey string
 
 // CrossReplicaSyncer synchronizes shared state across EPP replicas.
-// Implementations own the sync mechanism (e.g., Redis pub/sub, gossip).
+// Implementations own the storage mechanism and must provide the atomic
+// consistency required by GetOrSet.
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
@@ -42,12 +43,21 @@ type CrossReplicaSyncer interface {
 
 	// Delete removes the value for the given key and endpoint.
 	Delete(ctx context.Context, key StateKey, endpointID string) error
+
+	// GetOrSet atomically returns the value already stored for key and id, or
+	// stores candidate and returns it. This is global request-level state shared
+	// across EPP replicas, not per-endpoint state. Use it only when exact
+	// coordination is required. Implementations own a fixed expiration period.
+	// The bool reports whether the returned value already existed. Implementations
+	// must provide linearizable behavior across every EPP replica sharing the syncer.
+	GetOrSet(ctx context.Context, key StateKey, id string, candidate any) (actual any, existed bool, err error)
 }
 
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface
-// and wires the store transparently.
+// and wires the store transparently. Prefer it for per-endpoint state that can
+// tolerate periodic synchronization.
 type CrossReplicaContributor interface {
 	CrossReplicaState() CrossReplicaSpec
 }

@@ -23,42 +23,6 @@ schedulingProfiles:
     weight: 2
 `
 
-// EPP configuration for running with P/D
-// Uses deprecated pd-profile-handler
-const deprecatedPdConfig = `apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- type: prefill-header-handler
-- type: approx-prefix-cache-producer
-  parameters:
-    blockSizeTokens: 16
-    maxPrefixTokensToMatch: 16384
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: prefill-filter
-- type: decode-filter
-- type: max-score-picker
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
-- type: pd-profile-handler
-  parameters:
-    deciderPluginName: prefix-based-pd-decider
-schedulingProfiles:
-- name: prefill
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-- name: decode
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`
-
 // epdEncodeDecodeConfig configures E/PD (encode + P/D) using disagg-profile-handler.
 // The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
 const epdEncodeDecodeConfig = `apiVersion: llm-d.ai/v1alpha1

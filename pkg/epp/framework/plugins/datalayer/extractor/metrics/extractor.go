@@ -40,18 +40,17 @@ const (
 	KVCacheUsagePercentKey = "KVCacheUsagePercent"
 	WaitingQueueSizeKey    = "WaitingQueueSize"
 	RunningRequestsSizeKey = "RunningRequestsSize"
-	MaxActiveModelsKey     = "MaxActiveModels"
 	ActiveModelsKey        = "ActiveModels"
 	WaitingModelsKey       = "WaitingModels"
-	UpdateTimeKey          = "UpdateTime"
 
 	// LoRA metrics based on MSP
 	LoraInfoRunningAdaptersMetricName = "running_lora_adapters"
 	LoraInfoWaitingAdaptersMetricName = "waiting_lora_adapters"
 	LoraInfoMaxAdaptersMetricName     = "max_lora"
 
-	CacheConfigBlockSizeInfoMetricName = "block_size"
-	CacheConfigNumGPUBlocksMetricName  = "num_gpu_blocks"
+	CacheConfigBlockSizeInfoMetricName   = "block_size"
+	CacheConfigNumGPUBlocksMetricName    = "num_gpu_blocks"
+	CacheConfigPrefixMatchUnitMetricName = "prefix_match_unit"
 )
 
 // Extractor implements the metrics extraction based on the model
@@ -89,10 +88,20 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 var _ fwkplugin.ProducerPlugin = &Extractor{}
 
 // Produces declares the custom scalar metric attributes, whose names come from
-// the per-engine mappings in configuration. Core metrics land on the Metrics
-// struct rather than the attribute map and so are not declared here.
+// the per-engine mappings in configuration, plus the per-pod metric fields this
+// extractor writes into the endpoint's Metrics struct that a scorer or filter
+// declares as a Consumes() dependency. Declaring both lets the data-attribute
+// registry and the DAG builder validate the scorers and filters that read them.
+// The Metrics field types mirror the fwkdl.Metrics struct (float64, int, map
+// of model name to count).
 func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
-	produced := map[fwkplugin.DataKey]any{}
+	produced := map[fwkplugin.DataKey]any{
+		fwkplugin.NewDataKey(KVCacheUsagePercentKey, MetricsExtractorType): float64(0),
+		fwkplugin.NewDataKey(WaitingQueueSizeKey, MetricsExtractorType):    int(0),
+		fwkplugin.NewDataKey(RunningRequestsSizeKey, MetricsExtractorType): int(0),
+		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):        map[string]int{},
+		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
+	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
@@ -197,13 +206,18 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		updated = true
 	}
 
-	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().ID)
 	if updated {
 		clone.UpdateTime = time.Now()
-		logger.V(logutil.TRACE).Info("Refreshed metrics",
-			"metrics", mapping.MetricNames(),
-			"updated", clone,
-		)
+		// Guarded: this runs per endpoint per scrape tick, and the logger
+		// construction, MetricNames slice, and boxed args all allocate even
+		// when TRACE is off.
+		if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
+			trace.Info("Refreshed metrics",
+				"endpoint", ep.GetMetadata().ID,
+				"metrics", mapping.MetricNames(),
+				"updated", clone,
+			)
+		}
 		ep.UpdateMetrics(clone)
 	}
 
@@ -255,10 +269,11 @@ func populateLoRAMetrics(clone *fwkdl.Metrics, metric *dto.Metric, errs *[]error
 }
 
 // populateCacheInfoMetrics updates the metrics with cache info from the metric labels.
-// blockSizeLabelName and numBlocksLabelName allow engines to use different label names
-// (e.g. SGLang uses "page_size" and "num_pages" instead of "block_size" and "num_gpu_blocks").
+// blockSizeLabelName and numBlocksLabelName allow engines to carry the values under
+// label names other than "block_size" and "num_gpu_blocks".
 func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSizeLabelName, numBlocksLabelName string, errs *[]error) {
 	clone.CacheBlockSize = 0
+	clone.CachePrefixMatchUnit = 0
 	for _, label := range metric.GetLabel() {
 		switch label.GetName() {
 		case blockSizeLabelName:
@@ -273,6 +288,14 @@ func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSiz
 			if label.GetValue() != "" {
 				if val, err := strconv.Atoi(label.GetValue()); err == nil {
 					clone.CacheNumBlocks = val
+				} else {
+					*errs = append(*errs, err)
+				}
+			}
+		case CacheConfigPrefixMatchUnitMetricName:
+			if label.GetValue() != "" && label.GetValue() != "None" {
+				if val, err := strconv.Atoi(label.GetValue()); err == nil {
+					clone.CachePrefixMatchUnit = val
 				} else {
 					*errs = append(*errs, err)
 				}

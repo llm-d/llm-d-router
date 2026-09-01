@@ -62,6 +62,10 @@ func (s *fakeSyncer) Get(context.Context, fwkdl.StateKey, string, func([]any) an
 
 func (s *fakeSyncer) Delete(context.Context, fwkdl.StateKey, string) error { return nil }
 
+func (s *fakeSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
+	return candidate, false, nil
+}
+
 // fakeContributor is a Plugin + CrossReplicaContributor whose supplied value
 // echoes the endpoint ID, so tests can assert routing to the right key.
 type fakeContributor struct {

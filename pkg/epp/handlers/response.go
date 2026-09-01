@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -28,6 +29,7 @@ import (
 	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -46,7 +48,11 @@ import (
 // body as a single "stream" event.
 func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *RequestContext, responseBytes []byte, endOfStream bool) *RequestContext {
 	logger := log.FromContext(ctx)
-	logger.V(logutil.DEBUG).Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
+	// The Enabled() guard is intentional: passing arguments to a disabled logger
+	// still boxes them into a heap-allocated slice, and this runs per chunk.
+	if debug := logger.V(logutil.DEBUG); debug.Enabled() {
+		debug.Info("HandleResponseBody is triggered", "len(responseBytes)", len(responseBytes), "endOfStream", endOfStream)
+	}
 
 	fairnessID, priority := extractFairnessAndPriority(reqCtx)
 
@@ -177,6 +183,18 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 				RawValue: []byte("true"),
 			},
 		},
+	}
+
+	// Stamp the flow control queue duration ahead of the streamed body so it reaches the client before the
+	// first token. Absent when flow control did not process the request; zero means a dispatch with no
+	// measurable queueing.
+	if reqCtx.FlowControlAdmitted {
+		headers = append(headers, &configPb.HeaderValueOption{
+			Header: &configPb.HeaderValue{
+				Key:      metadata.FlowQueueDurationHeaderKey,
+				RawValue: []byte(strconv.FormatInt(reqCtx.FlowControlQueueDuration.Milliseconds(), 10)),
+			},
+		})
 	}
 
 	// Include any non-system-owned headers.

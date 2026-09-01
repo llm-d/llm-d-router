@@ -53,19 +53,14 @@ llm-d.ai/igw-mode: llm-d-router-gateway
 Return the monitoring provider name.
 
 If router.monitoring.provider.name is unset/empty, default to
-prometheusoperator. For backwards compatibility, provider.name=gke still maps
-to gmp when no monitoring provider is explicitly set.
+prometheusoperator.
 */}}
 {{- define "llm-d-router.monitoring.provider.name" -}}
 {{- $monitoring := .Values.router.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := index $mp "name" | default "" -}}
-{{- $gatewayProvider := .Values.provider | default dict -}}
-{{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
 {{- if and (kindIs "string" $mpName) (ne (trim $mpName) "") -}}
 {{- $mpName -}}
-{{- else if eq (lower $gatewayProviderName) "gke" -}}
-gmp
 {{- else -}}
 prometheusoperator
 {{- end -}}
@@ -74,24 +69,17 @@ prometheusoperator
 {{/*
 Return the monitoring provider config object.
 
-When router.monitoring.provider.name is unset/empty, use defaults.
-For backwards compatibility, provider.gke.autopilot is still honored when
-provider.name=gke and no monitoring provider is explicitly set.
+When router.monitoring.provider.name is unset/empty, use the
+prometheusoperator defaults.
 */}}
 {{- define "llm-d-router.monitoring.provider" -}}
 {{- $monitoring := .Values.router.monitoring | default dict -}}
 {{- $mp := index $monitoring "provider" | default dict -}}
 {{- $mpName := include "llm-d-router.monitoring.provider.name" . -}}
-{{- $gatewayProvider := .Values.provider | default dict -}}
-{{- $gatewayProviderName := index $gatewayProvider "name" | default "" -}}
 {{- $resolved := dict "name" $mpName -}}
 {{- if eq (lower $mpName) "gmp" -}}
   {{- $gmp := index $mp "gmp" | default dict -}}
-  {{- $legacyGke := dict -}}
-  {{- if and (eq (lower $gatewayProviderName) "gke") (index $gatewayProvider "gke") -}}
-    {{- $legacyGke = index $gatewayProvider "gke" -}}
-  {{- end -}}
-  {{- $_ := set $resolved "gmp" (mergeOverwrite (deepCopy $legacyGke) (deepCopy $gmp)) -}}
+  {{- $_ := set $resolved "gmp" (deepCopy $gmp) -}}
 {{- else -}}
   {{- $_ := set $resolved "prometheusoperator" (index $mp "prometheusoperator" | default dict) -}}
 {{- end -}}

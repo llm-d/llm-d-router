@@ -87,7 +87,7 @@ func TestCustomLevelEncoder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			enc := &mockArrayEncoder{}
-			customLevelEncoder(tt.level, enc)
+			LevelEncoder(tt.level, enc)
 			if len(enc.strings) != 1 {
 				t.Fatalf("Expected 1 string appended, got %d", len(enc.strings))
 			}

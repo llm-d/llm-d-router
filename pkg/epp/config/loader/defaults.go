@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -238,7 +239,11 @@ func ensureFlowControlLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugi
 }
 
 // ensureParsers guarantees that at least one parser is configured.
-// If no parsers are configured, the openAI parser is configured by default.
+// If no parsers are configured, the openAI, anthropic and vllmHTTP parsers are
+// configured by default, followed by the passthrough parser so a path claimed by
+// none of them is forwarded without interpretation instead of rejected. The
+// passthrough parser is last because the registry stops at the first parser
+// claiming no paths.
 func ensureParsers(
 	cfg *configapi.EndpointPickerConfig,
 	handle fwkplugin.Handle,
@@ -252,6 +257,7 @@ func ensureParsers(
 			{PluginRef: openai.OpenAIParserType},
 			{PluginRef: anthropic.AnthropicParserType},
 			{PluginRef: vllmhttp.VllmHTTPParserType},
+			{PluginRef: passthrough.PassthroughParserType},
 		}
 	}
 	for _, pc := range cfg.RequestHandler.Parsers {
@@ -302,7 +308,7 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}
-	if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, sourcemetrics.MetricsDataSourceType) {
+	if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, handle, sourcemetrics.MetricsDataSourceType) {
 		return nil
 	}
 
@@ -330,9 +336,9 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	return nil
 }
 
-func hasSourceOfType(dl *configapi.DataLayerConfig, pluginType string) bool {
+func hasSourceOfType(dl *configapi.DataLayerConfig, handle fwkplugin.Handle, pluginType string) bool {
 	for _, s := range dl.Sources {
-		if s.PluginRef == pluginType {
+		if p := handle.Plugin(s.PluginRef); p != nil && p.TypedName().Type == pluginType {
 			return true
 		}
 	}
