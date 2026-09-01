@@ -33,7 +33,7 @@ Runs each scheduling stage in sequence and assembles the final result from all s
 
 #### How It Works
 
-The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. If the decode stage finds no suitable endpoint, all remaining stages are skipped and the request fails.
+The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. The optional [experimental aggregated P/D fallback](#experimental-aggregated-pd-fallback) handles unavailable required Prefill or Decode stages.
 
 #### Inputs consumed
 
@@ -47,6 +47,7 @@ The handler is invoked repeatedly by the framework until all stages are complete
 | `profiles.decode` | `string` | No | `"decode"` | Name of the decode scheduling profile. |
 | `profiles.prefill` | `string` | No | `"prefill"` | Name of the prefill scheduling profile. |
 | `profiles.encode` | `string` | No | `"encode"` | Name of the encode scheduling profile. |
+| `profiles.fallback` | `string` | No | — | Enables [experimental aggregated P/D fallback](#experimental-aggregated-pd-fallback) using this scheduling profile. |
 | `deciders.prefill` | `string` | No | — | Name of the prefill decider plugin. When set, enables P/D disaggregation. |
 | `deciders.encode` | `string` | No | — | Name of the encode decider plugin. When set, enables E disaggregation. |
 
@@ -76,6 +77,64 @@ plugins:
         prefill: prefix-based-pd-decider
         encode: always-disagg-multimodal-decider
 ```
+
+#### Experimental Aggregated P/D Fallback
+
+Set `profiles.fallback` to enable this experimental feature with `stageOrder: decode-first`. Omitting it preserves the default scheduling behavior. `prefill-first` is unsupported.
+
+```yaml
+plugins:
+  - name: dedicated-decode
+    type: label-selector-filter
+    parameters:
+      matchLabels:
+        llm-d.ai/role: decode
+  - name: dedicated-prefill
+    type: label-selector-filter
+    parameters:
+      matchLabels:
+        llm-d.ai/role: prefill
+  - name: aggregated-workers
+    type: label-selector-filter
+    parameters:
+      matchExpressions:
+        - key: llm-d.ai/role
+          operator: In
+          values: [prefill-decode, encode-prefill-decode]
+  - type: approx-prefix-cache-producer
+  - type: prefix-cache-scorer
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 16
+  - type: max-score-picker
+  - type: disagg-profile-handler
+    parameters:
+      profiles:
+        fallback: aggregated-fallback
+      deciders:
+        prefill: prefix-based-pd-decider
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: dedicated-decode
+      - pluginRef: prefix-cache-scorer
+      - pluginRef: max-score-picker
+  - name: prefill
+    plugins:
+      - pluginRef: dedicated-prefill
+      - pluginRef: prefix-cache-scorer
+      - pluginRef: max-score-picker
+  - name: aggregated-fallback
+    plugins:
+      - pluginRef: aggregated-workers
+      - pluginRef: max-score-picker
+```
+
+Use dedicated selectors to keep the fallback workers out of the normal P/D profiles. The built-in `decode-filter` and `prefill-filter` both accept the aggregated roles in this example. The fallback profile must exist in `schedulingProfiles` at startup.
+
+Each request starts with the normal decode-first path. When Decode or a required Prefill stage has no target, the handler attempts the fallback profile once. A profile-level capacity filter can trigger fallback by removing every candidate. For example, `utilization-filter` can do this with `fallbackOnEmpty: false`. A decider declining Prefill continues on the normal Decode path. Admission or flow-control rejections return before scheduling. A failed fallback returns a scheduling error.
+
+The fallback result becomes the primary profile and routes the complete request to one endpoint in the same candidate pool. This happens before forwarding. Configure the fallback workers to execute all stages locally, including Encode for multimodal requests. Verify local execution for the deployed engine and connector before selecting workers by role label.
 
 #### Limitations
 

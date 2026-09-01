@@ -63,6 +63,7 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 		wantReason   string // empty: the attribute must be absent
 		wantQueued   bool
 		wantErr      bool
+		want429      bool
 	}{
 		{
 			name:         "admitted without flow control",
@@ -97,6 +98,7 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 			wantDecision: "rejected",
 			wantReason:   errcommon.ResourceExhausted,
 			wantErr:      true,
+			want429:      true,
 		},
 		{
 			name: "no endpoints after the admission controller admits",
@@ -157,6 +159,11 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 
 			dir, ctx := newSinglePodDirector(t, scheduled)
 			tc.setup(dir)
+			if tc.want429 {
+				dir.scheduler = admissionTestScheduler(func() {
+					t.Error("scheduling called after admission rejected the request")
+				})
+			}
 
 			body := []byte(`{"model":"m","prompt":"p"}`)
 			reqCtx := &handlers.RequestContext{
@@ -175,6 +182,11 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 
 			_, err = dir.HandleRequest(ctx, reqCtx, parsed.Body)
 			assert.Equal(t, tc.wantErr, err != nil, "HandleRequest error: %v", err)
+			if tc.want429 {
+				var rejection errcommon.Error
+				require.ErrorAs(t, err, &rejection)
+				assert.Equal(t, errcommon.ResourceExhausted, rejection.Code)
+			}
 
 			var attrs *attribute.Set
 			for _, span := range recorder.Ended() {
@@ -206,4 +218,11 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 			}
 		})
 	}
+}
+
+type admissionTestScheduler func()
+
+func (s admissionTestScheduler) Schedule(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) (*fwksched.SchedulingResult, error) {
+	s()
+	return nil, errors.New("scheduling called after admission rejection")
 }
