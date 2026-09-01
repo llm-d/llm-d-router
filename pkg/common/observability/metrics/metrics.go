@@ -49,6 +49,8 @@ const (
 	DisaggPathEncodeDecode = "encode-decode"
 	// DisaggPathEncodePrefillDecode is a request split into encode, prefill, and decode (E/P/D).
 	DisaggPathEncodePrefillDecode = "encode-prefill-decode"
+	// DisaggPathAggregatedFallback is a request served locally by the fallback profile.
+	DisaggPathAggregatedFallback = "aggregated-fallback"
 )
 
 // HelpMsgWithStability is a helper function to create a help message with stability level.
