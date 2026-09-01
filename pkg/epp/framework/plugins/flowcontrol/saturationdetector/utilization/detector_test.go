@@ -18,12 +18,14 @@ package utilization
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -438,4 +440,51 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	require.Equal(t, 2.0, staleGaugeValue(), "staleness should be re-observed after the empty list")
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
 	require.Equal(t, 0.0, staleGaugeValue(), "gauge should return to zero when staleness clears")
+}
+
+// warnCountingSink records how many Info messages mention the staleness warning.
+type warnCountingSink struct {
+	warnings int
+}
+
+func (s *warnCountingSink) Init(logr.RuntimeInfo)          {}
+func (s *warnCountingSink) Enabled(int) bool               { return true }
+func (s *warnCountingSink) Error(error, string, ...any)    {}
+func (s *warnCountingSink) WithValues(...any) logr.LogSink { return s }
+func (s *warnCountingSink) WithName(string) logr.LogSink   { return s }
+
+func (s *warnCountingSink) Info(_ int, msg string, _ ...any) {
+	if strings.Contains(msg, "refresh-metrics-interval exceeds metricsStalenessThreshold") {
+		s.warnings++
+	}
+}
+
+// TestUtilizationDetectorFactory_StalenessWarning verifies the factory warns
+// only when the data-layer polling cadence exceeds the staleness threshold.
+func TestUtilizationDetectorFactory_StalenessWarning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		refreshInterval time.Duration
+		wantWarnings    int
+	}{
+		{"interval exceeds threshold", DefaultMetricsStalenessThreshold + time.Second, 1},
+		{"interval equals threshold", DefaultMetricsStalenessThreshold, 0},
+		{"interval below threshold", DefaultMetricsStalenessThreshold - time.Millisecond, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := &warnCountingSink{}
+			ctx := log.IntoContext(context.Background(), logr.New(sink))
+			handle := fwkplugin.NewEppHandle(ctx, nil, fwkplugin.WithRefreshMetricsInterval(tc.refreshInterval))
+
+			_, err := UtilizationDetectorFactory("test", nil, handle)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantWarnings, sink.warnings)
+		})
+	}
 }

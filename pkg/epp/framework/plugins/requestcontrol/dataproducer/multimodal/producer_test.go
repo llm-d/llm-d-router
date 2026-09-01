@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -245,6 +246,10 @@ func (h *testHandle) CrossReplicaSyncer() plugin.Plugin {
 
 func (h *testHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
 	h.crossReplicaSyncer = syncer
+}
+
+func (h *testHandle) RefreshMetricsInterval() time.Duration {
+	return 0
 }
 
 func (h *testHandle) PodList() []k8stypes.NamespacedName {
