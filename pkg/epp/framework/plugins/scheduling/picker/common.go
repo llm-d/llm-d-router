@@ -95,16 +95,12 @@ func RotateScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint) {
 	PickerRand.mu.Lock()
 	defer PickerRand.mu.Unlock()
 
-	rotation := PickerRand.counter % n
-	PickerRand.counter++
-	if PickerRand.counter >= n {
-		PickerRand.counter = 0
-	}
+	PickerRand.counter = (PickerRand.counter + 1) % n
 
-	if rotation > 0 {
+	if PickerRand.counter > 0 {
 		rotated := make([]*fwksched.ScoredEndpoint, n)
-		copy(rotated, scoredEndpoints[rotation:])
-		copy(rotated[n-rotation:], scoredEndpoints[:rotation])
+		copy(rotated, scoredEndpoints[PickerRand.counter:])
+		copy(rotated[n-PickerRand.counter:], scoredEndpoints[:PickerRand.counter])
 		copy(scoredEndpoints, rotated)
 	}
 }
