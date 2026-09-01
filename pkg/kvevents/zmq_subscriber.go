@@ -254,8 +254,6 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	// every stage of the pipeline.
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
 	defer span.End()
-	// A span that tracing sampled out still reports IsRecording false; skip
-	// attribute construction so those messages cost nothing either.
 	if span.IsRecording() {
 		attrs := []attribute.KeyValue{
 			attribute.String("llm_d.kv_cache.events.topic", topic),
@@ -269,13 +267,20 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		span.SetAttributes(attrs...)
 	}
 
-	z.pool.AddTask(&RawMessage{
+	msg := &RawMessage{
 		Topic:          topic,
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
-		SpanContext:    span.SpanContext(),
-	})
+	}
+	// carried is bound inside the branch on purpose. Taking &sc directly makes
+	// sc escape, so it heap-allocates on every message including the ones the
+	// disabled path never traces.
+	if sc := span.SpanContext(); sc.IsValid() {
+		carried := sc
+		msg.SpanContext = &carried
+	}
+	z.pool.AddTask(msg)
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {

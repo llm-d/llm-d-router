@@ -122,7 +122,7 @@ func TestProcessRawMessage_ParentsToReceiveSpan(t *testing.T) {
 	pool.processRawMessage(logging.NewTestLoggerIntoContext(context.Background()), &RawMessage{
 		Topic:       "kv@10.0.0.1:8000@test-model",
 		Payload:     []byte{1},
-		SpanContext: carried,
+		SpanContext: &carried,
 	})
 
 	process := findEventSpan(t, recorder, "events_process")
@@ -211,8 +211,7 @@ func TestProcessRawMessage_IndexSpansNestUnderProcess(t *testing.T) {
 	assert.Equal(t, process.SpanContext().SpanID(), add.Parent().SpanID())
 }
 
-// Event tracing is opt-in: with a shared head sampler, always-on event traces
-// would crowd request traces out of the exported volume.
+// Event tracing is opt-in; see Config.Tracing for why.
 func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 	recorder := setupEventSpanRecorder(t)
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
@@ -235,8 +234,7 @@ func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 	assert.Empty(t, recorder.Ended(), "no event spans when Config.Tracing is false")
 }
 
-// The default path must not pay for spans it never records. A no-op Start is
-// cheap but not free, and KV events arrive at many times the request rate.
+// The default path must not pay for spans it never records.
 func TestStartSpan_DisabledPathAllocatesNothing(t *testing.T) {
 	pool := NewPool(DefaultConfig(), nil, nil, nil)
 	require.Nil(t, pool.tracer, "event tracing must default off")

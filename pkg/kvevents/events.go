@@ -76,7 +76,10 @@ type RawMessage struct {
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and
 	// a queued task must not inherit the cancellation.
-	SpanContext trace.SpanContext
+	//
+	// A pointer keeps the 64-byte span context off messages the default
+	// configuration never traces. Nil when Config.Tracing is unset.
+	SpanContext *trace.SpanContext
 }
 
 // EngineAdapter defines the interface for engine-specific message parsers.

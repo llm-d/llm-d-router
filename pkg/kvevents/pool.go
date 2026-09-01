@@ -242,9 +242,9 @@ func newEventTracer(enabled bool) trace.Tracer {
 }
 
 // startSpan opens a pipeline span, or leaves ctx untouched and returns a span
-// that records nothing when event tracing is disabled. A no-op span is cheap
-// but not free, and KV events arrive at many times the request rate, so the
-// default path skips Start rather than relying on a no-op tracer.
+// that records nothing when event tracing is disabled. The default path skips
+// Start rather than relying on a no-op tracer, which still builds an option
+// slice and a context per call. See Config.Tracing.
 func (p *Pool) startSpan(ctx context.Context, name string, opts []trace.SpanStartOption) (context.Context, trace.Span) {
 	if p.tracer == nil {
 		return ctx, disabledSpan
@@ -368,14 +368,15 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	// cancellation, so index operations below land in the message's trace.
 	// The queue handoff stays inside one process, so the parent is local: a
 	// remote parent selects a different ParentBased sampler branch.
-	if msg.SpanContext.IsValid() {
-		ctx = trace.ContextWithSpanContext(ctx, msg.SpanContext)
+	if msg.SpanContext != nil {
+		ctx = trace.ContextWithSpanContext(ctx, *msg.SpanContext)
 	}
 
 	ctx, span := p.startSpan(ctx, "events_process", consumerSpanOptions)
 	defer span.End()
-	// A span that tracing sampled out still reports IsRecording false; skip
-	// attribute construction so those messages cost nothing either.
+	// Guards every attribute block in this package: a span the sampler dropped
+	// reports IsRecording false, so those messages skip attribute construction
+	// too, not just the ones with tracing off.
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(

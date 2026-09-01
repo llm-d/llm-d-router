@@ -383,8 +383,8 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 // stores it on the body. Skips when one is already present; errors propagate to
 // the Director, which logs and continues.
 //
-// The tokenize span covers the backend call only, so the skip path stays
-// untraced and the span always represents tokenization work.
+// The tokenize span opens below the already-tokenized skip path, so it is
+// emitted only when the backend is actually invoked.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
@@ -397,6 +397,8 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		}
 		return nil
 	}
+
+	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
 
 	ctx, span := tracing.Tracer(rcplugins.TracerScope).Start(ctx, "tokenize",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -418,7 +420,6 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		span.SetAttributes(attrs...)
 	}
 
-	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
 	tp, err := p.backend.produce(ctx, request.Body)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())

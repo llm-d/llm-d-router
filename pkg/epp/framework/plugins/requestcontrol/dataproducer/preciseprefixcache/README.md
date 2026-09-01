@@ -39,6 +39,13 @@ upstream. No-op otherwise.
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.
 
+Set `kvEventsConfig.tracing` to `true` to emit OpenTelemetry spans for the
+KV-event pipeline (`events_receive`, `events_process`, `events_decode`). It
+defaults to `false`: KV events arrive at many times the inference request rate,
+so with a shared head sampler always-on event spans crowd request traces out of
+the exported volume. The EPP `--tracing` flag gates tracing as a whole, so this
+field has no effect while that is off.
+
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.
 
