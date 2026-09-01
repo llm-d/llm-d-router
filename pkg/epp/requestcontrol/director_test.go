@@ -1191,6 +1191,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 
 				assert.NoError(t, err, "HandleRequest() returned unexpected error")
+				require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")
+				assert.Equal(t, originalRawBody, returnedReqCtx.SchedulingRequest.RawBody,
+					"SchedulingRequest.RawBody should contain the original request bytes")
 
 				if test.wantReqCtx != nil {
 					assert.Equal(t, test.wantReqCtx.ObjectiveKey, returnedReqCtx.ObjectiveKey, "reqCtx.Model mismatch")

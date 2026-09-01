@@ -180,6 +180,14 @@ func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout
 	return resp.TokenIDs, toKVCacheMM(resp.Features), nil
 }
 
+func (r *vllmHTTPRenderer) postRawChatRender(ctx context.Context, body []byte, timeout time.Duration) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	var resp renderResponse
+	if err := r.postJSONPayload(ctx, chatRenderPath, body, timeout, &resp); err != nil {
+		return nil, nil, err
+	}
+	return resp.TokenIDs, toKVCacheMM(resp.Features), nil
+}
+
 func (r *vllmHTTPRenderer) chatTimeout(payload fwkrh.PayloadMap) time.Duration {
 	messages, ok := payload["messages"].([]any)
 	if !ok {
@@ -349,7 +357,10 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
+	return r.postJSONPayload(ctx, path, payload, timeout, out)
+}
 
+func (r *vllmHTTPRenderer) postJSONPayload(ctx context.Context, path string, payload []byte, timeout time.Duration, out any) error {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

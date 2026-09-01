@@ -372,7 +372,13 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
-	tp, err := p.backend.produce(ctx, request.Body)
+	var tp *fwkrh.TokenizedRequest
+	var err error
+	if requestProducer, ok := p.backend.(requestInputProducer); ok {
+		tp, err = requestProducer.produceRequest(ctx, request)
+	} else {
+		tp, err = p.backend.produce(ctx, request.Body)
+	}
 	if err != nil {
 		return err
 	}

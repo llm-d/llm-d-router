@@ -227,6 +227,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
+		RawBody:          reqCtx.Request.RawBody,
 		Headers:          reqCtx.Request.Headers,
 		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
