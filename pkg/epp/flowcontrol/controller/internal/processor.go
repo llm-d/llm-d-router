@@ -306,6 +306,13 @@ func (p *Processor) enqueue(item *FlowItem) {
 		return
 	}
 
+	// The active queue-wait budget includes time spent in the processor's enqueue buffer.
+	regime := p.regime.Load()
+	if isExpired(item, p.clock.Now(), regime, p.noEndpointRequestTTL) {
+		p.finalizeAndRecordDrop(item, expiryError(regime.empty))
+		return
+	}
+
 	// --- Configuration Validation ---
 	// Registry errors on both lookups are flattened with %v; see tryDistribution for why a finalized error must
 	// not preserve registry sentinels.
