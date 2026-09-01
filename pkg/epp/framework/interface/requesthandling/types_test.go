@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
+
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 )
 
 func TestPrompt_UnmarshalJSON(t *testing.T) {
@@ -57,7 +59,11 @@ func TestPrompt_UnmarshalJSON(t *testing.T) {
 			input:   `[1.5,2.7]`,
 			wantErr: true,
 		},
-
+		{
+			name:  "whole decimal token IDs",
+			input: `[1.0]`,
+			want:  Prompt{TokenIDs: [][]uint32{{1}}},
+		},
 		{
 			name:  "array of arrays of integers prompt",
 			input: `[[1,2],[3,4]]`,
@@ -112,12 +118,33 @@ func TestPrompt_UnmarshalJSON(t *testing.T) {
 			err := p.UnmarshalJSON([]byte(tt.input))
 			if tt.wantErr {
 				assert.Error(t, err)
+				assert.Equal(t, Prompt{}, p)
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.want, p)
 			}
 		})
 	}
+}
+
+func TestPrompt_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
+	stale := Prompt{
+		Raw:      "stale",
+		Strings:  []string{"stale"},
+		TokenIDs: [][]uint32{{99}},
+	}
+
+	p := stale
+	require.NoError(t, p.UnmarshalJSON([]byte(`[1,2,3]`)))
+	assert.Equal(t, Prompt{Raw: "stale", TokenIDs: [][]uint32{{1, 2, 3}}}, p)
+
+	p = stale
+	require.NoError(t, p.UnmarshalJSON([]byte(`[1.0]`)))
+	assert.Equal(t, Prompt{Raw: "stale", TokenIDs: [][]uint32{{1}}}, p)
+
+	p = stale
+	require.NoError(t, p.UnmarshalJSON([]byte(`"hello"`)))
+	assert.Equal(t, Prompt{Raw: "hello", Strings: []string{"stale"}, TokenIDs: [][]uint32{{99}}}, p)
 }
 
 func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
@@ -148,6 +175,11 @@ func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:  "exponent token IDs",
+			input: `[1e0]`,
+			want:  EmbeddingsInput{TokenIDs: [][]uint32{{1}}},
+		},
+		{
 			name:  "array of arrays of integers input",
 			input: `[[1,2],[3,4]]`,
 			want:  EmbeddingsInput{TokenIDs: [][]uint32{{1, 2}, {3, 4}}},
@@ -172,6 +204,26 @@ func TestEmbeddingsInput_UnmarshalJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEmbeddingsInput_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
+	stale := EmbeddingsInput{
+		Raw:      "stale",
+		Strings:  []string{"stale"},
+		TokenIDs: [][]uint32{{99}},
+	}
+
+	e := stale
+	require.NoError(t, e.UnmarshalJSON([]byte(`[1,2,3]`)))
+	assert.Equal(t, EmbeddingsInput{Raw: "stale", TokenIDs: [][]uint32{{1, 2, 3}}}, e)
+
+	e = stale
+	require.NoError(t, e.UnmarshalJSON([]byte(`[1e0]`)))
+	assert.Equal(t, EmbeddingsInput{Raw: "stale", TokenIDs: [][]uint32{{1}}}, e)
+
+	e = stale
+	require.NoError(t, e.UnmarshalJSON([]byte(`"hello"`)))
+	assert.Equal(t, EmbeddingsInput{Raw: "hello", Strings: []string{"stale"}, TokenIDs: [][]uint32{{99}}}, e)
 }
 
 func TestPrompt_PlainText(t *testing.T) {
@@ -229,9 +281,29 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			want:  []uint32{1, 2, 3},
 		},
 		{
+			name:  "valid token ids with whitespace",
+			input: "{\n\t\"token_ids\": [ 1,\r\n2, 3 ]\n}",
+			want:  []uint32{1, 2, 3},
+		},
+		{
 			name:  "max uint32 boundary accepted",
 			input: `{"token_ids":[4294967295]}`,
 			want:  []uint32{4294967295},
+		},
+		{
+			name:  "whole decimal accepted",
+			input: `{"token_ids":[1.0]}`,
+			want:  []uint32{1},
+		},
+		{
+			name:  "whole exponent accepted",
+			input: `{"token_ids":[1e0]}`,
+			want:  []uint32{1},
+		},
+		{
+			name:  "negative zero accepted",
+			input: `{"token_ids":[-0]}`,
+			want:  []uint32{0},
 		},
 		{
 			name:        "negative token id rejected",
@@ -263,6 +335,18 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			wantErr:     true,
 			errContains: "unexpected end of JSON",
 		},
+		{
+			name:        "invalid cache salt preserves error field",
+			input:       `{"token_ids":[1,2,3],"cache_salt":1}`,
+			wantErr:     true,
+			errContains: "Go struct field .cache_salt",
+		},
+		{
+			name:        "invalid placeholder preserves error field",
+			input:       `{"token_ids":[1,2,3],"features":{"mm_placeholders":{"image":[{"offset":"x","length":1}]}}}`,
+			wantErr:     true,
+			errContains: "Go struct field wirePlaceholder.features.mm_placeholders.offset",
+		},
 	}
 
 	for _, tt := range tests {
@@ -280,6 +364,43 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			assert.Equal(t, tt.want, g.TokenIDs)
 		})
 	}
+}
+
+func TestGenerateRequest_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
+	g := GenerateRequest{
+		TokenIDs:  []uint32{99},
+		CacheSalt: "stale",
+		Features: &tokenization.MultiModalFeatures{
+			MMHashes: map[string][]string{"image": {"stale"}},
+		},
+	}
+
+	err := g.UnmarshalJSON([]byte(`{"token_ids":[1,2.5,3],"cache_salt":"updated"}`))
+	require.EqualError(t, err, "token_ids[1]: invalid value 2.5")
+	assert.Equal(t, []uint32{1, 0, 0}, g.TokenIDs)
+	assert.Equal(t, "updated", g.CacheSalt)
+	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
+
+	require.NoError(t, g.UnmarshalJSON([]byte(`{}`)))
+	assert.NotNil(t, g.TokenIDs)
+	assert.Empty(t, g.TokenIDs)
+	assert.Empty(t, g.CacheSalt)
+	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
+}
+
+func TestGenerateRequest_UnmarshalJSONCanonicalPreservesAbsentFeatures(t *testing.T) {
+	g := GenerateRequest{
+		TokenIDs:  []uint32{99},
+		CacheSalt: "stale",
+		Features: &tokenization.MultiModalFeatures{
+			MMHashes: map[string][]string{"image": {"stale"}},
+		},
+	}
+
+	require.NoError(t, g.UnmarshalJSON([]byte(`{"token_ids":[1,2,3],"cache_salt":"updated"}`)))
+	assert.Equal(t, []uint32{1, 2, 3}, g.TokenIDs)
+	assert.Equal(t, "updated", g.CacheSalt)
+	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
 }
 
 func TestMaxOutputTokensFromPayload(t *testing.T) {
