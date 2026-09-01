@@ -40,6 +40,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
@@ -383,6 +384,12 @@ func buildSchedulerConfig(
 
 	if profileHandler.TypedName().Type == single.SingleProfileHandlerType && len(profiles) > 1 {
 		return nil, errors.New("SingleProfileHandler cannot support multiple scheduling profiles")
+	}
+
+	if handler, ok := profileHandler.(*disagg.Handler); ok {
+		if err := handler.ValidateSchedulingProfiles(profiles); err != nil {
+			return nil, err
+		}
 	}
 
 	return scheduling.NewSchedulerConfig(profileHandler, profiles), nil

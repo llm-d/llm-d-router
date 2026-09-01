@@ -18,7 +18,9 @@ package disagg_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,10 +29,13 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -38,6 +43,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
@@ -324,6 +330,168 @@ func TestPDSchedule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPDSchedule_AggregatedFallback(t *testing.T) {
+	const fallback = "fallback"
+	ctx := context.Background()
+
+	fallbackEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "fallback-endpoint"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	decodeEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "decode-endpoint"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	prefillOnlyEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "prefill-only-endpoint"},
+			Address: "9.10.11.12",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+
+	prefillFilter, err := bylabel.NewSelector("strict-prefill", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+	})
+	require.NoError(t, err)
+	decodeFilter, err := bylabel.NewSelector("strict-decode", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+	})
+	require.NoError(t, err)
+	fallbackFilter, err := bylabel.NewSelector("full-capability", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode},
+	})
+	require.NoError(t, err)
+
+	capacityFilter, err := utilization.Factory("capacity", json.NewDecoder(strings.NewReader(
+		`{"conditions":[{"metric":"running-requests","maxValue":0}]}`)), nil)
+	require.NoError(t, err)
+
+	prefillProfile := scheduling.NewSchedulerProfile().
+		WithFilters(prefillFilter).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	decodeProfile := scheduling.NewSchedulerProfile().
+		WithFilters(decodeFilter, capacityFilter.(fwksched.Filter)).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	fallbackProfile := scheduling.NewSchedulerProfile().
+		WithFilters(fallbackFilter, capacityFilter.(fwksched.Filter)).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	for _, tc := range []struct {
+		name             string
+		hasDecode        bool
+		hasPrefill       bool
+		hasFallback      bool
+		decodeBusy       bool
+		fallbackBusy     bool
+		prefillDeclined  bool
+		cancelled        bool
+		wantPrimary      string
+		wantFallbackRuns int
+	}{
+		{name: "decode unavailable", hasPrefill: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "both stages available", hasDecode: true, hasPrefill: true, hasFallback: true, wantPrimary: decode},
+		{name: "required prefill unavailable", hasDecode: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "prefill declined", hasDecode: true, hasFallback: true, prefillDeclined: true, wantPrimary: decode},
+		{name: "prefill only cannot satisfy fallback", hasPrefill: true, wantFallbackRuns: 1},
+		{name: "fallback unavailable", hasDecode: true, wantFallbackRuns: 1},
+		{name: "decode busy", hasDecode: true, hasFallback: true, decodeBusy: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "both workers busy", hasDecode: true, hasFallback: true, decodeBusy: true, fallbackBusy: true, wantFallbackRuns: 1},
+		{name: "request cancelled", hasFallback: true, cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decider := &disagg.AlwaysDisaggPDDecider{}
+			handler := disagg.NewDisaggProfileHandler(decode, prefill, "", decider, nil).WithFallbackProfile(fallback)
+			if tc.prefillDeclined {
+				handler = disagg.NewDisaggProfileHandler(decode, prefill, "", nil, nil).WithFallbackProfile(fallback)
+			}
+			var endpoints []fwksched.Endpoint
+			if tc.hasDecode {
+				endpoints = append(endpoints, decodeEndpoint)
+			}
+			if tc.hasPrefill {
+				endpoints = append(endpoints, prefillOnlyEndpoint)
+			}
+			if tc.hasFallback {
+				endpoints = append(endpoints, fallbackEndpoint)
+			}
+			decodeEndpoint.GetMetrics().RunningRequestsSize = 0
+			fallbackEndpoint.GetMetrics().RunningRequestsSize = 0
+			if tc.decodeBusy {
+				decodeEndpoint.GetMetrics().RunningRequestsSize = 1
+			}
+			if tc.fallbackBusy {
+				fallbackEndpoint.GetMetrics().RunningRequestsSize = 1
+			}
+
+			fallbackRuns := 0
+			scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{
+				decode:  decodeProfile,
+				prefill: prefillProfile,
+				fallback: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+					fallbackRuns++
+					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
+					assert.False(t, hasPeer)
+					return fallbackProfile.Run(ctx, req, endpoints)
+				}),
+			}))
+
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901"), Headers: map[string]string{}}
+			got, err := scheduler.Schedule(ctx, req, endpoints)
+			assert.Equal(t, tc.wantFallbackRuns, fallbackRuns)
+			if tc.wantPrimary == "" {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				var typedErr errcommon.Error
+				require.ErrorAs(t, err, &typedErr)
+				assert.Equal(t, errcommon.ServiceUnavailable, typedErr.Code)
+				assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPrimary, got.PrimaryProfileName)
+			switch {
+			case tc.wantPrimary == fallback:
+				require.Len(t, got.ProfileResults, 1)
+				require.Equal(t, fallbackEndpoint.GetMetadata().ID, got.PrimaryEndpoint().GetMetadata().ID)
+				for _, header := range []string{routing.PrefillEndpointHeader, routing.EncoderEndpointsHeader} {
+					routing.SetRoutingHeader(req.Headers, header, "stale-endpoint")
+				}
+				require.NoError(t, handler.PreRequest(ctx, req, got))
+				require.Empty(t, req.Headers)
+			case tc.prefillDeclined:
+				assert.NotContains(t, got.ProfileResults, prefill)
+			default:
+				assert.Contains(t, got.ProfileResults, prefill)
+			}
+		})
+	}
+}
+
+type profileFunc func(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) (*fwksched.ProfileRunResult, error)
+
+func (f profileFunc) Run(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+	return f(ctx, req, endpoints)
 }
 
 func TestPDSchedule_PrefillFirst(t *testing.T) {
