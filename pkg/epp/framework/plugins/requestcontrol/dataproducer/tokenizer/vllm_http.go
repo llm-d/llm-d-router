@@ -20,12 +20,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -69,6 +71,18 @@ type vllmConfig struct {
 	// MMTimeout is the per-request timeout for multimodal requests
 	// (image download/processing). Defaults to 30s.
 	MMTimeout string `json:"mmTimeout,omitempty"`
+	// CACertPath is a PEM CA bundle used to verify the render endpoint's
+	// server certificate when the URL scheme is https. When empty, the
+	// system CA pool is used.
+	CACertPath string `json:"caCertPath,omitempty"`
+	// ClientCertPath and ClientKeyPath present a client certificate for
+	// mTLS with the render endpoint. Both must be set together.
+	ClientCertPath string `json:"clientCertPath,omitempty"`
+	ClientKeyPath  string `json:"clientKeyPath,omitempty"`
+	// InsecureSkipVerify disables verification of the render endpoint's
+	// server certificate. Use for self-signed certificates in development
+	// or when the cluster manages its own PKI.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
@@ -94,8 +108,12 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid 'mmTimeout': %w", err)
 	}
+	transport, err := newRenderTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &vllmHTTPRenderer{
-		client: &http.Client{Transport: otelhttp.NewTransport(newRenderTransport(), otelhttp.WithSpanNameFormatter(
+		client: &http.Client{Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(
 			// Name the outbound span after the render route instead of the
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
@@ -110,8 +128,10 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 // newRenderTransport returns an http.Transport tuned for the render endpoint:
 // HTTP/2 is disabled (vLLM doesn't support it) and the idle-connection pool
 // is sized for the in-pod sidecar case while still being reasonable for a
-// dedicated render Service.
-func newRenderTransport() *http.Transport {
+// dedicated render Service. When the config carries TLS fields (caCertPath,
+// clientCertPath/clientKeyPath, insecureSkipVerify), the transport is
+// configured for https.
+func newRenderTransport(cfg *vllmConfig) (*http.Transport, error) {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConns = 0
 	t.MaxIdleConnsPerHost = 16
@@ -120,7 +140,44 @@ func newRenderTransport() *http.Transport {
 	// not enough — clearing TLSNextProto prevents ALPN-negotiated h2 too.
 	t.ForceAttemptHTTP2 = false
 	t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	return t
+
+	if cfg.hasTLS() {
+		tlsCfg, err := renderTLSConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		t.TLSClientConfig = tlsCfg
+	}
+	return t, nil
+}
+
+func (c *vllmConfig) hasTLS() bool {
+	return c.InsecureSkipVerify || c.CACertPath != "" || c.ClientCertPath != "" || c.ClientKeyPath != ""
+}
+
+func renderTLSConfig(cfg *vllmConfig) (*tls.Config, error) {
+	tc := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec
+
+	if !cfg.InsecureSkipVerify && cfg.CACertPath != "" {
+		pem, err := os.ReadFile(cfg.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading render CA cert %s: %w", cfg.CACertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no valid CA certs in %s", cfg.CACertPath)
+		}
+		tc.RootCAs = pool
+	}
+
+	if cfg.ClientCertPath != "" || cfg.ClientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading render client cert: %w", err)
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+	return tc, nil
 }
 
 func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
