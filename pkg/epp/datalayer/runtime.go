@@ -464,12 +464,9 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 func (r *Runtime) ReleaseEndpoint(ep fwkdl.Endpoint) {
 	key := ep.GetMetadata().GetID()
 	if r.crossReplicaPub != nil {
-		removed, err := r.crossReplicaPub.delete(context.Background(), key)
+		_, err := r.crossReplicaPub.delete(context.Background(), key)
 		if err != nil {
 			r.logger.Error(err, "failed to delete cross-replica state", "endpoint", key)
-		}
-		if !removed {
-			return
 		}
 	}
 	if collector, ok := r.collectors.Remove(key); ok {
