@@ -70,6 +70,10 @@ func (s *fakeSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID st
 	return nil
 }
 
+func (s *fakeSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
+	return candidate, false, nil
+}
+
 // fakeContributor is a Plugin + CrossReplicaContributor whose supplied value
 // echoes the endpoint ID, so tests can assert routing to the right key.
 type fakeContributor struct {
@@ -175,6 +179,10 @@ func (s *blockingSyncer) Delete(_ context.Context, _ fwkdl.StateKey, endpointID 
 	delete(s.state, endpointID)
 	s.events = append(s.events, "delete")
 	return nil
+}
+
+func (s *blockingSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
+	return candidate, false, nil
 }
 
 func (c fakeContributor) TypedName() fwkplugin.TypedName {
