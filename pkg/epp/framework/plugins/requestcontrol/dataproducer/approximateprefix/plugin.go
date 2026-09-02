@@ -131,7 +131,7 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 // is configured.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*fwksched.TokenizedRequest)(nil)},
 	}
 }
 

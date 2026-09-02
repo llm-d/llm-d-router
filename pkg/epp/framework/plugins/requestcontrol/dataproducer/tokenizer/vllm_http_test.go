@@ -105,8 +105,9 @@ func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, p.dk)
+	assert.True(t, ok)
+	assert.Equal(t, []uint32{4, 5}, tp.Prompts[0].TokenIDs)
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.completions, &sent))
@@ -238,8 +239,9 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{9, 10}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, p.dk)
+	assert.True(t, ok)
+	assert.Equal(t, []uint32{9, 10}, tp.Prompts[0].TokenIDs)
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.chat, &sent))
@@ -280,8 +282,9 @@ func TestProduce_MessagesVLLMHTTPFullAgenticTurn(t *testing.T) {
 
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{11, 12, 13}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, p.dk)
+	assert.True(t, ok)
+	assert.Equal(t, []uint32{11, 12, 13}, tp.Prompts[0].TokenIDs)
 
 	var sent struct {
 		Model    string           `json:"model"`

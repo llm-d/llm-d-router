@@ -109,7 +109,8 @@ func needsLegacyTokenization(request *scheduling.InferenceRequest) bool {
 	if request == nil || request.Body == nil {
 		return false
 	}
-	if tp := request.Body.TokenizedRequest; tp != nil && tp.TokenCount() > 0 {
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](request, tokenizer.TokenizedPromptDataKey)
+	if ok && tp.TokenCount() > 0 {
 		return false
 	}
 	return request.Body.Completions != nil || request.Body.ChatCompletions != nil
@@ -132,13 +133,13 @@ func (lp *legacyProducer) tokenizeRequest(request *scheduling.InferenceRequest) 
 		return
 	}
 
-	request.Body.TokenizedRequest = &fwkrh.TokenizedRequest{
+	request.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
 		Prompts: []fwkrh.PromptTokens{{
 			TokenIDs:           tokens,
 			MultiModalFeatures: flattenMMFeatures(mmFeatures),
 		}},
 		CacheSalt: tokenizer.CacheSaltFromBody(request.Body),
-	}
+	})
 }
 
 // flattenMMFeatures regroups the kvcache map-shaped multimodal metadata

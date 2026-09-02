@@ -709,7 +709,7 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: (*fwksched.TokenizedRequest)(nil),
 		},
 		Optional: map[fwkplugin.DataKey]any{
 			p.prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfo{},

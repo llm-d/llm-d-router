@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -219,16 +221,11 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		copiedTokenIDsInt := make([]uint32, len(inputIDs))
 		copy(copiedTokenIDsInt, inputIDs)
 		body = &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
+			Generate: &fwkrh.GenerateRequest{
+				TokenIDs: copiedTokenIDsInt,
+				Features: convertMultiModalFeatures(pbReq.GetMmInputs()),
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{
-					TokenIDs:           copiedTokenIDsInt,
-					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
-				}},
-			},
 		}
 	default:
 		return nil, errors.New("not supported request inputType")
@@ -242,7 +239,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 	return body, nil
 }
 
-func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModalFeature {
+func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) *tokenization.MultiModalFeatures {
 	if mmInputs == nil {
 		return nil
 	}
@@ -252,27 +249,31 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModal
 		return nil
 	}
 
-	hashes := mmInputs.GetMmHashes()
-	features := make([]fwkrh.MultiModalFeature, 0, len(placeholders))
+	ranges := make([]kvblock.PlaceholderRange, len(placeholders))
 	for i, placeholder := range placeholders {
-		hash := ""
-		if i < len(hashes) {
-			hash = hashes[i]
+		if placeholder == nil {
+			continue
 		}
-
-		feature := fwkrh.MultiModalFeature{
-			Modality: fwkrh.ModalityImage,
-			Hash:     hash,
+		ranges[i] = kvblock.PlaceholderRange{
+			Offset: int(placeholder.GetOffset()),
+			Length: int(placeholder.GetLength()),
 		}
-		if placeholder != nil {
-			feature.Offset = int(placeholder.GetOffset())
-			feature.Length = int(placeholder.GetLength())
-		}
-
-		features = append(features, feature)
 	}
 
-	return features
+	// Keep one hash entry per placeholder. Missing hashes are represented by
+	// empty strings so downstream conversion does not drop placeholder ranges.
+	hashes := make([]string, len(placeholders))
+	copy(hashes, mmInputs.GetMmHashes())
+
+	modality := string(fwkrh.ModalityImage)
+	return &tokenization.MultiModalFeatures{
+		MMHashes: map[string][]string{
+			modality: hashes,
+		},
+		MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+			modality: ranges,
+		},
+	}
 }
 
 func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.InferenceRequestBody, error) {

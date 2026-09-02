@@ -25,6 +25,7 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 // testMaxPrefixBlocks is a cap large enough not to truncate any prompt in
@@ -82,43 +83,29 @@ func TestGetKVCacheBlocksFromTokens(t *testing.T) {
 func TestGetBlockHashes(t *testing.T) {
 	tests := []struct {
 		name            string
-		request         *fwksched.InferenceRequest
+		targetModel     string
+		tokenized       *fwkrh.TokenizedRequest
 		blockSizeTokens int
 		expectedBlocks  int
 	}{
 		{
 			name: "TokenizedRequest",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedRequest: &fwkrh.TokenizedRequest{
-						Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}}},
-					},
+			tokenized: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
 				},
 			},
 			blockSizeTokens: 4,
 			expectedBlocks:  3,
 		},
 		{
-			name: "MissingTokenizedRequest",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{},
-			},
+			name:            "MissingTokenizedRequest",
 			blockSizeTokens: 4,
 			expectedBlocks:  0,
 		},
 		{
-			name: "EmptyTokenIDs",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedRequest: &fwkrh.TokenizedRequest{},
-				},
-			},
-			blockSizeTokens: 4,
-			expectedBlocks:  0,
-		},
-		{
-			name:            "NilRequest",
-			request:         nil,
+			name:            "EmptyTokenIDs",
+			tokenized:       &fwkrh.TokenizedRequest{},
 			blockSizeTokens: 4,
 			expectedBlocks:  0,
 		},
@@ -126,7 +113,8 @@ func TestGetBlockHashes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			perPromptHashes := GetBlockHashes(context.Background(), tt.request, tt.blockSizeTokens, testMaxPrefixBlocks)
+			request := tokenizedRequest(tt.targetModel, tt.tokenized)
+			perPromptHashes := GetBlockHashes(context.Background(), request, tt.blockSizeTokens, testMaxPrefixBlocks)
 			totalBlocks := 0
 			for _, ph := range perPromptHashes {
 				totalBlocks += len(ph)
@@ -137,21 +125,16 @@ func TestGetBlockHashes(t *testing.T) {
 }
 
 func TestGetBlockHashesCacheSalt(t *testing.T) {
-	body := func(salt string) *fwkrh.InferenceRequestBody {
-		return &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts:   []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}},
-				CacheSalt: salt,
-			},
-		}
+	req := func(salt string) *fwksched.InferenceRequest {
+		return tokenizedRequest("m", &fwkrh.TokenizedRequest{
+			Prompts:   []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}},
+			CacheSalt: salt,
+		})
 	}
-
-	noSalt := GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
-		TargetModel: "m", Body: body(""),
-	}, 2, testMaxPrefixBlocks)
-	salted := GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
-		TargetModel: "m", Body: body("salt"),
-	}, 2, testMaxPrefixBlocks)
+	noSaltReq := req("")
+	noSalt := GetBlockHashes(context.Background(), noSaltReq, 2, testMaxPrefixBlocks)
+	saltReq := req("salt")
+	salted := GetBlockHashes(context.Background(), saltReq, 2, testMaxPrefixBlocks)
 
 	assert.Equal(t, len(noSalt), len(salted))
 	assert.NotEqual(t, noSalt, salted, "cache salt must change the block hashes")
@@ -190,15 +173,9 @@ func TestGetBlockHashes_MultiPrompt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request := &fwksched.InferenceRequest{
-				TargetModel: "model",
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedRequest: &fwkrh.TokenizedRequest{
-						Prompts: tt.prompts,
-					},
-				},
-			}
-			result := GetBlockHashes(context.Background(), request, tt.blockSizeTokens, testMaxPrefixBlocks)
+			result := GetBlockHashes(context.Background(), tokenizedRequest("model", &fwkrh.TokenizedRequest{
+				Prompts: tt.prompts,
+			}), tt.blockSizeTokens, testMaxPrefixBlocks)
 			assert.Equal(t, tt.expectedPrompts, len(result))
 			for i, expected := range tt.expectedBlocksPerPrompt {
 				assert.Equal(t, expected, len(result[i]), "prompt %d block count", i)
@@ -208,25 +185,12 @@ func TestGetBlockHashes_MultiPrompt(t *testing.T) {
 }
 
 func TestGetBlockHashes_MultiPromptHashIndependence(t *testing.T) {
-	multiPrompt := &fwksched.InferenceRequest{
-		TargetModel: "model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3, 4}}},
-			},
-		},
-	}
-	singlePrompt := &fwksched.InferenceRequest{
-		TargetModel: "model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}},
-			},
-		},
-	}
-
-	multi := GetBlockHashes(context.Background(), multiPrompt, 2, testMaxPrefixBlocks)
-	single := GetBlockHashes(context.Background(), singlePrompt, 2, testMaxPrefixBlocks)
+	multi := GetBlockHashes(context.Background(), tokenizedRequest("model", &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3, 4}}},
+	}), 2, testMaxPrefixBlocks)
+	single := GetBlockHashes(context.Background(), tokenizedRequest("model", &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}},
+	}), 2, testMaxPrefixBlocks)
 
 	assert.Equal(t, 2, len(multi), "multi-prompt should produce 2 inner slices")
 	assert.Equal(t, 1, len(single), "single-prompt should produce 1 inner slice")
@@ -240,6 +204,14 @@ func TestGetBlockHashes_MultiPromptHashIndependence(t *testing.T) {
 	// split prevents.
 	assert.NotEqual(t, multi[1][0], single[0][1],
 		"second prompt must start its own hash chain, not chain from the first prompt")
+}
+
+func tokenizedRequest(targetModel string, tokenized *fwkrh.TokenizedRequest) *fwksched.InferenceRequest {
+	request := &fwksched.InferenceRequest{TargetModel: targetModel}
+	if tokenized != nil {
+		request.PutAttribute(tokenproducer.TokenizedPromptDataKey, tokenized)
+	}
+	return request
 }
 
 func TestKVCacheBlock_Hash(t *testing.T) {

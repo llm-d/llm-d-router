@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -807,10 +808,14 @@ func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 // stays independent of the production in-flight token estimator's policy, which
 // derives output tokens from the outlen-bucket attribute rather than a fixed ratio.
 func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
-	if req == nil || req.Body == nil || req.Body.TokenizedRequest == nil {
+	if req == nil {
 		return 0
 	}
-	input := int64(req.Body.TokenizedRequest.TokenCount())
+	tp, ok := fwksched.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, tokenizer.TokenizedPromptDataKey)
+	if !ok {
+		return 0
+	}
+	input := int64(tp.TokenCount())
 	// round(input * 1.5) via integer half-up, matching the numbers these tests assert.
 	return input + (input*3+1)/2
 }
@@ -818,12 +823,12 @@ func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
 // makeTokenRequest builds a request with inputTokens tokenized input tokens.
 // simulatedTokenLoad then derives total tokens as inputTokens + round(inputTokens * 1.5).
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
+	req := &fwksched.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}})
+	return req
 }
 
 // nilMetadataEndpoint simulates a freshly registered endpoint whose metadata

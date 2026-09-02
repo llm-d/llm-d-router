@@ -635,14 +635,15 @@ func (f *stubSchedulingEndpoint) Keys() []fwkplugin.DataKey { return f.attr.Keys
 // matching a deployment where the outlen-bucket plugin is not enabled, hence the
 // UnknownOutputTokens output the counter-tracking tests expect.
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
+	req := &fwksched.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}},
-			},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	tp := fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}},
+	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &tp)
+	return req
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease verifies that when

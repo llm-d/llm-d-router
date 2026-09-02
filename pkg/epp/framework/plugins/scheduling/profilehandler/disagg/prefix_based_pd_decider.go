@@ -150,7 +150,7 @@ func (d *PrefixBasedPDDecider) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			d.prefixMatchInfoDK:                  attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil),
 		},
 	}
 }
@@ -271,12 +271,11 @@ func (d *PrefixBasedPDDecider) computeNeedsRemotePrefill(ctx context.Context, re
 	}
 	prefixInfoRaw, ok := endpoint.Get(d.prefixMatchInfoDK)
 	if !ok || prefixInfoRaw == nil {
-		return false, fmt.Errorf("unable to read prefix cache state for %s", d.prefixMatchInfoDK)
+		return false, errors.New("unable to read prefix cache state")
 	}
 	info, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 	if !ok {
-		return false, fmt.Errorf("prefix cache match info from %s has unexpected type: %T",
-			d.prefixMatchInfoDK, prefixInfoRaw)
+		return false, fmt.Errorf("prefix cache match info has unexpected type: %T", prefixInfoRaw)
 	}
 	hitPrefixTokens := info.CachedBlockCount() * info.BlockSizeTokens()
 	nonCachedTokens := inputTokens - hitPrefixTokens
@@ -291,11 +290,15 @@ func (d *PrefixBasedPDDecider) computeNeedsRemotePrefill(ctx context.Context, re
 // in PreRequest and disaggregate surfaces the tokenizer failure in the log
 // rather than silently treating an untokenized request as zero-length input.
 func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) {
-	if request == nil || request.Body == nil {
+	if request == nil {
 		return 0, errors.New("request or request body is nil")
 	}
-	if request.Body.TokenizedRequest == nil {
+	tp, ok := scheduling.ReadRequestAttribute[*scheduling.TokenizedRequest](
+		request,
+		tokenproducer.TokenizedPromptDataKey,
+	)
+	if !ok {
 		return 0, errors.New("prompt not tokenized")
 	}
-	return request.Body.TokenizedRequest.TokenCount(), nil
+	return tp.TokenCount(), nil
 }

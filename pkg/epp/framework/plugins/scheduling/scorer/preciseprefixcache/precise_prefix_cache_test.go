@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -214,7 +215,7 @@ func TestLegacyProducer_ConsumesDropsTokenizedRequestWhenPoolSet(t *testing.T) {
 
 // When a completions prompt arrives without TokenizedRequest and the pool
 // is set, Produce must route the prompt through the pool and stash the
-// resulting tokens on request.Body.TokenizedRequest.
+// resulting tokens in the request attribute store.
 func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
@@ -241,11 +242,12 @@ func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
 
 	assert.Equal(t, 1, stub.calls)
 	assert.Equal(t, "hello world", stub.lastRaw)
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, tokenizer.TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, []uint32{1, 2, 3}, tp.Prompts[0].TokenIDs)
 	// Wrapper-owned tokenization must still carry the cache salt so precise
 	// keys stay isolated on this path.
-	assert.Equal(t, "leg-salt", req.Body.TokenizedRequest.CacheSalt)
+	assert.Equal(t, "leg-salt", tp.CacheSalt)
 }
 
 // End-to-end: tokens from the pool flow into the embedded producer, get
@@ -314,12 +316,14 @@ func TestLegacyProducer_KeepsExistingTokenizedRequest(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{5, 5, 5}}}},
-			Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "should not tokenize"}},
+			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "should not tokenize"}},
 		},
 	}
+	req.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{5, 5, 5}}}})
 	require.NoError(t, lp.Produce(ctx, req, nil))
 
 	assert.Equal(t, 0, stub.calls, "pool must not be called when tokens already present")
-	assert.Equal(t, []uint32{5, 5, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, tokenizer.TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, []uint32{5, 5, 5}, tp.Prompts[0].TokenIDs)
 }

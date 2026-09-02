@@ -6,6 +6,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -47,4 +48,12 @@ func (d *AlwaysDisaggMultimodalDecider) WithName(name string) *AlwaysDisaggMulti
 
 func (d *AlwaysDisaggMultimodalDecider) disaggregate(_ context.Context, request *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
 	return hasMultimodalContent(request)
+}
+
+func (d *AlwaysDisaggMultimodalDecider) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil),
+		},
+	}
 }

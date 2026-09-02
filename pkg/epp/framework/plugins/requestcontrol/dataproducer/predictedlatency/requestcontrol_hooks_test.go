@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -104,14 +105,14 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, 8, ctx.inputTokenCount)
+	assert.Equal(t, 2, ctx.inputTokenCount)
 }
 
 func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
 	request := createTestInferenceRequestWithBody("test-generate", 1.0, 0.05, &fwkrh.InferenceRequestBody{
-		Generate:         &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5}},
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 5)}}},
+		Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5}},
 	})
+	request.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 5)}}})
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
