@@ -2,6 +2,9 @@
 
 KIND_CLUSTER_NAME ?= $(PROJECT_NAME)-dev
 KIND_GATEWAY_HOST_PORT ?= 30080
+# KIND_PROM_HOST_PORT is the documented Make variable. Fall back to
+# PROM_HOST_PORT so direct callers keep working through this target.
+KIND_PROM_HOST_PORT ?= $(PROM_HOST_PORT)
 
 .PHONY: image-kind
 image-kind: ## Reload the EPP and SideCar images into the kind cluster $(KIND_CLUSTER_NAME)
@@ -15,6 +18,7 @@ env-dev-kind: image-build image-pull ## Run under kind ($(KIND_CLUSTER_NAME))
 	else \
 		CLUSTER_NAME=$(KIND_CLUSTER_NAME) \
 		GATEWAY_HOST_PORT=$(KIND_GATEWAY_HOST_PORT) \
+		PROM_HOST_PORT="$(KIND_PROM_HOST_PORT)" \
 		IMAGE_REGISTRY=$(IMAGE_REGISTRY) \
 		./scripts/kind-dev-env.sh; \
 	fi
