@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -30,11 +31,12 @@ import (
 )
 
 func tokenizedRequest(tokens []uint32) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}},
-		},
+	req := &fwksched.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey,
+		&fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}})
+	return req
 }
 
 // assignedReplica returns the name of the endpoint this producer steered the

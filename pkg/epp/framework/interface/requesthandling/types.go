@@ -114,9 +114,6 @@ type InferenceRequestBody struct {
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
 	Payload RequestPayload `json:"-"`
-	// TokenizedRequest contains parser-derived tokenization results when available.
-	// It is nil when the request was not already tokenized.
-	TokenizedRequest *TokenizedRequest `json:"-"`
 
 	// Stream indicates whether the request specifies a streaming response (e.g., via a stream field).
 	// This typically implies the model server's response will be streamed.

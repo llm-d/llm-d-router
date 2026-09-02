@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -56,19 +57,17 @@ func TestFactory(t *testing.T) {
 }
 
 func TestExtractMMItemsFromTokenizedRequest(t *testing.T) {
-	items := ExtractMMItems(&scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{
-					MultiModalFeatures: []fwkrh.MultiModalFeature{
-						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 576},
-						{Modality: fwkrh.ModalityImage, Hash: "image-b", Length: 0},
-						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 144},
-					},
-				}},
+	req := &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{
+			MultiModalFeatures: []fwkrh.MultiModalFeature{
+				{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 576},
+				{Modality: fwkrh.ModalityImage, Hash: "image-b", Length: 0},
+				{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 144},
 			},
-		},
+		}},
 	})
+	items := ExtractMMItems(req)
 
 	assert.ElementsMatch(t, []attrmm.MatchItem{
 		{Hash: "image-a", Size: 1, Modality: string(fwkrh.ModalityImage)},
@@ -84,11 +83,11 @@ func TestExtractMMItemsNilTokenizedRequestReturnsNil(t *testing.T) {
 }
 
 func TestExtractMMItemsEmptyMultiModalFeaturesReturnsNil(t *testing.T) {
-	items := ExtractMMItems(&scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{},
-		},
-	})
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{},
+	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{})
+	items := ExtractMMItems(req)
 	assert.Nil(t, items)
 }
 
@@ -276,12 +275,12 @@ func requestWithHashes(requestID string, hashToWeight map[string]int) *schedulin
 	for hash, weight := range hashToWeight {
 		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: hash, Length: weight})
 	}
-	return &scheduling.InferenceRequest{
+	req := &scheduling.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}}},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}}})
+	return req
 }
 
 func schedulingResult(target scheduling.Endpoint) *scheduling.SchedulingResult {

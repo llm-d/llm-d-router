@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -241,7 +242,7 @@ func TestCalculateRangeScoreFallback(t *testing.T) {
 	})
 }
 
-// TokenizedRequest tests — plugin reads tokens from InferenceRequestBody.TokenizedRequest
+// TokenizedRequest tests — plugin reads tokens from per-request TokenizedPrompt attribute
 // as populated by the tokenizer DataProducer plugin.
 
 func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
@@ -272,11 +273,9 @@ func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
-
+	request.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}})
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().ID.Name)

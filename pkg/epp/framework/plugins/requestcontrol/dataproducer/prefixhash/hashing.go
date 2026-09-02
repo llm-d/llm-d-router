@@ -30,6 +30,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 // BlockHash is a hash of a block of request data.
@@ -56,16 +57,16 @@ func (b HashBlock) Hash() uint64 {
 // independently so cross-prompt block adjacency is avoided. The first block
 // hash of every prompt includes the model name and cache salt (if provided).
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
-// It requires request.Body.TokenizedRequest to be populated by a token-producer backend.
+// It requires the token producer to populate TokenizedPromptDataKey.
 func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]BlockHash {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
-	if request == nil || request.Body == nil {
-		loggerDebug.Info("Request or request data is nil, skipping hashing")
+	if request == nil {
+		loggerDebug.Info("Request is nil, skipping hashing")
 		return nil
 	}
 
-	tp := request.Body.TokenizedRequest
-	if tp == nil || tp.TokenCount() == 0 {
+	tp, ok := scheduling.ReadRequestAttribute[*scheduling.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+	if !ok || tp.TokenCount() == 0 {
 		loggerDebug.Info("TokenizedRequest is empty, skipping hashing")
 		return nil
 	}
@@ -73,7 +74,7 @@ func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 	var result [][]BlockHash
 	for _, p := range tp.Prompts {
 		seq := getKVCacheBlocksFromTokens(p.TokenIDs, blockSizeTokens)
-		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
+		hashes := computeBlockHashes(seq, request.TargetModel, tp.CacheSalt, maxPrefixBlocks)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
 		}
@@ -86,13 +87,13 @@ func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 }
 
 // computeBlockHashes calculates the hash for content blocks.
-func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
+func computeBlockHashes(seq iter.Seq[HashBlock], targetModel, cacheSalt string, maxPrefixBlocks int) []BlockHash {
 	var blockHashes []BlockHash
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
-	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.TokenizedRequest.CacheSalt; cacheSalt != "" {
+	_, _ = h.Write([]byte(targetModel))
+	if cacheSalt != "" {
 		_, _ = h.Write([]byte(cacheSalt))
 	}
 

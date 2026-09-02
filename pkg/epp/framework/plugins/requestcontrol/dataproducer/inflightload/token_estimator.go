@@ -17,7 +17,9 @@ limitations under the License.
 package inflightload
 
 import (
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
 
@@ -66,10 +68,14 @@ func NewSimpleTokenEstimator(maxOutput *int64) TokenEstimator {
 // EstimateInput returns the input token count read from the tokenized prompt,
 // or 0 when no tokenization is available.
 func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest) int64 {
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+	if request == nil {
 		return 0
 	}
-	return int64(request.Body.TokenizedRequest.TokenCount())
+	tp, ok := fwksched.ReadRequestAttribute[*fwkrh.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+	if !ok {
+		return 0
+	}
+	return int64(tp.TokenCount())
 }
 
 // EstimateOutputFromRequest returns the estimated output token count for a request

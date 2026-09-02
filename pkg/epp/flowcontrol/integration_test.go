@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -86,10 +87,9 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 			req := &fwksched.InferenceRequest{
 				RequestID: fmt.Sprintf("req-%d", i),
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
-				},
+				Body:      &fwkrh.InferenceRequestBody{},
 			}
+			req.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}})
 			result := &fwksched.SchedulingResult{
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
 					"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
@@ -163,10 +163,9 @@ func TestSaturationFullLoop(t *testing.T) {
 		schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("prefill-%d", i),
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
-			},
+			Body:      &fwkrh.InferenceRequestBody{},
 		}
+		req.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}})
 		result := &fwksched.SchedulingResult{
 			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
@@ -452,10 +451,9 @@ func TestUsageLimitThresholdGatesDispatch(t *testing.T) {
 		schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("inflight-%d", i),
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
-			},
+			Body:      &fwkrh.InferenceRequestBody{},
 		}
+		req.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}})
 		result := &fwksched.SchedulingResult{
 			ProfileResults: map[string]*fwksched.ProfileRunResult{
 				"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
@@ -1002,10 +1000,9 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	schedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	oldReq := &fwksched.InferenceRequest{
 		RequestID: "old-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	oldReq.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}})
 	oldResult := &fwksched.SchedulingResult{
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},
@@ -1058,10 +1055,9 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	newSchedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	newReq := &fwksched.InferenceRequest{
 		RequestID: "new-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	newReq.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}})
 	newResult := &fwksched.SchedulingResult{
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"decode": {TargetEndpoints: []fwksched.Endpoint{newSchedEp}},
@@ -1119,10 +1115,9 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	schedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	req := &fwksched.InferenceRequest{
 		RequestID: "new-pod-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenizer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}})
 	result := &fwksched.SchedulingResult{
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"decode": {TargetEndpoints: []fwksched.Endpoint{schedEp}},

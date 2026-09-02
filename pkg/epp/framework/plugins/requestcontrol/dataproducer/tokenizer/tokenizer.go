@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package tokenizer provides a DataProducer plugin that tokenizes the request
-// prompt and publishes the result on InferenceRequestBody.TokenizedRequest for
+// prompt and publishes the result on per-request TokenizedPrompt attribute for
 // downstream consumers (scorers, filters, other data producers).
 package tokenizer
 
@@ -313,7 +313,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 	p := &Plugin{
 		typedName: plugin.TypedName{Type: PluginType, Name: name},
 		backend:   backend,
-		dk:        TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+		dk:        TokenizedPromptDataKey,
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -322,7 +322,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 }
 
 // Plugin tokenizes the prompt in the incoming request and writes the result to
-// InferenceRequestBody.TokenizedRequest for downstream DataProducer / scoring plugins.
+// per-request TokenizedPrompt attribute for downstream DataProducer / scoring plugins.
 type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
@@ -342,7 +342,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+	return map[plugin.DataKey]any{p.dk: (*fwkrh.TokenizedRequest)(nil)}
 }
 
 // ProduceTimeout surfaces the backend's render timeout when it manages one, so
@@ -356,19 +356,11 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 }
 
 // Produce derives the request's TokenizedRequest via the configured backend and
-// stores it on the body. Skips when one is already present; errors propagate to
-// the Director, which logs and continues.
+// stores it in the per-request attribute store. Errors propagate to the
+// Director, which logs and continues.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
-	}
-	if request.Body.TokenizedRequest != nil {
-		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
-		// ensure cache-salt isolation still applies on the skip path.
-		if request.Body.TokenizedRequest.CacheSalt == "" {
-			request.Body.TokenizedRequest.CacheSalt = CacheSaltFromBody(request.Body)
-		}
-		return nil
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
@@ -380,7 +372,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		return nil
 	}
 	tp.CacheSalt = CacheSaltFromBody(request.Body)
-	request.Body.TokenizedRequest = tp
+	request.PutAttribute(p.dk, tp)
 	return nil
 }
 

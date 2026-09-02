@@ -8,6 +8,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
@@ -36,14 +37,20 @@ const (
 	averageCharactersPerToken = 4
 )
 
-// completionsBody builds a completions request body whose tokenized prompt carries
+// inferenceRequest builds a completions request body whose tokenized prompt carries
 // len(prompt)/averageCharactersPerToken token IDs, which the decider reads as
 // the input token count.
-func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
-	return &fwkrh.InferenceRequestBody{
-		Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
+func inferenceRequest(model, prompt string) *fwksched.InferenceRequest {
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: model,
+		Body: &fwkrh.InferenceRequestBody{
+			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey,
+		&fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}})
+	return req
 }
 
 // Tests the scheduler expected behavior.
@@ -118,22 +125,14 @@ func TestPDSchedule(t *testing.T) {
 		err      bool
 	}{
 		{
-			name: "no candidate endpoints",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "any-model",
-				Body:        completionsBody("12345678901"),
-			},
+			name:  "no candidate endpoints",
+			req:   inferenceRequest("any-model", "12345678901"),
 			input: []fwksched.Endpoint{},
 			err:   true,
 		},
 		{
 			name: "one decode endpoint, long prompt, no prefill endpoint available",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
-				Body:        completionsBody("12345678901"),
-			},
+			req:  inferenceRequest("critical", "12345678901"),
 			// The long, uncached prompt makes the decider pick the prefill profile,
 			// but no Prefill-role endpoint is present: the request must fail rather
 			// than silently complete decode-only.
@@ -142,22 +141,14 @@ func TestPDSchedule(t *testing.T) {
 		},
 		{
 			name: "one prefill endpoint, long prompt",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
-				Body:        completionsBody("12345678901"),
-			},
+			req:  inferenceRequest("critical", "12345678901"),
 			// no Decode endpoint
 			input: []fwksched.Endpoint{endpoint1},
 			err:   true,
 		},
 		{
 			name: "1P1D - long prompt",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
-				Body:        completionsBody("12345678906"),
-			},
+			req:  inferenceRequest("critical", "12345678906"),
 			// endpoint2 will be picked in the decode profile result, endpoint1 will be in the prefill profile result
 			input:    []fwksched.Endpoint{endpoint1, endpoint2},
 			wantRes:  prefillDecodeResult,
@@ -165,11 +156,7 @@ func TestPDSchedule(t *testing.T) {
 		},
 		{
 			name: "1P1Dshort",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
-				Body:        completionsBody("12345"),
-			},
+			req:  inferenceRequest("critical", "12345"),
 			// endpoint2 will be picked because it is the decode endpoint, endpoint1 shouldn't be picked,
 			// because the prompt is too short
 			input:    []fwksched.Endpoint{endpoint1, endpoint2},
@@ -177,12 +164,8 @@ func TestPDSchedule(t *testing.T) {
 			wantRes2: decodeResult,
 		},
 		{
-			name: "TestRolesWithNoDecode",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
-				Body:        completionsBody("12345678901"),
-			},
+			name:  "TestRolesWithNoDecode",
+			req:   inferenceRequest("critical", "12345678901"),
 			input: []fwksched.Endpoint{endpoint1, noRoleEndpoint1},
 			wantRes: &fwksched.SchedulingResult{
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -206,11 +189,7 @@ func TestPDSchedule(t *testing.T) {
 		},
 		{
 			name: "1P2D - long prompt",
-			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
-				Body:        completionsBody("1234567890123456789012345678901234567890"),
-			},
+			req:  inferenceRequest("critical", "1234567890123456789012345678901234567890"),
 			// endpoint2 will be picked in the decode profile result cause it has higher score than noRoleEndpoint1
 			// endpoint1 will be in the prefill profile result
 			input:    []fwksched.Endpoint{endpoint1, endpoint2, noRoleEndpoint1},
@@ -357,11 +336,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 	})
 	scheduler := scheduling.NewSchedulerWithConfig(schedulerConfig)
 
-	req := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "critical",
-		Body:        completionsBody("12345678906"),
-	}
+	req := inferenceRequest("critical", "12345678906")
 	input := []fwksched.Endpoint{endpoint1, endpoint2}
 
 	got, err := scheduler.Schedule(ctx, req, input)

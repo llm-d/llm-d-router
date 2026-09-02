@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 // BenchmarkFlowController_PerformanceMatrix evaluates throughput across a matrix of variables.
@@ -346,8 +347,9 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 			//    detector reads to compute saturation.
 			infReq := &scheduling.InferenceRequest{
 				RequestID: reqID,
-				Body:      &requesthandling.InferenceRequestBody{TokenizedRequest: &requesthandling.TokenizedRequest{Prompts: []requesthandling.PromptTokens{{TokenIDs: benchTokenIDs}}}},
+				Body:      &requesthandling.InferenceRequestBody{},
 			}
+			infReq.PutAttribute(tokenizer.TokenizedPromptDataKey, &requesthandling.TokenizedRequest{Prompts: []requesthandling.PromptTokens{{TokenIDs: benchTokenIDs}}})
 			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
 			_ = h.producer.PreRequest(ctx, infReq, schedResult)
 

@@ -30,6 +30,8 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 )
 
 // helper function to simulate the gRPC payload framing
@@ -125,10 +127,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{
-						TokenIDs: [][]uint32{{11, 12, 13}},
-					},
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{11, 12, 13},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -139,9 +139,6 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 							},
 						},
 					}},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{11, 12, 13}}},
-				},
 			},
 		},
 		{
@@ -163,8 +160,19 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{101, 102, 103, 104, 105},
+					Features: &tokenization.MultiModalFeatures{
+						MMHashes: map[string][]string{
+							"image": {"hash-a", "hash-b"},
+						},
+						MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+							"image": {
+								{Offset: 1, Length: 2},
+								{Offset: 4, Length: 1},
+							},
+						},
+					},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -182,15 +190,6 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 							MmHashes: []string{"hash-a", "hash-b"},
 						},
 					},
-				},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{
-						TokenIDs: []uint32{101, 102, 103, 104, 105},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
-							{Modality: fwkrh.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
-						},
-					}},
 				},
 			},
 		},
@@ -213,8 +212,19 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{201, 202, 203, 204},
+					Features: &tokenization.MultiModalFeatures{
+						MMHashes: map[string][]string{
+							"image": {"hash-only", ""},
+						},
+						MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+							"image": {
+								{Offset: 0, Length: 1},
+								{Offset: 2, Length: 2},
+							},
+						},
+					},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -232,15 +242,6 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 							MmHashes: []string{"hash-only"},
 						},
 					},
-				},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{
-						TokenIDs: []uint32{201, 202, 203, 204},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
-							{Modality: fwkrh.ModalityImage, Hash: "", Offset: 2, Length: 2},
-						},
-					}},
 				},
 			},
 		},

@@ -67,10 +67,12 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 // withTokens sets the tokenized prompt to carry n token IDs, which the decider reads
 // as the input token count. Any existing tokenized prompt is preserved.
 func withTokens(req *scheduling.InferenceRequest, n int) *scheduling.InferenceRequest {
-	if req.Body.TokenizedRequest == nil {
-		req.Body.TokenizedRequest = &fwkrh.TokenizedRequest{}
+	_, ok := req.GetAttribute(tokenproducer.TokenizedPromptDataKey)
+	if !ok {
+		tp := &fwkrh.TokenizedRequest{}
+		tp.Prompts = []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}}
+		req.PutAttribute(tokenproducer.TokenizedPromptDataKey, tp)
 	}
-	req.Body.TokenizedRequest.Prompts = []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}}
 	return req
 }
 
@@ -114,16 +116,15 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		},
 		{
 			name: "completions string array prompt",
-			req: &scheduling.InferenceRequest{
+			req: withTokens(&scheduling.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{
 							Strings: []string{"hello world", "foo bar baz"},
 						},
 					},
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 5)}}},
 				},
-			},
+			}, 5),
 			want: 5,
 		},
 		{
@@ -161,12 +162,11 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		},
 		{
 			name: "generate request returns exact token count",
-			req: &scheduling.InferenceRequest{
+			req: withTokens(&scheduling.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
-					Generate:         &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 7)}}},
+					Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
 				},
-			},
+			}, 7),
 			want: 7,
 		},
 	}

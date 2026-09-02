@@ -28,6 +28,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -255,7 +256,7 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 // is configured; multimodal features come from the tokenizer output.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil)},
 	}
 }
 
@@ -297,12 +298,19 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
 // derived from the tokenized prompt's multimodal features.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+	if request == nil {
+		return nil
+	}
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](
+		request,
+		tokenproducer.TokenizedPromptDataKey,
+	)
+	if !ok {
 		return nil
 	}
 
 	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, p := range request.Body.TokenizedRequest.Prompts {
+	for _, p := range tp.Prompts {
 		for _, feature := range p.MultiModalFeatures {
 			if feature.Hash == "" {
 				continue

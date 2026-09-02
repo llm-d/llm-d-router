@@ -52,6 +52,7 @@ func newTestPlugin(tok tokenizer) *Plugin {
 	return &Plugin{
 		typedName: plugin.TypedName{Type: PluginType, Name: "test"},
 		backend:   renderBackend{tk: tok},
+		dk:        TokenizedPromptDataKey,
 	}
 }
 
@@ -75,6 +76,15 @@ func TestProduceTimeout(t *testing.T) {
 
 	// A render backend whose tokenizer manages no timeout (e.g. UDS) keeps the default.
 	assert.Zero(t, newTestPlugin(&mockTokenizer{}).ProduceTimeout())
+}
+
+// The tokenizer must publish under the bare TokenizedPromptDataKey regardless of
+// its instance name; every consumer reads that key, not a name-suffixed one.
+func TestNewPlugin_PublishesUnderBareKey(t *testing.T) {
+	ctx := context.Background()
+	p, err := NewPlugin(ctx, "custom-name", &tokenizerPluginConfig{Estimate: &estimateConfig{}})
+	require.NoError(t, err)
+	assert.Equal(t, TokenizedPromptDataKey, p.dk)
 }
 
 func TestPluginFactory_Validation(t *testing.T) {
@@ -142,7 +152,7 @@ func TestPluginFactory_Validation(t *testing.T) {
 	}
 }
 
-func TestProduce_PopulatesTokenizedRequest(t *testing.T) {
+func TestProduce_PublishesTokenizedPrompt(t *testing.T) {
 	mm := &tokenization.MultiModalFeatures{
 		MMHashes: map[string][]string{"image": {"hash-a", "hash-b"}},
 		MMPlaceholders: map[string][]kvblock.PlaceholderRange{
@@ -155,7 +165,6 @@ func TestProduce_PopulatesTokenizedRequest(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			ChatCompletions: &fwkrh.ChatCompletionsRequest{
@@ -165,47 +174,17 @@ func TestProduce_PopulatesTokenizedRequest(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{1, 2, 3, 4}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
-	require.Len(t, req.Body.TokenizedRequest.Prompts, 1)
-	require.Len(t, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures, 2)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, []uint32{1, 2, 3, 4}, tp.Prompts[0].TokenIDs)
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 2)
 
-	assert.Equal(t, 3, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Offset)
-	assert.Equal(t, "hash-a", req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Hash)
-	assert.Equal(t, 20, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[1].Offset)
-	assert.Equal(t, "hash-b", req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[1].Hash)
-	assert.Equal(t, fwkrh.ModalityImage, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures[0].Modality)
-}
-
-func TestProduce_SkipsWhenAlreadyPopulated(t *testing.T) {
-	existing := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{42}}}}
-	p := newTestPlugin(&mockTokenizer{})
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{TokenizedRequest: existing},
-	}
-	require.NoError(t, p.Produce(context.Background(), req, nil))
-	assert.Same(t, existing, req.Body.TokenizedRequest)
-}
-
-func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
-	tok := &mockTokenizer{
-		renderChatFunc: func(fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
-			t.Fatal("backend must not run on the skip path")
-			return nil, nil, nil
-		},
-	}
-	existing := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}}
-	p := newTestPlugin(tok)
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions:  &fwkrh.ChatCompletionsRequest{CacheSalt: "tenant-x"},
-			TokenizedRequest: existing,
-		},
-	}
-	require.NoError(t, p.Produce(context.Background(), req, nil))
-	assert.Same(t, existing, req.Body.TokenizedRequest)
-	assert.Equal(t, "tenant-x", req.Body.TokenizedRequest.CacheSalt)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	assert.Equal(t, 3, tp.Prompts[0].MultiModalFeatures[0].Offset)
+	assert.Equal(t, "hash-a", tp.Prompts[0].MultiModalFeatures[0].Hash)
+	assert.Equal(t, 20, tp.Prompts[0].MultiModalFeatures[1].Offset)
+	assert.Equal(t, "hash-b", tp.Prompts[0].MultiModalFeatures[1].Hash)
+	assert.Equal(t, fwkrh.ModalityImage, tp.Prompts[0].MultiModalFeatures[0].Modality)
 }
 
 func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
@@ -300,7 +279,8 @@ func TestProduce_TokenizerError(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tokenization failed")
-	assert.Nil(t, req.Body.TokenizedRequest)
+	_, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.False(t, ok)
 }
 
 func TestProduce_UnsupportedBodyType(t *testing.T) {
@@ -313,7 +293,8 @@ func TestProduce_UnsupportedBodyType(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported request body type")
-	assert.Nil(t, req.Body.TokenizedRequest)
+	_, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.False(t, ok)
 }
 
 func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
@@ -329,7 +310,6 @@ func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-
 	tokenIDs := []uint32{1, 2, 3, 4, 5}
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
@@ -340,9 +320,10 @@ func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
 	}
 
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, tokenIDs, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
-	assert.Nil(t, req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, tokenIDs, tp.Prompts[0].TokenIDs)
+	assert.Nil(t, tp.Prompts[0].MultiModalFeatures)
 }
 
 func TestProduce_GenerateFlattensFeatures(t *testing.T) {
@@ -359,7 +340,6 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-
 	tokenIDs := []uint32{151644, 872, 198, 3838, 374, 279, 6722}
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
@@ -381,14 +361,15 @@ func TestProduce_GenerateFlattensFeatures(t *testing.T) {
 	}
 
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, tokenIDs, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, tokenIDs, tp.Prompts[0].TokenIDs)
 	assert.Equal(t,
 		[]fwkrh.MultiModalFeature{
 			{Modality: fwkrh.ModalityImage, Hash: "abc123hash", Offset: 1, Length: 3},
 			{Modality: fwkrh.ModalityImage, Hash: "def456hash", Offset: 4, Length: 3},
 		},
-		req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures,
+		tp.Prompts[0].MultiModalFeatures,
 	)
 }
 
@@ -469,7 +450,6 @@ func TestProduce_StringArrayPrompt(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
@@ -478,10 +458,11 @@ func TestProduce_StringArrayPrompt(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	require.Len(t, req.Body.TokenizedRequest.Prompts, 2)
-	assert.Equal(t, []uint32{10, 20, 30}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
-	assert.Equal(t, []uint32{40, 50}, req.Body.TokenizedRequest.Prompts[1].TokenIDs)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.True(t, ok)
+	require.Len(t, tp.Prompts, 2)
+	assert.Equal(t, []uint32{10, 20, 30}, tp.Prompts[0].TokenIDs)
+	assert.Equal(t, []uint32{40, 50}, tp.Prompts[1].TokenIDs)
 }
 
 func TestProduce_StringArrayPromptRenderError(t *testing.T) {
@@ -502,7 +483,8 @@ func TestProduce_StringArrayPromptRenderError(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tokenization failed")
-	assert.Nil(t, req.Body.TokenizedRequest)
+	_, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.False(t, ok)
 }
 
 func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
@@ -521,7 +503,8 @@ func TestProduce_StringArrayPromptDoesNotPublishEmptyTokenResult(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	assert.Nil(t, req.Body.TokenizedRequest)
+	_, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.False(t, ok)
 }
 
 func TestProduce_SinglePromptSetsPrompts(t *testing.T) {
@@ -531,7 +514,6 @@ func TestProduce_SinglePromptSetsPrompts(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
@@ -540,8 +522,9 @@ func TestProduce_SinglePromptSetsPrompts(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{10, 20, 30}}}, req.Body.TokenizedRequest.Prompts)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{10, 20, 30}}}, tp.Prompts)
 }
 
 func TestChatCompletionsToRenderChatRequest_MultimodalContent(t *testing.T) {
@@ -878,7 +861,6 @@ func TestProduce_MessagesRequest(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-
 	// Payload holds the raw request body; RenderChat must receive the converted
 	// /render body, not that raw payload.
 	req := &scheduling.InferenceRequest{
@@ -893,9 +875,11 @@ func TestProduce_MessagesRequest(t *testing.T) {
 			},
 		},
 	}
+
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: wantTokens}}, req.Body.TokenizedRequest.Prompts)
+	tp, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, TokenizedPromptDataKey)
+	assert.True(t, ok)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: wantTokens}}, tp.Prompts)
 
 	pm, ok := gotPayload.AsMap()
 	require.True(t, ok, "RenderChat payload must be a map")

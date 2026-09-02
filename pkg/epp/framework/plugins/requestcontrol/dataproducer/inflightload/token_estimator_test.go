@@ -19,6 +19,7 @@ package inflightload
 import (
 	"testing"
 
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 
@@ -29,13 +30,14 @@ import (
 
 // tokenizedRequest builds a request whose body carries a tokenized prompt of n tokens.
 func tokenizedRequest(n int) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}},
-			},
-		},
+	req := &fwksched.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{},
 	}
+	tp := fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}},
+	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &tp)
+	return req
 }
 
 // requestWithBucket builds a request whose outlen-bucket attribute is set (as the
