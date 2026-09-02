@@ -58,7 +58,7 @@ schedulingProfiles:
 
 #### Token Counting
 
-Reads total prompt tokens from `request.Body.TokenizedRequest.TokenCount()`.
+Reads total prompt tokens from the request's `TokenizedPromptDataKey` attribute.
 A `token-producer` populates this data and is auto-created with the
 tokenizer-free `estimate` backend when none is configured.
 

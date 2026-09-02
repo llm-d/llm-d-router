@@ -27,6 +27,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -159,7 +160,6 @@ func createTestInferenceRequest(reqID string, ttftSLO, tpotSLO float64) *fwksche
 		Completions: &fwkrh.CompletionsRequest{
 			Prompt: fwkrh.Prompt{Raw: "test prompt"},
 		},
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 2)}}},
 	})
 }
 
@@ -171,7 +171,6 @@ func createTestChatCompletionsInferenceRequest(reqID string, ttftSLO, tpotSLO fl
 				{Role: "user", Content: fwkrh.Content{Raw: "Tell me a joke."}},
 			},
 		},
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 8)}}},
 	})
 }
 
@@ -184,11 +183,12 @@ func createTestInferenceRequestWithBody(reqID string, ttftSLO, tpotSLO float64, 
 	if tpotSLO > 0 {
 		headers[metadata.TPOTSLOHeaderKey] = fmt.Sprintf("%f", tpotSLO)
 	}
-
-	return &fwksched.InferenceRequest{
+	req := &fwksched.InferenceRequest{
 		Headers: headers,
 		Body:    body,
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 2)}}})
+	return req
 }
 
 func TestParseSLOHeaders(t *testing.T) {

@@ -55,7 +55,7 @@ func (p *tokenizedPromptTestProducer) TypedName() fwkplugin.TypedName {
 }
 
 func (p *tokenizedPromptTestProducer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}}
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil)}
 }
 
 func (p *tokenizedPromptTestProducer) Produce(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
@@ -175,15 +175,15 @@ func migrationPrefiller(
 }
 
 func migrationTokenizedRequest(requestID string, tokenCount int) *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{
+	request := &scheduling.InferenceRequest{
 		RequestID: requestID,
 		Headers:   map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
-			},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	request.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
+	})
+	return request
 }
 
 func migrationPrefillResult(endpoint scheduling.Endpoint) *scheduling.SchedulingResult {

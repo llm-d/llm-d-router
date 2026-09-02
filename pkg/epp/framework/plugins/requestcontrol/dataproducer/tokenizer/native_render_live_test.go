@@ -125,7 +125,8 @@ func TestRenderServingLive(t *testing.T) {
 			p := e.plugin(t, httputil.NewSingleHostReverseProxy(target))
 			req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": e.auth}}
 			require.NoError(t, p.Produce(t.Context(), req, nil))
-			require.Equal(t, e.render(t, tc.path+"/render", raw), req.Body.TokenizedRequest.Prompts)
+			tokenized := tokenizedPrompt(t, req)
+			require.Equal(t, e.render(t, tc.path+"/render", raw), tokenized.Prompts)
 			var served struct {
 				PromptTokenIDs []uint32 `json:"prompt_token_ids"`
 				Choices        []struct {
@@ -135,11 +136,11 @@ func TestRenderServingLive(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(e.post(t, tc.path, wireBytes(t, parsed.Body.WirePayload())), &served))
 			if tc.path == "/v1/chat/completions" {
-				require.Equal(t, req.Body.TokenizedRequest.Prompts[0].TokenIDs, served.PromptTokenIDs)
+				require.Equal(t, tokenized.Prompts[0].TokenIDs, served.PromptTokenIDs)
 			} else {
-				require.Len(t, served.Choices, len(req.Body.TokenizedRequest.Prompts))
+				require.Len(t, served.Choices, len(tokenized.Prompts))
 				for _, choice := range served.Choices {
-					require.Equal(t, req.Body.TokenizedRequest.Prompts[choice.Index].TokenIDs, choice.PromptTokenIDs)
+					require.Equal(t, tokenized.Prompts[choice.Index].TokenIDs, choice.PromptTokenIDs)
 				}
 			}
 		})
@@ -155,7 +156,7 @@ func TestRenderServingLive(t *testing.T) {
 		p := e.plugin(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { t.Error("Generate must not render"); w.WriteHeader(500) }))
 		req := &scheduling.InferenceRequest{Body: parsed.Body}
 		require.NoError(t, p.Produce(t.Context(), req, nil))
-		require.Equal(t, rendered, req.Body.TokenizedRequest.Prompts)
+		require.Equal(t, rendered, tokenizedPrompt(t, req).Prompts)
 		wire := wireBytes(t, parsed.Body.WirePayload())
 		require.Equal(t, before, wire)
 		require.JSONEq(t, string(raw), string(wire))
@@ -234,10 +235,11 @@ func TestNativeRenderLive(t *testing.T) {
 				req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": e.auth}}
 				require.NoError(t, p.Produce(t.Context(), req, nil))
 				if variant == "direct-render" {
-					require.Nil(t, req.Body.TokenizedRequest)
+					assertNoTokenizedPrompt(t, req)
 				} else {
-					require.Equal(t, want, req.Body.TokenizedRequest.Prompts)
-					require.Equal(t, "live-test", req.Body.TokenizedRequest.CacheSalt)
+					tokenized := tokenizedPrompt(t, req)
+					require.Equal(t, want, tokenized.Prompts)
+					require.Equal(t, "live-test", tokenized.CacheSalt)
 				}
 				if variant == rewritten {
 					parsed.Body.MutatePayloadMap(func(payload fwkrh.PayloadMap) { payload["vllm_xargs"] = map[string]any{"kv_cache_report_mode": "full"} })
@@ -298,7 +300,7 @@ func TestRenderLiveProtocolHandoff(t *testing.T) {
 			}))
 			req := &scheduling.InferenceRequest{Body: parsed.Body}
 			require.NoError(t, p.Produce(t.Context(), req, nil))
-			require.Equal(t, want, req.Body.TokenizedRequest.Prompts)
+			require.Equal(t, want, tokenizedPrompt(t, req).Prompts)
 			require.False(t, req.Body.Mutated)
 		})
 	}
@@ -323,7 +325,7 @@ func TestRenderLiveProtocolHandoff(t *testing.T) {
 			p := e.plugin(t, httputil.NewSingleHostReverseProxy(target))
 			req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": e.auth}}
 			require.NoError(t, p.Produce(t.Context(), req, nil))
-			require.Equal(t, e.render(t, renderPath, reference), req.Body.TokenizedRequest.Prompts)
+			require.Equal(t, e.render(t, renderPath, reference), tokenizedPrompt(t, req).Prompts)
 			require.False(t, parsed.Body.Mutated)
 		})
 	}

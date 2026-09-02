@@ -19,6 +19,7 @@ package multimodal
 import (
 	"testing"
 
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/stretchr/testify/assert"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -107,13 +108,13 @@ func TestSpanAttributes(t *testing.T) {
 }
 
 func requestWith(features ...fwkrh.MultiModalFeature) *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{
-					MultiModalFeatures: features,
-				}},
-			},
-		},
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{
+			MultiModalFeatures: features,
+		}},
+	})
+	return req
 }

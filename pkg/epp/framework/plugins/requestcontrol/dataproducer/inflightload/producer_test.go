@@ -118,7 +118,7 @@ func (*tokenStubProducer) TypedName() fwkplugin.TypedName {
 }
 
 func (*tokenStubProducer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}}
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*fwksched.TokenizedRequest)(nil)}
 }
 
 // prefixMatchInfoProducerName selects which prefix producer (approximate or
@@ -209,7 +209,7 @@ func (p *tokenizedPromptTestProducer) TypedName() fwkplugin.TypedName {
 }
 
 func (p *tokenizedPromptTestProducer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}}
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*fwksched.TokenizedRequest)(nil)}
 }
 
 func (p *tokenizedPromptTestProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
@@ -744,14 +744,15 @@ func (f *stubSchedulingEndpoint) Keys() []fwkplugin.DataKey { return f.attr.Keys
 // matching a deployment where the outlen-bucket plugin is not enabled, hence the
 // UnknownOutputTokens output the counter-tracking tests expect.
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
+	req := &fwksched.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}},
-			},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	tp := fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}},
+	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &tp)
+	return req
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease verifies that when

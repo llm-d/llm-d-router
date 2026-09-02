@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -301,7 +302,7 @@ func TestPreRequest_MaximaCarryModality(t *testing.T) {
 	endpoint := freshEndpoints()[0]
 	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(2, 8, testBlockSize).WithCachedBlockCount(2))
 	req := tokenizedRequest("req-best-modality", 8*testBlockSize)
-	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+	tokenizedForTest(t, req).Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
 		{Modality: fwkrh.ModalityImage, Hash: "img"},
 		{Modality: "audio", Hash: "aud"},
 	}
@@ -518,21 +519,29 @@ func primaryWithScored(name string, target scheduling.Endpoint, scored ...schedu
 }
 
 func tokenizedRequest(id string, tokenCount int) *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{
+	req := &scheduling.InferenceRequest{
 		RequestID: id,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
-			},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
+	})
+	return req
+}
+
+func tokenizedForTest(t *testing.T, req *scheduling.InferenceRequest) *fwkrh.TokenizedRequest {
+	t.Helper()
+	tokenized, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, tokenproducer.TokenizedPromptDataKey)
+	require.True(t, ok)
+	return tokenized
 }
 
 // mmRequest wraps tokenizedRequest with one image feature spanning the
 // prompt's placeholder tokens.
 func mmRequest(id string, featureTokens int) *scheduling.InferenceRequest {
 	req := tokenizedRequest(id, featureTokens)
-	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+	tokenized, _ := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](req, tokenproducer.TokenizedPromptDataKey)
+	tokenized.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
 		{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 0, Length: featureTokens},
 	}
 	return req
@@ -656,7 +665,7 @@ func TestPreRequest_RecordsMMPrediction_TwoImagesFirstMatched(t *testing.T) {
 		WithMM(attrprefix.MMMatchInfo{MatchBlocks: 2, MatchTokens: 20}))
 
 	req := tokenizedRequest("req-mm-two-images", 4*testBlockSize)
-	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+	tokenizedForTest(t, req).Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
 		{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 2, Length: 20},
 		{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 32, Length: 20},
 	}
@@ -688,25 +697,24 @@ func TestPreRequest_RecordsMMPrediction_MultiPrompt(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		RequestID: "req-mm-multi",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{
-					{
-						TokenIDs: make([]uint32, 4*testBlockSize),
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
-						},
-					},
-					{
-						TokenIDs: make([]uint32, 3*testBlockSize),
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 0, Length: 3 * testBlockSize},
-						},
-					},
+		Body:      &fwkrh.InferenceRequestBody{},
+	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{
+			{
+				TokenIDs: make([]uint32, 4*testBlockSize),
+				MultiModalFeatures: []fwkrh.MultiModalFeature{
+					{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
+				},
+			},
+			{
+				TokenIDs: make([]uint32, 3*testBlockSize),
+				MultiModalFeatures: []fwkrh.MultiModalFeature{
+					{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 0, Length: 3 * testBlockSize},
 				},
 			},
 		},
-	}
+	})
 
 	beforePredicted := sharedPrefixHistogram(t, mmPredictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
 	beforePrompt := sharedPrefixHistogram(t, mmPromptTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
@@ -733,7 +741,7 @@ func TestPreRequest_RecordsMMPrediction_MultipleFeaturesInPrompt(t *testing.T) {
 		WithMM(attrprefix.MMMatchInfo{MatchBlocks: 7, MatchTokens: 7 * testBlockSize}))
 
 	req := tokenizedRequest("req-mm-features", 7*testBlockSize)
-	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+	tokenizedForTest(t, req).Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
 		{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
 		{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 4 * testBlockSize, Length: 3 * testBlockSize},
 	}

@@ -29,7 +29,9 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -420,10 +422,9 @@ type predictedLatencyCtx struct {
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
-	if request.Body != nil {
-		if tp := request.Body.TokenizedRequest; tp != nil {
-			inputTokenCount = tp.TokenCount()
-		}
+	tp, ok := fwksched.ReadRequestAttribute[*fwkrh.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+	if ok {
+		inputTokenCount = tp.TokenCount()
 	}
 	return &predictedLatencyCtx{
 		schedulingRequest:              *request,

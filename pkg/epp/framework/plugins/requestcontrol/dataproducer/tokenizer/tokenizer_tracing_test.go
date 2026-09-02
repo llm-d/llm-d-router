@@ -151,18 +151,6 @@ func TestProduce_TokenizeSpanRecordsError(t *testing.T) {
 	assert.Contains(t, span.Status().Description, "render failed")
 }
 
-// The skip path does no tokenization work, so it must not emit a span.
-func TestProduce_NoSpanWhenAlreadyTokenized(t *testing.T) {
-	recorder := setupSpanRecorder(t)
-	p := newTestPlugin(&mockTokenizer{})
-
-	req := chatRequest()
-	req.Body.TokenizedRequest = &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{7}}}}
-	require.NoError(t, p.Produce(context.Background(), req, nil))
-
-	assert.Empty(t, recorder.Ended())
-}
-
 // A backend that returns no tokens still did work, so the span must say why it
 // carries no token count rather than looking like an unattributed span.
 func TestProduce_TokenizeSpanRecordsSkippedNoTokens(t *testing.T) {

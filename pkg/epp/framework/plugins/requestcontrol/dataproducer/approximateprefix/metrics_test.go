@@ -32,6 +32,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 func TestRegisterMetrics(t *testing.T) {
@@ -134,14 +135,12 @@ func TestPreRequestPredictionBoundsEachPromptSeparately(t *testing.T) {
 	endpoints, result := endpointAndResult()
 
 	// 5 tokens (2 blocks, 1 partial) alongside 8 tokens (2 full blocks).
-	body := &fwkrh.InferenceRequestBody{
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{
-			{TokenIDs: []uint32{1, 2, 3, 4, 5}},
-			{TokenIDs: []uint32{6, 7, 8, 9, 10, 11, 12, 13}},
-		}},
-	}
-	runPredictionWithBody(t, p, "seed", body, endpoints, result)
-	runPredictionWithBody(t, p, "repeat", body, endpoints, result)
+	tokenized := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{
+		{TokenIDs: []uint32{1, 2, 3, 4, 5}},
+		{TokenIDs: []uint32{6, 7, 8, 9, 10, 11, 12, 13}},
+	}}
+	runPredictionWithTokenized(t, p, "seed", tokenized, endpoints, result)
+	runPredictionWithTokenized(t, p, "repeat", tokenized, endpoints, result)
 
 	assert.Equal(t, float64(13), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
 	assert.Equal(t, float64(26), metricSum(t, promptTokensMetric, name, prefixmetrics.RoleDecode))
@@ -328,11 +327,11 @@ func TestPreRequestMaximaCarryModality(t *testing.T) {
 	p := producerForPrediction(t, name, 2)
 	endpoints, result := endpointAndResult()
 
-	body := tokenizedBody([]uint32{1, 2, 3, 4})
-	body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+	tokenized := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}}}
+	tokenized.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
 		{Modality: fwkrh.ModalityImage, Hash: "img"},
 	}
-	runPredictionWithBody(t, p, "mm", body, endpoints, result)
+	runPredictionWithTokenized(t, p, "mm", tokenized, endpoints, result)
 
 	image := string(fwkrh.ModalityImage)
 	assert.Equal(t, image, metricModality(t, bestPredictedMetric, name))
@@ -387,14 +386,17 @@ func runPrediction(t *testing.T, p *dataProducer, id string, tokens []uint32,
 	endpoints []fwksched.Endpoint, result *fwksched.SchedulingResult,
 ) {
 	t.Helper()
-	runPredictionWithBody(t, p, id, tokenizedBody(tokens), endpoints, result)
+	runPredictionWithTokenized(t, p, id, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}},
+	}, endpoints, result)
 }
 
-func runPredictionWithBody(t *testing.T, p *dataProducer, id string, body *fwkrh.InferenceRequestBody,
+func runPredictionWithTokenized(t *testing.T, p *dataProducer, id string, tokenized *fwkrh.TokenizedRequest,
 	endpoints []fwksched.Endpoint, result *fwksched.SchedulingResult,
 ) {
 	t.Helper()
-	req := &fwksched.InferenceRequest{RequestID: id, TargetModel: "m", Body: body}
+	req := &fwksched.InferenceRequest{RequestID: id, TargetModel: "m", Body: &fwkrh.InferenceRequestBody{}}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, tokenized)
 	require.NoError(t, p.Produce(context.Background(), req, endpoints))
 	require.NoError(t, p.PreRequest(context.Background(), req, result))
 	p.wg.Wait()

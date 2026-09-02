@@ -29,6 +29,7 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 // referenceBlockHashes is an independent statement of the block hash chain:
@@ -84,11 +85,12 @@ func TestGetBlockHashesMatchesReference(t *testing.T) {
 		}
 		model := fmt.Sprintf("model-%d", rng.IntN(3))
 
-		req := &fwksched.InferenceRequest{TargetModel: model, Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{CacheSalt: salt}}}
+		req := &fwksched.InferenceRequest{TargetModel: model, Body: &fwkrh.InferenceRequestBody{}}
+		tokenized := &fwkrh.TokenizedRequest{CacheSalt: salt}
 		for _, p := range prompts {
-			req.Body.TokenizedRequest.Prompts = append(req.Body.TokenizedRequest.Prompts, fwkrh.PromptTokens{TokenIDs: p})
+			tokenized.Prompts = append(tokenized.Prompts, fwkrh.PromptTokens{TokenIDs: p})
 		}
+		req.PutAttribute(tokenproducer.TokenizedPromptDataKey, tokenized)
 
 		gotHashes, gotTokens := GetBlockHashesWithPromptTokens(context.Background(), req, blockSize, maxBlocks)
 		wantHashes, wantTokens := referenceBlockHashes(model, salt, prompts, blockSize, maxBlocks)
@@ -103,8 +105,8 @@ func BenchmarkGetBlockHashes(b *testing.B) {
 	for i := range tokens {
 		tokens[i] = uint32(i)
 	}
-	req := &fwksched.InferenceRequest{TargetModel: "bench-model", Body: &fwkrh.InferenceRequestBody{
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}}}}
+	req := &fwksched.InferenceRequest{TargetModel: "bench-model", Body: &fwkrh.InferenceRequestBody{}}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}}})
 	b.ReportAllocs()
 	for b.Loop() {
 		GetBlockHashesWithPromptTokens(context.Background(), req, 64, 2048)
