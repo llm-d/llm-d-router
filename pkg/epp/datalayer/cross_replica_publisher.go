@@ -42,9 +42,10 @@ const (
 // crossReplicaPublisher owns cross-replica publishing and endpoint lifecycle
 // coordination. One shared ticker publishes every registered endpoint.
 type crossReplicaPublisher struct {
-	syncer       fwkdl.CrossReplicaSyncer
-	contributors []fwkdl.CrossReplicaContributor
-	interval     time.Duration
+	syncer         fwkdl.CrossReplicaSyncer
+	contributors   []fwkdl.CrossReplicaContributor
+	interval       time.Duration
+	publishTimeout time.Duration
 
 	// mu guards endpoints and orders syncer operations with endpoint removal.
 	mu        sync.RWMutex
@@ -52,9 +53,9 @@ type crossReplicaPublisher struct {
 }
 
 // newCrossReplicaPublisher collects the opted-in CrossReplicaContributors, or
-// returns nil if there is no syncer or none opt in. A non-positive interval
-// falls back to defaultCrossReplicaSyncInterval.
-func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extractorMap, interval time.Duration) *crossReplicaPublisher {
+// returns nil if there is no syncer or none opt in. Non-positive durations
+// fall back to their defaults.
+func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extractorMap, interval, publishTimeout time.Duration) *crossReplicaPublisher {
 	if syncer == nil {
 		return nil
 	}
@@ -73,7 +74,15 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	if interval <= 0 {
 		interval = defaultCrossReplicaSyncInterval
 	}
-	return &crossReplicaPublisher{syncer: syncer, contributors: contributors, interval: interval}
+	if publishTimeout <= 0 {
+		publishTimeout = defaultCrossReplicaPublishTimeout
+	}
+	return &crossReplicaPublisher{
+		syncer:         syncer,
+		contributors:   contributors,
+		interval:       interval,
+		publishTimeout: publishTimeout,
+	}
 }
 
 // Interval returns the configured sync cadence.
@@ -115,7 +124,7 @@ func (p *crossReplicaPublisher) run(ctx context.Context) {
 
 func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
 	for _, endpointID := range p.endpointSnapshot() {
-		dispatchCtx, cancel := context.WithTimeout(ctx, defaultCrossReplicaPublishTimeout)
+		dispatchCtx, cancel := context.WithTimeout(ctx, p.publishTimeout)
 		p.publish(dispatchCtx, endpointID)
 		cancel()
 	}

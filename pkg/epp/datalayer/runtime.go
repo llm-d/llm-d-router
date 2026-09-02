@@ -237,7 +237,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	}
 
 	if cfg != nil {
-		r.crossReplicaPub = newCrossReplicaPublisher(cfg.Syncer, r.extractors, cfg.SyncInterval)
+		r.crossReplicaPub = newCrossReplicaPublisher(cfg.Syncer, r.extractors, cfg.SyncInterval, cfg.PublishTimeout)
 	}
 
 	logger.Info("Datalayer runtime configured",

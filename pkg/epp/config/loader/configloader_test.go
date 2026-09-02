@@ -1085,6 +1085,34 @@ func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	require.Empty(t, cfg.Sources)
 }
 
+func TestBuildDataLayerConfigCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	timeout := 3 * time.Second
+	cfg, err := buildDataLayerConfig(
+		&configapi.DataLayerConfig{
+			CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+		},
+		handle,
+	)
+	require.NoError(t, err)
+	require.Equal(t, timeout, cfg.PublishTimeout)
+}
+
+func TestBuildDataLayerConfigRejectsNonPositiveCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		_, err := buildDataLayerConfig(
+			&configapi.DataLayerConfig{
+				CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+			},
+			handle,
+		)
+		require.ErrorContains(t, err, "crossReplicaPublishTimeout must be positive")
+	}
+}
+
 // --- Helpers & Mocks ---
 
 func hasPluginType(handle fwkplugin.Handle, typeName string) bool {
