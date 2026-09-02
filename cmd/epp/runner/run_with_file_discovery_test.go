@@ -24,7 +24,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -37,49 +36,9 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	crossplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
-
-const fileDiscoveryTestSyncerType = "file-discovery-test-syncer"
-
-type fileDiscoveryTestSyncer struct {
-	typedName fwkplugin.TypedName
-	data      sync.Map
-}
-
-func (s *fileDiscoveryTestSyncer) TypedName() fwkplugin.TypedName {
-	return s.typedName
-}
-
-func (s *fileDiscoveryTestSyncer) key(key fwkdl.StateKey, id string) string {
-	return string(key) + ":" + id
-}
-
-func (s *fileDiscoveryTestSyncer) Set(_ context.Context, key fwkdl.StateKey, id string, value any, aggregate func([]any) any) error {
-	s.data.Store(s.key(key, id), aggregate([]any{value}))
-	return nil
-}
-
-func (s *fileDiscoveryTestSyncer) Get(_ context.Context, key fwkdl.StateKey, id string) (any, bool, error) {
-	value, ok := s.data.Load(s.key(key, id))
-	return value, ok, nil
-}
-
-func (s *fileDiscoveryTestSyncer) Delete(_ context.Context, key fwkdl.StateKey, id string) error {
-	s.data.Delete(s.key(key, id))
-	return nil
-}
-
-func (s *fileDiscoveryTestSyncer) GetOrSet(_ context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
-	actual, loaded := s.data.LoadOrStore(s.key(key, id), candidate)
-	return actual, loaded, nil
-}
-
-func fileDiscoveryTestSyncerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return &fileDiscoveryTestSyncer{
-		typedName: fwkplugin.TypedName{Type: fileDiscoveryTestSyncerType, Name: name},
-	}, nil
-}
 
 // TestRunWithFileDiscovery_Smoke is a wiring test for the file-discovery path.
 // It does not exercise ext_proc routing; that lives in the integration test.
@@ -88,7 +47,7 @@ func fileDiscoveryTestSyncerFactory(name string, _ *json.Decoder, _ fwkplugin.Ha
 // RunnableGroup's Ready() gate firing once the plugin loads its initial file,
 // and (c) the health and ext_proc gRPC servers binding their ports.
 func TestRunWithFileDiscovery_Smoke(t *testing.T) {
-	fwkplugin.Register(fileDiscoveryTestSyncerType, fwkplugin.StabilityBeta, fileDiscoveryTestSyncerFactory)
+	fwkplugin.Register(crossplugin.LocalSyncerType, fwkplugin.StabilityBeta, crossplugin.LocalSyncerFactory)
 
 	dir := t.TempDir()
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
@@ -116,7 +75,7 @@ plugins:
   - name: metrics-extractor
     type: core-metrics-extractor
   - name: local-syncer
-    type: file-discovery-test-syncer
+    type: local-syncer
   - name: inflight-load-producer
     type: inflight-load-producer
 schedulingProfiles:
