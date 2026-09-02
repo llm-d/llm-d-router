@@ -248,6 +248,96 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	assert.Equal(t, testHTTPModel, sent["model"])
 }
 
+func TestProduce_ChatCompletionsVLLMHTTPPreservesRequestBodyOrder(t *testing.T) {
+	srv, captured := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{9, 10}})
+	defer srv.Close()
+
+	rawBody := []byte(`{
+  "model": "test-model",
+  "messages": [{"role": "user", "content": "hello"}],
+  "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {
+    "type": "object",
+    "properties": {"zeta": {"type": "string", "description": "last"}, "alpha": {"type": "string", "description": "first"}}
+  }}}]
+}`)
+	var payload fwkrh.PayloadMap
+	require.NoError(t, json.Unmarshal(rawBody, &payload))
+	req := &scheduling.InferenceRequest{
+		TargetModel: testHTTPModel,
+		RawBody:     rawBody,
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello"}}},
+			},
+			Payload: payload,
+			Model:   testHTTPModel,
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, rawBody, captured.chat)
+}
+
+func TestProduce_ChatCompletionsVLLMHTTPUsesMutatedPayload(t *testing.T) {
+	srv, captured := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{9, 10}})
+	defer srv.Close()
+
+	rawBody := []byte(`{"model":"client-model","messages":[{"role":"user","content":"hello"}]}`)
+	payload := fwkrh.PayloadMap{
+		"model":    testHTTPModel,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	req := &scheduling.InferenceRequest{
+		TargetModel: testHTTPModel,
+		RawBody:     rawBody,
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello"}}},
+			},
+			Payload: payload,
+			Mutated: true,
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	want, err := payload.Marshal()
+	require.NoError(t, err)
+	assert.Equal(t, want, captured.chat)
+	assert.NotEqual(t, rawBody, captured.chat)
+}
+
+func TestProduce_ChatCompletionsVLLMHTTPUsesPayloadWhenModelDiffers(t *testing.T) {
+	srv, captured := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{9, 10}})
+	defer srv.Close()
+
+	rawBody := []byte(`{"model":"client-model","messages":[{"role":"user","content":"hello"}]}`)
+	payload := fwkrh.PayloadMap{
+		"model":    "client-model",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	req := &scheduling.InferenceRequest{
+		TargetModel: testHTTPModel,
+		RawBody:     rawBody,
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello"}}},
+			},
+			Payload: payload,
+			Model:   "client-model",
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.NotEqual(t, rawBody, captured.chat)
+
+	var sent fwkrh.PayloadMap
+	require.NoError(t, json.Unmarshal(captured.chat, &sent))
+	assert.Equal(t, testHTTPModel, sent["model"])
+}
+
 // TestProduce_MessagesVLLMHTTPFullAgenticTurn covers the complete production
 // path from a parsed Anthropic request through the rebuilt OpenAI-shaped
 // payload sent to vLLM's chat render endpoint.

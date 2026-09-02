@@ -27,12 +27,19 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // tokenInputProducer turns a request body into a TokenizedRequest. Backends vary
 // in fidelity (render vs estimate); callers never branch on which produced it.
 type tokenInputProducer interface {
 	produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error)
+}
+
+// requestInputProducer is implemented by backends that need request metadata
+// in addition to the parsed body.
+type requestInputProducer interface {
+	produceRequest(ctx context.Context, request *scheduling.InferenceRequest) (*fwkrh.TokenizedRequest, error)
 }
 
 // timeoutAware is implemented by backends (and the tokenizers they wrap) whose
@@ -102,6 +109,30 @@ func warmupChat(imageURLs ...string) *fwkrh.InferenceRequestBody {
 // the pre-tokenized (Generate) passthrough.
 type renderBackend struct {
 	tk tokenizer
+}
+
+// produceRequest sends the original chat-completions JSON to vLLM when it is
+// also the body that will be forwarded downstream, preserving object key order.
+func (b renderBackend) produceRequest(ctx context.Context, request *scheduling.InferenceRequest) (*fwkrh.TokenizedRequest, error) {
+	body := request.Body
+	renderer, ok := b.tk.(*vllmHTTPRenderer)
+	if !ok || body.ChatCompletions == nil || body.Mutated || len(request.RawBody) == 0 ||
+		request.TargetModel != renderer.modelName || body.Model != renderer.modelName || body.Payload == nil {
+		return b.produce(ctx, body)
+	}
+
+	payload, ok := body.Payload.AsMap()
+	if !ok {
+		return b.produce(ctx, body)
+	}
+	tokenIDs, mmFeatures, err := renderer.postRawChatRender(ctx, request.RawBody, renderer.chatTimeout(payload))
+	if err != nil {
+		return nil, fmt.Errorf("tokenization failed: %w", err)
+	}
+	return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+		TokenIDs:           tokenIDs,
+		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
+	}}}, nil
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {

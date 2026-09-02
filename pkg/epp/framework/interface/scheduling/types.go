@@ -58,6 +58,8 @@ type InferenceRequest struct {
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
+	// RawBody contains the request body exactly as received from the downstream proxy.
+	RawBody []byte
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 
