@@ -171,3 +171,18 @@ func TestPluginFactory_RejectsMultipleExistingProducers(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multiple precise-prefix-cache-producer instances")
 }
+
+// The self-hosted path forwards indexerConfig verbatim to the producer, whose
+// indexer has no tokenization pool, so a config still carrying one is rejected
+// by strict decoding rather than silently ignored.
+func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	handle := fwkplugin.NewEppHandle(ctx, nil,
+		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
+
+	raw := json.RawMessage(`{"indexerConfig":{"tokenizersPoolConfig":{"modelName":"x"}}}`)
+
+	_, err := PluginFactory("test", fwkplugin.StrictDecoder(raw), handle)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown field "tokenizersPoolConfig"`)
+}
