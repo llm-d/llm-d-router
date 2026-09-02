@@ -58,6 +58,7 @@ func TestSGLangHTTPParser_RewritePriority(t *testing.T) {
 			t.Errorf("priority = %v, want 2", got.(fwkrh.PayloadMap)["priority"])
 		}
 	})
+}
 
 var benchmarkSGLangParseResult *fwkrh.ParseResult
 
