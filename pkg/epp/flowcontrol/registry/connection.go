@@ -45,15 +45,5 @@ func (c *connection) FlowKey() flowcontrol.FlowKey {
 
 // DefaultRequestTTL returns the queue-wait bound configured for the leased priority band and whether it was set.
 func (c *connection) DefaultRequestTTL() (time.Duration, bool) {
-	c.registry.mu.RLock()
-	defer c.registry.mu.RUnlock()
-	bandValue, ok := c.registry.priorityBands.Load(c.key.Priority)
-	if !ok {
-		return 0, false
-	}
-	defaultRequestTTL := bandValue.(*priorityBand).config.DefaultRequestTTL
-	if defaultRequestTTL == nil {
-		return 0, false
-	}
-	return *defaultRequestTTL, true
+	return c.registry.priorityBandDefaultRequestTTL(c.key.Priority)
 }

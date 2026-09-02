@@ -199,21 +199,48 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 
 	t.Run("Handle_DefaultRequestTTL_ShouldReturnBandConfiguration", func(t *testing.T) {
 		t.Parallel()
-		defaults := newTestPriorityBandPolicyDefaults()
-		configuredBand, err := NewPriorityBandConfig(highPriority, defaults, WithBandDefaultRequestTTL(5*time.Second))
-		require.NoError(t, err)
-		cfg, err := NewConfig(defaults, WithPriorityBand(configuredBand))
-		require.NoError(t, err)
-		h := newRegistryTestHarness(t, harnessOptions{config: cfg})
-		key := flowcontrol.FlowKey{ID: "ttl-flow", Priority: highPriority}
+		testCases := []struct {
+			name    string
+			options []PriorityBandConfigOption
+			wantTTL time.Duration
+			wantSet bool
+		}{
+			{
+				name:    "Configured",
+				options: []PriorityBandConfigOption{WithBandDefaultRequestTTL(5 * time.Second)},
+				wantTTL: 5 * time.Second,
+				wantSet: true,
+			},
+			{
+				name: "Omitted",
+			},
+			{
+				name:    "ExplicitZero",
+				options: []PriorityBandConfigOption{WithBandDefaultRequestTTL(0)},
+				wantSet: true,
+			},
+		}
 
-		err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
-			ttl, set := conn.DefaultRequestTTL()
-			assert.True(t, set)
-			assert.Equal(t, 5*time.Second, ttl)
-			return nil
-		})
-		require.NoError(t, err)
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				defaults := newTestPriorityBandPolicyDefaults()
+				configuredBand, err := NewPriorityBandConfig(highPriority, defaults, tc.options...)
+				require.NoError(t, err)
+				cfg, err := NewConfig(defaults, WithPriorityBand(configuredBand))
+				require.NoError(t, err)
+				h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+				key := flowcontrol.FlowKey{ID: "ttl-flow", Priority: highPriority}
+
+				err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+					ttl, set := conn.DefaultRequestTTL()
+					assert.Equal(t, tc.wantSet, set)
+					assert.Equal(t, tc.wantTTL, ttl)
+					return nil
+				})
+				require.NoError(t, err)
+			})
+		}
 	})
 }
 
