@@ -6,6 +6,8 @@ plugins:
   - type: prefix-cache-scorer
   - type: lora-affinity-scorer
   - type: openai-parser
+    parameters:
+      propagatePriority: true
 schedulingProfiles:
   - name: default
     plugins:

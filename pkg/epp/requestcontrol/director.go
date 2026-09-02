@@ -362,17 +362,13 @@ func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers
 		logger.V(logutil.DEBUG).Info("payload does not implement MarshalablePayload, skipping priority rewrite")
 		return nil
 	}
-	priorPayloadMap, _ := payload.AsMap()
-	_, hadClientPriority := priorPayloadMap["priority"]
-	mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: reqCtx.TargetPod}, payload, reqCtx.Priority)
+	mutatedPayload, mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: reqCtx.TargetPod}, payload, reqCtx.Priority)
 	if err != nil {
 		return err
 	}
-	mutatedPayloadMap, _ := mutated.AsMap()
-	_, hasBackendPriority := mutatedPayloadMap["priority"]
 	// Store the result back so repackage serializes the mutated payload.
-	inferenceRequestBody.Payload = mutated
-	if hadClientPriority || hasBackendPriority {
+	inferenceRequestBody.Payload = mutatedPayload
+	if mutated {
 		inferenceRequestBody.Mutated = true
 	}
 	return nil

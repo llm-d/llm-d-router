@@ -167,20 +167,25 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 // writes the resolved EPP priority. SGLang and vLLM both accept a top-level
 // priority field, but vLLM treats lower values as more urgent, so invert EPP's
 // higher-is-more-urgent value for vLLM targets.
-func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, error) {
+func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
 	m, ok := payload.(fwkrh.PayloadMap)
 	if !ok {
-		return payload, nil
+		return payload, false, nil
 	}
+	_, hadClientPriority := m["priority"]
 	delete(m, "priority")
 	if !p.propagatePriority {
-		return m, nil
+		return m, hadClientPriority, nil
 	}
+	// EPP priority follows SGLang semantics (higher = more urgent), matching the
+	// InferenceObjective convention. vLLM's native scheduler is the opposite
+	// (lower = more urgent), so negate for vLLM targets to keep the same relative
+	// ordering across backends.
 	if isVLLMTarget(ctx) {
 		priority = -priority
 	}
 	m["priority"] = priority
-	return m, nil
+	return m, true, nil
 }
 
 const legacyEngineTypeLabelKey = "inference.networking.k8s.io/engine-type"

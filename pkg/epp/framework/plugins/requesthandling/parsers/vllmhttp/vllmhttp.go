@@ -124,7 +124,7 @@ func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mode
 
 // RewritePriority delegates to the OpenAI-compatible map rewriter; the generate
 // body shares the same top-level priority field.
-func (p *VllmHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, error) {
+func (p *VllmHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
 	return p.openai.RewritePriority(ctx, payload, priority)
 }
 

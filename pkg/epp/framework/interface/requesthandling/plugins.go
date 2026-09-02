@@ -71,8 +71,10 @@ type PriorityRewriteContext struct {
 type PriorityRewriter interface {
 	// RewritePriority removes any client-supplied priority field and may write the
 	// EPP-resolved priority into the payload. Taking and returning a
-	// MarshalablePayload guarantees the result is repackageable.
-	RewritePriority(ctx PriorityRewriteContext, payload MarshalablePayload, priority int) (MarshalablePayload, error)
+	// MarshalablePayload guarantees the result is repackageable. The returned bool
+	// reports whether the payload was changed, so callers can flag it for
+	// repackaging without re-inspecting the body.
+	RewritePriority(ctx PriorityRewriteContext, payload MarshalablePayload, priority int) (MarshalablePayload, bool, error)
 }
 
 // Claims defines the matching criteria for a parser.

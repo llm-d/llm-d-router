@@ -53,11 +53,14 @@ func TestVllmHTTPParser_RewritePriority(t *testing.T) {
 	}
 	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}}
 
-	got, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+	got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
 		Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
 	}}, payload, 2)
 	if err != nil {
 		t.Fatalf("RewritePriority() error = %v", err)
+	}
+	if !mutated {
+		t.Errorf("RewritePriority() mutated = false, want true")
 	}
 	m, ok := got.(fwkrh.PayloadMap)
 	if !ok {
@@ -72,11 +75,14 @@ func TestVllmHTTPParser_RewritePriorityStripsByDefault(t *testing.T) {
 	parser := NewVllmHTTPParser()
 	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}, "priority": 100}
 
-	got, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+	got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
 		Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
 	}}, payload, 2)
 	if err != nil {
 		t.Fatalf("RewritePriority() error = %v", err)
+	}
+	if !mutated {
+		t.Errorf("RewritePriority() mutated = false, want true")
 	}
 	m, ok := got.(fwkrh.PayloadMap)
 	if !ok {
