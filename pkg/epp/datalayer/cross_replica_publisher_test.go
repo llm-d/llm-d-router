@@ -221,7 +221,7 @@ func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {
 		contributors: []fwkdl.CrossReplicaContributor{fakeContributor{key: "inflight:test"}},
 	}
 	endpointID := types.NamespacedName{Namespace: "ns", Name: "ep-a"}
-	require.True(t, pub.RegisterEndpoint(endpointID))
+	require.True(t, pub.registerEndpoint(endpointID))
 
 	pub.publish(context.Background(), endpointID)
 
@@ -242,7 +242,7 @@ func TestCrossReplicaPublisher_SkipsSyncDisabled(t *testing.T) {
 	require.NotNil(t, pub)
 	require.Len(t, pub.contributors, 1)
 	assert.Equal(t, fwkdl.StateKey("enabled"), pub.contributors[0].CrossReplicaState().StateKey)
-	assert.Equal(t, defaultCrossReplicaSyncInterval, pub.Interval(), "zero interval falls back to default")
+	assert.Equal(t, defaultCrossReplicaSyncInterval, pub.interval, "zero interval falls back to default")
 	assert.Equal(t, defaultCrossReplicaPublishTimeout, pub.publishTimeout, "zero timeout falls back to default")
 }
 
@@ -250,7 +250,7 @@ func TestCrossReplicaPublisher_ConfiguredDurations(t *testing.T) {
 	em := extractorMapWith(fakeContributor{key: "enabled"})
 	pub := newCrossReplicaPublisher(&fakeSyncer{}, em, 500*time.Millisecond, 3*time.Second)
 	require.NotNil(t, pub)
-	assert.Equal(t, 500*time.Millisecond, pub.Interval())
+	assert.Equal(t, 500*time.Millisecond, pub.interval)
 	assert.Equal(t, 3*time.Second, pub.publishTimeout)
 }
 
@@ -282,7 +282,7 @@ func TestCrossReplicaPublisher_PublishesAllEndpoints(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r.crossReplicaPub.Start(ctx)
+	r.crossReplicaPub.start(ctx)
 
 	require.Eventually(t, func() bool {
 		ids := syncer.endpointIDs()
@@ -303,7 +303,7 @@ func TestCrossReplicaPublisher_PublishesContributorsConcurrently(t *testing.T) {
 		},
 	}
 	endpointID := testEndpoint("ep-a").GetMetadata().GetID()
-	require.True(t, pub.RegisterEndpoint(endpointID))
+	require.True(t, pub.registerEndpoint(endpointID))
 
 	done := make(chan struct{})
 	go func() {
@@ -340,7 +340,7 @@ func TestCrossReplicaPublisher_SkipsEndpointDeletedAfterSnapshot(t *testing.T) {
 		contributors: []fwkdl.CrossReplicaContributor{fakeContributor{key: "inflight:test"}},
 	}
 	endpointID := testEndpoint("ep-gone").GetMetadata().GetID()
-	require.True(t, pub.RegisterEndpoint(endpointID))
+	require.True(t, pub.registerEndpoint(endpointID))
 
 	snapshot := pub.endpointSnapshot()
 	require.Len(t, snapshot, 1)
@@ -362,7 +362,7 @@ func TestCrossReplicaPublisher_DeletesAllContributorState(t *testing.T) {
 		},
 	}
 	endpointID := testEndpoint("ep-gone").GetMetadata().GetID()
-	require.True(t, pub.RegisterEndpoint(endpointID))
+	require.True(t, pub.registerEndpoint(endpointID))
 
 	removed, err := pub.delete(context.Background(), endpointID)
 	require.NoError(t, err)
@@ -384,11 +384,11 @@ func TestCrossReplicaPublisher_SetsPerPublishDeadline(t *testing.T) {
 		publishTimeout: publishTimeout,
 	}
 	ep := testEndpoint("ep-a")
-	require.True(t, r.crossReplicaPub.RegisterEndpoint(ep.GetMetadata().GetID()))
+	require.True(t, r.crossReplicaPub.registerEndpoint(ep.GetMetadata().GetID()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r.crossReplicaPub.Start(ctx)
+	r.crossReplicaPub.start(ctx)
 
 	select {
 	case deadline := <-syncer.deadlineObserved:
@@ -410,11 +410,11 @@ func TestCrossReplicaPublisher_StopsAfterDelete(t *testing.T) {
 		publishTimeout: defaultCrossReplicaPublishTimeout,
 	}
 	ep := testEndpoint("ep-gone")
-	require.True(t, r.crossReplicaPub.RegisterEndpoint(ep.GetMetadata().GetID()))
+	require.True(t, r.crossReplicaPub.registerEndpoint(ep.GetMetadata().GetID()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r.crossReplicaPub.Start(ctx)
+	r.crossReplicaPub.start(ctx)
 
 	require.Eventually(t, func() bool {
 		return syncer.endpointIDs()["ns/ep-gone"] > 0

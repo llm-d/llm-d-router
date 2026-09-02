@@ -409,7 +409,7 @@ func (r *Runtime) StartCrossReplicaSync(ctx context.Context) {
 	if r.crossReplicaPub == nil {
 		return
 	}
-	r.crossReplicaPub.Start(ctx)
+	r.crossReplicaPub.start(ctx)
 }
 
 // NewEndpoint sets up data polling on the provided endpoint.
@@ -427,7 +427,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 		dispatchers = append(dispatchers, d)
 	}
 	key := endpointMetadata.GetID()
-	if r.crossReplicaPub != nil && !r.crossReplicaPub.RegisterEndpoint(key) {
+	if r.crossReplicaPub != nil && !r.crossReplicaPub.registerEndpoint(key) {
 		logger.V(logging.DEFAULT).Info("endpoint already registered for cross-replica publishing", "endpoint", key)
 		return nil
 	}
@@ -511,9 +511,7 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 					logger.Error(err, "endpoint extractor failed", "extractor", ext.TypedName())
 				}
 				if r.crossReplicaPub != nil {
-					if err := r.crossReplicaPub.HandleEndpointEvent(ctx, *processed, ext); err != nil {
-						logger.Error(err, "failed to handle cross-replica endpoint event", "extractor", ext.TypedName())
-					}
+					r.crossReplicaPub.handleEndpointEvent(ctx, *processed, ext)
 				}
 			}
 		}

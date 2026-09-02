@@ -85,18 +85,11 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	}
 }
 
-// Interval returns the configured sync cadence.
-func (p *crossReplicaPublisher) Interval() time.Duration {
-	return p.interval
-}
-
-// Start starts the shared publishing loop.
-func (p *crossReplicaPublisher) Start(ctx context.Context) {
+func (p *crossReplicaPublisher) start(ctx context.Context) {
 	go p.run(ctx)
 }
 
-// RegisterEndpoint adds key to the publishing set if it is absent.
-func (p *crossReplicaPublisher) RegisterEndpoint(key types.NamespacedName) bool {
+func (p *crossReplicaPublisher) registerEndpoint(key types.NamespacedName) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.endpoints == nil {
@@ -136,18 +129,17 @@ func (p *crossReplicaPublisher) endpointSnapshot() []types.NamespacedName {
 	return p.endpoints.UnsortedList()
 }
 
-// HandleEndpointEvent installs aggregate state readers.
-func (p *crossReplicaPublisher) HandleEndpointEvent(ctx context.Context, event fwkdl.EndpointEvent, plugin fwkplugin.Plugin) error {
+func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event fwkdl.EndpointEvent, plugin fwkplugin.Plugin) {
 	contributor, ok := plugin.(fwkdl.CrossReplicaContributor)
 	if !ok {
-		return nil
+		return
 	}
 	spec := contributor.CrossReplicaState()
 	if spec.SyncDisabled {
-		return nil
+		return
 	}
 	if event.Type != fwkdl.EventAddOrUpdate {
-		return nil
+		return
 	}
 	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
 	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
@@ -160,7 +152,6 @@ func (p *crossReplicaPublisher) HandleEndpointEvent(ctx context.Context, event f
 			return nil
 		},
 	})
-	return nil
 }
 
 func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) error {
