@@ -82,7 +82,7 @@ func TestOpenAIParser_RewritePriority(t *testing.T) {
 			parser:  newPriorityPropagatingOpenAIParser(),
 			payload: fwkrh.PayloadMap{"model": "test"},
 			ctx: fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
-				Labels: map[string]string{legacyEngineTypeLabelKey: "vllm"},
+				Labels: map[string]string{"inference.networking.k8s.io/engine-type": "vllm"},
 			}},
 			want:        map[string]any{"model": "test", "priority": -2},
 			wantMutated: true,

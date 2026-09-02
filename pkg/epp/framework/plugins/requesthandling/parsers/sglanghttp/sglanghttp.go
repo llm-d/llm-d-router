@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parsers "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 )
 
 const (
@@ -48,13 +49,19 @@ const (
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser = &SGLangHTTPParser{}
+	_ fwkrh.Parser           = &SGLangHTTPParser{}
+	_ fwkrh.PriorityRewriter = &SGLangHTTPParser{}
 )
 
 // SGLangHTTPParser implements fwkrh.Parser for SGLang's native /generate
 // endpoint. Only pre-tokenized prompts are supported.
 type SGLangHTTPParser struct {
-	typedName fwkplugin.TypedName
+	typedName         fwkplugin.TypedName
+	propagatePriority bool
+}
+
+type sgLangHTTPParserConfig struct {
+	PropagatePriority bool `json:"propagatePriority"`
 }
 
 // NewSGLangHTTPParser creates a new SGLangHTTPParser.
@@ -68,8 +75,17 @@ func NewSGLangHTTPParser() *SGLangHTTPParser {
 }
 
 // SGLangHTTPParserPluginFactory is the factory function used to register the plugin.
-func SGLangHTTPParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewSGLangHTTPParser().WithName(name), nil
+func SGLangHTTPParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	parser := NewSGLangHTTPParser().WithName(name)
+	if parameters == nil {
+		return parser, nil
+	}
+	var cfg sgLangHTTPParserConfig
+	if err := parameters.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode sglanghttp parser parameters: %w", err)
+	}
+	parser.propagatePriority = cfg.PropagatePriority
+	return parser, nil
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -133,12 +149,27 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
+	// Keep the full body as a map so priority can be injected; when nothing is
+	// mutated, repackage still forwards the original bytes unchanged.
+	bodyMap := make(map[string]any)
+	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+		return nil, fmt.Errorf("invalid generate request: %w", err)
+	}
+
 	return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{
 		Generate:        &fwkrh.GenerateRequest{TokenIDs: tokenIDs, CacheSalt: cacheSalt},
-		Payload:         fwkrh.RawPayload(rawBody),
+		Payload:         fwkrh.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
 	}, SkipResponseProcessing: false}, nil
+}
+
+// RewritePriority removes any client-supplied priority from the SGLang /generate
+// payload and, when priority propagation is enabled, writes the resolved EPP
+// priority. See parsers.RewritePriority for the cross-backend priority
+// semantics.
+func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	return parsers.RewritePriority(ctx, payload, p.propagatePriority, priority)
 }
 
 func hasJSONValue(data json.RawMessage) bool {

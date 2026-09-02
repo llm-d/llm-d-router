@@ -30,7 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
-	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
+	parsers "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
@@ -163,43 +163,11 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 }
 
 // RewritePriority removes any client-supplied priority from the
-// OpenAI-compatible request payload. If priority propagation is enabled, it then
-// writes the resolved EPP priority. SGLang and vLLM both accept a top-level
-// priority field, but vLLM treats lower values as more urgent, so invert EPP's
-// higher-is-more-urgent value for vLLM targets.
+// OpenAI-compatible request payload and, when priority propagation is enabled,
+// writes the resolved EPP priority. See parsers.RewritePriority for the
+// cross-backend priority semantics.
 func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
-	if !ok {
-		return payload, false, nil
-	}
-	_, hadClientPriority := m["priority"]
-	delete(m, "priority")
-	if !p.propagatePriority {
-		return m, hadClientPriority, nil
-	}
-	// EPP priority follows SGLang semantics (higher = more urgent), matching the
-	// InferenceObjective convention. vLLM's native scheduler is the opposite
-	// (lower = more urgent), so negate for vLLM targets to keep the same relative
-	// ordering across backends.
-	if isVLLMTarget(ctx) {
-		priority = -priority
-	}
-	m["priority"] = priority
-	return m, true, nil
-}
-
-const legacyEngineTypeLabelKey = "inference.networking.k8s.io/engine-type"
-
-func isVLLMTarget(ctx fwkrh.PriorityRewriteContext) bool {
-	meta := ctx.TargetEndpoint
-	if meta == nil || meta.Labels == nil {
-		return false
-	}
-	engineType := meta.Labels[fwkplugins.EngineTypeLabelKey]
-	if engineType == "" {
-		engineType = meta.Labels[legacyEngineTypeLabelKey]
-	}
-	return strings.EqualFold(engineType, "vllm")
+	return parsers.RewritePriority(ctx, payload, p.propagatePriority, priority)
 }
 
 // maxOutputTokensForAPI normalizes the per-API output-token cap field into a

@@ -31,6 +31,27 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
+func TestAnthropicParser_RewritePriority(t *testing.T) {
+	t.Run("strips client priority by default", func(t *testing.T) {
+		parser := NewAnthropicParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test", "priority": 100}, 2)
+		require.NoError(t, err)
+		assert.True(t, mutated)
+		m := got.(fwkrh.PayloadMap)
+		_, ok := m["priority"]
+		assert.False(t, ok, "priority should be stripped")
+	})
+	t.Run("writes priority when propagation is enabled", func(t *testing.T) {
+		parser := NewAnthropicParser()
+		parser.propagatePriority = true
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test"}, 2)
+		require.NoError(t, err)
+		assert.True(t, mutated)
+		m := got.(fwkrh.PayloadMap)
+		assert.Equal(t, 2, m["priority"])
+	})
+}
+
 func TestNewAnthropicParser(t *testing.T) {
 	parser := NewAnthropicParser()
 

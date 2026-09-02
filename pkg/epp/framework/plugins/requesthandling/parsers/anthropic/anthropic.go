@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parsers "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
@@ -48,10 +49,16 @@ const (
 var (
 	_ fwkrh.Parser            = &AnthropicParser{}
 	_ fwkrh.ModelNameRewriter = &AnthropicParser{}
+	_ fwkrh.PriorityRewriter  = &AnthropicParser{}
 )
 
 type AnthropicParser struct {
-	typedName fwkplugin.TypedName
+	typedName         fwkplugin.TypedName
+	propagatePriority bool
+}
+
+type anthropicParserConfig struct {
+	PropagatePriority bool `json:"propagatePriority"`
 }
 
 func NewAnthropicParser() *AnthropicParser {
@@ -74,8 +81,17 @@ func (p *AnthropicParser) Claims() fwkrh.Claims {
 	}
 }
 
-func AnthropicParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewAnthropicParser().WithName(name), nil
+func AnthropicParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	parser := NewAnthropicParser().WithName(name)
+	if parameters == nil {
+		return parser, nil
+	}
+	var cfg anthropicParserConfig
+	if err := parameters.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode anthropic parser parameters: %w", err)
+	}
+	parser.propagatePriority = cfg.PropagatePriority
+	return parser, nil
 }
 
 func (p *AnthropicParser) WithName(name string) *AnthropicParser {
@@ -135,6 +151,14 @@ func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, mod
 	}
 	m["model"] = model
 	return m, nil
+}
+
+// RewritePriority removes any client-supplied priority from the Anthropic
+// messages payload and, when priority propagation is enabled, writes the
+// resolved EPP priority. See parsers.RewritePriority for the cross-backend
+// priority semantics.
+func (p *AnthropicParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	return parsers.RewritePriority(ctx, payload, p.propagatePriority, priority)
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {

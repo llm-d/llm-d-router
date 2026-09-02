@@ -16,7 +16,52 @@ limitations under the License.
 
 package parsers
 
+import (
+	"strings"
+
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
+)
+
 const (
 	// MethodPathKey is the header key for the request path.
 	MethodPathKey = ":path"
 )
+
+// RewritePriority strips any client-supplied priority from a JSON-map payload
+// and, when propagate is true, writes the EPP-resolved priority; it reports
+// whether the payload changed. Non-map payloads are returned unchanged. EPP
+// priority follows SGLang semantics (higher = more urgent), matching the
+// InferenceObjective convention; vLLM's native scheduler is the opposite (lower =
+// more urgent), so the value is negated for vLLM targets to keep the same
+// relative ordering across backends.
+func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, propagate bool, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, false, nil
+	}
+	_, hadClientPriority := m["priority"]
+	delete(m, "priority")
+	if !propagate {
+		return m, hadClientPriority, nil
+	}
+	if isVLLMTarget(ctx) {
+		priority = -priority
+	}
+	m["priority"] = priority
+	return m, true, nil
+}
+
+// isVLLMTarget reports whether the scheduled endpoint is a vLLM backend.
+func isVLLMTarget(ctx fwkrh.PriorityRewriteContext) bool {
+	meta := ctx.TargetEndpoint
+	if meta == nil || meta.Labels == nil {
+		return false
+	}
+	engineType := meta.Labels[fwkplugins.EngineTypeLabelKey]
+	if engineType == "" {
+		// Fall back to the pre-migration GAIE label for backward compatibility.
+		engineType = meta.Labels["inference.networking.k8s.io/engine-type"]
+	}
+	return strings.EqualFold(engineType, "vllm")
+}
