@@ -64,10 +64,11 @@ and the release stage is ALPHA. Request and latency metrics share the label set
 
 Client-derived label values are cardinality-bounded: `model_name` and `target_model_name` (from the
 request body) share a cap of 1000 distinct values, and `fairness_id` (from the
-`x-llm-d-inference-fairness-id` header) is capped at 1000 distinct values. Caps apply over the
-lifetime of the process; once a cap is reached, new values are reported as `other`. Model names
-configured through InferenceModelRewrite rules never fold to `other`. Flow control series for a
-`fairness_id` are removed when its flow is garbage collected.
+`x-llm-d-inference-fairness-id` header) has a cap that defaults to 1000 distinct values and is
+configurable with `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id`
+to `other`. Caps apply over the lifetime of the process; once a cap is reached, new values are
+reported as `other`. Model names configured through InferenceModelRewrite rules never fold to
+`other`. Flow control series for a `fairness_id` are removed when its flow is garbage collected.
 
 ### Request and latency
 

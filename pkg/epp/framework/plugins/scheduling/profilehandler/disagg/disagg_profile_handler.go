@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -241,11 +242,17 @@ func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() plugin.DataDependencies {
+func (h *Handler) Consumes() plugin.DataDependencies {
+	prefixMatchInfoDK := attrprefix.PrefixCacheMatchInfoDataKey
+	if h.pdDecider != nil {
+		if consumer, ok := h.pdDecider.(prefixMatchInfoConsumer); ok {
+			prefixMatchInfoDK = consumer.prefixMatchInfoDataKey()
+		}
+	}
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
-			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedRequest{},
+			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 		},
 	}
 }
@@ -275,14 +282,14 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	defer span.End()
 
 	if request == nil {
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_nil_request"))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_nil_request"))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
 	if request.TargetModel != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	if h.stageOrder == StageOrderPrefillFirst {
@@ -298,17 +305,17 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		decodeProfile, ok := profiles[h.decodeProfile]
 		if !ok {
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "error_missing_decode_profile"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("error_missing_decode_profile"))
 			return map[string]scheduling.SchedulerProfile{}
 		}
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_decode"))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_decode"))
 		return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 	}
 
 	decodeRes := profileResults[h.decodeProfile]
 	if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 		span.SetAttributes(
-			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+			semconv.LLMDEPPProfileHandlerDecision("complete"),
 			attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
 		)
 		return map[string]scheduling.SchedulerProfile{}
@@ -318,12 +325,12 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {
 			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
+				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_encode"))
 				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
 			}
 			// Decider rejected encode - mark as evaluated so we don't re-run the decider.
 			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("skip_encode"))
 		}
 	}
 
@@ -334,14 +341,14 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 				// Publish the decode pick so plugins in the prefill profile (e.g.
 				// topology affinity) can compare candidates against it.
 				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
+				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
 			// Decider rejected prefill - mark as evaluated so we don't re-run the decider,
 			// and record that this is an intentional skip, not a failed run.
 			profileResults[h.prefillProfile] = nil
 			request.PutAttribute(prefillDeclinedAttributeKey, true)
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("skip_prefill"))
 		}
 	}
 
@@ -351,7 +358,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 
 	decision := DisaggDecisionType(encodeUsed, prefillUsed)
 	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-	span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_"+decision))
+	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
 
 	return map[string]scheduling.SchedulerProfile{}
 }
@@ -364,7 +371,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 		decodeRes := profileResults[h.decodeProfile]
 		if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 			span.SetAttributes(
-				attribute.String("llm_d.epp.profile_handler.decision", "complete"),
+				semconv.LLMDEPPProfileHandlerDecision("complete"),
 				attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
 			)
 			return map[string]scheduling.SchedulerProfile{}
@@ -375,7 +382,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 
 		decision := DisaggDecisionType(encodeUsed, prefillUsed)
 		RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_"+decision))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -383,7 +390,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	// In prefill-first mode, prefill runs whenever the prefill profile is configured.
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
 			return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 		}
 	}
@@ -392,19 +399,19 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {
 			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, nil) {
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
+				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_encode"))
 				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
 			}
 			// Decider rejected encode - mark as evaluated so we don't re-run.
 			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("skip_encode"))
 		}
 	}
 
 	// ── Stage 3: Decode (mandatory) ────────────────────────────────────────
 	decodeProfile, ok := profiles[h.decodeProfile]
 	if !ok {
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "error_missing_decode_profile"))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("error_missing_decode_profile"))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -414,7 +421,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 		request.PutAttribute(PeerEndpointAttributeKey, prefillRes.TargetEndpoints[0])
 	}
 
-	span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_decode"))
+	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_decode"))
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 }
 
@@ -489,9 +496,9 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	}
 
 	if request.TargetModel != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header

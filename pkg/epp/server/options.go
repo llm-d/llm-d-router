@@ -35,6 +35,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -122,6 +123,10 @@ type Options struct {
 	MetricsClientCAFile     string   // PEM CA that requires a verified client cert on the metrics endpoint.
 	MetricsCertDir          string   // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
+	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. Bounds metric cardinality in
+	// deployments with many distinct fairness IDs.
+	FairnessIDMetricLabelLimit int
 	//
 	// Configuration.
 	//
@@ -157,6 +162,7 @@ func NewOptions() *Options {
 		LoggingOptions:                   *logging.NewOptions(),
 		Tracing:                          true,
 		MetricsPort:                      9090,
+		FairnessIDMetricLabelLimit:       metricsutil.DefaultFairnessIDLabelLimit,
 		GRPCHealthPort:                   9003,
 		EnablePprof:                      true,
 		SecureServing:                    true,
@@ -236,6 +242,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables certificate reloading of the certificates specified in --cert-path.")
 	fs.BoolVar(&opts.EnableGRPCStreamMetrics, "enable-grpc-stream-metrics", opts.EnableGRPCStreamMetrics,
 		"Enables ext_proc gRPC stream metrics (in-flight gauge, hold-duration histogram, completions counter by code).")
+	fs.IntVar(&opts.FairnessIDMetricLabelLimit, "fairness-id-metric-label-limit", opts.FairnessIDMetricLabelLimit,
+		"Caps the number of distinct fairness_id label values recorded on metrics; values beyond the cap collapse to a "+
+			"single overflow series, and 0 collapses all of them. Bounds metric cardinality with many distinct fairness IDs.")
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Enables secure serving.")
 	fs.StringVar(&opts.TLSMinVersion, "tls-min-version", opts.TLSMinVersion,
 		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).")
@@ -412,6 +421,9 @@ func (opts *Options) Validate() error {
 	}
 	if opts.GRPCMaxSendMsgSize < 0 {
 		return fmt.Errorf("grpc-max-send-msg-size must be non-negative, got %d", opts.GRPCMaxSendMsgSize)
+	}
+	if opts.FairnessIDMetricLabelLimit < 0 {
+		return fmt.Errorf("fairness-id-metric-label-limit must be non-negative, got %d", opts.FairnessIDMetricLabelLimit)
 	}
 
 	if opts.PluginStateStalenessThreshold <= 0 {

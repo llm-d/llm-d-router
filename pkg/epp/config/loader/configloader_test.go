@@ -74,6 +74,39 @@ const (
 	testFeatureGate = "test-feature-gate"
 )
 
+type testCrossReplicaSyncer struct{}
+
+func (testCrossReplicaSyncer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "test-syncer", Name: "test-syncer"}
+}
+
+func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any) error {
+	return nil
+}
+
+func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string, func([]any) any) (any, bool, error) {
+	return nil, false, nil
+}
+
+func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
+	return nil
+}
+
+func (testCrossReplicaSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
+	return candidate, false, nil
+}
+
+func TestBuildDataLayerConfigExposesCrossReplicaSyncerOnHandle(t *testing.T) {
+	handle := fwkplugin.NewEppHandle(context.Background(), nil)
+	syncer := &testCrossReplicaSyncer{}
+	handle.AddPlugin("syncer", syncer)
+
+	cfg, err := buildDataLayerConfig(&configapi.DataLayerConfig{CrossReplicaSyncerPluginRef: "syncer"}, handle)
+	require.NoError(t, err)
+	require.Same(t, syncer, cfg.Syncer)
+	require.Same(t, syncer, handle.CrossReplicaSyncer())
+}
+
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
 
 func TestLoadRawConfiguration(t *testing.T) {

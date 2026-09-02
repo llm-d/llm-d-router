@@ -39,6 +39,7 @@ const (
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
 	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"
+	RequestDroppedReasonInternal         RequestDroppedReason = "rejected-internal"
 
 	// Evicted — request was dispatched to an inference server and then killed.
 	// The generic "evicted" reason is the current default used by ImmediateResponseEvictor.Evict().

@@ -513,5 +513,6 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 			return nil, fmt.Errorf("the plugin %s is not a fwkdl.DataSource", source.PluginRef)
 		}
 	}
+	handle.SetCrossReplicaSyncer(cfg.Syncer)
 	return &cfg, nil
 }

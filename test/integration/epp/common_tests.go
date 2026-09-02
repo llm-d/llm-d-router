@@ -317,7 +317,7 @@ func commonTestCases(prio func(int) int) []testCase {
 				"inference_objective_request_total": cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
 				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
 			},
-			wantSpans: []string{"gateway.request", "gateway.request_orchestration"},
+			wantSpans: []string{"request", "request_orchestration"},
 		},
 		{
 			name:     "select active lora, low queue",

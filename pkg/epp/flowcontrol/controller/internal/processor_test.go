@@ -197,7 +197,7 @@ func (h *testHarness) waitForFinalization(item *FlowItem) (types.QueueOutcome, e
 func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.Duration) *FlowItem {
 	h.t.Helper()
 	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
-	return NewItem(req, ttl, h.clock.Now())
+	return NewItem(req, ttl, h.clock.Now(), logr.Discard())
 }
 
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
@@ -363,7 +363,9 @@ func TestProcessor(t *testing.T) {
 			outcome, err := h.waitForFinalization(item)
 			assert.Equal(t, types.QueueOutcomeRejectedOther, outcome, "The final outcome should be RejectedOther")
 			require.Error(t, err, "A rejection from a registry failure should produce an error")
-			assert.ErrorIs(t, err, registryErr, "The underlying registry error should be preserved")
+			assert.ErrorContains(t, err, registryErr.Error(),
+				"The registry error text should be preserved; the error itself is flattened so registry sentinels "+
+					"cannot be misread by the fallback retry")
 		})
 
 		t.Run("should reject item if enqueued during shutdown", func(t *testing.T) {
@@ -589,7 +591,8 @@ func TestProcessor(t *testing.T) {
 						assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 							"Outcome should be RejectedOther")
 						require.Error(t, item.FinalState().Err, "An error should be returned")
-						assert.ErrorIs(t, item.FinalState().Err, testErr, "The underlying error should be preserved")
+						assert.ErrorContains(t, item.FinalState().Err, testErr.Error(),
+							"The registry error text should be preserved; the error itself is flattened")
 					},
 				},
 				{
@@ -604,7 +607,8 @@ func TestProcessor(t *testing.T) {
 						assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 							"Outcome should be RejectedOther")
 						require.Error(t, item.FinalState().Err, "An error should be returned")
-						assert.ErrorIs(t, item.FinalState().Err, testErr, "The underlying error should be preserved")
+						assert.ErrorContains(t, item.FinalState().Err, testErr.Error(),
+							"The registry error text should be preserved; the error itself is flattened")
 					},
 				},
 				{
@@ -679,7 +683,7 @@ func TestProcessor(t *testing.T) {
 					item: func() *FlowItem {
 						// Create a pre-finalized item.
 						item := newTestHarness(t, 0).newTestItem("req-finalized", testFlow, testTTL)
-						item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+						item.FinalizeWithError(nil)
 						return item
 					}(),
 					assert: func(t *testing.T, h *testHarness, item *FlowItem) {
@@ -1333,7 +1337,7 @@ func TestProcessor(t *testing.T) {
 				// --- ARRANGE ---
 				h := newTestHarness(t, testCleanupTick)
 				item := h.newTestItem("req-already-finalized", testFlow, testTTL)
-				item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, errors.New("already done"))
+				item.FinalizeWithError(fmt.Errorf("%w: already done", types.ErrRejected))
 
 				h.ManagedQueueFunc = func(flowcontrol.FlowKey) (contracts.ManagedQueue, error) {
 					return &mocks.MockManagedQueue{
@@ -1776,33 +1780,28 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 			// regimeAfter is how long after enqueue the regime last changed; zero means it never has.
 			regimeAfter time.Duration
 			elapsed     time.Duration
-			wantOutcome types.QueueOutcome
 			wantExpired bool
 		}{
 			{
 				name:        "SaturatedPool_HoldsWithinSaturationBudget",
 				elapsed:     saturationTTL - time.Millisecond,
-				wantOutcome: types.QueueOutcomeEvictedTTL,
 				wantExpired: false,
 			},
 			{
 				name:        "SaturatedPool_ShedsAtSaturationBudget",
 				elapsed:     saturationTTL,
-				wantOutcome: types.QueueOutcomeEvictedTTL,
 				wantExpired: true,
 			},
 			{
 				name:        "EmptyPool_HoldsPastSaturationBudget",
 				poolEmpty:   true,
 				elapsed:     noEndpointTTL - time.Millisecond,
-				wantOutcome: types.QueueOutcomeEvictedNoEndpoints,
 				wantExpired: false,
 			},
 			{
 				name:        "EmptyPool_ShedsAtNoEndpointBudget",
 				poolEmpty:   true,
 				elapsed:     noEndpointTTL,
-				wantOutcome: types.QueueOutcomeEvictedNoEndpoints,
 				wantExpired: true,
 			},
 			{
@@ -1810,14 +1809,12 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 				noEndpointTTL: -1, // Sentinel for an explicit zero; see the field comment.
 				poolEmpty:     true,
 				elapsed:       time.Hour,
-				wantOutcome:   types.QueueOutcomeEvictedNoEndpoints,
 				wantExpired:   false,
 			},
 			{
 				name:        "SaturatedPool_ZeroBudgetWaitsIndefinitely",
 				itemTTL:     -1, // Sentinel for an explicit zero; see the field comment.
 				elapsed:     time.Hour,
-				wantOutcome: types.QueueOutcomeEvictedTTL,
 				wantExpired: false,
 			},
 			{
@@ -1826,14 +1823,12 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 				name:        "PoolCameUp_StartsFreshSaturationBudget",
 				regimeAfter: noEndpointTTL / 2,
 				elapsed:     noEndpointTTL/2 + saturationTTL - time.Millisecond,
-				wantOutcome: types.QueueOutcomeEvictedTTL,
 				wantExpired: false,
 			},
 			{
 				name:        "PoolCameUp_ShedsAfterFreshSaturationBudget",
 				regimeAfter: noEndpointTTL / 2,
 				elapsed:     noEndpointTTL/2 + saturationTTL,
-				wantOutcome: types.QueueOutcomeEvictedTTL,
 				wantExpired: true,
 			},
 			{
@@ -1841,7 +1836,6 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 				name:        "RegimeChangeBeforeEnqueue_DoesNotExtendBudget",
 				regimeAfter: -saturationTTL,
 				elapsed:     saturationTTL,
-				wantOutcome: types.QueueOutcomeEvictedTTL,
 				wantExpired: true,
 			},
 		}
@@ -1863,14 +1857,27 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 					regimeSince = base.Add(tc.regimeAfter)
 				}
 
-				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base)
+				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
 				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
-				outcome, expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
+				expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 
-				assert.Equal(t, tc.wantOutcome, outcome, "expiry should be attributed to the regime in force")
 				assert.Equal(t, tc.wantExpired, expired, "the budget in force decides whether the request is shed")
 			})
 		}
+	})
+
+	t.Run("expiry error carries the regime sentinels", func(t *testing.T) {
+		t.Parallel()
+
+		saturated := expiryError(false)
+		assert.ErrorIs(t, saturated, types.ErrEvicted, "saturation expiry should classify as an eviction")
+		assert.ErrorIs(t, saturated, types.ErrTTLExpired, "saturation expiry should carry the TTL sentinel")
+		assert.NotErrorIs(t, saturated, types.ErrNoEndpoints, "saturation expiry must not claim unavailability")
+
+		empty := expiryError(true)
+		assert.ErrorIs(t, empty, types.ErrEvicted, "no-endpoint expiry should classify as an eviction")
+		assert.ErrorIs(t, empty, types.ErrTTLExpired, "no-endpoint expiry should carry the TTL sentinel")
+		assert.ErrorIs(t, empty, types.ErrNoEndpoints, "no-endpoint expiry should carry the no-endpoints sentinel")
 	})
 
 	t.Run("sweep holds a queued request across a scale-from-zero", func(t *testing.T) {

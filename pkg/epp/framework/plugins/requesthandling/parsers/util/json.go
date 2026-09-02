@@ -42,3 +42,31 @@ func Unmarshal(data []byte, v any) error {
 		return fmt.Errorf("%w: %v", ErrTrailingData, err)
 	}
 }
+
+// UnmarshalMapWithRawField decodes a JSON object while preserving one field's
+// original JSON representation. All other numbers are preserved as json.Number.
+func UnmarshalMapWithRawField(data []byte, rawField string) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		var fallback map[string]json.RawMessage
+		if fallbackErr := Unmarshal(data, &fallback); fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		return nil, err
+	}
+
+	result := make(map[string]any, len(fields))
+	for key, raw := range fields {
+		if key == rawField {
+			result[key] = raw
+			continue
+		}
+
+		var value any
+		if err := Unmarshal(raw, &value); err != nil {
+			return nil, err
+		}
+		result[key] = value
+	}
+	return result, nil
+}

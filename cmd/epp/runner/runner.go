@@ -47,6 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/internal/runnable"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/profiling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
@@ -385,6 +386,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
 
 	// --- Setup Metrics Server ---
+	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)

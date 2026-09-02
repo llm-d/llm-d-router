@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/testr"
+	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -154,9 +155,13 @@ func selfSignedCert(t *testing.T) (credentials.TransportCredentials, string) {
 func exportOneSpan(ctx context.Context, t *testing.T) error {
 	t.Helper()
 
-	exporter, err := initTraceExporter(ctx, testr.New(t))
+	exporterType, err := traceExporterType()
 	if err != nil {
-		t.Fatalf("initTraceExporter() error = %v", err)
+		t.Fatalf("traceExporterType() error = %v", err)
+	}
+	exporter, err := newTraceExporter(ctx, exporterType)
+	if err != nil {
+		t.Fatalf("newTraceExporter() error = %v", err)
 	}
 	t.Cleanup(func() { _ = exporter.Shutdown(context.Background()) })
 
@@ -300,5 +305,48 @@ func TestOTLPExporterSendsHeadersFromEnvironment(t *testing.T) {
 		if got := md.Get(key); len(got) != 1 || got[0] != want {
 			t.Errorf("metadata %q = %v, want [%q]", key, got, want)
 		}
+	}
+}
+
+// InitTracing with nothing configured must reach a collector, not pretty print to
+// stdout. This is the whole point of the default: the loopback fallback and the
+// otlp default have to line up so an unconfigured process exports rather than
+// flooding its own log stream.
+func TestInitTracingDefaultsToOTLPCollector(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+
+	lis, err := net.Listen("tcp", "localhost:4317")
+	if err != nil {
+		t.Skipf("cannot bind the default OTLP port: %v", err)
+	}
+	c := serveCollector(t, nil, lis)
+
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	shutdown, err := InitTracing(ctx, testr.New(t), testServiceName)
+	if err != nil {
+		t.Fatalf("InitTracing() error = %v", err)
+	}
+
+	_, span := Tracer().Start(ctx, "default-exporter-span")
+	span.End()
+
+	// Shutdown flushes the batcher, so the collector has the span once it returns.
+	if err := shutdown(ctx); err != nil {
+		t.Fatalf("shutdown() error = %v", err)
+	}
+
+	if spans, _ := c.received(); spans != 1 {
+		t.Errorf("collector received %d spans, want 1 exported by the default exporter", spans)
 	}
 }

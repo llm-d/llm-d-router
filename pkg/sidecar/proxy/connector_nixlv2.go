@@ -289,7 +289,10 @@ retryLoop:
 		pCachedTokens = 0
 	}
 
-	s.logger.V(logging.TRACE).Info("received prefiller response", requestFieldKVTransferParams, pKVTransferParams)
+	s.logger.V(logging.TRACE).Info("received prefiller response",
+		requestFieldKVTransferParams, pKVTransferParams,
+		"cachedTokens", pCachedTokens,
+		"hasCachedTokens", hasPCachedTokens)
 
 	// Decode Stage
 
@@ -424,7 +427,7 @@ retryLoop:
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
 		trace.Info("sending request to decoder", "body", string(dbody))
 	}
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
@@ -637,7 +640,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dispatchCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	pCtx, prefillSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.prefill",
+	pCtx, prefillSpan := tracer.Start(dispatchCtx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -654,7 +657,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	preq.Body = io.NopCloser(bytes.NewReader(pbody))
 	preq.ContentLength = int64(len(pbody))
 
-	dCtx, decodeSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.decode",
+	dCtx, decodeSpan := tracer.Start(dispatchCtx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
