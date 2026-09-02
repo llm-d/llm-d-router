@@ -108,6 +108,30 @@ type estimateConfig struct {
 	Image *imageEstimateConfig `json:"image,omitempty"`
 	// Video tunes multimodal video placeholder-token estimation.
 	Video *videoEstimateConfig `json:"video,omitempty"`
+	// Audio tunes multimodal audio placeholder-token estimation.
+	Audio *audioEstimateConfig `json:"audio,omitempty"`
+}
+
+// audioEstimateConfig tunes how an audio's placeholder-token count is estimated.
+type audioEstimateConfig struct {
+	// Mode selects "dynamic" (tokens-per-second * duration) or "static" (a constant count).
+	Mode string `json:"mode,omitempty"`
+	// Static configures the static (constant per-audio) mode.
+	Static *staticAudioConfig `json:"static,omitempty"`
+	// Dynamic configures the dynamic (tokens-per-second) mode.
+	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
+}
+
+// staticAudioConfig is the static-mode parameter.
+type staticAudioConfig struct {
+	// NumTokens is the per-audio placeholder count.
+	NumTokens int `json:"numTokens,omitempty"`
+}
+
+// dynamicAudioConfig is the dynamic-mode parameter.
+type dynamicAudioConfig struct {
+	// TokensPerSecond is the placeholder tokens per second of audio.
+	TokensPerSecond int `json:"tokensPerSecond,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -307,7 +331,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
 	}
 
 	p := &Plugin{
@@ -396,9 +420,11 @@ func ChatCompletionsToRenderChatRequest(chat *fwkrh.ChatCompletionsRequest) *tok
 		}
 		for _, block := range msg.Content.Structured {
 			conv.Content.Structured = append(conv.Content.Structured, tokenizerTypes.ContentBlock{
-				Type:     block.Type,
-				Text:     block.Text,
-				ImageURL: tokenizerTypes.ImageBlock{URL: block.ImageURL.URL},
+				Type:       block.Type,
+				Text:       block.Text,
+				ImageURL:   tokenizerTypes.ImageBlock{URL: block.ImageURL.URL},
+				AudioURL:   tokenizerTypes.AudioURLBlock{URL: block.AudioURL.URL},
+				InputAudio: tokenizerTypes.AudioBlock{Data: block.InputAudio.Data, Format: block.InputAudio.Format},
 			})
 		}
 		conversation = append(conversation, conv)

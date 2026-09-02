@@ -718,14 +718,19 @@ type Content struct {
 }
 
 type ContentBlock struct {
-	Type       string     `json:"type"`
-	Text       string     `json:"text,omitempty"`
-	ImageURL   ImageBlock `json:"image_url"`
-	InputAudio AudioBlock `json:"input_audio"`
-	VideoURL   VideoBlock `json:"video_url"`
+	Type       string        `json:"type"`
+	Text       string        `json:"text,omitempty"`
+	ImageURL   ImageBlock    `json:"image_url"`
+	AudioURL   AudioURLBlock `json:"audio_url"`
+	InputAudio AudioBlock    `json:"input_audio"`
+	VideoURL   VideoBlock    `json:"video_url"`
 }
 
 type ImageBlock struct {
+	URL string `json:"url,omitempty"`
+}
+
+type AudioURLBlock struct {
 	URL string `json:"url,omitempty"`
 }
 

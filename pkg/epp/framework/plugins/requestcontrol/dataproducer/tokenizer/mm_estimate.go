@@ -167,10 +167,11 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 }
 
 // mmMetadata carries per-request multimodal properties parsed from the
-// x-llm-d-* request headers. Only video is populated today; image and audio
-// fields follow the same pattern when their headers are added.
+// x-llm-d-* request headers. Video and audio are populated from headers;
+// image parsing follows the same pattern when its headers are added.
 type mmMetadata struct {
 	video videoMetadata
+	audio audioMetadata
 }
 
 // videoMetadata carries per-request video properties parsed from the
@@ -181,6 +182,15 @@ type videoMetadata struct {
 	width, height int
 	duration      float64 // seconds
 	fps           float64 // source frames per second
+}
+
+// audioMetadata carries per-request audio properties parsed from the
+// x-llm-d-audio- request headers. A zero field means "not provided"; the
+// estimator falls back per field to configuration and then built-in defaults.
+type audioMetadata struct {
+	duration   float64 // seconds
+	sampleRate int     // Hz
+	channels   int
 }
 
 // videoEstimator estimates a video's placeholder-token count as
@@ -342,4 +352,79 @@ func (e videoEstimator) tokensPerFrame(meta videoMetadata) int {
 		return n
 	}
 	return 1
+}
+
+const (
+	// Audio estimation modes.
+	audioModeDynamic = "dynamic"
+	audioModeStatic  = "static"
+
+	defaultAudioDuration        = 10   // seconds
+	audioTokensPerSecond        = 25   // placeholder tokens per second
+	audioBytesPerSecondEstimate = 8000 // compressed audio bytes/sec (OGG ~1500, MP3 ~16000)
+)
+
+// audioEstimator estimates an audio's placeholder-token count from configured or
+// default parameters. The zero value is valid and uses all built-in defaults.
+type audioEstimator struct {
+	mode         string
+	staticToken  int
+	tokensPerSec int
+}
+
+// newAudioEstimator resolves an estimateConfig into an audioEstimator, leaving
+// unset fields zero so placeholderCount applies built-in defaults.
+func newAudioEstimator(cfg *estimateConfig) audioEstimator {
+	if cfg == nil || cfg.Audio == nil {
+		return audioEstimator{}
+	}
+	aud := cfg.Audio
+	est := audioEstimator{mode: aud.Mode}
+	if aud.Static != nil {
+		est.staticToken = aud.Static.NumTokens
+	}
+	if aud.Dynamic != nil {
+		est.tokensPerSec = aud.Dynamic.TokensPerSecond
+	}
+	return est
+}
+
+// placeholderCount estimates placeholder tokens for audio content.
+// If meta has a non-zero duration, it is used directly; otherwise the estimator
+// falls back to file-size estimation for base64 data or the default duration.
+func (e audioEstimator) placeholderCount(dataOrURL string, isBase64 bool, meta audioMetadata) int {
+	if e.mode == audioModeStatic {
+		if e.staticToken > 0 {
+			return e.staticToken
+		}
+		return 1
+	}
+
+	tokensPerSec := e.tokensPerSec
+	if tokensPerSec <= 0 {
+		tokensPerSec = audioTokensPerSecond
+	}
+
+	// Use header-provided duration if available
+	duration := meta.duration
+	if duration <= 0 {
+		// Fall back to file-size estimation for base64 data
+		duration = float64(defaultAudioDuration)
+		if isBase64 && len(dataOrURL) > 0 {
+			// Rough estimation: base64 expands 3 bytes to 4 chars
+			// Use mid-range estimate for compressed audio (~8000 bytes/sec)
+			// Base64 size * 3/4 = raw bytes, then / 8000 = seconds
+			rawBytes := float64(len(dataOrURL)) * 0.75
+			duration = rawBytes / float64(audioBytesPerSecondEstimate)
+			if duration < 1 {
+				duration = 1
+			}
+		}
+	}
+
+	tokens := int(float64(tokensPerSec) * duration)
+	if tokens < 1 {
+		tokens = 1
+	}
+	return tokens
 }
