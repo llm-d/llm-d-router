@@ -18,6 +18,7 @@ The Core Metrics Extractor is a data layer plugin responsible for extracting mod
     -   **KV Cache Usage**: Percentage of KV cache currently utilized.
     -   **LoRA Adapters**: Information about active and waiting LoRA adapters.
     -   **Cache Configuration**: Block size and total number of GPU blocks.
+    -   **Tiered Offloading** (optional): KV cache tiering metrics (`kv_offload_tiering_*`) when vLLM is configured with `TieringOffloadingSpec`. Silently skipped on non-tiering deployments.
 5.  Stores these values as attributes on the endpoint, making them available to scheduling plugins.
 
 ## Attributes produced
@@ -32,6 +33,15 @@ The plugin populates several standard keys on the endpoint:
 -   `WaitingModels` (int)
 -   `UpdateTime` (time.Time)
 
+When tiered offloading metrics are detected, the following scalar metric attributes are also produced (stored via `ScalarMetricDataKey`):
+
+-   `tiering_chunk_hits` (float64)
+-   `tiering_chunk_queries` (float64)
+-   `tiering_read_bytes` (float64)
+-   `tiering_read_time` (float64)
+-   `tiering_promotion_failures` (float64)
+-   `tiering_allocation_failures` (float64)
+
 ## Configuration
 
 The plugin config supports:
@@ -41,8 +51,11 @@ The plugin config supports:
     but will be removed in a future release.
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
 -   `engineConfigs`: A list of engine-specific metric specifications.
-    Each engine config can also include `customMetrics` entries. Each entry
-    maps a scalar metric selector to an endpoint attribute key.
+    Each engine config can include `tieredOffloadingSpecs` and `customMetrics`
+    entries. Each entry maps a scalar metric selector to an endpoint attribute key.
+    The built-in vLLM config includes tiered offloading specs for the default
+    single-tier filesystem configuration (`tier="1:fs"`). Multi-tier deployments
+    should override with per-tier entries (see example below).
 
 ### Built-in Engine Configurations
 
@@ -86,6 +99,43 @@ metadata:
 
 ```
 
+### Multi-Tier Offloading Configuration
+
+The built-in vLLM config extracts tiered offloading metrics for tier `1:fs`
+(the default single filesystem tier). Single-tier deployments need no
+configuration.
+
+Multi-tier deployments must override the vLLM engine config to add entries
+for each tier. The tier label format is `{index}:{type}`, where `index` is
+the position in the `secondary_tiers` list (starting at 1) and `type` is the
+tier type (`fs`, `p2p`, `obj` for S3-compatible stores, or a custom type).
+Check your vLLM `TieringOffloadingSpec` config or scrape output to confirm
+the exact labels.
+
+> [!NOTE]
+> Overriding `engineConfigs` for `"vllm"` replaces the entire built-in
+> config, so all standard metric specs must be re-specified alongside the
+> tiering entries.
+
+```yaml
+type: core-metrics-extractor
+parameters:
+  engineConfigs:
+    - name: "vllm"
+      # Standard specs (required — overriding replaces the built-in config)
+      queuedRequestsSpec: "vllm:num_requests_waiting"
+      runningRequestsSpec: "vllm:num_requests_running"
+      kvUsageSpec: "vllm:kv_cache_usage_perc"
+      loraSpec: "vllm:lora_requests_info"
+      cacheInfoSpec: "vllm:cache_config_info"
+      # Per-tier offloading specs
+      tieredOffloadingSpecs:
+        - attributeKey: "tiering_chunk_hits_fs"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"1:fs\"}"
+        - attributeKey: "tiering_chunk_hits_p2p"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"2:p2p\"}"
+        - attributeKey: "tiering_chunk_hits_obj"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"3:obj\"}"
 ```
 
 ## Multi-cluster support

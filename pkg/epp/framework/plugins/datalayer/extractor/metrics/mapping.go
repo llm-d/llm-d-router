@@ -41,7 +41,11 @@ type Mapping struct {
 	// config as separate gauge values rather than labels on an info metric.
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
-	CustomMetrics  []CustomMetric
+	// TieredOffloading holds specs for vLLM kv_offload_tiering_* metrics.
+	// When no tiering metric is found the block is silently skipped;
+	// when at least one is present, missing metrics are treated as errors.
+	TieredOffloading []AttributeMetric
+	CustomMetrics    []CustomMetric
 }
 
 // MappingConfig holds configuration used to build a Mapping.
@@ -55,13 +59,20 @@ type MappingConfig struct {
 	CacheNumBlocksLabel string
 	CacheBlockSize      string
 	CacheNumBlocks      string
+	TieredOffloading    []AttributeMetric
 	CustomMetrics       []CustomMetric
 }
 
-type CustomMetric struct {
+// AttributeMetric pairs a metric spec with the endpoint attribute key where
+// its extracted value is stored.
+type AttributeMetric struct {
 	AttributeKey string
 	Spec         *Spec
 }
+
+// CustomMetric is an alias for AttributeMetric, retained for the
+// core-metrics-extractor's CustomMetrics configuration parameter.
+type CustomMetric = AttributeMetric
 
 type namedSpec struct {
 	name    string
@@ -74,7 +85,7 @@ func (m *Mapping) specs() []namedSpec {
 	if m.LoraRequestInfo != nil {
 		loraSpec = m.LoraRequestInfo.Spec
 	}
-	specs := make([]namedSpec, 0, 5+len(m.CustomMetrics))
+	specs := make([]namedSpec, 0, 5+len(m.TieredOffloading)+len(m.CustomMetrics))
 	specs = append(specs,
 		namedSpec{"queue", m.TotalQueuedRequests, m.TotalQueuedRequests != nil},
 		namedSpec{"running", m.TotalRunningRequests, m.TotalRunningRequests != nil},
@@ -82,6 +93,13 @@ func (m *Mapping) specs() []namedSpec {
 		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
+	for _, tiered := range m.TieredOffloading {
+		specs = append(specs, namedSpec{
+			name:    tiered.AttributeKey,
+			spec:    tiered.Spec,
+			enabled: tiered.Spec != nil,
+		})
+	}
 	for _, custom := range m.CustomMetrics {
 		specs = append(specs, namedSpec{
 			name:    custom.AttributeKey,
@@ -160,6 +178,8 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	tieredOffloading, tieredErrs := parseCustomMetrics(cfg.TieredOffloading)
+	errs = append(errs, tieredErrs...)
 	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
 	errs = append(errs, customErrs...)
 
@@ -176,6 +196,7 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
 		CacheBlockSize:       cacheBlockSizeSpec,
 		CacheNumBlocks:       cacheNumBlocksSpec,
+		TieredOffloading:     tieredOffloading,
 		CustomMetrics:        customMetrics,
 	}, nil
 }
