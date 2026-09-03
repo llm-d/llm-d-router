@@ -116,11 +116,11 @@ var (
 	// LookupRequests counts how many Lookup() calls have been made.
 	LookupRequests = newDualCounter("index", "lookup_requests_total",
 		"kv_cache_index_lookup_requests_total", "Total number of lookup calls")
-	// MaxPodHitCount counts, per lookup, the longest contiguous prefix chain
-	// any single pod holds counting from the first requested block.
+	// MaxPodHitCount counts, per prefix match, the longest contiguous prefix
+	// chain any single pod holds counting from the first requested block.
 	MaxPodHitCount = newDualCounter("index", "max_pod_hit_count_total",
 		"kv_cache_index_max_pod_hit_count_total", "Longest contiguous per-pod prefix chain observed per lookup")
-	// LookupHits accumulates the same per-lookup contiguous chain length as
+	// LookupHits accumulates the same per-match contiguous chain length as
 	// MaxPodHitCount.
 	LookupHits = newDualCounter("index", "lookup_hits_total",
 		"kv_cache_index_lookup_hits_total", "Contiguous prefix blocks matched by the best pod per lookup")

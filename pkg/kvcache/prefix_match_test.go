@@ -23,6 +23,7 @@ import (
 	"slices"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -30,15 +31,25 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
+// nonWalkerIndex hides the walk capability of the index it wraps, so the
+// matcher takes the materialized Lookup path.
+type nonWalkerIndex struct{ kvblock.Index }
+
 // newMatcher builds an Indexer over an in-memory index whose per-key pod
-// cache is large enough that no fixture entry is evicted.
+// cache is large enough that no fixture entry is evicted. The matcher walks
+// the index; newMaterializedMatcher over the same index takes the fallback.
 func newMatcher(t *testing.T, backends []*kvcache.KVCacheBackendConfig) (*kvcache.Indexer, kvblock.Index) {
 	t.Helper()
 	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 256})
 	require.NoError(t, err)
 	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, idx, backends), idx
+}
+
+func newMaterializedMatcher(idx kvblock.Index, backends []*kvcache.KVCacheBackendConfig) *kvcache.Indexer {
+	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, nonWalkerIndex{idx}, backends)
 }
 
 func assertPodMatches(t *testing.T, want, got map[string]kvcache.PodMatch) {
@@ -152,10 +163,14 @@ func TestMatchBlockKeys(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := logging.NewTestLoggerIntoContext(t.Context())
-			indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+			walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
 			populateIndex(t, idx, tt.entries)
 
-			got, err := indexer.MatchBlockKeys(ctx, tt.requestKeys, tt.podFilter)
+			got, err := walked.MatchBlockKeys(ctx, tt.requestKeys, tt.podFilter)
+			require.NoError(t, err)
+			assertPodMatches(t, tt.want, got)
+
+			got, err = newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()).MatchBlockKeys(ctx, tt.requestKeys, tt.podFilter)
 			require.NoError(t, err)
 			assertPodMatches(t, tt.want, got)
 		})
@@ -174,14 +189,74 @@ func TestMatchBlockKeysEmptyKeys(t *testing.T) {
 
 func TestMatchBlockKeysCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(logging.NewTestLoggerIntoContext(t.Context()))
-	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
 	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
 		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
 	})
 	cancel()
 
-	_, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
-	require.ErrorIs(t, err, context.Canceled)
+	for name, indexer := range map[string]*kvcache.Indexer{
+		"walked":       walked,
+		"materialized": newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
+func counterValue(t *testing.T, counter interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, counter.Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+// Both feeders record the longest contiguous chain of the match as the hit
+// metrics, once per call.
+func TestMatchBlockKeysRecordsHitMetrics(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}, {PodIdentifier: "pod-b", DeviceTier: "gpu"}},
+		20: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
+	})
+
+	for name, indexer := range map[string]*kvcache.Indexer{
+		"walked":       walked,
+		"materialized": newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			hits, longest := counterValue(t, metrics.LookupHits), counterValue(t, metrics.MaxPodHitCount)
+
+			_, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30}, nil)
+			require.NoError(t, err)
+
+			assert.InDelta(t, 2, counterValue(t, metrics.LookupHits)-hits, 0)
+			assert.InDelta(t, 2, counterValue(t, metrics.MaxPodHitCount)-longest, 0)
+		})
+	}
+}
+
+// Without EnableMetrics the matcher leaves the hit counters alone, like the
+// uninstrumented index leaves the request counters.
+func TestMatchBlockKeysWithoutMetricsRecordsNothing(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 256})
+	require.NoError(t, err)
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
+	})
+	indexer := kvcache.NewIndexerForTestWithoutMetrics(&mockTokenProcessor{}, idx, kvcache.DefaultKVCacheBackendConfig())
+
+	hits, longest := counterValue(t, metrics.LookupHits), counterValue(t, metrics.MaxPodHitCount)
+	matches, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+
+	assert.InDelta(t, hits, counterValue(t, metrics.LookupHits), 0)
+	assert.InDelta(t, longest, counterValue(t, metrics.MaxPodHitCount), 0)
 }
 
 // A device tier reported under the speculative tier's name and speculative
@@ -301,10 +376,11 @@ func TestMatchBlockKeysManyTiers(t *testing.T) {
 	}, got)
 }
 
-// The matcher reproduces the three algorithms it replaces (the longest-prefix
-// scorer and the producer's contiguous block counters, kept below as
-// oracles) on random fixtures: filters, gaps, duplicate pod entries at a
-// key, unconfigured tiers, and speculative entries.
+// Both feeders reproduce the three algorithms the matcher replaces (the
+// longest-prefix scorer and the producer's contiguous block counters, kept
+// below as oracles) on random fixtures: filters, gaps, duplicate pod entries
+// at a key (tiers and rank groups), unconfigured tiers, and speculative
+// entries.
 func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 	rng := rand.New(rand.NewSource(1))
@@ -324,8 +400,11 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 				if rng.Float64() >= 0.7 {
 					continue
 				}
-				for n := 1 + rng.Intn(2); n > 0; n-- {
+				for n := 1 + rng.Intn(3); n > 0; n-- {
 					entry := kvblock.PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", p), DeviceTier: tiers[rng.Intn(len(tiers))]}
+					if rng.Intn(2) == 0 {
+						entry.HasGroup, entry.GroupIdx = true, kvblock.GroupID(rng.Intn(3))
+					}
 					if rng.Float64() < 0.15 {
 						entry.Speculative = true
 						entry.DeviceTier = ""
@@ -343,10 +422,12 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 			}
 		}
 
-		indexer, idx := newMatcher(t, backends)
+		walked, idx := newMatcher(t, backends)
 		populateIndex(t, idx, fixture)
 
-		got, err := indexer.MatchBlockKeys(ctx, keys, filter)
+		gotWalked, err := walked.MatchBlockKeys(ctx, keys, filter)
+		require.NoError(t, err)
+		gotMaterialized, err := newMaterializedMatcher(idx, backends).MatchBlockKeys(ctx, keys, filter)
 		require.NoError(t, err)
 		keyToPods, err := idx.Lookup(ctx, keys, filter)
 		require.NoError(t, err)
@@ -359,7 +440,8 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 				BlocksByTier:  legacyMatchedBlockCountByTier(keys, keyToPods, pod),
 			}
 		}
-		assertPodMatches(t, want, got)
+		assertPodMatches(t, want, gotWalked)
+		assertPodMatches(t, want, gotMaterialized)
 	}
 }
 
