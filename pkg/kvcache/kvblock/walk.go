@@ -22,10 +22,14 @@ import (
 )
 
 // EntryRef is one indexed entry with the ordinals the index assigned to its
-// pod and device tier. Ordinals are stable for the index lifetime and never
-// reused, so consumers can key request-local tables by them; live entries
-// hold a sparse subset of the assigned range, so consumers must not size
-// state by it.
+// pod identifier and device tier. Two entries share a PodOrdinal exactly
+// when they share a PodIdentifier, and a TierOrdinal exactly when they share
+// a DeviceTier. An ordinal is assigned on the first Add of its name and
+// belongs to that name for the index lifetime: Evict and Clear never reclaim
+// or reassign one, and an Add whose new names would exceed the index's caps
+// fails before writing anything. Live entries hold a sparse subset of the
+// assigned range, so consumers key request-local tables by ordinals and
+// never size state by them.
 type EntryRef struct {
 	PodEntry
 	PodOrdinal  uint32
@@ -34,22 +38,41 @@ type EntryRef struct {
 
 // KeyWalker is an optional Index capability: visit requestKeys in input
 // order without materializing per-key entry slices.
+//
+// The walk contract:
+//
+//   - visit runs once per position of requestKeys, in order, until it
+//     returns false, the keys run out, or ctx is cancelled. A key listed
+//     twice is visited at both positions, each visit reading the index anew.
+//   - A key the index does not hold is visited with found=false and no
+//     entries; the walk continues.
+//   - entries is every record the index holds for the key, unfiltered, in
+//     an order the consumer must not rely on. It is borrowed: read-only and
+//     valid only until visit returns, after which the index may reorder or
+//     overwrite its backing array. Consumers copy what they keep.
+//   - visit must not call back into the index; the key's lock is held for
+//     the duration of the call.
+//   - A visit sees one key's entries as of that instant, exclusive of
+//     writers to that key and of other visits to it. There is no snapshot
+//     across keys: a concurrent Add, Evict, or Clear may be visible at some
+//     positions and not at others.
+//   - Cancellation is polled at the first position, every 256th position
+//     after it, and once more when the walk ends, so a cancelled ctx always
+//     yields ctx.Err(); visits may run between the cancellation and the
+//     next poll.
+//   - When the walk ends, for any reason, the prefix of requestKeys through
+//     the last key found is marked most recently used in position order
+//     under one acquisition, skipping keys absent by then. Positions after
+//     the last key found are not promoted. Lookup promotes the same way, so
+//     a prefix that is only read stays resident under capacity pressure.
 type KeyWalker interface {
-	// WalkKeys calls visit once per position, in order, until visit returns
-	// false, the keys run out, or ctx is cancelled. Cancellation is observed
-	// at checkpoints along the walk and when the walk completes, and always
-	// makes the walk return ctx.Err(). A miss is reported with found=false
-	// and no entries.
-	// entries is borrowed from the index: read-only and valid only until
-	// visit returns. A walk refreshes the recency of the keys it visited
-	// once it ends, as Lookup does, so a prefix that is only read stays
-	// resident under capacity pressure.
 	WalkKeys(ctx context.Context, requestKeys []BlockHash,
 		visit func(pos int, found bool, entries []EntryRef) bool) error
 }
 
-// WalkKeys implements KeyWalker. Each key's entries are visited under that
-// key's lock, so a visit excludes writers to the same key and nothing else.
+// WalkKeys implements KeyWalker. Each key is peeked under the LRU's shared
+// lock and its entries visited under that key's own lock; the visited prefix
+// is promoted in a deferred call, so every exit path refreshes what was read.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {

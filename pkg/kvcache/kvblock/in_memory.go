@@ -264,6 +264,8 @@ func (m *InMemoryIndex) internRecords(entries []PodEntry) ([]EntryRef, error) {
 // It returns:
 // 1. A map where the keys are those in (1) and the values are pod-identifiers.
 // 2. An error if any occurred during the operation.
+//
+// Lookup polls cancellation and promotes recency exactly as WalkKeys does.
 func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {

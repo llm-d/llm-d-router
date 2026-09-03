@@ -78,6 +78,24 @@ func TestWalkKeysVisitsEveryPositionInOrder(t *testing.T) {
 	assert.Equal(t, []PodEntry{podA, podB}, podEntries(visits[2].entries))
 }
 
+// A key listed twice is visited at both positions.
+func TestWalkKeysVisitsDuplicatePositions(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+	podA := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{10}, []PodEntry{podA}))
+
+	visits := walkAll(t, index, []BlockHash{10, 10})
+
+	require.Len(t, visits, 2)
+	for i, v := range visits {
+		assert.Equal(t, i, v.pos)
+		assert.True(t, v.found)
+		assert.Equal(t, []PodEntry{podA}, podEntries(v.entries))
+	}
+}
+
 func TestWalkKeysStopsWhenVisitReturnsFalse(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 	index, err := NewInMemoryIndex(nil)
@@ -279,6 +297,16 @@ func TestWalkKeysOrdinalsAreStable(t *testing.T) {
 	assert.NotEqual(t, byEntry[gpuA].TierOrdinal, byEntry[cpuB].TierOrdinal)
 	assert.Equal(t, byEntry[gpuA].PodOrdinal, byEntry[specA].PodOrdinal, "the same pod shares one ordinal across tiers")
 	assert.True(t, byEntry[specA].Speculative)
+
+	// Ordinals survive removal: a pod cleared or evicted and added again
+	// keeps its own.
+	require.NoError(t, index.Clear(ctx, "pod-a"))
+	require.NoError(t, index.Evict(ctx, 1, RequestKey, []PodEntry{cpuB}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{3}, []PodEntry{gpuA, cpuB}))
+	for _, v := range walkAll(t, index, []BlockHash{3})[0].entries {
+		assert.Equal(t, byEntry[v.PodEntry].PodOrdinal, v.PodOrdinal, "%v pod ordinal after removal", v.PodEntry)
+		assert.Equal(t, byEntry[v.PodEntry].TierOrdinal, v.TierOrdinal, "%v tier ordinal after removal", v.PodEntry)
+	}
 }
 
 // nonWalkerIndex is an Index without the walk capability.
