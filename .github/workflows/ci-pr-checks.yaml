@@ -59,7 +59,7 @@ jobs:
 
   verify-helm-charts:
     needs: check-changes
-    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
