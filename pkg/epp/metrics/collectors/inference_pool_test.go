@@ -108,22 +108,13 @@ func TestMetricsCollected(t *testing.T) {
 		collector := &inferencePoolMetricsCollector{
 			ds: ds,
 		}
-		err := testutil.CollectAndCompare(collector, strings.NewReader(`
-		# HELP inference_pool_per_pod_queue_size [ALPHA] The total number of requests pending in the model server queue for each underlying pod.
-		# TYPE inference_pool_per_pod_queue_size gauge
-		inference_pool_per_pod_queue_size{model_server_pod="pod1-rank-0",name="test-pool"} 100
-`), "inference_pool_per_pod_queue_size")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		errNew := promtestutil.CollectAndCompare(collector, strings.NewReader(`
+		err := promtestutil.CollectAndCompare(collector, strings.NewReader(`
 		# HELP llm_d_epp_per_endpoint_queue_size [ALPHA] The total number of requests pending in the model server queue for each underlying endpoint.
 		# TYPE llm_d_epp_per_endpoint_queue_size gauge
 		llm_d_epp_per_endpoint_queue_size{model_server_endpoint="pod1-rank-0",name="test-pool"} 100
 `), "llm_d_epp_per_endpoint_queue_size")
-		if errNew != nil {
-			t.Fatal(errNew)
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 }

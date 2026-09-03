@@ -154,7 +154,7 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 					},
 					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test3"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
 				},
 				{
@@ -194,8 +194,8 @@ dataLayer:
 					},
 					wantResponses: ExpectPassthroughRouteTo("192.168.1.2:8000", []byte("passthrough-parser")),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal("", "", prio(2))),
-						"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+						"llm_d_epp_request_total":   cleanMetric(metricReqTotal("", "", prio(2))),
+						"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 					},
 				},
 				{
@@ -208,7 +208,7 @@ dataLayer:
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSQLLoraTarget, "test4"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
 				},
 
@@ -245,7 +245,7 @@ dataLayer:
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSheddableTarget, "test6"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
 					},
 				},
 				{
@@ -348,7 +348,7 @@ dataLayer:
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelDirect, "test6"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelDirect, modelDirect, prio(2))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelDirect, modelDirect, prio(2))),
 					},
 				},
 				{
@@ -359,7 +359,7 @@ dataLayer:
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, "test-rewrite"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
 					},
 					requiresCRDs: true,
 				},
@@ -425,34 +425,7 @@ dataLayer:
 						"",
 					),
 					// Labels are empty because we skipped the Request phase.
-					wantMetrics: map[string]string{
-						"inference_objective_input_tokens": cleanMetric(`
-              # HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.
-              # TYPE inference_objective_input_tokens histogram
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="64"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="128"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="256"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="512"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1024"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="2048"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16384"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32768"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="65536"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="131072"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="262144"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="524288"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1.048576e+06"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="+Inf"} 1
-              inference_objective_input_tokens_sum{model_name="",target_model_name=""} 7
-              inference_objective_input_tokens_count{model_name="",target_model_name=""} 1
-              `),
-					},
+					wantMetrics: map[string]string{},
 				},
 			}
 			tests := append(commonTestCases(prio), hermeticTests...)

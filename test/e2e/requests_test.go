@@ -338,19 +338,6 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	// Define the metrics we expect to see
 	preset := []string{ //nolint:prealloc
-		"inference_objective_request_total",
-		"inference_objective_request_error_total",
-		"inference_objective_request_duration_seconds",
-		"inference_objective_normalized_time_per_output_token_seconds",
-		"inference_objective_request_sizes",
-		"inference_objective_response_sizes",
-		"inference_objective_input_tokens",
-		"inference_objective_output_tokens",
-		"inference_pool_average_kv_cache_utilization",
-		"inference_pool_average_queue_size",
-		"inference_pool_per_pod_queue_size",
-		"inference_objective_running_requests",
-		"inference_pool_ready_pods",
 		"inference_extension_info",
 
 		// llm_d metrics
@@ -376,13 +363,6 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	for _, modelServerPodName := range decodePods {
 		for rank := range numTargetPorts {
-			metricQueueSize := fmt.Sprintf(
-				"inference_pool_per_pod_queue_size{model_server_pod=\"%s-rank-%d\",name=\"%s\"}",
-				modelServerPodName,
-				rank,
-				infPoolName)
-			expectedMetrics = append(expectedMetrics, metricQueueSize)
-
 			metricQueueSizeNew := fmt.Sprintf(
 				"llm_d_epp_per_endpoint_queue_size{model_server_endpoint=\"%s-rank-%d\",name=\"%s\"}",
 				modelServerPodName,

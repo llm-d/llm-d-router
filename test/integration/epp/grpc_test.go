@@ -82,8 +82,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test1", integration.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 4)),
-				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+				"llm_d_epp_request_total":   cleanMetric(metricReqTotal("", "", 4)),
+				"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 			},
 		},
 		{
@@ -96,8 +96,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test1", integration.EmbedGRPCMethodName),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 4)),
-				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+				"llm_d_epp_request_total":   cleanMetric(metricReqTotal("", "", 4)),
+				"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 			},
 		},
 		{
@@ -110,8 +110,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 			wantResponses: ExpectGRPCRouteToWithStream("192.168.1.2:8000", "test-stream", integration.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 4)),
-				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+				"llm_d_epp_request_total":   cleanMetric(metricReqTotal("", "", 4)),
+				"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 			},
 		},
 		{
@@ -124,7 +124,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 			wantResponses: ExpectGRPCRouteTo("192.168.1.1:8000", "test2", integration.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 0)),
+				"llm_d_epp_request_total": cleanMetric(metricReqTotal("", "", 0)),
 			},
 		},
 
@@ -164,7 +164,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 			wantResponses: ExpectGRPCRouteTo("192.168.1.1:8000", "test3", integration.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 0)),
+				"llm_d_epp_request_total": cleanMetric(metricReqTotal("", "", 0)),
 			},
 		},
 		{
@@ -285,34 +285,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				return ExpectBufferResp(string(gRPCPayload), "application/grpc")
 			}(),
 			// Labels are empty because we skipped the Request phase.
-			wantMetrics: map[string]string{
-				"inference_objective_input_tokens": cleanMetric(`
-					# HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.
-					# TYPE inference_objective_input_tokens histogram
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="64"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="128"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="256"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="512"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1024"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="2048"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16384"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32768"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="65536"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="131072"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="262144"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="524288"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1.048576e+06"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="+Inf"} 1
-					inference_objective_input_tokens_sum{model_name="",target_model_name=""} 7
-					inference_objective_input_tokens_count{model_name="",target_model_name=""} 1
-					`),
-			},
+			wantMetrics: map[string]string{},
 		},
 		{
 			name: "response streaming with token usage",
@@ -409,53 +382,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 
 				return append(reqs, respRespHeaders, respChunk1, respChunk2)
 			}(),
-			wantMetrics: map[string]string{
-				"inference_objective_input_tokens": cleanMetric(`
-					# HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.
-					# TYPE inference_objective_input_tokens histogram
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="64"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="128"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="256"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="512"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1024"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="2048"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16384"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32768"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="65536"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="131072"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="262144"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="524288"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1.048576e+06"} 1
-					inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="+Inf"} 1
-					inference_objective_input_tokens_sum{model_name="",target_model_name=""} 7
-					inference_objective_input_tokens_count{model_name="",target_model_name=""} 1
-					`),
-				"inference_objective_output_tokens": cleanMetric(`
-					# HELP inference_objective_output_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_output_tokens] Inference objective output token count distribution for requests in each model.
-					# TYPE inference_objective_output_tokens histogram
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="1"} 0
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="8"} 0
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="16"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="32"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="64"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="128"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="256"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="512"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="1024"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="2048"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
-					inference_objective_output_tokens_bucket{model_name="",target_model_name="",le="+Inf"} 1
-					inference_objective_output_tokens_sum{model_name="",target_model_name=""} 10
-					inference_objective_output_tokens_count{model_name="",target_model_name=""} 1
-					`),
-			},
+			wantMetrics: map[string]string{},
 		},
 	}
 
