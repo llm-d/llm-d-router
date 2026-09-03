@@ -35,11 +35,19 @@ var _ fwkdl.EndpointExtractor = &Producer{}
 // subscriber, delete tears one down. No-op unless per-pod discovery is
 // enabled.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
-	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
-		return nil
-	}
 	meta := event.Endpoint.GetMetadata()
 	if meta == nil || meta.ID.Name == "" {
+		return nil
+	}
+
+	// Health state is keyed by endpoint identifier, not by namespaced name, and
+	// is collected in both global-socket and per-pod discovery modes, so it is
+	// dropped here rather than in the discovery-only switch below.
+	if event.Type == fwkdl.EventDelete && meta.Address != "" {
+		p.healthMonitor.RemoveEndpoint(endpointIdentifier(meta.Address, meta.Port))
+	}
+
+	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
 	}
 
@@ -55,7 +63,7 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 	case fwkdl.EventDelete:
 		p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
 		if meta.Address != "" {
-			if err := p.kvCacheIndexer.KVBlockIndex().Clear(ctx, fmt.Sprintf("%s:%s", meta.Address, meta.Port)); err != nil {
+			if err := p.kvCacheIndexer.KVBlockIndex().Clear(ctx, endpointIdentifier(meta.Address, meta.Port)); err != nil {
 				logger.Error(err, "Failed to clear index entries for removed endpoint",
 					"endpoint", endpointKey, "address", meta.Address, "port", meta.Port)
 			}
@@ -79,7 +87,7 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
 		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
 	}
-	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
+	sourceEndpoint := endpointIdentifier(meta.Address, meta.Port)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
