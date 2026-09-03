@@ -748,6 +748,31 @@ func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
 	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
 }
 
+func TestPreRequest_TierDataWithoutConfirmedCountUsesCachedCount(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 2 * testBlockSize})
+
+	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
+	computing := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      k8stypes.NamespacedName{Name: "pod-comp"},
+		Address: "10.0.0.2",
+		Port:    "8080",
+	}, nil, nil)
+	computing.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(5, 6, testBlockSize).
+			WithCachedBlockCount(5).
+			WithCachedBlocksByTier(map[string]int{"gpu": 5}))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-tier-default", Headers: map[string]string{}}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
+
+	// The source leads by one block, below the two-block delta. A producer that
+	// publishes tier data without setting a separate confirmed count preserves
+	// its cached count, so the pull remains suppressed.
+	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
+}
+
 func TestPreRequest_SpeculativeComputingCacheDoesNotSuppressHeader(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})

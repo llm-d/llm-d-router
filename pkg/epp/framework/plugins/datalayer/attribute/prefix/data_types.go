@@ -59,7 +59,8 @@ type PrefixCacheMatchInfo struct {
 	cachedBlockCount int
 	// unweighted count of contiguous cached prefix blocks confirmed by the
 	// engine. Speculative index entries are excluded, while confirmed blocks
-	// can move between device tiers across the prefix.
+	// can move between device tiers across the prefix. Defaults to
+	// cachedBlockCount when not set.
 	confirmedCachedBlockCount int
 	// per device tier, the unweighted count of contiguous cached prefix blocks
 	// the endpoint holds in that tier, from the first block until the first
@@ -77,10 +78,11 @@ type MMMatchInfo struct {
 
 func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *PrefixCacheMatchInfo {
 	return &PrefixCacheMatchInfo{
-		matchBlocks:      matchBlocks,
-		totalBlocks:      totalBlocks,
-		blockSizeTokens:  blockSizeTokens,
-		cachedBlockCount: matchBlocks,
+		matchBlocks:               matchBlocks,
+		totalBlocks:               totalBlocks,
+		blockSizeTokens:           blockSizeTokens,
+		cachedBlockCount:          matchBlocks,
+		confirmedCachedBlockCount: matchBlocks,
 	}
 }
 
@@ -88,6 +90,7 @@ func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *Pre
 // returns the receiver for chaining.
 func (p *PrefixCacheMatchInfo) WithCachedBlockCount(cachedBlockCount int) *PrefixCacheMatchInfo {
 	p.cachedBlockCount = cachedBlockCount
+	p.confirmedCachedBlockCount = cachedBlockCount
 	return p
 }
 
