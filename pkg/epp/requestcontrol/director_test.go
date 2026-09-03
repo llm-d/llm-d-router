@@ -69,11 +69,7 @@ var (
 
 func newOpenAIParserWithPriorityPropagation(t *testing.T) *openai.OpenAIParser {
 	t.Helper()
-	plugin, err := openai.OpenAIParserPluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"propagatePriority":true}`)), nil)
-	require.NoError(t, err)
-	parser, ok := plugin.(*openai.OpenAIParser)
-	require.True(t, ok)
-	return parser
+	return openai.NewOpenAIParser()
 }
 
 // --- Mocks ---
@@ -433,6 +429,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
+		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
@@ -450,6 +447,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			initialTargetModelName: model,
 			parser:                 newOpenAIParserWithPriorityPropagation(t),
+			propagatePriority:      true,
 			wantReqCtx: &handlers.RequestContext{
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
@@ -469,7 +467,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 		},
 		{
-			name: "successful completions request strips client priority by default",
+			name: "successful completions request leaves client priority untouched when propagation disabled",
 			reqBodyMap: map[string]any{
 				"model":    model,
 				"prompt":   "critical prompt",
@@ -491,10 +489,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
-			wantMutatedBody: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
-			},
+			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
 		{
@@ -1167,6 +1162,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					config = config.WithRequestHeaderPlugins(test.requestHeaderPlugin)
 				}
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
+				if test.propagatePriority {
+					config = config.WithPropagatePriority(true)
+				}
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)

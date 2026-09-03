@@ -116,7 +116,7 @@ func TestNewVllmHTTPParser(t *testing.T) {
 }
 
 func TestVllmHTTPParser_RewritePriority(t *testing.T) {
-	plugin, err := VllmHTTPParserPluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"propagatePriority":true}`)), nil)
+	plugin, err := VllmHTTPParserPluginFactory("test", nil, nil)
 	if err != nil {
 		t.Fatalf("VllmHTTPParserPluginFactory() error = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestVllmHTTPParser_RewritePriority(t *testing.T) {
 	}
 }
 
-func TestVllmHTTPParser_RewritePriorityStripsByDefault(t *testing.T) {
+func TestVllmHTTPParser_RewritePriorityOverwritesClientPriority(t *testing.T) {
 	parser := NewVllmHTTPParser()
 	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}, "priority": 100}
 
@@ -161,8 +161,8 @@ func TestVllmHTTPParser_RewritePriorityStripsByDefault(t *testing.T) {
 	if !ok {
 		t.Fatalf("RewritePriority() payload = %T, want PayloadMap", got)
 	}
-	if _, ok := m["priority"]; ok {
-		t.Errorf("priority = %v, want absent", m["priority"])
+	if gotPriority := m["priority"]; gotPriority != -2 {
+		t.Errorf("priority = %v, want -2", gotPriority)
 	}
 }
 

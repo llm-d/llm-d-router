@@ -6,8 +6,6 @@ plugins:
   - type: prefix-cache-scorer
   - type: lora-affinity-scorer
   - type: openai-parser
-    parameters:
-      propagatePriority: true
   - type: mock-metrics-source
 schedulingProfiles:
   - name: default
@@ -17,6 +15,7 @@ schedulingProfiles:
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
 requestHandler:
+  propagatePriority: true
   parsers:
   - pluginRef: openai-parser
 dataLayer:

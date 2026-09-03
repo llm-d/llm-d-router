@@ -28,23 +28,20 @@ const (
 	MethodPathKey = ":path"
 )
 
-// RewritePriority strips any client-supplied priority from a JSON-map payload
-// and, when propagate is true, writes the EPP-resolved priority; it reports
-// whether the payload changed. Non-map payloads are returned unchanged. EPP
-// priority follows SGLang semantics (higher = more urgent), matching the
-// InferenceObjective convention; vLLM's native scheduler is the opposite (lower =
-// more urgent), so the value is negated for vLLM targets to keep the same
-// relative ordering across backends.
-func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, propagate bool, priority int) (fwkrh.MarshalablePayload, bool, error) {
+// RewritePriority strips any client-supplied priority from a JSON-map payload and
+// writes the EPP-resolved priority; it reports whether the payload changed.
+// Non-map payloads are returned unchanged. Callers decide whether priority
+// propagation is enabled (see requestHandler.propagatePriority); this helper
+// always injects when invoked. EPP priority follows SGLang semantics (higher =
+// more urgent), matching the InferenceObjective convention; vLLM's native
+// scheduler is the opposite (lower = more urgent), so the value is negated for
+// vLLM targets to keep the same relative ordering across backends.
+func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
 	m, ok := payload.(fwkrh.PayloadMap)
 	if !ok {
 		return payload, false, nil
 	}
-	_, hadClientPriority := m["priority"]
 	delete(m, "priority")
-	if !propagate {
-		return m, hadClientPriority, nil
-	}
 	if isVLLMTarget(ctx) {
 		priority = -priority
 	}

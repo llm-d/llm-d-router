@@ -11,9 +11,15 @@ Supports all standard OpenAI-compatible endpoints: completions, chat/completions
 The fields parsed out vary by endpoint: the request's input content (prompt, messages, or input), the streaming mode, and token usage from responses that report it. 
 The images/edits endpoint accepts multipart/form-data.
 
-**Parameters:**
+**Parameters:** None.
 
-- `propagatePriority` (bool, default: `false`): When enabled, injects the EPP-resolved request priority into the outgoing request body's `priority` field. Client-supplied `priority` is always removed first so backend-native priority scheduling is governed by EPP.
+> [!NOTE]
+> Priority propagation is controlled by a single global switch,
+> `requestHandler.propagatePriority` (bool, default: `false`), not per parser. When
+> enabled, the EPP injects the resolved request priority into the outgoing request
+> body's `priority` field (client-supplied `priority` is replaced so backend-native
+> priority scheduling is governed by EPP). When disabled, the request body is
+> forwarded unchanged.
 
 ---
 

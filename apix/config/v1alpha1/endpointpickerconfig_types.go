@@ -364,6 +364,13 @@ type RequestHandlerConfig struct {
 	// Parsers specifies the parsing plugins used by the EPP to process protocol messages.
 	// If unspecified, default parsing behavior will be applied.
 	Parsers []ParserConfig `json:"parsers,omitempty"`
+
+	// +optional
+	// PropagatePriority, when true, lets the EPP inject the resolved request
+	// priority into the outbound request body's top-level "priority" field so the
+	// backend's native priority scheduler can consume it. It is off by default:
+	// when disabled the request body is forwarded unchanged.
+	PropagatePriority bool `json:"propagatePriority,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -377,6 +384,9 @@ func (rhc *RequestHandlerConfig) String() string {
 			parserStrs[i] = rhc.Parsers[i].String()
 		}
 		parts = append(parts, fmt.Sprintf("Parsers: [%s]", strings.Join(parserStrs, ", ")))
+	}
+	if rhc.PropagatePriority {
+		parts = append(parts, "PropagatePriority: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }

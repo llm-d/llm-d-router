@@ -53,12 +53,7 @@ var (
 )
 
 type AnthropicParser struct {
-	typedName         fwkplugin.TypedName
-	propagatePriority bool
-}
-
-type anthropicParserConfig struct {
-	PropagatePriority bool `json:"propagatePriority"`
+	typedName fwkplugin.TypedName
 }
 
 func NewAnthropicParser() *AnthropicParser {
@@ -81,17 +76,8 @@ func (p *AnthropicParser) Claims() fwkrh.Claims {
 	}
 }
 
-func AnthropicParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	parser := NewAnthropicParser().WithName(name)
-	if parameters == nil {
-		return parser, nil
-	}
-	var cfg anthropicParserConfig
-	if err := parameters.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode anthropic parser parameters: %w", err)
-	}
-	parser.propagatePriority = cfg.PropagatePriority
-	return parser, nil
+func AnthropicParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	return NewAnthropicParser().WithName(name), nil
 }
 
 func (p *AnthropicParser) WithName(name string) *AnthropicParser {
@@ -154,11 +140,11 @@ func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, mod
 }
 
 // RewritePriority removes any client-supplied priority from the Anthropic
-// messages payload and, when priority propagation is enabled, writes the
-// resolved EPP priority. See parsers.RewritePriority for the cross-backend
-// priority semantics.
+// messages payload and writes the resolved EPP priority. The director only calls
+// this when priority propagation is enabled; see parsers.RewritePriority for the
+// cross-backend priority semantics.
 func (p *AnthropicParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	return parsers.RewritePriority(ctx, payload, p.propagatePriority, priority)
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {

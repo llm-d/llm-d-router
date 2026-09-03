@@ -79,12 +79,7 @@ var (
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
 // https://developers.openai.com/api/reference/overview
 type OpenAIParser struct {
-	typedName         fwkplugin.TypedName
-	propagatePriority bool
-}
-
-type openAIParserConfig struct {
-	PropagatePriority bool `json:"propagatePriority"`
+	typedName fwkplugin.TypedName
 }
 
 // NewOpenAIParser creates a new OpenAIParser.
@@ -119,17 +114,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 	}
 }
 
-func OpenAIParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	parser := NewOpenAIParser().WithName(name)
-	if parameters == nil {
-		return parser, nil
-	}
-	var cfg openAIParserConfig
-	if err := parameters.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode openai parser parameters: %w", err)
-	}
-	parser.propagatePriority = cfg.PropagatePriority
-	return parser, nil
+func OpenAIParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	return NewOpenAIParser().WithName(name), nil
 }
 
 func (p *OpenAIParser) WithName(name string) *OpenAIParser {
@@ -195,11 +181,11 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 }
 
 // RewritePriority removes any client-supplied priority from the
-// OpenAI-compatible request payload and, when priority propagation is enabled,
-// writes the resolved EPP priority. See parsers.RewritePriority for the
-// cross-backend priority semantics.
+// OpenAI-compatible request payload and writes the resolved EPP priority. The
+// director only calls this when priority propagation is enabled; see
+// parsers.RewritePriority for the cross-backend priority semantics.
 func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	return parsers.RewritePriority(ctx, payload, p.propagatePriority, priority)
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 // maxOutputTokensForAPI normalizes the per-API output-token cap field into a

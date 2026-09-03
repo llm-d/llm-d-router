@@ -56,12 +56,7 @@ var (
 // SGLangHTTPParser implements fwkrh.Parser for SGLang's native /generate
 // endpoint. Only pre-tokenized prompts are supported.
 type SGLangHTTPParser struct {
-	typedName         fwkplugin.TypedName
-	propagatePriority bool
-}
-
-type sgLangHTTPParserConfig struct {
-	PropagatePriority bool `json:"propagatePriority"`
+	typedName fwkplugin.TypedName
 }
 
 // NewSGLangHTTPParser creates a new SGLangHTTPParser.
@@ -75,17 +70,8 @@ func NewSGLangHTTPParser() *SGLangHTTPParser {
 }
 
 // SGLangHTTPParserPluginFactory is the factory function used to register the plugin.
-func SGLangHTTPParserPluginFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	parser := NewSGLangHTTPParser().WithName(name)
-	if parameters == nil {
-		return parser, nil
-	}
-	var cfg sgLangHTTPParserConfig
-	if err := parameters.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode sglanghttp parser parameters: %w", err)
-	}
-	parser.propagatePriority = cfg.PropagatePriority
-	return parser, nil
+func SGLangHTTPParserPluginFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	return NewSGLangHTTPParser().WithName(name), nil
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -165,11 +151,11 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 }
 
 // RewritePriority removes any client-supplied priority from the SGLang /generate
-// payload and, when priority propagation is enabled, writes the resolved EPP
-// priority. See parsers.RewritePriority for the cross-backend priority
-// semantics.
+// payload and writes the resolved EPP priority. The director only calls this when
+// priority propagation is enabled; see parsers.RewritePriority for the
+// cross-backend priority semantics.
 func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	return parsers.RewritePriority(ctx, payload, p.propagatePriority, priority)
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 func hasJSONValue(data json.RawMessage) bool {

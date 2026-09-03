@@ -352,6 +352,11 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 
 func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
 	logger := log.FromContext(ctx)
+	// Priority propagation is an explicit opt-in policy; when disabled the request
+	// body is forwarded unchanged.
+	if !d.requestControlPlugins.propagatePriority {
+		return nil
+	}
 	rewriter, ok := reqCtx.Parser.(fwkrh.PriorityRewriter)
 	if !ok {
 		logger.V(logutil.DEBUG).Info("parser does not implement PriorityRewriter, skipping priority rewrite")
