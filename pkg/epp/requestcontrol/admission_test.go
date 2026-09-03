@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -206,24 +208,27 @@ func TestFlowControlAdmissionController_RequestTTL(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name          string
-		headerName    string
-		header        string
-		headerPresent bool
-		wantTTL       time.Duration
+		name           string
+		headerName     string
+		header         string
+		headerPresent  bool
+		wantTTL        time.Duration
+		wantInvalidLog bool
 	}{
 		{name: "valid", headerName: metadata.InferenceTTLHeaderKey, header: " 2s ", headerPresent: true, wantTTL: 2 * time.Second},
 		{name: "missing"},
-		{name: "empty", headerName: metadata.InferenceTTLHeaderKey, header: " ", headerPresent: true},
-		{name: "malformed", headerName: metadata.InferenceTTLHeaderKey, header: "soon", headerPresent: true},
-		{name: "overflow", headerName: metadata.InferenceTTLHeaderKey, header: "999999999999999999999h", headerPresent: true},
-		{name: "zero", headerName: metadata.InferenceTTLHeaderKey, header: "0s", headerPresent: true},
-		{name: "negative", headerName: metadata.InferenceTTLHeaderKey, header: "-1s", headerPresent: true},
+		{name: "empty", headerName: metadata.InferenceTTLHeaderKey, header: " ", headerPresent: true, wantInvalidLog: true},
+		{name: "malformed", headerName: metadata.InferenceTTLHeaderKey, header: "soon", headerPresent: true, wantInvalidLog: true},
+		{name: "overflow", headerName: metadata.InferenceTTLHeaderKey, header: "999999999999999999999h", headerPresent: true, wantInvalidLog: true},
+		{name: "zero", headerName: metadata.InferenceTTLHeaderKey, header: "0s", headerPresent: true, wantInvalidLog: true},
+		{name: "negative", headerName: metadata.InferenceTTLHeaderKey, header: "-1s", headerPresent: true, wantInvalidLog: true},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			writer := &strings.Builder{}
+			ctx := log.IntoContext(context.Background(), logutil.NewTestLoggerWithWriter(writer))
 			headers := map[string]string{}
 			if tc.headerPresent {
 				headers[tc.headerName] = tc.header
@@ -235,11 +240,18 @@ func TestFlowControlAdmissionController_RequestTTL(t *testing.T) {
 			fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched}
 			controller := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
 
-			err := controller.Admit(logutil.NewTestLoggerIntoContext(context.Background()), reqCtx, 0)
+			err := controller.Admit(ctx, reqCtx, 0)
 
 			require.NoError(t, err)
 			require.NotNil(t, fc.request)
 			assert.Equal(t, tc.wantTTL, fc.request.InitialEffectiveTTL())
+			if tc.wantInvalidLog {
+				assert.Contains(t, writer.String(), "Ignoring invalid request TTL header")
+				assert.Contains(t, writer.String(), `"requestID": "test-req"`)
+				assert.Contains(t, writer.String(), fmt.Sprintf(`"value": %q`, tc.header))
+			} else {
+				assert.NotContains(t, writer.String(), "Ignoring invalid request TTL header")
+			}
 		})
 	}
 }

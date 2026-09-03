@@ -170,6 +170,9 @@ func (fcac *FlowControlAdmissionController) Admit(
 		parsedTTL, err := time.ParseDuration(strings.TrimSpace(rawTTL))
 		if err == nil && parsedTTL > 0 {
 			initialEffectiveTTL = parsedTTL
+		} else {
+			logger.V(logutil.DEBUG).Info("Ignoring invalid request TTL header",
+				"requestID", reqCtx.SchedulingRequest.RequestID, "value", rawTTL, "err", err)
 		}
 	}
 

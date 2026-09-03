@@ -514,6 +514,7 @@ func (fc *FlowController) distributeRequest(
 	item *internal.FlowItem,
 ) error {
 	reqID := item.OriginalRequest().ID()
+	// Reject items that expire during lease acquisition because Submit does not check the context.
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, ctx.Err())

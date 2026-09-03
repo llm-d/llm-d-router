@@ -65,8 +65,11 @@ Tuning knobs, all under the `flowControl:` config section:
 * `defaultRequestTTL` — the queue-wait budget against a pool that has endpoints, and the other way a
   request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
   budget you are willing to spend waiting on a saturated pool. Priority-band entries and templates
-  may replace the global value, including with `0s` for unbounded queue wait. Clients may shorten the
-  selected operator bound with `x-llm-d-inference-ttl` using Go duration syntax.
+  may replace the global value, including with `0s` for unbounded queue wait. Clients may request a
+  shorter TTL with `x-llm-d-inference-ttl` using Go duration syntax. A positive header also sets a TTL
+  when the selected band uses `0s`. The header cannot extend a finite configured TTL. These TTLs apply
+  while the pool has endpoints. When the pool is empty, `noEndpointRequestTTL` controls how long
+  requests wait.
 * `noEndpointRequestTTL` — the queue-wait budget that replaces `defaultRequestTTL` while the pool has
   no endpoints, where the queue acts as a scale-from-zero waiting room. Left unset it follows
   `defaultRequestTTL`, so splitting the regimes is opt-in. Size it above pod startup (image pull plus

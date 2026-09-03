@@ -565,9 +565,10 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
-	// DefaultRequestTTL bounds how long a request may wait in this priority band before it is evicted.
-	// If omitted, the global DefaultRequestTTL is used. An explicit value replaces the global default;
-	// "0s" makes queue wait unbounded for this band.
+	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
+	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
+	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
+	// eviction in this band while the pool has endpoints.
 	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
 
 	// +optional
