@@ -32,7 +32,8 @@ import (
 
 // SpeculativeTier is the tier name under which speculative entries count in
 // PodMatch.BlocksByTier. Speculative entries carry no engine-reported device
-// tier.
+// tier; an entry whose device tier is reported under this name counts in the
+// same chain.
 const SpeculativeTier = "speculative"
 
 // defaultTierWeight scores blocks held in a tier without a configured weight.
@@ -314,7 +315,7 @@ func (a *prefixAccumulator) entry(pod string, podOrdinal uint32, tier string, ti
 		slot.weight = w
 	}
 
-	if speculative {
+	if speculative || tier == SpeculativeTier {
 		tier, tierOrdinal = SpeculativeTier, speculativeTierOrdinal
 	}
 	for i := range slot.tiers {

@@ -184,6 +184,24 @@ func TestMatchBlockKeysCancelled(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// A device tier reported under the speculative tier's name and speculative
+// entries form one chain, as the per-tier counters always treated them.
+func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "pod-a", DeviceTier: kvcache.SpeculativeTier}},
+		20: {{PodIdentifier: "pod-a", Speculative: true}},
+		30: {{PodIdentifier: "pod-a", DeviceTier: kvcache.SpeculativeTier}},
+	})
+
+	got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30}, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		"pod-a": {WeightedScore: 3.0, MatchedBlocks: 3, BlocksByTier: map[string]int{kvcache.SpeculativeTier: 3}},
+	}, got)
+}
+
 // Pod churn (index ordinals assigned to pods since cleared) must change
 // neither the result nor its size.
 func TestMatchBlockKeysAfterPodChurn(t *testing.T) {
@@ -237,7 +255,7 @@ func TestMatchBlockKeysManyTiers(t *testing.T) {
 func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 	rng := rand.New(rand.NewSource(1))
-	tiers := []string{"gpu", "cpu", "disk"}
+	tiers := []string{"gpu", "cpu", "disk", kvcache.SpeculativeTier}
 	backends := []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.0}, {Name: "cpu", Weight: 0.8}}
 	weights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
 
