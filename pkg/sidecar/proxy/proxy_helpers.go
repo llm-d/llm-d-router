@@ -90,16 +90,24 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			}
 		}
 
-		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			CipherSuites: []uint16{
+		minVersion := s.config.TLSMinVersion
+		if minVersion == 0 {
+			minVersion = tls.VersionTLS12
+		}
+		cipherSuites := s.config.TLSCipherSuites
+		if len(cipherSuites) == 0 {
+			cipherSuites = []uint16{
 				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			},
+			}
+		}
+		server.TLSConfig = &tls.Config{
+			MinVersion:     minVersion,
+			CipherSuites:   cipherSuites,
 			GetCertificate: getCertificate,
 		}
 		s.logger.Info("server TLS configured")

@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -1304,6 +1305,67 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 
 		})
 	}
+}
+
+func TestCompleteTLSServingProfile(t *testing.T) {
+	tests := []struct {
+		name                 string
+		flags                []string
+		expectedMinVersion   uint16
+		expectedCipherSuites []uint16
+		expectedError        string
+	}{
+		{
+			name: "valid profile",
+			flags: []string{
+				"--tls-min-version=VersionTLS13",
+				"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			},
+			expectedMinVersion: tls.VersionTLS13,
+			expectedCipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:          "invalid minimum version",
+			flags:         []string{"--tls-min-version=VersionTLS14"},
+			expectedError: `invalid tls-min-version "VersionTLS14"`,
+		},
+		{
+			name:          "invalid cipher suite",
+			flags:         []string{"--tls-cipher-suites=FAKE_CIPHER_SUITE"},
+			expectedError: `invalid tls-cipher-suites: unknown cipher suite "FAKE_CIPHER_SUITE"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, flagSet := newTestOptions(t)
+			require.NoError(t, flagSet.Parse(tt.flags))
+
+			err := opts.Complete()
+			if tt.expectedError != "" {
+				require.ErrorContains(t, err, tt.expectedError)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedMinVersion, opts.TLSMinVersion)
+			require.Equal(t, tt.expectedCipherSuites, opts.TLSCipherSuites)
+		})
+	}
+}
+
+func TestCompleteTLSServingProfileFromYAML(t *testing.T) {
+	opts, flagSet := newTestOptions(t)
+	require.NoError(t, flagSet.Parse([]string{
+		`--configuration={tls-min-version: VersionTLS12, tls-cipher-suites: [TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]}`,
+	}))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, uint16(tls.VersionTLS12), opts.TLSMinVersion)
+	require.Equal(t, []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, opts.TLSCipherSuites)
 }
 
 // TestResolveHostsToIPs tests the DNS resolution helper function that
