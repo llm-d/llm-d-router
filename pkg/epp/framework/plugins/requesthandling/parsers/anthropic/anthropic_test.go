@@ -44,6 +44,29 @@ func TestNewAnthropicParser(t *testing.T) {
 	}
 }
 
+func TestAnthropicParser_PreservesTemplateControls(t *testing.T) {
+	parsed, err := NewAnthropicParser().ParseRequest(
+		context.Background(),
+		[]byte(`{
+			"model":"zai-org/GLM-5.2-FP8",
+			"max_tokens":512,
+			"messages":[{"role":"user","content":"Hello"}],
+			"chat_template_kwargs":{"enable_thinking":false,"custom":"value"},
+			"output_config":{"effort":"high"}
+		}`),
+		map[string]string{":path": "/v1/messages"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, parsed.Body.Messages)
+
+	assert.Equal(t, map[string]any{
+		"enable_thinking": false,
+		"custom":          "value",
+	}, parsed.Body.Messages.ChatTemplateKWArgs)
+	require.NotNil(t, parsed.Body.Messages.OutputConfig)
+	assert.Equal(t, "high", parsed.Body.Messages.OutputConfig.Effort)
+}
+
 func TestAnthropicParser_ParseRequest(t *testing.T) {
 	parser := NewAnthropicParser()
 

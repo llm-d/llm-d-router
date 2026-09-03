@@ -27,6 +27,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 )
 
 // tokenInputProducer turns a request body into a TokenizedRequest. Backends vary
@@ -104,6 +105,10 @@ type renderBackend struct {
 	tk tokenizer
 }
 
+type anthropicRenderer interface {
+	RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest, canonicalizeJSON bool) ([]uint32, *tokenization.MultiModalFeatures, error)
+}
+
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	switch {
 	case body.Completions != nil:
@@ -121,7 +126,16 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
 	case body.Messages != nil:
-		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, messagesPayload(body))
+		var (
+			tokenIDs   []uint32
+			mmFeatures *tokenization.MultiModalFeatures
+			err        error
+		)
+		if renderer, ok := b.tk.(anthropicRenderer); ok {
+			tokenIDs, mmFeatures, err = renderer.RenderAnthropic(ctx, body.Messages, body.Mutated)
+		} else {
+			tokenIDs, mmFeatures, err = b.tk.RenderChat(ctx, messagesPayload(body))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
@@ -175,11 +189,11 @@ func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
 // body uses the Anthropic Messages schema (top-level system, source-based image
 // blocks), which vLLM /render does not accept, so the payload is always rebuilt
 // from the typed struct into the /render chat schema regardless of body.Payload.
-// Messages and tools are embedded as raw JSON rather than decoded maps: Go maps
-// re-serialize with sorted keys, which would reorder tool schemas and break
-// token parity with what vLLM renders server-side.
+// Messages and tools are embedded as raw JSON to avoid another untyped
+// decode-and-encode cycle. Their object order follows the bytes the director
+// forwards: client order for unchanged bodies, PayloadMap order after mutation.
 func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	rr := buildChatRenderRequest(MessagesToRenderChatRequest(body.Messages))
+	rr := buildChatRenderRequest(messagesToRenderChatRequest(body.Messages, false, body.Mutated))
 	msgs := make([]any, len(rr.Messages))
 	for i, m := range rr.Messages {
 		data, _ := json.Marshal(m)

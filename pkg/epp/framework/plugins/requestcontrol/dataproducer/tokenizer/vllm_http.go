@@ -27,6 +27,7 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -69,6 +70,9 @@ type vllmConfig struct {
 	// MMTimeout is the per-request timeout for multimodal requests
 	// (image download/processing). Defaults to 30s.
 	MMTimeout string `json:"mmTimeout,omitempty"`
+	// MergeAnthropicInlineSystem overrides automatic detection of vLLM's
+	// Anthropic inline-system conversion.
+	MergeAnthropicInlineSystem *bool `json:"mergeAnthropicInlineSystem,omitempty"`
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
@@ -79,6 +83,10 @@ type vllmHTTPRenderer struct {
 	modelName string
 	timeout   time.Duration
 	mmTimeout time.Duration
+
+	mergeAnthropicInlineSystem *bool
+	anthropicModeMu            sync.Mutex
+	detectedAnthropicMode      *bool
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, error) {
@@ -100,10 +108,11 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
 		))},
-		baseURL:   url,
-		modelName: modelName,
-		timeout:   timeout,
-		mmTimeout: mmTimeout,
+		baseURL:                    url,
+		modelName:                  modelName,
+		timeout:                    timeout,
+		mmTimeout:                  mmTimeout,
+		mergeAnthropicInlineSystem: cfg.MergeAnthropicInlineSystem,
 	}, nil
 }
 
@@ -172,6 +181,29 @@ func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.Request
 	return r.postChatRender(ctx, body, r.chatTimeout(pm))
 }
 
+// RenderAnthropic converts an Anthropic request using the same inline-system
+// mode as the serving vLLM process and renders the resulting chat request.
+func (r *vllmHTTPRenderer) RenderAnthropic(ctx context.Context, request *fwkrh.MessagesRequest, canonicalizeJSON bool) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	mergeInlineSystem, err := r.anthropicInlineSystemMode(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return r.renderChatRequest(ctx, messagesToRenderChatRequest(request, mergeInlineSystem, canonicalizeJSON))
+}
+
+func (r *vllmHTTPRenderer) renderChatRequest(ctx context.Context, request *tokenizerTypes.RenderChatRequest) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	body := buildChatRenderRequest(request)
+	body.Model = r.modelName
+	timeout := r.timeout
+	for _, message := range request.Conversation {
+		if message.Content != nil && len(message.Content.Structured) > 0 {
+			timeout = r.mmTimeout
+			break
+		}
+	}
+	return r.postChatRender(ctx, body, timeout)
+}
+
 func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout time.Duration) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	var resp renderResponse
 	if err := r.postJSON(ctx, chatRenderPath, body, timeout, &resp); err != nil {
@@ -216,6 +248,7 @@ func (r *vllmHTTPRenderer) produceTimeout() time.Duration {
 // Used by the non-PayloadMap fallback path (gRPC, warmup). The model is
 // stamped in by the renderer, not carried here.
 type chatRenderRequest struct {
+	Model                string         `json:"model,omitempty"`
 	Messages             []chatMessage  `json:"messages"`
 	Tools                []any          `json:"tools,omitempty"`
 	Documents            []any          `json:"documents,omitempty"`
