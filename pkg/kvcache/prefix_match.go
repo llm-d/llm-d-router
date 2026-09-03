@@ -147,6 +147,11 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 			break
 		}
 	}
+	// Cancellation is sampled at checkpoints along the keys and once more at
+	// completion, so a cancelled request never reports a match.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return acc.result(), nil
 }
 

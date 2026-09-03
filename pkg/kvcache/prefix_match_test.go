@@ -202,6 +202,59 @@ func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
 	}, got)
 }
 
+// lateCancelContext reports cancellation from its second poll after arm is
+// called. The matcher polls once at its first checkpoint and once at
+// completion, so the cancellation lands between them, as one arriving
+// mid-walk would.
+type lateCancelContext struct {
+	context.Context
+	armed bool
+	polls int
+}
+
+func (c *lateCancelContext) arm() { c.armed = true }
+
+func (c *lateCancelContext) Err() error {
+	if !c.armed {
+		return c.Context.Err()
+	}
+	c.polls++
+	if c.polls > 1 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// armingIndex arms the request context once the index has been read, so the
+// matcher folds the materialized entries under a context about to be
+// cancelled.
+type armingIndex struct {
+	kvblock.Index
+	ctx *lateCancelContext
+}
+
+func (a armingIndex) Lookup(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+	result, err := a.Index.Lookup(ctx, keys, podFilter)
+	a.ctx.arm()
+	return result, err
+}
+
+// A request cancelled between the matcher's checkpoints, after its keys were
+// read, reports the cancellation rather than a match.
+func TestMatchBlockKeysCancelledBetweenCheckpoints(t *testing.T) {
+	ctx := &lateCancelContext{Context: logging.NewTestLoggerIntoContext(t.Context())}
+	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 256})
+	require.NoError(t, err)
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
+		20: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
+	})
+	indexer := kvcache.NewIndexerForTest(&mockTokenProcessor{}, armingIndex{Index: idx, ctx: ctx}, kvcache.DefaultKVCacheBackendConfig())
+
+	_, err = indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 // Pod churn (index ordinals assigned to pods since cleared) must change
 // neither the result nor its size.
 func TestMatchBlockKeysAfterPodChurn(t *testing.T) {
