@@ -9,6 +9,8 @@ on:
     branches: [ main ]
     types: [ opened, synchronize, reopened ]
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
