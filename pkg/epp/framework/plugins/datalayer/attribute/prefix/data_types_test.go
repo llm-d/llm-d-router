@@ -39,6 +39,7 @@ func TestPrefixCacheMatchInfo_CachedBlockCountDefaultsToMatchBlocks(t *testing.T
 	// Unset cachedBlockCount mirrors matchBlocks so existing producers and
 	// consumers keep their current behavior.
 	assert.Equal(t, 5, info.CachedBlockCount())
+	assert.Equal(t, 5, info.ConfirmedCachedBlockCount())
 }
 
 func TestPrefixCacheMatchInfo_WithCachedBlockCount(t *testing.T) {
@@ -47,6 +48,7 @@ func TestPrefixCacheMatchInfo_WithCachedBlockCount(t *testing.T) {
 	// the unweighted literal count.
 	assert.Equal(t, 192, info.MatchBlocks())
 	assert.Equal(t, 240, info.CachedBlockCount())
+	assert.Equal(t, 240, info.ConfirmedCachedBlockCount())
 }
 
 func TestPrefixCacheMatchInfo_WithConfirmedCachedBlockCount(t *testing.T) {

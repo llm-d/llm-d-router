@@ -337,17 +337,13 @@ func (p *Producer) sourceCachedTokens(ep scheduling.Endpoint) (tokens, blockSize
 }
 
 // cachedTokenCount returns the endpoint's confirmed cached prompt tokens
-// across all tiers, or 0 when its PrefixCacheMatchInfo is absent. Producers
-// without tier data keep their trusted tierless count.
+// across all tiers, or 0 when its PrefixCacheMatchInfo is absent.
 func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
 	info := p.matchInfo(ep)
 	if info == nil {
 		return 0
 	}
-	if info.CachedBlocksByTier() != nil {
-		return info.ConfirmedCachedBlockCount() * info.BlockSizeTokens()
-	}
-	return info.CachedBlockCount() * info.BlockSizeTokens()
+	return info.ConfirmedCachedBlockCount() * info.BlockSizeTokens()
 }
 
 // matchInfo returns the endpoint's PrefixCacheMatchInfo, or nil when absent.
