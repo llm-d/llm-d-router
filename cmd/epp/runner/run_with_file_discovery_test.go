@@ -36,7 +36,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	crossplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin"
+	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
 
@@ -47,7 +47,7 @@ import (
 // RunnableGroup's Ready() gate firing once the plugin loads its initial file,
 // and (c) the health and ext_proc gRPC servers binding their ports.
 func TestRunWithFileDiscovery_Smoke(t *testing.T) {
-	fwkplugin.Register(crossplugin.LocalSyncerType, fwkplugin.StabilityBeta, crossplugin.LocalSyncerFactory)
+	fwkplugin.Register(localsyncer.LocalSyncerType, fwkplugin.StabilityBeta, localsyncer.LocalSyncerFactory)
 
 	dir := t.TempDir()
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
