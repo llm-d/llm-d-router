@@ -18,6 +18,7 @@ package maxscore
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,6 +28,46 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
+
+func TestEqualScoreDistribution(t *testing.T) {
+	// Verifies that concurrent requests with equal scores are distributed
+	// across endpoints via round-robin, not concentrated on one winner.
+	// This prevents routing imbalance when prefix cache affinity causes
+	// all endpoints to receive identical scores.
+	numPods := 8
+	endpoints := make([]fwksched.Endpoint, numPods)
+	for i := 0; i < numPods; i++ {
+		endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID: k8stypes.NamespacedName{Name: fmt.Sprintf("pod%d", i)},
+		}, nil, nil)
+	}
+
+	picker := NewMaxScorePicker(1)
+	picks := make(map[string]int)
+
+	// Simulate 80 concurrent requests all seeing the same scores
+	for i := 0; i < 80; i++ {
+		scored := make([]*fwksched.ScoredEndpoint, numPods)
+		for j := 0; j < numPods; j++ {
+			scored[j] = &fwksched.ScoredEndpoint{Endpoint: endpoints[j], Score: 50} // all equal
+		}
+		result := picker.Pick(context.Background(), scored)
+		winner := result.TargetEndpoints[0].String()
+		picks[winner]++
+	}
+
+	// Each pod should get exactly 10 requests (80/8)
+	for pod, count := range picks {
+		if count != 10 {
+			t.Errorf("Pod %s got %d requests, expected 10 (even distribution)", pod, count)
+		}
+	}
+
+	// All 8 pods should have been picked
+	if len(picks) != numPods {
+		t.Errorf("Only %d of %d pods were picked — routing imbalance", len(picks), numPods)
+	}
+}
 
 func TestPickMaxScorePicker(t *testing.T) {
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)

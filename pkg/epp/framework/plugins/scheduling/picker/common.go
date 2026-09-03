@@ -42,8 +42,9 @@ type PickerParameters struct {
 }
 
 type lockedRand struct {
-	mu   sync.Mutex
-	rand *rand.Rand
+	mu      sync.Mutex
+	rand    *rand.Rand
+	counter int // round-robin counter for deterministic tie-breaking, reset when it reaches endpoint count
 }
 
 func newLockedRand() *lockedRand {
@@ -72,10 +73,34 @@ func (r *lockedRand) Shuffle(n int, swap func(i, j int)) {
 // overhead and ensure controlled randomization.
 var PickerRand = newLockedRand()
 
-// ShuffleScoredEndpoints randomizes the order of the given scored candidates in-place.
+// ShuffleScoredEndpoints randomly shuffles the scored endpoints.
 func ShuffleScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint) {
-	// Shuffle in-place
 	PickerRand.Shuffle(len(scoredEndpoints), func(i, j int) {
 		scoredEndpoints[i], scoredEndpoints[j] = scoredEndpoints[j], scoredEndpoints[i]
 	})
+}
+
+// RotateScoredEndpoints provides deterministic round-robin rotation for
+// equal-score endpoints. Under concurrent load with prefix cache affinity,
+// multiple requests can see identical scores simultaneously. Pure random
+// shuffling causes them to converge on the same winner, creating severe
+// routing imbalance. The round-robin counter ensures each call rotates
+// through the endpoints evenly.
+func RotateScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint) {
+	n := len(scoredEndpoints)
+	if n <= 1 {
+		return
+	}
+
+	PickerRand.mu.Lock()
+	defer PickerRand.mu.Unlock()
+
+	PickerRand.counter = (PickerRand.counter + 1) % n
+
+	if PickerRand.counter > 0 {
+		rotated := make([]*fwksched.ScoredEndpoint, n)
+		copy(rotated, scoredEndpoints[PickerRand.counter:])
+		copy(rotated[n-PickerRand.counter:], scoredEndpoints[:PickerRand.counter])
+		copy(scoredEndpoints, rotated)
+	}
 }
