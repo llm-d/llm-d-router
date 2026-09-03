@@ -44,18 +44,20 @@ type EntryRef struct {
 //   - visit runs once per position of requestKeys, in order, until it
 //     returns false, the keys run out, or ctx is cancelled. A key listed
 //     twice is visited at both positions, each visit reading the index anew.
-//   - A key the index does not hold is visited with found=false and no
+//   - found reports whether the index held a generation of the key when the
+//     position was looked up. A miss is visited with found=false and no
 //     entries; the walk continues.
-//   - entries is every record the index holds for the key, unfiltered, in
-//     an order the consumer must not rely on. It is borrowed: read-only and
-//     valid only until visit returns, after which the index may reorder or
-//     overwrite its backing array. Consumers copy what they keep.
-//   - visit must not call back into the index; the key's lock is held for
-//     the duration of the call.
-//   - A visit sees one key's entries as of that instant, exclusive of
-//     writers to that key and of other visits to it. There is no snapshot
-//     across keys: a concurrent Add, Evict, or Clear may be visible at some
-//     positions and not at others.
+//   - entries is every unfiltered record in that generation, in an order the
+//     consumer must not rely on. It is borrowed: read-only and valid only
+//     until visit returns, after which the index may reorder or overwrite its
+//     backing array. Consumers copy what they keep.
+//   - visit must not call back into the index; the generation's lock is held
+//     for the duration of the call.
+//   - A visit sees an internally consistent generation, exclusive of writers
+//     and other visits using that generation. Capacity eviction may detach it
+//     and a later Add may install a new generation of the same key while
+//     visit runs. There is no snapshot across positions: a concurrent Add,
+//     Evict, or Clear may be visible at some positions and not at others.
 //   - Cancellation is polled at the first position, every 256th position
 //     after it, and once more when the walk ends, so a cancelled ctx always
 //     yields ctx.Err(); visits may run between the cancellation and the

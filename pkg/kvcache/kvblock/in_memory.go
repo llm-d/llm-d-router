@@ -265,7 +265,8 @@ func (m *InMemoryIndex) internRecords(entries []PodEntry) ([]EntryRef, error) {
 // 1. A map where the keys are those in (1) and the values are pod-identifiers.
 // 2. An error if any occurred during the operation.
 //
-// Lookup polls cancellation and promotes recency exactly as WalkKeys does.
+// For non-empty requestKeys, Lookup uses WalkKeys' cancellation checkpoints
+// and recency-promotion rules. It retains Lookup's empty-input error.
 func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {
