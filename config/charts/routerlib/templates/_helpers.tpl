@@ -464,7 +464,11 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- $proxy := index $router "proxy" | default dict -}}
 {{- if empty $proxy }}{{ $proxy = .Values.proxy | default dict }}{{ end -}}
 {{- $pr := index $proxy "priorityRouting" | default dict -}}
-{{- if index $pr "enabled" }}true{{ end -}}
+{{- $enabled := index $pr "enabled" -}}
+{{- if and (not (kindIs "invalid" $enabled)) (not (kindIs "bool" $enabled)) -}}
+{{- fail (printf "priorityRouting.enabled must be a boolean, got %q" (toString $enabled)) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $enabled) $enabled }}true{{ end -}}
 {{- end -}}
 
 {{- define "llm-d-router.priorityRouting.primaryReplicas" -}}
@@ -500,8 +504,14 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- fail "priorityRouting is only supported when proxy mode is set to 'service' (router.proxy.mode=service)" -}}
 {{- end -}}
 {{- $eppFlags := .Values.router.epp.flags | default dict -}}
-{{- if and $isPriorityRouting (hasKey $eppFlags "health-checking") (not (index $eppFlags "health-checking")) -}}
+{{- if and $isPriorityRouting (hasKey $eppFlags "health-checking") -}}
+{{- $healthChecking := index $eppFlags "health-checking" -}}
+{{- if not (kindIs "bool" $healthChecking) -}}
+{{- fail (printf ".Values.router.epp.flags.health-checking must be a boolean, got %q" (toString $healthChecking)) -}}
+{{- end -}}
+{{- if not $healthChecking -}}
 {{- fail "priorityRouting requires EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
