@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -24,6 +25,8 @@ const (
 	DefaultContextLengthLabel = "llm-d.ai/context-length-range"
 )
 
+var routingLengthDataKey = plugin.NewDataKey("RoutingLengthDataKey", ContextLengthAwareType)
+
 type contextLengthAwareParameters struct {
 	// Label is the pod label name to check for context length range.
 	// Format expected: "min-max" (e.g., "0-2048" or "2048-8192"), where min and max are positive integers.
@@ -34,6 +37,11 @@ type contextLengthAwareParameters struct {
 	// If false, the plugin only scores pods.
 	// Default is false.
 	EnableFiltering bool `json:"enableFiltering"`
+
+	// ReusableTokensProducerName is the name of the p2p-source-producer whose
+	// reusable prefix token count is subtracted from the request length. Empty
+	// disables cache subtraction.
+	ReusableTokensProducerName string `json:"reusableTokensProducerName,omitempty"`
 }
 
 // contextRange represents a single context length range.
@@ -61,6 +69,9 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 	if parameters.Label == "" {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'label' must be specified", ContextLengthAwareType)
 	}
+	if parameters.ReusableTokensProducerName != "" && parameters.Label == DefaultContextLengthLabel {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: reusableTokensProducerName requires a work-range label other than %q", ContextLengthAwareType, DefaultContextLengthLabel)
+	}
 
 	return NewContextLengthAware(name, parameters), nil
 }
@@ -68,9 +79,13 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 // NewContextLengthAware creates and returns an instance of the ContextLengthAware plugin.
 func NewContextLengthAware(name string, params *contextLengthAwareParameters) *ContextLengthAware {
 	return &ContextLengthAware{
-		typedName:       plugin.TypedName{Type: ContextLengthAwareType, Name: name},
-		labelName:       params.Label,
-		enableFiltering: params.EnableFiltering,
+		typedName:                  plugin.TypedName{Type: ContextLengthAwareType, Name: name},
+		labelName:                  params.Label,
+		enableFiltering:            params.EnableFiltering,
+		reusableTokensProducerName: params.ReusableTokensProducerName,
+		reusableTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.
+			WithNonEmptyProducerName(params.ReusableTokensProducerName),
+		routingLengthDataKey: routingLengthDataKey.WithNonEmptyProducerName(name),
 	}
 }
 
@@ -80,9 +95,10 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // If filtering is enabled, endpoints that don't support the request's context length are filtered out.
 // Additionally, it scores endpoints based on how well their context length ranges match the request.
 //
-// The context length is the token count from InferenceRequestBody.TokenizedRequest as
-// populated by the tokenizer DataProducer plugin. When tokens are not available it is
-// treated as 0 (unknown).
+// The context length is the token count from InferenceRequestBody.TokenizedRequest.
+// When reusableTokensProducerName is configured, the request-wide reusable
+// prefix token floor is subtracted from that count. Missing tokens are treated
+// as 0 (unknown).
 type ContextLengthAware struct {
 	// typedName defines the plugin typed name
 	typedName plugin.TypedName
@@ -90,6 +106,12 @@ type ContextLengthAware struct {
 	labelName string
 	// enableFiltering indicates whether filtering is enabled
 	enableFiltering bool
+	// reusableTokensProducerName enables cache subtraction when non-empty.
+	reusableTokensProducerName string
+	// reusableTokensDataKey identifies the configured producer's request data.
+	reusableTokensDataKey plugin.DataKey
+	// routingLengthDataKey identifies this plugin instance's request snapshot.
+	routingLengthDataKey plugin.DataKey
 }
 
 // TypedName returns the typed name of the plugin.
@@ -100,15 +122,22 @@ func (p *ContextLengthAware) TypedName() plugin.TypedName {
 // WithName sets the name of the plugin.
 func (p *ContextLengthAware) WithName(name string) *ContextLengthAware {
 	p.typedName.Name = name
+	p.routingLengthDataKey = routingLengthDataKey.WithNonEmptyProducerName(name)
 	return p
 }
 
-// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
-// the token-producer before this plugin runs and auto-creates one when none is
-// configured; the context length is the token count it provides.
+// Consumes declares the TokenizedRequest dependency and, when configured, the
+// reusable prefix token dependency. The data-layer DAG orders those producers
+// before this plugin runs.
 func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
+	required := map[plugin.DataKey]any{
+		tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+	}
+	if p.reusableTokensProducerName != "" {
+		required[p.reusableTokensDataKey] = attrprefix.ReusablePrefixTokens(0)
+	}
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
+		Required: required,
 	}
 }
 
@@ -120,7 +149,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 	}
 
 	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Filter")
-	contextLength := getContextLength(request)
+	contextLength := p.getContextLength(request)
 	logger.V(logging.TRACE).Info("Filtering endpoints by context length", "contextLength", contextLength)
 
 	filteredEndpoints := []scheduling.Endpoint{}
@@ -160,7 +189,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 // Endpoints with tighter/more specific ranges matching the request get higher scores.
 func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Score")
-	contextLength := getContextLength(request)
+	contextLength := p.getContextLength(request)
 	logger.V(logging.TRACE).Info("Scoring endpoints by context length", "contextLength", contextLength)
 
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
@@ -199,14 +228,38 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
 }
 
-// getContextLength returns the context length (token count) for the request, read solely
-// from InferenceRequestBody.TokenizedRequest as populated by the tokenizer DataProducer
-// plugin. When tokens are unavailable it returns 0 (unknown).
-func getContextLength(request *scheduling.InferenceRequest) int {
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+// getContextLength returns the token count after subtracting the configured
+// producer's reusable prefix token floor. Positive token counts have at least
+// one token of prefill work. Missing reusable-token data leaves the total token
+// count unchanged. When tokens are unavailable it returns 0. With cache
+// subtraction enabled, the result is stored per request and plugin instance so
+// Filter and Score use the same value.
+func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceRequest) int {
+	if request == nil {
 		return 0
 	}
-	return request.Body.TokenizedRequest.TokenCount()
+	if p.reusableTokensProducerName == "" {
+		if request.Body == nil || request.Body.TokenizedRequest == nil {
+			return 0
+		}
+		return request.Body.TokenizedRequest.TokenCount()
+	}
+	if routingLength, ok := scheduling.ReadRequestAttribute[int](request, p.routingLengthDataKey); ok {
+		return routingLength
+	}
+
+	routingLength := 0
+	if request.Body != nil && request.Body.TokenizedRequest != nil {
+		total := request.Body.TokenizedRequest.TokenCount()
+		routingLength = total
+		if total > 0 {
+			if reusable, ok := scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](request, p.reusableTokensDataKey); ok {
+				routingLength = max(1, total-int(reusable))
+			}
+		}
+	}
+	request.PutAttribute(p.routingLengthDataKey, routingLength)
+	return routingLength
 }
 
 // parseContextRange parses a label value into a single context range.

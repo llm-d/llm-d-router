@@ -17,6 +17,7 @@ limitations under the License.
 package p2psource
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -56,6 +58,11 @@ func decodeOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 			"decode": {TargetEndpoints: []scheduling.Endpoint{ep}},
 		},
 	}
+}
+
+func readReusablePrefixTokens(request *scheduling.InferenceRequest, producerName string) (attrprefix.ReusablePrefixTokens, bool) {
+	key := attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName)
+	return scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](request, key)
 }
 
 // Factory defaults: token delta 1, default PrefixCacheMatchInfo producer.
@@ -88,6 +95,21 @@ func TestPluginFactory_RejectsZeroDelta(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNew_DefaultsMinCachedTokenDelta(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{})
+	req := &scheduling.InferenceRequest{RequestID: "req-new-default"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		tierEndpoint(p, "pod-a", "10.0.0.1", 4, map[string]int{cpuDeviceTier: 4}),
+	}))
+
+	assert.Equal(t, defaultMinCachedTokenDelta, p.minCachedTokenDelta)
+	got, ok := readReusablePrefixTokens(req, "test")
+	require.True(t, ok)
+	assert.Equal(t, attrprefix.ReusablePrefixTokens(4*testBlockSize), got)
+}
+
 // Produce stashes the endpoint holding the most cached prompt tokens.
 func TestProduce_StashesBestMatchPeer(t *testing.T) {
 	ctx := utils.NewTestContext(t)
@@ -104,6 +126,124 @@ func TestProduce_StashesBestMatchPeer(t *testing.T) {
 	require.True(t, ok, "expected best-match attribute to be stashed")
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 	assert.Equal(t, 48, best.cachedTokens)
+}
+
+func TestProduce_PublishesReusablePrefixTokens(t *testing.T) {
+	tests := []struct {
+		name        string
+		cached      int
+		delta       int
+		wantTokens  attrprefix.ReusablePrefixTokens
+		wantPresent bool
+	}{
+		{name: "delta one", cached: 4, delta: 1, wantTokens: 4 * testBlockSize, wantPresent: true},
+		{name: "delta equals source", cached: 4, delta: 4 * testBlockSize, wantTokens: 1, wantPresent: true},
+		{name: "delta exceeds source", cached: 4, delta: 4*testBlockSize + 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			p := New("test", Config{MinCachedTokenDelta: tt.delta})
+			req := &scheduling.InferenceRequest{RequestID: "req-floor-" + tt.name}
+
+			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+				tierEndpoint(p, "pod-a", "10.0.0.1", tt.cached, map[string]int{cpuDeviceTier: tt.cached}),
+			}))
+
+			got, ok := readReusablePrefixTokens(req, "test")
+			assert.Equal(t, tt.wantPresent, ok)
+			if tt.wantPresent {
+				assert.Equal(t, tt.wantTokens, got)
+			}
+			_, hasBest := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+			assert.True(t, hasBest)
+		})
+	}
+}
+
+func TestProduce_NoSource_NoReusablePrefixTokens(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-no-floor"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		endpoint(p, "pod-a", "10.0.0.1", 0),
+	}))
+
+	_, ok := readReusablePrefixTokens(req, "test")
+	assert.False(t, ok)
+}
+
+func TestProduce_CancelledContextDoesNotStoreAttributes(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	cancel()
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-cancelled"}
+
+	err := p.Produce(ctx, req, []scheduling.Endpoint{
+		tierEndpoint(p, "pod-a", "10.0.0.1", 4, map[string]int{cpuDeviceTier: 4}),
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	_, hasBest := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	assert.False(t, hasBest)
+	_, hasReusable := readReusablePrefixTokens(req, "test")
+	assert.False(t, hasReusable)
+}
+
+func TestProduce_ReusablePrefixTokensUsesSampledSource(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	eps := []scheduling.Endpoint{
+		tierEndpointWithLoad(p, "pod-ahead", "10.0.0.1", 4, 20),
+		tierEndpointWithLoad(p, "pod-short", "10.0.0.2", 3, 0),
+	}
+
+	foundShort := false
+	for i := 0; i < 400; i++ {
+		req := &scheduling.InferenceRequest{RequestID: fmt.Sprintf("floor-band-%d", i)}
+		require.NoError(t, p.Produce(ctx, req, eps))
+		best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+		require.True(t, ok)
+		if best.hostPort != "10.0.0.2:8080" {
+			continue
+		}
+
+		got, ok := readReusablePrefixTokens(req, "test")
+		require.True(t, ok)
+		assert.Equal(t, attrprefix.ReusablePrefixTokens(3*testBlockSize), got)
+		foundShort = true
+		break
+	}
+	assert.True(t, foundShort, "expected the one-block-short source to be sampled")
+}
+
+func TestProduce_ReusablePrefixTokensKeyUsesInstanceName(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("custom", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-custom-key"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		tierEndpoint(p, "pod-a", "10.0.0.1", 2, map[string]int{cpuDeviceTier: 2}),
+	}))
+
+	got, ok := readReusablePrefixTokens(req, "custom")
+	require.True(t, ok)
+	assert.Equal(t, attrprefix.ReusablePrefixTokens(2*testBlockSize), got)
+	_, ok = scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](req, attrprefix.ReusablePrefixTokensDataKey)
+	assert.False(t, ok)
+}
+
+func TestProduces_DeclaresReusablePrefixTokens(t *testing.T) {
+	p := New("custom", Config{MinCachedTokenDelta: 1})
+	key := attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName("custom")
+
+	produced := p.Produces()
+	require.Len(t, produced, 1)
+	assert.Equal(t, attrprefix.ReusablePrefixTokens(0), produced[key])
+	assert.IsType(t, attrprefix.ReusablePrefixTokens(0), produced[key])
+	assert.Equal(t, plugin.NewDataKey("ReusablePrefixTokensDataKey", "custom").String(), key.String())
 }
 
 // No candidate holds any cached block: nothing to pull, no attribute.
@@ -343,6 +483,20 @@ func endpointWithLoad(p *Producer, name, address string, cachedBlocks, waiting i
 	return e
 }
 
+func tierEndpointWithLoad(p *Producer, name, address string, cachedBlocks, waiting int) scheduling.Endpoint {
+	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      k8stypes.NamespacedName{Name: name},
+		Address: address,
+		Port:    "8080",
+	}, &fwkdl.Metrics{WaitingQueueSize: waiting}, nil)
+	e.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).
+			WithCachedBlockCount(cachedBlocks).
+			WithConfirmedCachedBlockCount(cachedBlocks).
+			WithCachedBlocksByTier(map[string]int{cpuDeviceTier: cachedBlocks}))
+	return e
+}
+
 // Equally-cached peers share pull traffic proportionally to 1/(1+queue):
 // the shortest queue receives the most requests, deeper queues fewer, and a
 // small queue difference shifts share without starving anyone.
@@ -494,6 +648,12 @@ func TestProduce_NilMetrics_NeutralLoad(t *testing.T) {
 // tierEndpoint builds a candidate whose PrefixCacheMatchInfo carries a
 // per-tier cached-block map alongside the unweighted total.
 func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier map[string]int) scheduling.Endpoint {
+	return tierEndpointWithConfirmed(p, name, address, cachedBlocks, cachedBlocks, byTier)
+}
+
+func tierEndpointWithConfirmed(
+	p *Producer, name, address string, cachedBlocks, confirmedCachedBlocks int, byTier map[string]int,
+) scheduling.Endpoint {
 	e := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
 		ID:      k8stypes.NamespacedName{Name: name},
 		Address: address,
@@ -502,6 +662,7 @@ func tierEndpoint(p *Producer, name, address string, cachedBlocks int, byTier ma
 	e.Put(p.prefixMatchDataKey,
 		attrprefix.NewPrefixCacheMatchInfo(cachedBlocks, 4, testBlockSize).
 			WithCachedBlockCount(cachedBlocks).
+			WithConfirmedCachedBlockCount(confirmedCachedBlocks).
 			WithCachedBlocksByTier(byTier))
 	return e
 }
@@ -522,6 +683,19 @@ func TestProduce_GPUOnlySource_NotChosen(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 	assert.Equal(t, 3*testBlockSize, best.cachedTokens)
+}
+
+func TestProduce_GPUOnlySource_NoReusablePrefixTokens(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+	req := &scheduling.InferenceRequest{RequestID: "req-gpu-only-floor"}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{
+		tierEndpoint(p, "pod-gpu", "10.0.0.1", 10, map[string]int{"gpu": 10}),
+	}))
+
+	_, ok := readReusablePrefixTokens(req, "test")
+	assert.False(t, ok)
 }
 
 // Speculative entries must not make an endpoint a pull source.
@@ -554,9 +728,11 @@ func TestProduce_NoTierData_FallsBackToUnweighted(t *testing.T) {
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
 	require.True(t, ok)
 	assert.Equal(t, 4*testBlockSize, best.cachedTokens)
+	_, hasReusable := readReusablePrefixTokens(req, "test")
+	assert.False(t, hasReusable)
 }
 
-// The computing side of the delta stays tier-blind.
+// The computing side counts confirmed local blocks across every real tier.
 func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 2 * testBlockSize})
@@ -570,4 +746,44 @@ func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
 
 	// source 6 cpu blocks minus computing 5 (gpu, but local) = 1 block < delta.
 	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
+}
+
+func TestPreRequest_TierDataWithoutConfirmedCountUsesCachedCount(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 2 * testBlockSize})
+
+	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
+	computing := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      k8stypes.NamespacedName{Name: "pod-comp"},
+		Address: "10.0.0.2",
+		Port:    "8080",
+	}, nil, nil)
+	computing.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(5, 6, testBlockSize).
+			WithCachedBlockCount(5).
+			WithCachedBlocksByTier(map[string]int{"gpu": 5}))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-tier-default", Headers: map[string]string{}}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
+
+	// The source leads by one block, below the two-block delta. A producer that
+	// publishes tier data without setting a separate confirmed count preserves
+	// its cached count, so the pull remains suppressed.
+	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
+}
+
+func TestPreRequest_SpeculativeComputingCacheDoesNotSuppressHeader(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
+	computing := tierEndpointWithConfirmed(p, "pod-comp", "10.0.0.2", 6, 0,
+		map[string]int{attrprefix.SpeculativeTierKey: 6})
+	req := &scheduling.InferenceRequest{RequestID: "req-speculative-computing", Headers: map[string]string{}}
+
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
+
+	assert.Equal(t, "10.0.0.1:8080", req.Headers[routing.KVCacheSourceHeader])
 }
