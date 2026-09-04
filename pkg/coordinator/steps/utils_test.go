@@ -73,6 +73,12 @@ func TestCapSingleTokenOutput(t *testing.T) {
 			},
 		},
 		{
+			name:   "responses caps max_output_tokens and forces non-streaming",
+			format: gateway.FormatResponses,
+			body:   map[string]any{"model": "m", "max_output_tokens": 100, "stream": true},
+			want:   map[string]any{"model": "m", "max_tokens": 1, "max_output_tokens": 1, "stream": false},
+		},
+		{
 			name:   "max_completion_tokens is not added when the client omitted it",
 			format: gateway.FormatChatCompletions,
 			body:   map[string]any{"model": "m"},
