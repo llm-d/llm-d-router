@@ -628,7 +628,11 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
-	mux.HandleFunc("POST "+GeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
+	nativeGeneratePath := GeneratePath
+	if s.config.KVConnector == KVConnectorSGLang {
+		nativeGeneratePath = sglangGeneratePath
+	}
+	mux.HandleFunc("POST "+nativeGeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 

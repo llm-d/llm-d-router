@@ -55,16 +55,10 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.proxy.readyCh
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
-		By("sending a /v1/chat/completions request with prefill header")
-		body := `{
-				"model": "Qwen/Qwen2-0.5B",
-				"messages": [
-				  {"role": "user", "content": "Hello"}
-				],
-				"max_tokens": 50
-			}`
+		By("sending a tokenized /generate request with prefill header")
+		body := `{"input_ids":[1,2,3],"sampling_params":{"max_new_tokens":8}}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+sglangGeneratePath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -111,6 +105,7 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(drq1[requestFieldBootstrapHost]).To(Equal(expectedHost))
 		Expect(drq1[requestFieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
 		Expect(drq1[requestFieldBootstrapRoom]).To(Equal(prq1[requestFieldBootstrapRoom])) // Room ID must match
+		Expect(drq1["input_ids"]).To(Equal(prq1["input_ids"]))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

@@ -52,6 +52,9 @@ const (
 
 	// GeneratePath is vLLM's token-in generate endpoint
 	GeneratePath = "/inference/v1/generate"
+
+	// sglangGeneratePath is SGLang's native generation endpoint.
+	sglangGeneratePath = "/generate"
 )
 
 func openAIAPIAttr(apiType APIType) attribute.KeyValue {
