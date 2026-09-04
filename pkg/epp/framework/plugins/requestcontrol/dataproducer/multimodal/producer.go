@@ -51,6 +51,11 @@ const (
 
 	// bytesPerImage is the assumed memory per tracked image.
 	bytesPerImage = 2 * 1024 * 1024
+
+	// defaultEncodeProfile is the scheduling profile that selects encode-stage
+	// endpoints. It matches the disagg-profile-handler default and is
+	// overridable via the encodeProfile parameter.
+	defaultEncodeProfile = "encode"
 )
 
 var (
@@ -67,6 +72,11 @@ var (
 type Parameters struct {
 	// CacheSizeInMBPerServer is the per-endpoint LRU memory budget in mebibytes (MiB).
 	CacheSizeInMBPerServer int `json:"cacheSizeInMBPerServer"`
+
+	// EncodeProfile names the scheduling profile that selects encode-stage
+	// endpoints in disaggregated serving. Must match the profiles.encode value
+	// configured on disagg-profile-handler. Empty selects the default "encode".
+	EncodeProfile string `json:"encodeProfile,omitempty"`
 }
 
 // lruCapacityFromCacheSizeMB converts a MiB budget to a maximum LRU entry count.
@@ -100,14 +110,15 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 // encoder-cache entries. Each pod has its own LRU cache of hashes, so eviction
 // is scoped per endpoint rather than global.
 type Producer struct {
-	typedName   plugin.TypedName
-	dk          plugin.DataKey
-	caches      map[string]*lru.Cache[string, struct{}]
-	cacheSize   int
-	pluginState *plugin.PluginState
-	podList     func() []k8stypes.NamespacedName
-	mutex       sync.RWMutex
-	wg          sync.WaitGroup
+	typedName     plugin.TypedName
+	dk            plugin.DataKey
+	caches        map[string]*lru.Cache[string, struct{}]
+	cacheSize     int
+	encodeProfile string
+	pluginState   *plugin.PluginState
+	podList       func() []k8stypes.NamespacedName
+	mutex         sync.RWMutex
+	wg            sync.WaitGroup
 }
 
 type requestState struct {
@@ -124,20 +135,25 @@ func (s *requestState) Clone() plugin.StateData {
 // New creates a Producer.
 func New(ctx context.Context, name string, params *Parameters, podList func() []k8stypes.NamespacedName) (*Producer, error) {
 	cacheSizeMB := 0
+	encodeProfile := defaultEncodeProfile
 	if params != nil {
 		cacheSizeMB = params.CacheSizeInMBPerServer
+		if params.EncodeProfile != "" {
+			encodeProfile = params.EncodeProfile
+		}
 	}
 	cacheSize := lruCapacityFromCacheSizeMB(cacheSizeMB)
 
 	registerEncoderCacheMetrics()
 
 	p := &Producer{
-		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
-		dk:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(name),
-		caches:      make(map[string]*lru.Cache[string, struct{}]),
-		cacheSize:   cacheSize,
-		pluginState: plugin.NewPluginState(ctx),
-		podList:     podList,
+		typedName:     plugin.TypedName{Type: ProducerType, Name: name},
+		dk:            attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(name),
+		caches:        make(map[string]*lru.Cache[string, struct{}]),
+		cacheSize:     cacheSize,
+		encodeProfile: encodeProfile,
+		pluginState:   plugin.NewPluginState(ctx),
+		podList:       podList,
 	}
 	if podList != nil {
 		go p.cleanupLoop(ctx)
