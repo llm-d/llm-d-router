@@ -448,6 +448,20 @@ func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	assert.Contains(t, err.Error(), "only one of")
 }
 
+// The plugin has no UDS backend, so a config still carrying its parameter is
+// rejected by strict decoding rather than silently ignored.
+func TestPluginFactory_RejectsUDSTokenizerConfig(t *testing.T) {
+	params := `{
+		"modelName": "m",
+		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"}
+	}`
+	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
+	require.Error(t, err)
+	assert.Nil(t, p)
+	assert.Contains(t, err.Error(), `unknown field "udsTokenizerConfig"`)
+}
+
 func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
 	params := `{
 		"modelName": "m",
