@@ -1,5 +1,5 @@
-# Consolidated router configuration for optimized-baseline guide
-
+# Router configuration that combines load-aware-scorer with session-affinity-filter and passthrough-parser.
+# Configured with 3 active-active EPP replicas for horizontal scaling benchmark.
 router:
   extraServicePorts:
     - name: http
@@ -8,7 +8,7 @@ router:
       targetPort: 8081
 
   epp:
-    replicas: 1
+    replicas: 3
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-router-endpoint-picker
@@ -18,30 +18,31 @@ router:
       v: 4
       enable-pprof: "true"
       tracing: "false"
+      ha-enable-leader-election: "false"
     pluginsConfigFile: "optimized-baseline-plugins.yaml"
     pluginsCustomConfig:
       optimized-baseline-plugins.yaml: |
         apiVersion: llm-d.ai/v1alpha1
         kind: EndpointPickerConfig
         plugins:
-        - type: queue-scorer
-        - type: kv-cache-utilization-scorer
-        - type: approx-prefix-cache-producer
+        - type: passthrough-parser
+        - type: session-affinity-filter
           parameters:
-            maxPrefixTokensToMatch: 100000
-        - type: prefix-cache-scorer
-        - type: no-hit-lru-scorer
+            headerName: x-session-token
+        - type: load-aware-scorer
+          parameters:
+            threshold: 128
+        - type: weighted-random-picker
+        requestHandler:
+          parsers:
+          - pluginRef: passthrough-parser
         schedulingProfiles:
         - name: default
           plugins:
-          - pluginRef: queue-scorer
-            weight: 2
-          - pluginRef: kv-cache-utilization-scorer
-            weight: 2
-          - pluginRef: prefix-cache-scorer
-            weight: 3
-          - pluginRef: no-hit-lru-scorer
-            weight: 2
+          - pluginRef: session-affinity-filter
+          - pluginRef: load-aware-scorer
+            weight: 5
+          - pluginRef: weighted-random-picker
 
   inferencePool:
     failureMode: "FailOpen"
