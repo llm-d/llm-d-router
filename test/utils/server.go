@@ -38,7 +38,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 )
 
 const bufSize = 1024 * 1024
@@ -72,7 +72,7 @@ func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.Inferenc
 		WithScheme(scheme).
 		WithObjects(initObjs...).
 		Build()
-	pool := testutil.MakeInferencePool(poolName).Namespace(namespace).ObjRef()
+	pool := fwkgaie.MakeInferencePool(poolName).Namespace(namespace).ObjRef()
 	pool.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(poolPort)}}
 	_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(pool))
 

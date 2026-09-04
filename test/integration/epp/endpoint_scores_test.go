@@ -24,7 +24,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 // TestEndpointScoresMetadata verifies the opt-in request-path dynamic metadata contract: with
@@ -79,10 +79,10 @@ func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
 func requestHeaderEnvoyLbMetadata(t *testing.T, h *TestHarness) *structpb.Struct {
 	t.Helper()
 
-	requests := integration.ReqLLM(logger, "hello", modelMyModel, modelMyModelTarget)
+	requests := fwkepp.ReqLLM(Logger(), "hello", modelMyModel, modelMyModelTarget)
 
 	// RequestHeaders + RequestBody -> request header response and request body response.
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 2)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
 	require.NoError(t, err)
 	require.Len(t, responses, 2)
 

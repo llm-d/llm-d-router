@@ -96,7 +96,7 @@ func TestRuntimePollingDispatch(t *testing.T) {
 				},
 			}
 
-			require.NoError(t, r.Configure(cfg, logger))
+			require.NoError(t, r.Configure(cfg, Logger()))
 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -148,7 +148,7 @@ func TestRuntimePollingMultipleExtractors(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -197,7 +197,7 @@ func TestRuntimePollingEndpointLifecycle(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -251,7 +251,7 @@ func TestRuntimePollingWithoutExtractors(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -290,7 +290,7 @@ func TestRuntimePollingHTTPError(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
