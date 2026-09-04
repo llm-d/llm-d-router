@@ -6,7 +6,7 @@ import (
 	"io"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
@@ -39,11 +39,11 @@ type modelsDatasourceParams struct {
 	Interval string `json:"interval"`
 }
 
-// NewHTTPModelsDataSource constructs a ModelsDataSource with the given scheme and path.
-// InsecureSkipVerify defaults to true (matching the factory default).
-// Use this function directly in tests to bypass JSON parameter marshaling.
-func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
-	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
+// NewHTTPModelsDataSource constructs a ModelsDataSource carrying the same defaults the factory
+// applies to an unconfigured models-data-source, for plugins that auto-create one.
+func NewHTTPModelsDataSource(name string) (*http.HTTPDataSource[*attrmodels.ModelResponse], error) {
+	return http.NewHTTPDataSource(defaultModelsScheme, defaultModelsPath,
+		http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
 		ModelsDataSourceType, name, parseModels)
 }
 
@@ -87,12 +87,12 @@ func defaultDataSourceConfigParams() *modelsDatasourceParams {
 	}
 }
 
-func parseModels(data io.Reader) (*extmodels.ModelResponse, error) {
+func parseModels(data io.Reader) (*attrmodels.ModelResponse, error) {
 	body, err := io.ReadAll(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
-	var modelsResponse extmodels.ModelResponse
+	var modelsResponse attrmodels.ModelResponse
 	if err := json.Unmarshal(body, &modelsResponse); err != nil {
 		return nil, err
 	}
