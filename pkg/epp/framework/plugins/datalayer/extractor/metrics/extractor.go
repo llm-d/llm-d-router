@@ -110,6 +110,27 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	return produced
 }
 
+var _ sourcemetrics.FamilyNamer = &Extractor{}
+
+// MetricNames declares every family this extractor can read, letting the
+// metrics data source discard the rest of a scrape before parsing it. The
+// engine of an endpoint is only known at extraction time, so the declaration
+// is the union over all registered mappings.
+func (ext *Extractor) MetricNames() []string {
+	seen := map[string]struct{}{}
+	var names []string
+	for _, mapping := range ext.registry.Mappings() {
+		for _, name := range mapping.MetricNames() {
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // Extract transforms the typed metrics payload into endpoint attributes.
 func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
 	families := in.Payload
