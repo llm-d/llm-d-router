@@ -18,8 +18,8 @@ package scheduling
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -203,105 +204,126 @@ func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
 	assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }
 
-func newDocumentedDecodeSelector(t *testing.T) fwksched.Filter {
-	t.Helper()
-	return newLabelSelector(t, "decode-filter", json.RawMessage(`{
-		"matchExpressions": [
-			{
-				"key": "llm-d.ai/role",
-				"operator": "In",
-				"values": ["decode", "prefill-decode", "encode-prefill-decode"]
+func TestScheduleProfileErrorCause(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		profileName string
+		wrapped     bool
+		wantCause   bool
+	}{
+		{name: "selected profile", profileName: "failed", wantCause: true},
+		{name: "wrapped profile error", profileName: "failed", wrapped: true, wantCause: true},
+		{name: "profile did not run", profileName: "missing"},
+		{name: "profile has no run error", profileName: "empty"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handlerCause := errors.New("required profile produced no result")
+			var handlerErr error = &fwksched.ProfileError{ProfileName: tt.profileName, Err: handlerCause}
+			if tt.wrapped {
+				handlerErr = fmt.Errorf("process results: %w", handlerErr)
 			}
-		]
-	}`))
+			handler := &errorProfileHandler{SingleProfileHandler: single.NewSingleProfileHandler(), err: handlerErr}
+			scheduler := NewSchedulerWithConfig(NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{
+				"failed": NewSchedulerProfile().WithFilters(&testPlugin{}),
+				"empty":  NewSchedulerProfile().WithPicker(&testPlugin{}),
+			}))
+			result, err := scheduler.Schedule(context.Background(), &fwksched.InferenceRequest{TargetModel: "model"}, newTestEndpoints("pod"))
+			require.Nil(t, result)
+			require.ErrorIs(t, err, handlerCause)
+			if tt.wantCause {
+				assertTypedScheduleError(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonSaturated)
+			} else {
+				assert.Same(t, handlerErr, err)
+				var typedErr errcommon.Error
+				assert.False(t, errors.As(err, &typedErr), "unrelated profile error must not replace the handler error")
+			}
+		})
+	}
 }
 
-func newLabelSelector(t *testing.T, name string, rawParams json.RawMessage) fwksched.Filter {
-	t.Helper()
-	plugin, err := bylabel.SelectorFactory(name, fwkplugin.StrictDecoder(rawParams), nil)
-	require.NoError(t, err)
-	filter, ok := plugin.(fwksched.Filter)
-	require.True(t, ok, "label selector factory should return a scheduling filter")
-	return filter
+type errorProfileHandler struct {
+	*single.SingleProfileHandler
+	err error
 }
 
-func newWaitingQueueCapacityFilter(t *testing.T) fwksched.Filter {
-	t.Helper()
-	rawParams := json.RawMessage(`{"conditions":[{"metric":"waiting-queue","maxValue":0}]}`)
-	plugin, err := utilization.Factory("capacity-filter", fwkplugin.StrictDecoder(rawParams), nil)
-	require.NoError(t, err)
-	filter, ok := plugin.(fwksched.Filter)
-	require.True(t, ok, "utilization factory should return a scheduling filter")
-	return filter
+func (h *errorProfileHandler) ProcessResults(context.Context, *fwksched.InferenceRequest,
+	map[string]*fwksched.ProfileRunResult,
+) (*fwksched.SchedulingResult, error) {
+	return nil, h.err
 }
 
 func assertTypedScheduleError(t *testing.T, err error, code string, reason errcommon.RequestDroppedReason) {
 	t.Helper()
-	require.Error(t, err)
 	var typedErr errcommon.Error
-	require.True(t, errors.As(err, &typedErr), "Schedule error is not an errcommon.Error: %v", err)
+	require.ErrorAs(t, err, &typedErr)
 	assert.Equal(t, code, typedErr.Code)
 	assert.Equal(t, string(reason), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }
 
 func TestScheduleEndpointEligibilityClassification(t *testing.T) {
+	decodeSelector, err := bylabel.NewSelector("decode-filter", &metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{{
+			Key:      bylabel.RoleLabel,
+			Operator: metav1.LabelSelectorOpIn,
+			Values:   []string{bylabel.RoleDecode, bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode},
+		}},
+	})
+	require.NoError(t, err)
+	zoneSelector, err := bylabel.NewSelector("zone-filter", &metav1.LabelSelector{MatchLabels: map[string]string{"zone": "b"}})
+	require.NoError(t, err)
+	capacityPlugin, err := utilization.Factory("capacity-filter", fwkplugin.StrictDecoder(
+		[]byte(`{"conditions":[{"metric":"waiting-queue","maxValue":0}]}`)), nil)
+	require.NoError(t, err)
+	capacityFilter := capacityPlugin.(fwksched.Filter)
+	decodeRole := bylabel.NewDecodeRole()
+
 	prefillEndpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 		ID:     k8stypes.NamespacedName{Name: "prefill-pod"},
-		Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+		Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill, "zone": "b"},
 	}, &fwkdl.Metrics{}, nil)
 	saturatedDecodeEndpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 		ID:     k8stypes.NamespacedName{Name: "saturated-decode-pod"},
-		Labels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+		Labels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode, "zone": "a"},
 	}, &fwkdl.Metrics{WaitingQueueSize: 1}, nil)
 
 	tests := []struct {
 		name    string
-		filters func(*testing.T) []fwksched.Filter
+		filters []fwksched.Filter
 		input   []fwksched.Endpoint
 		code    string
 		reason  errcommon.RequestDroppedReason
 	}{
 		{
-			name: "label selector finds no decode endpoint",
-			filters: func(t *testing.T) []fwksched.Filter {
-				return []fwksched.Filter{newDocumentedDecodeSelector(t)}
-			},
-			input:  []fwksched.Endpoint{prefillEndpoint},
-			code:   errcommon.ServiceUnavailable,
-			reason: errcommon.RequestDroppedReasonNoEndpoints,
+			name:    "label selector finds no decode endpoint",
+			filters: []fwksched.Filter{decodeSelector},
+			input:   []fwksched.Endpoint{prefillEndpoint},
+			code:    errcommon.ServiceUnavailable,
+			reason:  errcommon.RequestDroppedReasonNoEndpoints,
 		},
 		{
-			name: "capacity before eligibility",
-			filters: func(t *testing.T) []fwksched.Filter {
-				return []fwksched.Filter{newWaitingQueueCapacityFilter(t), bylabel.NewDecodeRole()}
-			},
-			input:  []fwksched.Endpoint{saturatedDecodeEndpoint, prefillEndpoint},
-			code:   errcommon.ResourceExhausted,
-			reason: errcommon.RequestDroppedReasonSaturated,
+			name:    "capacity before eligibility",
+			filters: []fwksched.Filter{capacityFilter, decodeRole},
+			input:   []fwksched.Endpoint{saturatedDecodeEndpoint, prefillEndpoint},
+			code:    errcommon.ResourceExhausted,
+			reason:  errcommon.RequestDroppedReasonSaturated,
 		},
 		{
-			name: "capacity drains the only eligible endpoint",
-			filters: func(t *testing.T) []fwksched.Filter {
-				return []fwksched.Filter{newWaitingQueueCapacityFilter(t), bylabel.NewDecodeRole()}
-			},
-			input:  []fwksched.Endpoint{saturatedDecodeEndpoint},
-			code:   errcommon.ResourceExhausted,
-			reason: errcommon.RequestDroppedReasonSaturated,
+			name:    "capacity drains the only eligible endpoint",
+			filters: []fwksched.Filter{capacityFilter, decodeRole},
+			input:   []fwksched.Endpoint{saturatedDecodeEndpoint},
+			code:    errcommon.ResourceExhausted,
+			reason:  errcommon.RequestDroppedReasonSaturated,
 		},
 		{
-			name: "capacity after eligibility",
-			filters: func(t *testing.T) []fwksched.Filter {
-				return []fwksched.Filter{bylabel.NewDecodeRole(), newWaitingQueueCapacityFilter(t)}
-			},
-			input:  []fwksched.Endpoint{saturatedDecodeEndpoint, prefillEndpoint},
-			code:   errcommon.ResourceExhausted,
-			reason: errcommon.RequestDroppedReasonSaturated,
+			name:    "capacity after eligibility",
+			filters: []fwksched.Filter{decodeRole, capacityFilter},
+			input:   []fwksched.Endpoint{saturatedDecodeEndpoint, prefillEndpoint},
+			code:    errcommon.ResourceExhausted,
+			reason:  errcommon.RequestDroppedReasonSaturated,
 		},
 		{
-			name: "capacity drains candidates with no original decode endpoint",
-			filters: func(t *testing.T) []fwksched.Filter {
-				return []fwksched.Filter{newWaitingQueueCapacityFilter(t), bylabel.NewDecodeRole()}
-			},
+			name:    "capacity drains candidates with no original decode endpoint",
+			filters: []fwksched.Filter{capacityFilter, decodeRole},
 			input: []fwksched.Endpoint{
 				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 					ID:     k8stypes.NamespacedName{Name: "saturated-prefill-pod"},
@@ -312,32 +334,18 @@ func TestScheduleEndpointEligibilityClassification(t *testing.T) {
 			reason: errcommon.RequestDroppedReasonNoEndpoints,
 		},
 		{
-			name: "eligibility filters have no common endpoint",
-			filters: func(t *testing.T) []fwksched.Filter {
-				return []fwksched.Filter{
-					newDocumentedDecodeSelector(t),
-					newLabelSelector(t, "zone-filter", json.RawMessage(`{"matchLabels":{"zone":"b"}}`)),
-				}
-			},
-			input: []fwksched.Endpoint{
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-					ID:     k8stypes.NamespacedName{Name: "decode-zone-a"},
-					Labels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode, "zone": "a"},
-				}, &fwkdl.Metrics{}, nil),
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-					ID:     k8stypes.NamespacedName{Name: "prefill-zone-b"},
-					Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill, "zone": "b"},
-				}, &fwkdl.Metrics{}, nil),
-			},
-			code:   errcommon.ServiceUnavailable,
-			reason: errcommon.RequestDroppedReasonNoEndpoints,
+			name:    "eligibility filters have no common endpoint",
+			filters: []fwksched.Filter{decodeSelector, zoneSelector},
+			input:   []fwksched.Endpoint{saturatedDecodeEndpoint, prefillEndpoint},
+			code:    errcommon.ServiceUnavailable,
+			reason:  errcommon.RequestDroppedReasonNoEndpoints,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			profile := NewSchedulerProfile().
-				WithFilters(test.filters(t)...).
+				WithFilters(test.filters...).
 				WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
 			schedulerConfig := NewSchedulerConfig(single.NewSingleProfileHandler(), map[string]fwksched.SchedulerProfile{"decode": profile})
 			scheduler := NewSchedulerWithConfig(schedulerConfig)

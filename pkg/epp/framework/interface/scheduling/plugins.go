@@ -55,20 +55,33 @@ type ProfileHandler interface {
 		profileResults map[string]*ProfileRunResult) (*SchedulingResult, error)
 }
 
+// ProfileError identifies the profile responsible for a scheduling failure.
+// Err must be non-nil and describes the handler's failure.
+type ProfileError struct {
+	ProfileName string
+	Err         error
+}
+
+func (e *ProfileError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *ProfileError) Unwrap() error {
+	return e.Err
+}
+
 // Filter defines the interface for filtering a list of pods based on context.
 type Filter interface {
 	plugin.Plugin
 	Filter(ctx context.Context, request *InferenceRequest, pods []Endpoint) []Endpoint
 }
 
-// EndpointEligibilityFilter identifies stable endpoint constraints rather than
-// transient capacity constraints. EligibleEndpoints must return a subset of the
-// supplied endpoints without side effects. It may only read request and endpoint
-// state that remains unchanged while the filter chain runs. The scheduler calls
-// it with the original candidates after the complete filter chain returns no
-// endpoint and intersects the results from all eligibility filters.
+// EndpointEligibilityFilter identifies stable constraints on endpoint eligibility.
+// The scheduler intersects their results on profile-entry candidates when filtering returns no endpoints.
 type EndpointEligibilityFilter interface {
 	Filter
+	// EligibleEndpoints returns a subset of its input without side effects.
+	// It may only read request and endpoint state that remains unchanged during filtering.
 	EligibleEndpoints(ctx context.Context, request *InferenceRequest, endpoints []Endpoint) []Endpoint
 }
 

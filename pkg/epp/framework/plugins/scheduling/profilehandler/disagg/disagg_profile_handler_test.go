@@ -573,7 +573,9 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 			req := &scheduling.InferenceRequest{Headers: map[string]string{}}
 			res, err := h.ProcessResults(context.Background(), req, tt.results)
 			if tt.expectErr {
-				assert.Error(t, err)
+				var profileErr *scheduling.ProfileError
+				require.ErrorAs(t, err, &profileErr)
+				assert.Equal(t, defaultDecodeProfile, profileErr.ProfileName)
 				return
 			}
 			assert.NoError(t, err)
@@ -634,7 +636,9 @@ func TestHandler_PD_PrefillRequiredButUnavailable(t *testing.T) {
 			defaultPrefillProfile: nil,
 		}
 		_, err := h.ProcessResults(ctx, req, failedResults)
-		assert.Error(t, err, "a required prefill stage that found no endpoint must fail the request")
+		var profileErr *scheduling.ProfileError
+		require.ErrorAs(t, err, &profileErr, "a required prefill stage that found no endpoint must fail the request")
+		assert.Equal(t, defaultPrefillProfile, profileErr.ProfileName)
 	})
 }
 

@@ -44,7 +44,12 @@ type EndpointEligibilityFilter interface {
 }
 ```
 
-When the complete filter chain returns no endpoint, the scheduler calls each `EligibleEndpoints` method with the original candidate set and intersects the results. An empty intersection is reported as `503/rejected-no-endpoints`; otherwise the result remains `429/rejected-saturated`. The method must return a subset of the supplied endpoints without side effects. It may only read request and endpoint state that remains unchanged while the filter chain runs. Capacity, load, and preference filters should not implement this interface.
+When filtering leaves no endpoints, the scheduler evaluates eligibility against the profile-entry candidates and intersects the results.
+
+- At least one eligibility filter and an empty intersection: `503/rejected-no-endpoints`.
+- Otherwise: `429/rejected-saturated`, a compatibility fallback that does not prove saturation.
+
+Implementations must follow the [interface contract](../pkg/epp/framework/interface/scheduling/plugins.go). Capacity, load, and preference filters should not implement this interface.
 
 Key types used in the filter signature:
 - `scheduling.InferenceRequest` — parsed request with model, body, headers, and objectives
@@ -92,7 +97,6 @@ const (
     LabelSelectorFilterType = "label-selector-filter"
 )
 
-var _ scheduling.Filter = &Selector{}
 var _ scheduling.EndpointEligibilityFilter = &Selector{}
 
 // Selector filters out endpoints that do not match its label selector criteria.
@@ -102,7 +106,7 @@ type Selector struct {
 }
 ```
 
-> The compile-time interface checks assert that `Selector` implements both scheduling interfaces.
+> The compile-time check verifies `EndpointEligibilityFilter`, which embeds `Filter`.
 
 ### Factory function
 

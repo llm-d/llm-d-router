@@ -438,7 +438,10 @@ func (h *Handler) ProcessResults(
 
 	decodeRunResults := profileResults[h.decodeProfile]
 	if decodeRunResults == nil || len(decodeRunResults.TargetEndpoints) == 0 {
-		return nil, errors.New("failed to find available decode workers")
+		return nil, &scheduling.ProfileError{
+			ProfileName: h.decodeProfile,
+			Err:         errors.New("failed to find available decode workers"),
+		}
 	}
 
 	updatedResults := map[string]*scheduling.ProfileRunResult{}
@@ -449,11 +452,11 @@ func (h *Handler) ProcessResults(
 		if prefillRes != nil {
 			updatedResults[h.prefillProfile] = prefillRes
 		} else if declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey); !declined {
-			// The PD decider picked the prefill profile to run and it found no
-			// endpoint, instead of the decider declining to run it at all.
-			// Completing decode-only here would silently run prefill work on a
-			// decode pod instead of failing the request.
-			return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
+			// A required prefill failure must not send prefill work to a decode endpoint.
+			return nil, &scheduling.ProfileError{
+				ProfileName: h.prefillProfile,
+				Err:         fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile),
+			}
 		}
 	}
 

@@ -221,6 +221,9 @@ func (p *SchedulerProfile) runEndpointEligibilityFilters(ctx context.Context, re
 		hasEligibilityFilters = true
 		scoped, _ := datalayer.Scope(logger, filterExtensionPoint, filter, endpoints)
 		matchingEndpoints := datalayer.Unscope(eligibilityFilter.EligibleEndpoints(ctx, request, scoped))
+		if len(matchingEndpoints) == 0 {
+			return nil, true
+		}
 		eligibleEndpoints = intersectEndpoints(eligibleEndpoints, matchingEndpoints)
 		if len(eligibleEndpoints) == 0 {
 			break

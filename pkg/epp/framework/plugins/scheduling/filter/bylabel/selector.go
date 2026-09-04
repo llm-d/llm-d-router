@@ -25,7 +25,6 @@ const (
 )
 
 // compile-time type assertion
-var _ scheduling.Filter = &Selector{}
 var _ scheduling.EndpointEligibilityFilter = &Selector{}
 
 // LabelSelectorFilterFactory is an alias for SelectorFactory using the canonical name.

@@ -4,7 +4,7 @@
 
 Label-based filters that retain or remove candidate pods based on Kubernetes label values.
 
-Label constraints describe endpoint eligibility. When the complete scheduling filter chain returns no endpoint, the scheduler returns `503` with `rejected-no-endpoints` if the label constraints match no original candidate. It returns `429` with `rejected-saturated` if eligible endpoints existed before capacity filters removed them.
+These filters declare label constraints through `EndpointEligibilityFilter`. See [endpoint eligibility classification](../../../../../../../docs/create_new_filter.md#introduction-to-filtering) for how an empty filter result determines the profile's error status.
 
 ---
 

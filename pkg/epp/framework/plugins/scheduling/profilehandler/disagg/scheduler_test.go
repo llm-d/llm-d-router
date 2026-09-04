@@ -2,7 +2,7 @@ package disagg_test
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -10,6 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
@@ -21,6 +22,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
@@ -274,9 +276,7 @@ func TestPDSchedule(t *testing.T) {
 			}
 			if test.wantErrCode != "" {
 				var typedErr errcommon.Error
-				if !errors.As(err, &typedErr) {
-					t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
-				}
+				require.ErrorAs(t, err, &typedErr)
 				assert.Equal(t, test.wantErrCode, typedErr.Code)
 				assert.Equal(t, string(test.wantDroppedReason), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 			}
@@ -386,5 +386,80 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 	if diff := cmp.Diff(prefillDecodeResult, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
 		cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 		t.Errorf("Unexpected output (-want +got): %v", diff)
+	}
+}
+
+func TestPDSchedule_PrefillFirstMixedErrors(t *testing.T) {
+	tests := []struct {
+		name              string
+		roles             []string
+		wantErrCode       string
+		wantDroppedReason errcommon.RequestDroppedReason
+	}{
+		{
+			name:              "missing decode endpoint with saturated prefill",
+			roles:             []string{bylabel.RolePrefill},
+			wantErrCode:       errcommon.ServiceUnavailable,
+			wantDroppedReason: errcommon.RequestDroppedReasonNoEndpoints,
+		},
+		{
+			name:              "missing prefill endpoint with saturated decode",
+			roles:             []string{bylabel.RoleDecode},
+			wantErrCode:       errcommon.ResourceExhausted,
+			wantDroppedReason: errcommon.RequestDroppedReasonSaturated,
+		},
+		{
+			name:              "both stages saturated",
+			roles:             []string{bylabel.RolePrefill, bylabel.RoleDecode},
+			wantErrCode:       errcommon.ResourceExhausted,
+			wantDroppedReason: errcommon.RequestDroppedReasonSaturated,
+		},
+	}
+	for _, profiles := range []struct{ name, decode, prefill string }{
+		{name: "default profiles", decode: decode, prefill: prefill},
+		{name: "renamed profiles", decode: "z-decode", prefill: "a-prefill"},
+	} {
+		for _, test := range tests {
+			t.Run(profiles.name+"/"+test.name, func(t *testing.T) {
+				capacityPlugin, err := utilization.Factory("capacity", fwkplugin.StrictDecoder(json.RawMessage(
+					`{"conditions":[{"metric":"waiting-queue","maxValue":0}]}`)), nil)
+				require.NoError(t, err)
+				capacityFilter := capacityPlugin.(fwksched.Filter)
+				prefillProfile := scheduling.NewSchedulerProfile().
+					WithFilters(bylabel.NewPrefillRole(), capacityFilter).
+					WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+				decodeProfile := scheduling.NewSchedulerProfile().
+					WithFilters(bylabel.NewDecodeRole(), capacityFilter).
+					WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+				handler := disagg.NewDisaggProfileHandler(profiles.decode, profiles.prefill, "", nil, nil).
+					WithStageOrder(disagg.StageOrderPrefillFirst)
+				scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{
+					profiles.decode:  decodeProfile,
+					profiles.prefill: prefillProfile,
+				}))
+
+				input := make([]fwksched.Endpoint, 0, len(test.roles))
+				for _, role := range test.roles {
+					input = append(input, fwksched.NewEndpoint(
+						&fwkdl.EndpointMetadata{
+							ID:     k8stypes.NamespacedName{Name: role},
+							Labels: map[string]string{bylabel.RoleLabel: role},
+						},
+						&fwkdl.Metrics{WaitingQueueSize: 1},
+						fwkdl.NewAttributes(),
+					))
+				}
+				result, err := scheduler.Schedule(context.Background(), &fwksched.InferenceRequest{
+					RequestID:   uuid.NewString(),
+					TargetModel: "critical",
+					Body:        completionsBody("12345678906"),
+				}, input)
+				assert.Nil(t, result)
+				var typedErr errcommon.Error
+				require.ErrorAs(t, err, &typedErr)
+				assert.Equal(t, test.wantErrCode, typedErr.Code)
+				assert.Equal(t, string(test.wantDroppedReason), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+			})
+		}
 	}
 }
