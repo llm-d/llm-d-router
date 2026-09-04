@@ -21,11 +21,13 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
 
 func TestValidatePipeline(t *testing.T) {
 	render := config.StepConfig{Type: steps.RenderStepName}
 	decode := config.StepConfig{Type: steps.DecodeStepName}
+	broker := config.StepConfig{Type: asyncbroker.StepName}
 
 	tests := []struct {
 		name    string
@@ -45,6 +47,16 @@ func TestValidatePipeline(t *testing.T) {
 		{
 			name:    "tokens-in without render is rejected",
 			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
+			wantErr: true,
+		},
+		{
+			name:    "async-broker first is accepted",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{broker, decode}},
+			wantErr: false,
+		},
+		{
+			name:    "async-broker after another step is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{decode, broker}},
 			wantErr: true,
 		},
 	}
