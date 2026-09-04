@@ -24,10 +24,11 @@ import (
 
 // Metrics holds the latest metrics snapshot scraped from a pod.
 type Metrics struct {
-	// ActiveModels tracks adapters with running requests (not GPU residency).
-	// Idle adapters loaded on GPU but with no in-flight requests do not appear.
+	// ActiveModels holds only adapters that have at least one running or queued request.
 	ActiveModels map[string]int
-	// WaitingModels tracks adapters with queued-but-not-yet-running requests.
+	// WaitingModels is intended to track adapters with only queued requests,
+	// but current vLLM populates it with the same adapters as in ActiveModels.
+	// Not useful until vLLM replaces it with a residency signal.
 	WaitingModels map[string]int
 	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
 	MaxActiveModels         int

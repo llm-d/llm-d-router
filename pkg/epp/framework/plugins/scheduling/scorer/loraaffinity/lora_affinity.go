@@ -83,19 +83,30 @@ func (s *LoraAffinityScorer) WithName(name string) *LoraAffinityScorer {
 func (s *LoraAffinityScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 
-	// Score by whether the target adapter has active or waiting requests on each endpoint.
 	for _, endpoint := range endpoints {
-		_, active := endpoint.GetMetrics().ActiveModels[request.TargetModel]
-		_, waiting := endpoint.GetMetrics().WaitingModels[request.TargetModel]
+		m := endpoint.GetMetrics()
+		_, active := m.ActiveModels[request.TargetModel]
+		_, waiting := m.WaitingModels[request.TargetModel]
+
+		// ActiveModels and WaitingModels share the same source in current vLLM,
+		// so take the union to count each adapter once. This may change later if
+		// vLLM adds native support.
+		unionCount := len(m.ActiveModels)
+		for k := range m.WaitingModels {
+			if _, ok := m.ActiveModels[k]; !ok {
+				unionCount++
+			}
+		}
 
 		switch {
-		// Ideal: the adapter is already active on this model server.
 		case active:
 			scores[endpoint] = 1.0
-		// Moderate: the adapter has queued requests on this model server.
-		case waiting:
+		case unionCount < m.MaxActiveModels:
 			scores[endpoint] = 0.8
-		// No signal: the adapter has no request activity on this model server.
+		// Unreachable against current vLLM (waiting implies active), but
+		// reachable with the simulator and future backends.
+		case waiting:
+			scores[endpoint] = 0.6
 		default:
 			scores[endpoint] = 0.0
 		}
