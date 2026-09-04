@@ -31,15 +31,15 @@ type StateKey string
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
-	// Set writes a value for the given key and endpoint. The runtime calls
-	// this periodically, once per live endpoint, with a fresh local snapshot.
-	Set(ctx context.Context, key StateKey, endpointID string, value any) error
+	// Set writes a value for the given key and endpoint and prepares the
+	// aggregate returned by Get. The runtime calls this periodically, once per
+	// live endpoint, with a fresh local snapshot.
+	Set(ctx context.Context, key StateKey, endpointID string, value any, aggregate func([]any) any) error
 
-	// Get returns the aggregated value for the given key and endpoint across
-	// all replicas. The aggregate function folds per-replica values into a
-	// single result. Returns (value, true, nil) on hit, (nil, false, nil)
-	// on miss, or (nil, false, err) on failure.
-	Get(ctx context.Context, key StateKey, endpointID string, aggregate func([]any) any) (any, bool, error)
+	// Get returns the prepared aggregate for the given key and endpoint across
+	// all replicas. Returns (value, true, nil) on hit, (nil, false, nil) on
+	// miss, or (nil, false, err) on failure.
+	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
 
 	// Delete removes the value for the given key and endpoint.
 	Delete(ctx context.Context, key StateKey, endpointID string) error
@@ -77,7 +77,7 @@ type CrossReplicaSpec struct {
 	Supply func(endpointID string) func() Cloneable
 
 	// Aggregate combines per-replica values into a single aggregate.
-	// Called by the store's Get to fold values from all replicas.
+	// Called by the store's Set to fold values from all replicas.
 	Aggregate func(values []any) any
 
 	// SyncDisabled opts this contributor out of cross-replica synchronization

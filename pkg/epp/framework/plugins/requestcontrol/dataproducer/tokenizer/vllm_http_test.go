@@ -18,10 +18,19 @@ package tokenizer
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,23 +60,29 @@ func newHTTPRenderer(t *testing.T, srv *httptest.Server) *vllmHTTPRenderer {
 	return r
 }
 
-// httpFixture mimics vLLM's /render endpoints and captures request bodies.
+// httpFixture mimics vLLM's /render endpoints and captures request bodies
+// and Authorization headers.
 func httpFixture(t *testing.T, completionsResp []renderResponse, chatResp renderResponse) (*httptest.Server, *httpCaptured) {
 	t.Helper()
 	cap := &httpCaptured{}
 	mux := http.NewServeMux()
 	mux.HandleFunc(completionsRenderPath, func(w http.ResponseWriter, r *http.Request) {
 		cap.completions, _ = io.ReadAll(r.Body)
+		cap.completionsAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(completionsResp)
 	})
 	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, r *http.Request) {
 		cap.chat, _ = io.ReadAll(r.Body)
+		cap.chatAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(chatResp)
 	})
 	return httptest.NewServer(mux), cap
 }
 
-type httpCaptured struct{ completions, chat []byte }
+type httpCaptured struct {
+	completions, chat         []byte
+	completionsAuth, chatAuth string
+}
 
 func TestVLLMHTTPRenderer_Render(t *testing.T) {
 	srv, cap := httpFixture(t,
@@ -322,6 +337,77 @@ func TestProduce_MessagesVLLMHTTPFullAgenticTurn(t *testing.T) {
 	assert.Equal(t, "Sunny, 22C", toolResult["content"])
 }
 
+func TestProduce_VLLMHTTPForwardsAuthorization(t *testing.T) {
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{1}}}, renderResponse{TokenIDs: []uint32{2}})
+	defer srv.Close()
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+
+	authReq := func() *scheduling.InferenceRequest {
+		return &scheduling.InferenceRequest{
+			Headers: map[string]string{"authorization": "Bearer secret-token"},
+			Body: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+				},
+			},
+		}
+	}
+
+	require.NoError(t, p.Produce(context.Background(), authReq(), nil))
+	assert.Equal(t, "Bearer secret-token", cap.chatAuth)
+
+	completions := authReq()
+	completions.Body = &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
+	}
+	require.NoError(t, p.Produce(context.Background(), completions, nil))
+	assert.Equal(t, "Bearer secret-token", cap.completionsAuth)
+
+	cap.chatAuth = ""
+	require.NoError(t, p.Produce(context.Background(), &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+			},
+		},
+	}, nil))
+	assert.Empty(t, cap.chatAuth, "request without Authorization must not send one")
+}
+
+func TestRenderBackend_WarmupStopsOnAuthRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantsRetry bool
+	}{
+		{name: "401 gives up", status: http.StatusUnauthorized},
+		{name: "403 gives up", status: http.StatusForbidden},
+		{name: "503 retries", status: http.StatusServiceUnavailable, wantsRetry: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), warmupRetryInterval/2)
+			defer cancel()
+			renderBackend{tk: newHTTPRenderer(t, srv)}.warmup(ctx)
+
+			assert.Equal(t, 1, calls)
+			if tc.wantsRetry {
+				assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "non-auth failure must keep retrying until ctx ends")
+			} else {
+				assert.NoError(t, ctx.Err(), "auth failure must return before the retry interval")
+			}
+		})
+	}
+}
+
 func TestVLLMHTTPRenderer_RenderMultiPrompt(t *testing.T) {
 	srv, _ := httpFixture(t,
 		[]renderResponse{
@@ -432,6 +518,119 @@ func TestVLLMHTTPRenderer_ChatTimeoutRawMessages(t *testing.T) {
 		json.RawMessage(`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}`),
 	}}
 	assert.Equal(t, 30*time.Second, r.chatTimeout(multimodal))
+}
+
+func TestVLLMHTTPRenderer_TLSInsecureSkipVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{1, 2}}})
+	}))
+	defer srv.Close()
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                srv.URL,
+		InsecureSkipVerify: true,
+	}, testHTTPModel)
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{1, 2}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSWithCACert(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{3, 4}}})
+	}))
+	defer srv.Close()
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caFile, encodeCertPEM(srv.Certificate()), 0o600))
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:        srv.URL,
+		CACertPath: caFile,
+	}, testHTTPModel)
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{3, 4}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSWithMTLS(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{5, 6}}})
+	}))
+	srv.TLS = &tls.Config{
+		ClientAuth: tls.RequireAnyClientCert,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	clientCert, clientKey := generateTestCert(t, dir)
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                srv.URL,
+		InsecureSkipVerify: true,
+		ClientCertPath:     clientCert,
+		ClientKeyPath:      clientKey,
+	}, testHTTPModel)
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{5, 6}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSBadCACertPath(t *testing.T) {
+	_, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:        "https://localhost:9999",
+		CACertPath: "/nonexistent/ca.pem",
+	}, testHTTPModel)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading render CA cert")
+}
+
+func TestVLLMHTTPRenderer_TLSBadClientCert(t *testing.T) {
+	_, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:            "https://localhost:9999",
+		ClientCertPath: "/nonexistent/client.pem",
+		ClientKeyPath:  "/nonexistent/client.key",
+	}, testHTTPModel)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading render client cert")
+}
+
+// encodeCertPEM encodes an x509 certificate as PEM.
+func encodeCertPEM(cert *x509.Certificate) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+}
+
+// generateTestCert creates a self-signed cert/key pair for mTLS testing.
+func generateTestCert(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	certPath = filepath.Join(dir, "client.pem")
+	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600))
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	keyPath = filepath.Join(dir, "client.key")
+	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
+	return certPath, keyPath
 }
 
 // TestBuildChatRenderRequest_MessageFields asserts the wire shape of rebuilt

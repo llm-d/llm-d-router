@@ -226,6 +226,20 @@ if eval "${invalid_failopen_command}"; then
   exit 1
 fi
 
+invalid_priority_routing_enabled_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set-string router.proxy.priorityRouting.enabled=false >/dev/null"
+echo "Executing: ${invalid_priority_routing_enabled_command}"
+if eval "${invalid_priority_routing_enabled_command}"; then
+  echo "Helm template unexpectedly succeeded for non-boolean router.proxy.priorityRouting.enabled"
+  exit 1
+fi
+
+invalid_priority_routing_health_checking_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set-string router.epp.flags.health-checking=false >/dev/null"
+echo "Executing: ${invalid_priority_routing_health_checking_command}"
+if eval "${invalid_priority_routing_health_checking_command}"; then
+  echo "Helm template unexpectedly succeeded for non-boolean router.epp.flags.health-checking with priority routing"
+  exit 1
+fi
+
 echo "Verifying llm-d-router-standalone extra flags render as --flag=value..."
 flag_render_output="${TEMP_DIR}/llm-d-router-standalone-flag-render.yaml"
 flag_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string router.epp.flags.secure-serving=false > ${flag_render_output}"

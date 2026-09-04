@@ -26,9 +26,11 @@ Backend selection:
   config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
   P/D routing) without declaring a `token-producer`.
 - **`vllm`** (or `modelName`): calls vLLM's `/v1/completions/render` and
-  `/v1/chat/completions/render` over plain HTTP (TLS is not supported). Future
-  protocol fields (e.g. `grpc`) can be added alongside `url` under the same
-  `vllm` block.
+  `/v1/chat/completions/render` over HTTP or HTTPS. TLS is driven by the URL
+  scheme (`https://`). For in-cluster endpoints using self-signed or private CA
+  certificates, configure `vllm.caCertPath` to trust the CA, and optionally
+  `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS. Future protocol fields
+  (e.g. `grpc`) can be added alongside `url` under the same `vllm` block.
 - **`udsTokenizerConfig`**: deprecated gRPC-over-UDS sidecar (see warning below).
 
 > [!WARNING]
@@ -46,12 +48,16 @@ Backend selection:
 
 ## Config
 
-| Parameter        | Default                 | Description                                                       |
-| ---------------- | ----------------------- | ----------------------------------------------------------------- |
-| `modelName`      | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests. |
-| `vllm.url`       | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).         |
-| `vllm.timeout`   | `5s`                    | Per-request timeout for text-only requests.                       |
-| `vllm.mmTimeout` | `30s`                   | Per-request timeout for multimodal requests.                      |
+| Parameter                  | Default                 | Description                                                                  |
+| -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
+| `modelName`                | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests.            |
+| `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
+| `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
+| `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
+| `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
+| `vllm.clientCertPath`      | –                       | Client certificate for mTLS with the render endpoint; requires `clientKeyPath`. |
+| `vllm.clientKeyPath`       | –                       | Client private key for mTLS; requires `clientCertPath`.                      |
+| `vllm.insecureSkipVerify`  | `false`                 | Skip server certificate verification when using `https://`; `caCertPath` is ignored when set. |
 
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):
@@ -106,7 +112,11 @@ The plugin calls `POST {http}/v1/completions/render` and
 `vllm serve <model>` and by the GPU-less `vllm launch render <model>`.
 Any reachable HTTP endpoint serving the same model the scheduler tokenizes
 for will work — sidecar in the EPP pod (loopback) or a dedicated Service
-shared by multiple EPP replicas.
+shared by multiple EPP replicas. When the inbound request carries an
+`Authorization` header, it is forwarded verbatim on render requests, so an
+endpoint started with `--api-key` accepts them; the startup warmup probe
+sends no `Authorization` header, so against such an endpoint it is skipped
+and the first request pays the cold-start cost.
 
 ```yaml
 # EPP pod spec
@@ -137,6 +147,31 @@ Plugin config — dedicated render Service:
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://vllm-render.default.svc.cluster.local:8000"
+```
+
+Plugin config — dedicated render Service with TLS:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      url: "https://vllm-render.default.svc.cluster.local:8000"
+      caCertPath: "/path/to/ca.crt"
+```
+
+The render endpoint must also be serving TLS. When using `vllm launch render`,
+pass `--ssl-certfile` and `--ssl-keyfile` so the process listens over HTTPS:
+
+```yaml
+containers:
+- name: vllm-render
+  command: ["vllm", "launch", "render"]
+  args:
+    - "${MODEL_NAME}"
+    - "--port=8000"
+    - "--ssl-certfile=/path/to/tls.crt"
+    - "--ssl-keyfile=/path/to/tls.key"
 ```
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).

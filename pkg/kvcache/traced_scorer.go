@@ -31,8 +31,12 @@ type tracedScorer struct {
 	next KVBlockScorer
 }
 
-// NewTracedScorer wraps a KVBlockScorer and emits OpenTelemetry traces for Score operations.
-// This encapsulates all tracing logic for the KVBlockScorer interface.
+// NewTracedScorer wraps a KVBlockScorer and emits OpenTelemetry traces for
+// Score operations.
+//
+// Deprecated: Indexer.ScoreTokens scores through Indexer.MatchBlockKeys,
+// which emits its own span. The wrapper serves callers that hold a
+// KVBlockScorer themselves.
 func NewTracedScorer(next KVBlockScorer) KVBlockScorer {
 	return &tracedScorer{next: next}
 }

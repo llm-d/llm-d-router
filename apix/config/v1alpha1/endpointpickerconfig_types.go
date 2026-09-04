@@ -246,17 +246,21 @@ type DataLayerConfig struct {
 	CrossReplicaSyncerPluginRef string `json:"crossReplicaSyncerPluginRef,omitempty"`
 	// +optional
 	// CrossReplicaSyncInterval is the cadence at which each replica publishes
-	// its local per-endpoint state to the cross-replica syncer. It is rounded
-	// to a multiple of the datalayer base tick. If omitted, a default is used.
+	// its local per-endpoint state to the cross-replica syncer. This cadence is
+	// independent of the datalayer polling interval. If omitted, a default is used.
 	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
+	// +optional
+	// CrossReplicaPublishTimeout bounds one endpoint publish, including all
+	// concurrent contributor writes. If omitted, a default is used.
+	CrossReplicaPublishTimeout *metav1.Duration `json:"crossReplicaPublishTimeout,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
-		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v, CrossReplicaPublishTimeout: %v}",
+		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval, dlc.CrossReplicaPublishTimeout)
 }
 
 // DiscoveryConfig groups endpoint and peer discovery plugin references.

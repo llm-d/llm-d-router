@@ -17,6 +17,8 @@ limitations under the License.
 package requestcontrol
 
 import (
+	"sort"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
@@ -120,17 +122,46 @@ func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	}
 }
 
-// OrderDataProducerPlugins reorders the DataProducer plugins in the Config based on the given sorted plugin names.
-func (c *Config) OrderDataProducerPlugins(sortedPluginNames []string) {
-	sortedPlugins := make([]fwkrc.DataProducer, 0, len(sortedPluginNames))
-	nameToPlugin := make(map[string]fwkrc.DataProducer)
-	for _, plugin := range c.dataProducerPlugins {
-		nameToPlugin[plugin.TypedName().String()] = plugin
+// OrderPlugins reorders every extension point in the Config to the given sorted
+// plugin names, so that a plugin runs after the plugins whose data it consumes.
+// The names come from the data-dependency DAG, which only ranks producers and
+// consumers; plugins it does not rank keep running, ordered by name after the
+// ranked ones.
+func (c *Config) OrderPlugins(sortedPluginNames []string) {
+	rank := make(map[string]int, len(sortedPluginNames))
+	for i, name := range sortedPluginNames {
+		rank[name] = i
 	}
-	for _, name := range sortedPluginNames {
-		if plugin, ok := nameToPlugin[name]; ok {
-			sortedPlugins = append(sortedPlugins, plugin)
+
+	c.requestHeaderPlugins = orderByName(c.requestHeaderPlugins, rank)
+	c.screeners = orderByName(c.screeners, rank)
+	c.admissionPlugins = orderByName(c.admissionPlugins, rank)
+	c.dataProducerPlugins = orderByName(c.dataProducerPlugins, rank)
+	c.preRequestPlugins = orderByName(c.preRequestPlugins, rank)
+	c.responseReceivedPlugins = orderByName(c.responseReceivedPlugins, rank)
+	c.responseStreamingPlugins = orderByName(c.responseStreamingPlugins, rank)
+}
+
+// orderByName returns the plugins ordered by their rank, followed by the unranked
+// ones sorted by name. Sorting the unranked plugins rather than keeping their
+// original order matters: they reach the Config through a map iteration, so their
+// incoming order differs between runs.
+func orderByName[T plugin.Plugin](plugins []T, rank map[string]int) []T {
+	ordered := make([]T, len(plugins))
+	copy(ordered, plugins)
+
+	sort.SliceStable(ordered, func(i, j int) bool {
+		iName, jName := ordered[i].TypedName().String(), ordered[j].TypedName().String()
+		iRank, iRanked := rank[iName]
+		jRank, jRanked := rank[jName]
+		if iRanked != jRanked {
+			return iRanked
 		}
-	}
-	c.dataProducerPlugins = sortedPlugins
+		if !iRanked {
+			return iName < jName
+		}
+		return iRank < jRank
+	})
+
+	return ordered
 }
