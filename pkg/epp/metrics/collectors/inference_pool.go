@@ -23,8 +23,6 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-var ()
-
 type inferencePoolMetricsCollector struct {
 	ds datastore.Datastore
 }
