@@ -449,6 +449,7 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 	return out
 }
 
+// postJSON permits one retry on a different endpoint within the request budget.
 func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, timeout time.Duration, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -458,43 +459,36 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	excluded := map[string]struct{}{}
-	var lastErr error
-	for {
-		var baseURL string
-		if len(excluded) == 0 {
-			baseURL, err = r.endpointPicker.Pick()
-		} else {
-			picker, ok := r.endpointPicker.(retryingRenderEndpointPicker)
-			if !ok {
-				return lastErr
-			}
-			baseURL, err = picker.PickExcluding(excluded)
-		}
-		if err != nil {
-			if lastErr != nil {
-				if errors.Is(err, errNoRenderEndpoints) {
-					return lastErr
-				}
-				return fmt.Errorf("pick alternate render endpoint: %w", err)
-			}
-			return fmt.Errorf("pick render endpoint: %w", err)
-		}
-
-		retryable, attemptErr := r.postJSONAttempt(reqCtx, ctx, baseURL, path, payload, out)
-		if attemptErr == nil {
-			return nil
-		}
-		if !retryable {
-			return attemptErr
-		}
-		lastErr = attemptErr
-		excluded[baseURL] = struct{}{}
+	baseURL, err := r.endpointPicker.Pick()
+	if err != nil {
+		return fmt.Errorf("pick render endpoint: %w", err)
 	}
+	picker, canRetry := r.endpointPicker.(retryingRenderEndpointPicker)
+	attemptCtx := reqCtx
+	cancelAttempt := func() {}
+	if canRetry && picker.HasAlternative(baseURL) {
+		// Reserve half the remaining budget so a slow endpoint cannot consume it all.
+		deadline, _ := reqCtx.Deadline()
+		attemptCtx, cancelAttempt = context.WithTimeout(reqCtx, time.Until(deadline)/2)
+	}
+	retryable, attemptErr := r.postJSONAttempt(attemptCtx, baseURL, path, payload, out)
+	cancelAttempt()
+	if attemptErr == nil || !retryable || !canRetry || reqCtx.Err() != nil {
+		return attemptErr
+	}
+	baseURL, err = picker.PickExcluding(map[string]struct{}{baseURL: {}})
+	if errors.Is(err, errNoRenderEndpoints) {
+		return attemptErr
+	}
+	if err != nil {
+		return fmt.Errorf("pick alternate render endpoint: %w", err)
+	}
+	_, err = r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
+	return err
 }
 
 // postJSONAttempt sends one render request and reports whether another endpoint may succeed.
-func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx, authCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
+func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return false, fmt.Errorf("build request: %w", err)
@@ -502,13 +496,13 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx, authCtx context.Context, base
 	httpReq.Header.Set("Content-Type", "application/json")
 	// The render endpoint may require the same credential as inference;
 	// forward the inbound Authorization when present.
-	if auth := authHeaderFromContext(authCtx); auth != "" {
+	if auth := authHeaderFromContext(reqCtx); auth != "" {
 		httpReq.Header.Set("Authorization", auth)
 	}
 
 	httpResp, err := r.client.Do(httpReq)
 	if err != nil {
-		return reqCtx.Err() == nil, fmt.Errorf("post %s: %w", path, err)
+		return true, fmt.Errorf("post %s: %w", path, err)
 	}
 	defer httpResp.Body.Close()
 
@@ -517,7 +511,7 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx, authCtx context.Context, base
 		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
-		return false, fmt.Errorf("unmarshal response: %w", err)
+		return reqCtx.Err() != nil || errors.Is(err, io.ErrUnexpectedEOF), fmt.Errorf("unmarshal response: %w", err)
 	}
 	return false, nil
 }

@@ -47,8 +47,8 @@ Backend selection:
 | `modelName`                | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests.            |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
 | `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
-| `vllm.endpointDiscovery.portRules` | empty             | Ordered label-selector rules that resolve render ports as `basePort + RankIndex`; an empty list uses each endpoint's inference port. |
-| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Load-balancing algorithm for discovered endpoints.                 |
+| `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
+| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm; `round-robin` is the only built-in algorithm. |
 | `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
 | `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
@@ -171,7 +171,22 @@ containers:
     - "--ssl-keyfile=/path/to/tls.key"
 ```
 
-Plugin config - discovered engine endpoints:
+### Endpoint discovery
+
+Set `vllm.endpointDiscovery: {}` to use discovered inference addresses and
+ports with round-robin balancing. Omitted or empty `portRules` keeps each
+endpoint's inference port. Use this when `/v1/*/render` is served on the same
+listener as inference.
+
+When render uses a different listener, configure ordered `portRules`. The
+first matching Kubernetes label selector resolves the port as
+`basePort + RankIndex`. `RankIndex` is the endpoint's zero-based position in
+the `InferencePool`'s `targetPorts`, not a port-number difference. For example,
+a decode endpoint at index 3 uses render port `8203` with `basePort: 8200`,
+even when its inference port is `8003`.
+
+This configuration maps prefill and decode endpoints to separate render port
+ranges:
 
 ```yaml
 - type: token-producer
@@ -193,12 +208,36 @@ Plugin config - discovered engine endpoints:
 ```
 
 The Kubernetes discovery path supplies Ready `InferencePool` endpoints and
-their target ports. Other discovery plugins feed the same renderer path; for
-example, `file-discovery` can supply explicit render addresses and ports.
-With no `portRules`, the renderer uses those inference ports. When rules are
-configured, the first matching Kubernetes label selector chooses the render
-base port and each endpoint's `RankIndex` supplies the port offset. Every
-discovered endpoint must match a rule. Discovered endpoints use HTTP.
+removes endpoints when their pods become unready or leave the pool. Port rules
+map these endpoints; they do not discover extra pods or ranks. Other discovery
+plugins feed the same renderer path; `file-discovery`, for example, can supply
+explicit render addresses and ports. All selected endpoints must serve the
+configured model and expose the render routes. Discovered URLs use HTTP;
+use `vllm.url` for an HTTPS endpoint.
+
+Each rule's `basePort` is required and must be between 1 and 65535. An empty or
+omitted `selector` matches all endpoints, so a final catch-all rule can provide
+a default base port. Nonempty rule lists have no inference-port fallback:
+unmatched endpoints and endpoints whose resolved ports are out of range are
+excluded, and the data layer logs the error. Invalid selectors and base ports
+reject plugin configuration at startup.
+
+Transport failures, attempt timeouts, HTTP 408, HTTP 429, and HTTP 5xx permit
+one retry on a different discovered URL. Other HTTP errors return immediately.
+Both attempts share `vllm.timeout` or `vllm.mmTimeout`, capped by the caller's
+deadline. When an alternate URL is available, the first attempt gets half the
+remaining budget and the retry gets the remainder. A single endpoint uses the
+full budget. With no discovered endpoints, rendering returns an error. Failed
+URLs remain eligible for subsequent requests until discovery removes them;
+there is no circuit breaker or separate render health probe.
+
+Each named token producer maintains its own endpoint set and balancing state.
+Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
+global idle-connection cap; idle connections expire after 90 seconds.
+Alternative algorithms can be implemented in the tokenizer package through
+`endpointLoadBalancer` and registered in `endpointLoadBalancerFactories`.
+The picker supplies an independent snapshot without holding its endpoint lock;
+algorithms must support concurrent calls to `Pick`.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
