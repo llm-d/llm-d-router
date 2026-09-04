@@ -54,6 +54,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
@@ -66,6 +67,51 @@ import (
 var (
 	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
+
+func TestRepackagePreservesNativeRenderContent(t *testing.T) {
+	for _, tt := range []struct {
+		path, content string
+		parser        fwkrh.Parser
+	}{
+		{"/v1/chat/completions", `"messages":[{"role":"user","content":"hi"}]`, openai.NewOpenAIParser()},
+		{"/v1/messages", `"max_tokens":8,"messages":[{"role":"user","content":"hi"}]`, anthropic.NewAnthropicParser()},
+		{"/v1/completions", `"prompt":[1,2,3],"truncate_prompt_tokens":2`, openai.NewOpenAIParser()},
+	} {
+		for _, rewrite := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/rewrite=%t", tt.path, rewrite), func(t *testing.T) {
+				raw := []byte(` {"model":"alias",` + tt.content + `,"extension":{"z":9007199254740993,"a":1e0}} `)
+				parsed, err := tt.parser.ParseRequest(context.Background(), raw, map[string]string{":path": tt.path})
+				require.NoError(t, err)
+				body := parsed.Body
+				if rewrite {
+					body.Payload, err = tt.parser.(fwkrh.ModelNameRewriter).RewriteModelName(body.Payload.(fwkrh.MarshalablePayload), "adapter")
+					require.NoError(t, err)
+					body.Mutated = true
+				}
+				var renderBody []byte
+				switch payload := body.WirePayload().(type) {
+				case fwkrh.RawPayload:
+					renderBody = payload
+				case fwkrh.Marshaler:
+					renderBody, err = payload.Marshal()
+				}
+				require.NoError(t, err)
+				reqCtx := &handlers.RequestContext{Request: &handlers.Request{RawBody: raw}}
+				dir := &Director{}
+				require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+				require.Equal(t, renderBody, reqCtx.Request.RawBody)
+				body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
+					payload["vllm_xargs"] = map[string]any{"kv_cache_report_mode": "full"}
+				})
+				require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+				var final map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(reqCtx.Request.RawBody, &final))
+				require.Equal(t, `{"z":9007199254740993,"a":1e0}`, string(final["extension"]))
+				require.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
+			})
+		}
+	}
+}
 
 // --- Mocks ---
 

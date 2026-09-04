@@ -39,6 +39,30 @@ func TestUnmarshalUsesNumber(t *testing.T) {
 	}
 }
 
+func TestUnmarshalEnvelope(t *testing.T) {
+	got, err := UnmarshalEnvelope([]byte(` {
+ "model": "m", "stream": true, "seed": 9007199254740993, "null": null,
+ "tools": [ {"parameters": {"z": 1e0, "a": 2}} ],
+ "extra": { "z": "last", "a": "<first>" }
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"model": "m", "stream": true, "seed": json.Number("9007199254740993"), "null": nil,
+		"tools": json.RawMessage(`[ {"parameters": {"z": 1e0, "a": 2}} ]`),
+		"extra": json.RawMessage(`{ "z": "last", "a": "<first>" }`),
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("envelope mismatch (-want +got):\n%s", diff)
+	}
+	for _, input := range []string{"{", "[]", "{} {}", "{} trailing"} {
+		if _, err := UnmarshalEnvelope([]byte(input)); err == nil {
+			t.Errorf("accepted invalid envelope %q", input)
+		}
+	}
+}
+
 func TestUnmarshalRejectsTrailingData(t *testing.T) {
 	tests := []struct {
 		name      string

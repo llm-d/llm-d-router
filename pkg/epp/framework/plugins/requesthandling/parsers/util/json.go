@@ -26,6 +26,28 @@ import (
 
 var ErrTrailingData = errors.New("unexpected trailing data after JSON value")
 
+// UnmarshalEnvelope keeps objects and arrays opaque so routing metadata edits
+// cannot reorder nested keys or round-trip content through Go values.
+func UnmarshalEnvelope(data []byte) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	result := make(map[string]any, len(fields))
+	for key, raw := range fields {
+		if raw[0] == '{' || raw[0] == '[' {
+			result[key] = raw
+			continue
+		}
+		var value any
+		if err := Unmarshal(raw, &value); err != nil {
+			return nil, err
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
 // Unmarshal decodes one JSON value, preserves numbers as json.Number, and rejects trailing data.
 func Unmarshal(data []byte, v any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))

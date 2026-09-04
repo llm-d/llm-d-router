@@ -4,12 +4,12 @@
 
 `DataProducer` plugin that tokenizes the request prompt and publishes
 `TokenIDs` (and a flat sorted `MultiModalFeatures` list) on
-`InferenceRequestBody.TokenizedPrompt` for downstream consumers (scorers,
+`InferenceRequestBody.TokenizedRequest` for downstream consumers (scorers,
 filters, other data producers).
 
 Implements `requestcontrol.DataProducer` and runs in the `PrepareRequestData`
 phase, before filters and scorers. The plugin is idempotent: if
-`InferenceRequestBody.TokenizedPrompt` is already populated by an earlier
+`InferenceRequestBody.TokenizedRequest` is already populated by an earlier
 producer, tokenization is skipped. Multi-modal features are flattened into the
 upstream list shape, sorted by placeholder offset.
 
@@ -25,12 +25,41 @@ Backend selection:
   Selected when no backend is set, and auto-created by the framework for any
   config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
   P/D routing) without declaring a `token-producer`.
-- **`vllm`** (or `modelName`): calls vLLM's `/v1/completions/render` and
-  `/v1/chat/completions/render` over HTTP or HTTPS. TLS is driven by the URL
+- **`vllm`** (or `modelName`): forwards requests to vLLM's native
+  `/v1/completions/render`, `/v1/chat/completions/render`, and
+  `/v1/messages/render` endpoints over HTTP or HTTPS. TLS is driven by the URL
   scheme (`https://`). For in-cluster endpoints using self-signed or private CA
   certificates, configure `vllm.caCertPath` to trust the CA, and optionally
-  `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS. Future protocol fields
-  (e.g. `grpc`) can be added alongside `url` under the same `vllm` block.
+  `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS.
+
+## Native render contract
+
+The renderer sends the original HTTP JSON body when EPP has not mutated it.
+It does not substitute the model, translate protocols, rewrite messages or
+tools, or reconstruct content from routing projections. Model rewrites happen
+before token production and apply to both rendering and forwarding.
+
+The parsed payload keeps nested objects and arrays as `json.RawMessage`.
+Envelope mutations can therefore change routing fields without reordering
+tool schemas or other nested content. Plugins use the typed protocol
+projections to read content. Prompt-affecting mutations must finish before
+token production; metadata added afterward must not affect tokenization.
+
+Completions requests with token arrays still go through vLLM, which owns
+truncation and other input preprocessing. Native Generate requests already
+carry final tokens and bypass rendering. Protocols without a supported native
+render endpoint are not converted into another protocol. Direct requests to
+the three `/render` endpoints pass through without local token production or
+response parsing.
+
+Chat and Messages requests use the larger of `vllm.timeout` and
+`vllm.mmTimeout`. The renderer does not inspect content to select a timeout.
+
+Token parity requires matching render/serve model, tokenizer, template,
+processor, and parser configuration, plus deterministic upstream rendering.
+The serving path must preserve the effective request after EPP. Sidecar
+prefill/decode mutations and coordinator rendering are separate paths; this
+EPP contract does not establish parity for them.
 
 > [!WARNING]
 > The `estimate` backend approximates token boundaries (≈4 bytes/token); its
@@ -43,10 +72,10 @@ Backend selection:
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `modelName`                | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests.            |
+| `modelName`                | – (required for `vllm`) | Model for startup probes; inference requests retain their effective model.   |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
-| `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
-| `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
+| `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages timeout.                      |
+| `vllm.mmTimeout`           | `30s`                   | Chat/Messages timeout budget, including multimodal processing.               |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
 | `vllm.clientCertPath`      | –                       | Client certificate for mTLS with the render endpoint; requires `clientKeyPath`. |
 | `vllm.clientKeyPath`       | –                       | Client private key for mTLS; requires `clientCertPath`.                      |
@@ -96,16 +125,22 @@ apply to every video in the request.
 ## Failure mode
 
 Per-request errors are returned to the Director, which currently logs and
-continues; downstream scorers fall back to their own paths.
+continues; downstream scorers fall back to their own paths. A missing native
+endpoint, render error, or empty token result does not publish token IDs.
+The vLLM backend does not fall back to protocol conversion or estimation.
 
 ## Deployment
 
-The plugin calls `POST {http}/v1/completions/render` and
-`POST {http}/v1/chat/completions/render`, both of which are exposed by
-`vllm serve <model>` and by the GPU-less `vllm launch render <model>`.
-Any reachable HTTP endpoint serving the same model the scheduler tokenizes
-for will work — sidecar in the EPP pod (loopback) or a dedicated Service
-shared by multiple EPP replicas. When the inbound request carries an
+Use a vLLM build exposing the native render endpoint for each protocol in use.
+Messages rendering requires [native `/v1/messages/render` support](https://github.com/vllm-project/vllm/pull/45803);
+older builds are not supported by a local conversion fallback.
+`vllm launch render <model>` exposes render endpoints without a GPU.
+For `vllm serve <model>`, set `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`.
+
+The renderer can run beside EPP or behind a dedicated Service. It must accept
+the effective model name used for inference, including configured served-model
+aliases and adapters. `modelName` does not replace those names in render
+requests. When the inbound request carries an
 `Authorization` header, it is forwarded verbatim on render requests, so an
 endpoint started with `--api-key` accepts them; the startup warmup probe
 sends no `Authorization` header, so against such an endpoint it is skipped

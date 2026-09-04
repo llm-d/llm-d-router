@@ -1264,10 +1264,35 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				return
 			}
 
+			path := strings.TrimRight(tt.headers[":path"], "/")
+			if strings.HasSuffix(path, "/render") {
+				if !got.SkipResponseProcessing {
+					t.Fatal("render response must pass through")
+				}
+				if diff := cmp.Diff(&fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(bodyBytes)}, got.Body); diff != "" {
+					t.Fatalf("render body mismatch (-want +got):\\n%s", diff)
+				}
+				return
+			}
+
 			if got.SkipResponseProcessing != false {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
 
+			if tt.want.Completions != nil || tt.want.ChatCompletions != nil {
+				tt.want.RawBody = bodyBytes
+				payload, _ := tt.want.Payload.AsMap()
+				for key, value := range payload {
+					switch value.(type) {
+					case []any, map[string]any:
+						raw, err := json.Marshal(value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						payload[key] = json.RawMessage(raw)
+					}
+				}
+			}
 			// Model is extracted from the request body's "model" field.
 			tt.want.Model, _ = tt.body["model"].(string)
 
