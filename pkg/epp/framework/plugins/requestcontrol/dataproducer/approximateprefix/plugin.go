@@ -184,9 +184,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
-	if handle != nil {
-		go p.CleanUpInactivePods(ctx, handle)
-	}
+	go p.CleanUpInactivePods(ctx, handle)
 
 	return p, nil
 }
