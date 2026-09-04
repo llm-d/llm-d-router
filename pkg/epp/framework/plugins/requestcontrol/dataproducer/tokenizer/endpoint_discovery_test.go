@@ -28,13 +28,16 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	dlruntime "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -152,6 +155,7 @@ func TestDiscoveredEndpointPicker_PortRules(t *testing.T) {
 				Selector: metav1.LabelSelector{MatchLabels: map[string]string{"llm-d.ai/role": "decode"}},
 				BasePort: 8200,
 			},
+			{BasePort: 9000},
 		},
 	})
 	require.NoError(t, err)
@@ -162,8 +166,9 @@ func TestDiscoveredEndpointPicker_PortRules(t *testing.T) {
 	require.NoError(t, picker.Upsert(discoveredEndpointWithRank(
 		"decode-rank", "10.0.0.2", "8003", 3, map[string]string{"llm-d.ai/role": "decode"},
 	).GetMetadata()))
+	require.NoError(t, picker.Upsert(discoveredEndpointWithRank("other-rank", "::1", "8001", 1, nil).GetMetadata()))
 
-	for _, want := range []string{"http://10.0.0.2:8203", "http://10.0.0.1:8002"} {
+	for _, want := range []string{"http://10.0.0.2:8203", "http://[::1]:9001", "http://10.0.0.1:8002"} {
 		got, pickErr := picker.Pick()
 		require.NoError(t, pickErr)
 		assert.Equal(t, want, got)
@@ -332,7 +337,88 @@ func TestVLLMHTTPRenderer_DiscoveryRetriesTransportFailureWithinRequestTimeout(t
 	require.NoError(t, err)
 	assert.Equal(t, [][]uint32{{7}}, tokens)
 	require.Len(t, deadlines, 2)
-	assert.Equal(t, deadlines[0], deadlines[1])
+	assert.True(t, deadlines[0].Before(deadlines[1]), "first attempt reserves time for retry")
+}
+
+func TestVLLMHTTPRenderer_DiscoveryRetriesSlowEndpoint(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+		require.NoError(t, err)
+		require.NoError(t, picker.Upsert(discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()))
+		require.NoError(t, picker.Upsert(discoveredEndpoint("rank-b", "10.0.0.2", "8000").GetMetadata()))
+		var hosts []string
+		start := time.Now()
+		renderer := &vllmHTTPRenderer{
+			endpointPicker: picker,
+			timeout:        time.Second,
+			client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				hosts = append(hosts, req.URL.Host)
+				if req.URL.Host == "10.0.0.1:8000" {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`[{"token_ids":[7]}]`))}, nil
+			})},
+		}
+		tokens, _, err := renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+		require.NoError(t, err)
+		assert.Equal(t, [][]uint32{{7}}, tokens)
+		assert.Equal(t, []string{"10.0.0.1:8000", "10.0.0.2:8000"}, hosts)
+		assert.Less(t, time.Since(start), time.Second)
+	})
+}
+
+func TestVLLMHTTPRenderer_DiscoveryAttemptsAreBounded(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	for _, name := range []string{"a", "b", "c"} {
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+	}
+	var hosts []string
+	renderer := &vllmHTTPRenderer{
+		endpointPicker: picker,
+		timeout:        time.Second,
+		client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			hosts = append(hosts, req.URL.Host)
+			return nil, errors.New("connection refused")
+		})},
+	}
+	_, _, err = renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.ErrorContains(t, err, "connection refused")
+	require.Len(t, hosts, 2)
+	assert.NotEqual(t, hosts[0], hosts[1])
+}
+
+func TestVLLMHTTPRenderer_DiscoveryHonorsCallerDeadline(t *testing.T) {
+	for _, endpointCount := range []int{1, 2} {
+		t.Run(strconv.Itoa(endpointCount), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+				require.NoError(t, err)
+				for i := range endpointCount {
+					name := strconv.Itoa(i)
+					require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+				}
+				calls := 0
+				renderer := &vllmHTTPRenderer{
+					endpointPicker: picker,
+					timeout:        time.Second,
+					client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						calls++
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					})},
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				start := time.Now()
+				_, _, err = renderer.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				assert.Equal(t, endpointCount, calls)
+				assert.Equal(t, 200*time.Millisecond, time.Since(start))
+			})
+		})
+	}
 }
 
 func TestVLLMHTTPRenderer_DiscoveryDoesNotRetryDeterministicClientError(t *testing.T) {
@@ -458,7 +544,22 @@ func TestEndpointDiscoveryHandler_IgnoresStaleDelete(t *testing.T) {
 	require.ErrorContains(t, err, "no vLLM render endpoints discovered")
 }
 
+func TestEndpointDiscoveryHandler_RemovesInvalidUpdate(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{PortRules: []endpointPortRule{{
+		Selector: metav1.LabelSelector{MatchLabels: map[string]string{"role": "decode"}}, BasePort: 8200,
+	}}})
+	require.NoError(t, err)
+	handler := newEndpointDiscoveryHandler(plugin.TypedName{Type: PluginType, Name: "test"}, picker)
+	ep := discoveredEndpointWithRank("a", "10.0.0.1", "8000", 0, map[string]string{"role": "decode"})
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Endpoint: ep}))
+	ep.UpdateMetadata(discoveredEndpoint("a", "10.0.0.1", "8000").GetMetadata())
+	require.ErrorContains(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Endpoint: ep}), "does not match any port rule")
+	_, err = picker.Pick()
+	require.ErrorIs(t, err, errNoRenderEndpoints)
+}
+
 func TestPlugin_DiscoveryHandlersHavePerInstanceTypes(t *testing.T) {
+	runtime := dlruntime.NewRuntime(0)
 	registrations := make([]fwkdl.PendingRegistration, 0, 2)
 	for _, name := range []string{"first", "second"} {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -473,9 +574,25 @@ func TestPlugin_DiscoveryHandlersHavePerInstanceTypes(t *testing.T) {
 		require.NoError(t, p.RegisterDependencies(registrar))
 		require.Len(t, registrar.registrations, 1)
 		registrations = append(registrations, registrar.registrations[0])
+		require.NoError(t, p.RegisterDependencies(runtime))
 	}
 
 	assert.NotEqual(t, registrations[0].Extractor.TypedName().Type, registrations[1].Extractor.TypedName().Type)
+	ctx := utils.NewTestContext(t)
+	require.NoError(t, runtime.Configure(nil, log.FromContext(ctx)))
+	ep := runtime.NewEndpoint(ctx, discoveredEndpoint("a", "10.0.0.1", "8000").GetMetadata())
+	require.NotNil(t, ep)
+	for _, registration := range registrations {
+		picker := registration.Extractor.(*endpointDiscoveryHandler).picker
+		url, err := picker.Pick()
+		require.NoError(t, err)
+		assert.Equal(t, "http://10.0.0.1:8000", url)
+	}
+	runtime.ReleaseEndpoint(ep)
+	for _, registration := range registrations {
+		_, err := registration.Extractor.(*endpointDiscoveryHandler).picker.Pick()
+		require.ErrorIs(t, err, errNoRenderEndpoints)
+	}
 }
 
 func TestPlugin_StaticURLDoesNotRegisterForEndpointNotifications(t *testing.T) {

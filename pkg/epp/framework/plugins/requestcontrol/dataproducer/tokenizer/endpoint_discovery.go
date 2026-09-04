@@ -71,6 +71,7 @@ type renderEndpointPicker interface {
 type retryingRenderEndpointPicker interface {
 	renderEndpointPicker
 	PickExcluding(excluded map[string]struct{}) (string, error)
+	HasAlternative(endpoint string) bool
 }
 
 // fixedEndpointPicker always returns the statically configured render URL.
@@ -108,12 +109,6 @@ type roundRobinLoadBalancer struct {
 	next int
 }
 
-// compiledEndpointPortRule holds a validated selector and base port.
-type compiledEndpointPortRule struct {
-	selector labels.Selector
-	basePort int
-}
-
 // Pick returns the next endpoint and advances the concurrency-safe cursor.
 func (b *roundRobinLoadBalancer) Pick(endpoints []string) (string, error) {
 	if len(endpoints) == 0 {
@@ -128,6 +123,12 @@ func (b *roundRobinLoadBalancer) Pick(endpoints []string) (string, error) {
 	endpoint := endpoints[b.next]
 	b.next = (b.next + 1) % len(endpoints)
 	return endpoint, nil
+}
+
+// compiledEndpointPortRule holds a validated selector and base port.
+type compiledEndpointPortRule struct {
+	selector labels.Selector
+	basePort int
 }
 
 // discoveredEndpointPicker maintains render URLs keyed by endpoint identity.
@@ -176,7 +177,22 @@ func (p *discoveredEndpointPicker) PickExcluding(excluded map[string]struct{}) (
 		}
 		endpoints = available
 	}
+	if len(endpoints) == 0 {
+		return "", errNoRenderEndpoints
+	}
 	return p.loadBalancer.Pick(endpoints)
+}
+
+// HasAlternative reports whether reserving time for a retry can reach another URL.
+func (p *discoveredEndpointPicker) HasAlternative(endpoint string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, candidate := range p.ordered {
+		if candidate != endpoint {
+			return true
+		}
+	}
+	return false
 }
 
 // Upsert validates endpoint metadata and stores its HTTP render URL by identity.
@@ -278,7 +294,8 @@ func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadat
 type endpointDiscoveryHandler struct {
 	typedName           plugin.TypedName
 	picker              *discoveredEndpointPicker
-	registeredEndpoints sync.Map
+	mu                  sync.Mutex
+	registeredEndpoints map[string]fwkdl.Endpoint
 }
 
 var _ fwkdl.EndpointExtractor = &endpointDiscoveryHandler{}
@@ -290,7 +307,8 @@ func newEndpointDiscoveryHandler(owner plugin.TypedName, picker *discoveredEndpo
 			Type: PluginType + "-endpoint-discovery-" + owner.Name,
 			Name: owner.Name,
 		},
-		picker: picker,
+		picker:              picker,
+		registeredEndpoints: make(map[string]fwkdl.Endpoint),
 	}
 }
 
@@ -305,19 +323,24 @@ func (h *endpointDiscoveryHandler) Extract(_ context.Context, event fwkdl.Endpoi
 		return nil
 	}
 
+	// Keep generation checks and picker updates atomic across lifecycle callbacks.
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	meta := event.Endpoint.GetMetadata()
 	id := meta.ID.String()
 	switch event.Type {
 	case fwkdl.EventAddOrUpdate:
+		h.registeredEndpoints[id] = event.Endpoint
 		if err := h.picker.Upsert(meta); err != nil {
+			h.picker.Delete(meta)
 			return err
 		}
-		h.registeredEndpoints.Store(id, event.Endpoint)
 	case fwkdl.EventDelete:
-		if registered, ok := h.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
+		// Delete events carry the Endpoint object used by the corresponding add.
+		if registered, ok := h.registeredEndpoints[id]; ok && registered != event.Endpoint {
 			return nil
 		}
-		h.registeredEndpoints.Delete(id)
+		delete(h.registeredEndpoints, id)
 		h.picker.Delete(meta)
 	}
 	return nil
