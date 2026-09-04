@@ -18,7 +18,6 @@ package kvblock
 
 import (
 	"fmt"
-	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,30 +25,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
-
-var _ io.Closer = (*CostAwareMemoryIndex)(nil)
-
-func TestCostAwareMemoryIndexClose(t *testing.T) {
-	ctx := logging.NewTestLoggerIntoContext(t.Context())
-	for range 10 {
-		index, err := NewCostAwareMemoryIndex(&CostAwareMemoryIndexConfig{
-			Size:        "1MiB",
-			NumCounters: 10_000,
-		})
-		require.NoError(t, err)
-		require.NoError(t, index.Add(ctx,
-			[]BlockHash{1}, []BlockHash{1},
-			[]PodEntry{{PodIdentifier: "pod", DeviceTier: "gpu"}}))
-
-		require.NoError(t, index.Close())
-		require.NoError(t, index.Close())
-
-		index.keyIndexMu.Lock()
-		assert.Empty(t, index.keyIndex)
-		index.keyIndexMu.Unlock()
-		assert.Zero(t, index.requestKeys.Len())
-	}
-}
 
 // TestCostAwareKeyIndexBoundedUnderEviction verifies keyIndex does not grow with
 // every key ever added. keyIndex exists only so Clear can enumerate keys (ristretto
@@ -70,7 +45,6 @@ func TestCostAwareKeyIndexBoundedUnderEviction(t *testing.T) {
 
 	index, err := NewCostAwareMemoryIndex(cfg)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, index.Close()) })
 
 	const n = 1000
 	for i := uint64(0); i < n; i++ {

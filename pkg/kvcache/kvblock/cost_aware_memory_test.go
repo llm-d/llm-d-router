@@ -36,7 +36,6 @@ func createCostAwareIndexForTesting(t *testing.T) Index {
 	config.NumCounters = costAwareTestNumCounters
 	index, err := NewCostAwareMemoryIndex(config)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, index.Close()) })
 	return index
 }
 
@@ -64,7 +63,6 @@ func TestCostAwareIndexSize(t *testing.T) {
 
 	index, err := NewCostAwareMemoryIndex(cfg)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, index.Close()) })
 
 	err = index.Add(ctx, []BlockHash{engineKey1}, []BlockHash{requestKey1}, []PodEntry{entry1})
 	assert.NoError(t, err)
@@ -107,7 +105,6 @@ func TestSizeHumanize(t *testing.T) {
 			config := &CostAwareMemoryIndexConfig{Size: tt.size, NumCounters: costAwareTestNumCounters}
 			index, err := NewCostAwareMemoryIndex(config)
 			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, index.Close()) })
 			assert.Equal(t, tt.expected, index.MaxCost())
 		})
 	}

@@ -164,16 +164,6 @@ func (m *CostAwareMemoryIndex) MaxCost() int64 {
 	return m.data.MaxCost()
 }
 
-// Close releases the index's cache resources. It is safe to call multiple times.
-func (m *CostAwareMemoryIndex) Close() error {
-	m.data.Close()
-	m.requestKeys.Purge()
-	m.keyIndexMu.Lock()
-	clear(m.keyIndex)
-	m.keyIndexMu.Unlock()
-	return nil
-}
-
 // CostPodCache wraps a sync.Map of PodEntry and provides cost calculation for memory usage estimation.
 type CostPodCache struct {
 	cache sync.Map // map[PodEntry]struct{}
