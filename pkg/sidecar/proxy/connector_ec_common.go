@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"golang.org/x/sync/errgroup"
@@ -53,17 +54,18 @@ func truncateLongStrings(v any, maxLen int) any {
 }
 
 // extractMMItems extracts all multimodal items from the request messages.
-func extractMMItems(requestData map[string]any) []map[string]any {
+func extractMMItems(logger logr.Logger, requestData map[string]any) []map[string]any {
 	var items []map[string]any
 
-	messages, ok := requestData["messages"].([]any)
-	if !ok {
+	messages, err := requestMessages(requestData)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("cannot read request messages for multimodal extraction", "error", err)
 		return items
 	}
 
 	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
+		var msgMap map[string]any
+		if err := json.Unmarshal(msg, &msgMap); err != nil {
 			continue
 		}
 
@@ -139,7 +141,7 @@ func mmItemURL(item map[string]any) string {
 // there is no multimodal content. The caller should skip the encoder
 // stage in that case.
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
-	raw := extractMMItems(originalRequest)
+	raw := extractMMItems(s.logger, originalRequest)
 	if len(raw) == 0 {
 		return nil
 	}
