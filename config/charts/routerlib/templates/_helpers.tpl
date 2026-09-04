@@ -545,3 +545,19 @@ Deprecation validations
 {{- fail "Top-level 'inferenceObjectives' is deprecated. Please migrate your values to 'router.inferenceObjectives'." }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Annotations for the EPP pod template.
+
+The EPP parses its plugin configuration once at startup and never re-reads the
+mounted file, so a helm upgrade that touches only a ConfigMap has to change the
+pod template or the running pod keeps its old configuration. Hash the whole
+config partial rather than one ConfigMap: it renders the plugins, proxy and
+latency-predictor ConfigMaps, and all of them are mounted into this pod.
+*/}}
+{{- define "llm-d-epp.podAnnotations" -}}
+checksum/config: {{ include "llm-d-epp.config" . | sha256sum }}
+{{- with .Values.router.epp.podAnnotations }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end -}}
