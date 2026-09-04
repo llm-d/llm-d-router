@@ -37,7 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 var (
@@ -69,7 +69,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: testutil.FromBase(basePod3).
+			incomingPod: fwkk8s.FromBase(basePod3).
 				Labels(map[string]string{"some-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod1, basePod2, basePod3},
@@ -87,7 +87,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: testutil.FromBase(basePod11).
+			incomingPod: fwkk8s.FromBase(basePod11).
 				Labels(map[string]string{"some-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod11, basePod2},
@@ -105,7 +105,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: testutil.FromBase(basePod1).
+			incomingPod: fwkk8s.FromBase(basePod1).
 				Labels(map[string]string{"some-key": "some-val"}).
 				DeletionTimestamp().
 				ReadyCondition().ObjRef(),
@@ -140,7 +140,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: testutil.FromBase(basePod3).
+			incomingPod: fwkk8s.FromBase(basePod3).
 				Labels(map[string]string{"some-key": "some-val"}).ObjRef(),
 			wantPods: []*corev1.Pod{basePod1, basePod2},
 		},
@@ -157,7 +157,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: testutil.FromBase(basePod1).
+			incomingPod: fwkk8s.FromBase(basePod1).
 				Labels(map[string]string{"some-wrong-key": "some-val"}).
 				ReadyCondition().ObjRef(),
 			wantPods: []*corev1.Pod{basePod2},
@@ -175,7 +175,7 @@ func TestPodReconciler(t *testing.T) {
 					},
 				},
 			},
-			incomingPod: testutil.FromBase(basePod1).
+			incomingPod: fwkk8s.FromBase(basePod1).
 				Labels(map[string]string{"some-key": "some-val"}).ObjRef(),
 			wantPods: []*corev1.Pod{basePod2},
 		},
@@ -237,7 +237,7 @@ func TestPodReconciler_ErrorsOnRegistrationDrop(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 
-	incomingPod := testutil.FromBase(basePod1).
+	incomingPod := fwkk8s.FromBase(basePod1).
 		Labels(map[string]string{"some-key": "some-val"}).
 		ReadyCondition().ObjRef()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(incomingPod).Build()

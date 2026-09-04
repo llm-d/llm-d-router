@@ -14,33 +14,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package integration provides shared utilities, request builders, and assertions for the hermetic integration test
-// suites of the Gateway API Inference Extension.
+// Package epp provides ext_proc request and response builders and gRPC stream executors
+// for tests that drive an EPP ext_proc server.
 //
-// It encapsulates the complexity of constructing Envoy ext_proc Protobuf messages and managing gRPC streams, allowing
-// individual test suites (e.g., test/integration/epp, test/integration/bbr) to focus on behavioral assertions rather
-// than protocol boilerplate.
-package integration
+// It may import the R1/R2 framework packages, leaf pkg/epp packages (metadata, the
+// vllmgrpc generated API) and pkg/common; it must never import pkg/epp/server or cmd/.
+package epp
 
 import (
-	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strconv"
-	"testing"
 	"time"
 
 	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -70,24 +61,8 @@ func ReqLLM(logger logr.Logger, prompt, model, targetModel string) []*extProcPb.
 	return GenerateStreamedRequestSet(logger, prompt, model, targetModel, nil)
 }
 
-func ReqLLMWithStream(logger logr.Logger, prompt, model, targetModel string) []*extProcPb.ProcessingRequest {
-	requests := make([]*extProcPb.ProcessingRequest, 0, 2)
-	requests = append(requests, generateHeaders(model, targetModel, nil, nil))
-	requests = append(requests, GenerateRequestWithStream(logger, prompt, model, nil))
-	return requests
-}
-
 func ReqGRPCLLM(logger logr.Logger, prompt, inferenceObjective, methodName string) []*extProcPb.ProcessingRequest {
 	return GenerateStreamedGRPCRequestSet(logger, prompt, inferenceObjective, nil, methodName)
-}
-
-// ReqLLMUnary creates a single `ProcessingRequest` containing a complete JSON body.
-// This simulates a scenario where Envoy has buffered the request body before sending it to the external processor
-// (unary mode).
-//
-// Use this for tests where `streaming: false` or when testing legacy buffered behavior.
-func ReqLLMUnary(logger logr.Logger, prompt, model string) *extProcPb.ProcessingRequest {
-	return GenerateRequest(logger, prompt, model, nil)
 }
 
 // ReqRaw creates a custom sequence of gRPC messages with specific headers and arbitrary body chunks.
@@ -165,20 +140,6 @@ func GenerateRequest(logger logr.Logger, prompt, model string, filterMetadata []
 		panic(fmt.Errorf("failed to marshal LLM request: %w", err))
 	}
 
-	return generateRequestFromBytes(llmReq, filterMetadata)
-}
-
-func GenerateRequestWithStream(logger logr.Logger, prompt, model string, filterMetadata []string) *extProcPb.ProcessingRequest {
-	j := map[string]any{
-		"prompt":      prompt,
-		"max_tokens":  100,
-		"temperature": 0,
-		"stream":      true,
-	}
-	if model != "" {
-		j["model"] = model
-	}
-	llmReq, _ := json.Marshal(j)
 	return generateRequestFromBytes(llmReq, filterMetadata)
 }
 
@@ -457,209 +418,6 @@ func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers
 			ImmediateResponse: immediateResponse,
 		},
 	}}
-}
-
-// --- Execution Helpers ---
-
-// SendRequest is a helper for Unary (One-Shot) test scenarios.
-// It sends a single request message and waits for exactly one response.
-func SendRequest(
-	t *testing.T,
-	client extProcPb.ExternalProcessor_ProcessClient,
-	req *extProcPb.ProcessingRequest,
-) (*extProcPb.ProcessingResponse, error) {
-	t.Helper()
-	t.Logf("Sending request: %v", req)
-
-	if err := client.Send(req); err != nil {
-		t.Logf("Failed to send request: %v", err)
-		return nil, err
-	}
-
-	res, err := client.Recv()
-	if err != nil {
-		t.Logf("Failed to receive response: %v", err)
-		return nil, err
-	}
-	t.Logf("Received response: %+v", res)
-	return res, err
-}
-
-// StreamedRequest is a helper for Full-Duplex Streaming test scenarios.
-// It performs the following actions:
-//  1. Sends all requests in the provided slice to the server.
-//  2. Listens for responses on the stream until 'expectedResponses' count is reached.
-//  3. Enforces a 10-second timeout to prevent deadlocks if the server hangs.
-//  4. Handles io.EOF gracefully (server closed stream).
-func StreamedRequest(
-	t *testing.T,
-	client extProcPb.ExternalProcessor_ProcessClient,
-	requests []*extProcPb.ProcessingRequest,
-	expectedResponses int,
-) ([]*extProcPb.ProcessingResponse, error) {
-	t.Helper()
-
-	// 1. Send Phase
-	for _, req := range requests {
-		t.Logf("Sending request: %v", req)
-		if err := client.Send(req); err != nil {
-			t.Logf("Failed to send request: %v", err)
-			return nil, err
-		}
-	}
-
-	// 2. Receive Phase
-	// We use a channel and a separate goroutine for receiving to allow for a strict timeout via select{}.
-	type recvResult struct {
-		res *extProcPb.ProcessingResponse
-		err error
-	}
-
-	// Buffered channel avoids blocking the goroutine on the last read.
-	recvChan := make(chan recvResult, expectedResponses+1)
-
-	// Start reading in background.
-	go func() {
-		for range expectedResponses {
-			res, err := client.Recv()
-			recvChan <- recvResult{res, err}
-			if err != nil {
-				return // Stop reading on error or EOF.
-			}
-		}
-	}()
-
-	var responses []*extProcPb.ProcessingResponse
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
-	// Collect results with timeout.
-	for i := range expectedResponses {
-		select {
-		case <-ctx.Done():
-			t.Logf("Timeout waiting for response %d of %d: %v", i+1, expectedResponses, ctx.Err())
-			return responses, fmt.Errorf("timeout waiting for responses: %w", ctx.Err())
-
-		case result := <-recvChan:
-			if result.err != nil {
-				// io.EOF is a valid termination from the server side (e.g. rejection).
-				if result.err == io.EOF {
-					return responses, nil
-				}
-				t.Logf("Failed to receive: %v", result.err)
-				return nil, result.err
-			}
-			t.Logf("Received response: %+v", result.res)
-			responses = append(responses, result.res)
-		}
-	}
-
-	return responses, nil
-}
-
-// --- System Utilities ---
-
-// StartExtProcServer handles the lifecycle of starting a gRPC server in the background and connecting to it.
-// It guarantees that the server is listening on the specified port before returning.
-//
-// serverRunner: A function that blocks until the server exits (e.g. Runnable.Start).
-// port: The port the server is configured to listen on.
-func StartExtProcServer(
-	ctx context.Context,
-	t *testing.T,
-	serverRunner func(context.Context) error,
-	port int,
-	logger logr.Logger,
-) (extProcPb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
-	t.Helper()
-
-	// Force IPv4: the server binds on IPv4 localhost, and a dual-stack target would let
-	// the client reach for an IPv6 address nothing is listening on.
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
-
-	// Start server in background.
-	go func() {
-		logger.Info("Starting ExtProc server", "address", serverAddr)
-		if err := serverRunner(ctx); err != nil {
-			t.Error("Starting ExtProc server failed")
-		}
-	}()
-
-	return ExtProcServerClient(ctx, t, port, logger, nil)
-}
-
-// ExtProcServerClient returns a ExternalProcessor_ProcessClient listen to localhost on given port.
-// mgrErr, when non-nil, carries the early exit of the manager hosting the server so a start
-// failure fails the test immediately instead of waiting out extprocConnSetupTimeout.
-func ExtProcServerClient(
-	ctx context.Context,
-	t *testing.T,
-	port int,
-	logger logr.Logger,
-	mgrErr <-chan error,
-) (extProcPb.ExternalProcessor_ProcessClient, *grpc.ClientConn) {
-	t.Helper()
-
-	// Force IPv4: the server binds on IPv4 localhost, and a dual-stack target would let
-	// the client reach for an IPv6 address nothing is listening on.
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
-
-	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err, "failed to create grpc connection")
-	// Registered before any require below can call FailNow, so the conn and its
-	// goroutines do not leak on the failure path.
-	t.Cleanup(func() { _ = conn.Close() })
-
-	require.NoError(t, WaitExtProcReady(ctx, conn, mgrErr), "ext-proc server did not become ready")
-
-	extProcClient, err := extProcPb.NewExternalProcessorClient(conn).Process(ctx)
-	require.NoError(t, err, "failed to initialize ext_proc stream client")
-
-	return extProcClient, conn
-}
-
-// WaitExtProcReady blocks until conn reaches connectivity.Ready (nil), the manager
-// reports an early exit via mgrErr, ctx is done, or extprocConnSetupTimeout elapses.
-//
-// The server serves on a listener bound before it starts, so the kernel completes the
-// TCP handshake out of the listen backlog and a dial succeeds even while grpc.Serve has
-// not run yet. Only Ready, which requires the HTTP/2 handshake, proves it is serving.
-// The state wait is bounded by the poll interval so an early mgrErr is still observed
-// promptly rather than after the full timeout.
-func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan error) error {
-	deadline := time.Now().Add(extprocConnSetupTimeout)
-	for {
-		state := conn.GetState()
-		if state == connectivity.Ready {
-			return nil
-		}
-		if state == connectivity.Idle {
-			// A ClientConn only leaves Idle on Connect or a started RPC, so a
-			// Ready to Idle flap would otherwise stall until the deadline.
-			conn.Connect()
-		}
-
-		select {
-		case err := <-mgrErr:
-			if err == nil {
-				return errors.New("manager exited before ext-proc server became ready")
-			}
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("ext-proc server at %s not ready within %s (state %s)",
-				conn.Target(), extprocConnSetupTimeout, state)
-		}
-
-		waitCtx, cancel := context.WithTimeout(ctx, extPorcConnSetupPollInterval)
-		conn.WaitForStateChange(waitCtx, state)
-		cancel()
-	}
 }
 
 // --- Internal Helpers ---

@@ -36,6 +36,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	httpds "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 func TestRuntimePollingDispatch(t *testing.T) {
@@ -96,7 +97,7 @@ func TestRuntimePollingDispatch(t *testing.T) {
 				},
 			}
 
-			require.NoError(t, r.Configure(cfg, logger))
+			require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -148,7 +149,7 @@ func TestRuntimePollingMultipleExtractors(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -197,7 +198,7 @@ func TestRuntimePollingEndpointLifecycle(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -251,7 +252,7 @@ func TestRuntimePollingWithoutExtractors(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -290,7 +291,7 @@ func TestRuntimePollingHTTPError(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

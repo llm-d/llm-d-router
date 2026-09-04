@@ -25,7 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // TestFullDuplexStreamed_DataLayer runs integration tests through the datalayer metrics pipeline.
@@ -39,13 +40,13 @@ func TestFullDuplexStreamed_DataLayer(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			h := NewTestHarness(ctx, t, WithStandardMode())
+			h := eppharness.NewTestHarness(ctx, t, eppharness.WithStandardMode())
 			h.WithBaseResources().WithPods(tc.pods).WaitForSync(len(tc.pods), modelMyModel)
 			if len(tc.pods) > 0 {
 				h.WaitForReadyPodsMetric(len(tc.pods))
 			}
 
-			responses, err := integration.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
+			responses, err := fwkepp.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
 			require.NoError(t, err)
 
 			if diff := cmp.Diff(tc.wantResponses, responses,

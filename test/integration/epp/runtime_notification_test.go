@@ -31,6 +31,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 var (
@@ -49,7 +50,7 @@ func setupRuntimeWithExtractor(r *datalayer.Runtime, extractorName string) (*moc
 			{Plugin: src, Extractors: []fwkplugin.Plugin{ext}},
 		},
 	}
-	return ext, r.Configure(cfg, logger)
+	return ext, r.Configure(cfg, eppharness.Logger())
 }
 
 func TestRuntimeNotificationDispatch(t *testing.T) {
@@ -157,7 +158,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 						{Plugin: src, Extractors: []fwkplugin.Plugin{ext1, ext2}},
 					},
 				}
-				return ext1, r.Configure(cfg, logger)
+				return ext1, r.Configure(cfg, eppharness.Logger())
 			},
 			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-multi", s.namespace)
@@ -180,7 +181,7 @@ func TestRuntimeNotificationDispatch(t *testing.T) {
 						{Plugin: src, Extractors: []fwkplugin.Plugin{errExtractor, workingExtractor}},
 					},
 				}
-				return workingExtractor, r.Configure(cfg, logger)
+				return workingExtractor, r.Configure(cfg, eppharness.Logger())
 			},
 			trigger: func(_ *testing.T, s *testSetup, _ *mocks.NotificationExtractor) error {
 				pod := newTestPod("test-pod-error", s.namespace)
@@ -232,7 +233,7 @@ func TestRuntimeNotificationWithRuntime(t *testing.T) {
 			{Plugin: src, Extractors: []fwkplugin.Plugin{extractor}},
 		},
 	}
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
@@ -261,7 +262,7 @@ func TestRuntimeNotificationDifferentGVKs(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, r.Configure(cfg, logger))
+	require.NoError(t, r.Configure(cfg, eppharness.Logger()))
 	require.NoError(t, r.Start(setup.ctx, setup.mgr))
 
 	pod := newTestPod("test-pod-gvk", setup.namespace)

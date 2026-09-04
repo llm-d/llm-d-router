@@ -167,7 +167,10 @@ sidecar_TEST_PACKAGES = ./pkg/sidecar/...
 # block (epp+sidecar only); CI's baseline cache unions all coverage/*.out, so
 # framework enters the CI baseline once this is on main. The PR run reports
 # coverage/framework.out as a new component.
-framework_TEST_PACKAGES = ./test/framework/...
+# The EPP harness is excluded: it is envtest-driven and exercised by
+# make test-integration-hermetic, so unit coverage would report 0% for code
+# that is in fact covered.
+framework_TEST_PACKAGES = $$(go list ./test/framework/... | grep -vE '/test/framework/epp/harness($$|/)' | tr '\n' ' ')
 
 # Internal variables for generic targets
 epp_IMAGE = $(EPP_IMAGE)

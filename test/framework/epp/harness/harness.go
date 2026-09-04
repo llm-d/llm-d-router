@@ -14,18 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package epp
+// Package harness boots a shared envtest environment and per-test EPP servers for
+// integration suites.
+//
+// It sits at the top of the framework layering and may import anything, including
+// pkg/epp/server and cmd/epp/runner; only integration and e2e suites import it.
+package harness
 
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,12 +52,19 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/yaml"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	metricsutils "k8s.io/component-base/metrics/testutil"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
@@ -55,12 +73,12 @@ import (
 	dlmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
-	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
-// Global State (Initialized in TestMain)
+// Global State (Initialized in Run)
 var (
 	k8sClient     client.Client
 	testEnv       *envtest.Environment
@@ -69,8 +87,122 @@ var (
 	baseResources []*unstructured.Unstructured
 )
 
+// repoRootPath is the on-disk path to this repository. Hermetic tests use local
+// llm-d CRDs and fixtures so API group migrations are exercised before CI.
+var repoRootPath string
+
+// Run builds the shared envtest environment, runs the package's tests and tears the
+// environment down again. TestMain delegates to it.
+func Run(m *testing.M) int {
+	ctrl.SetLogger(logger)
+
+	repoRootPath = moduleDir("github.com/llm-d/llm-d-router")
+	gaieModulePath := moduleDir("sigs.k8s.io/gateway-api-inference-extension")
+	crdPaths := []string{
+		filepath.Join(gaieModulePath, "config", "crd", "bases"),
+		filepath.Join(repoRootPath, "config", "crd", "bases"),
+	}
+
+	// 1. EnvTest Setup (API Server + Etcd)
+	testEnv = &envtest.Environment{
+		CRDDirectoryPaths:     crdPaths,
+		ErrorIfCRDPathMissing: true,
+	}
+	cfg, err := testEnv.Start()
+	if err != nil {
+		panic(fmt.Sprintf("failed to start test environment: %v", err))
+	}
+
+	// 2. Client & Scheme Registration
+	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
+	utilruntime.Must(v1alpha2.Install(testScheme))
+	utilruntime.Must(v1.Install(testScheme))
+	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
+	if err != nil {
+		panic(err)
+	}
+
+	// 3. Global Metric Registration
+	// Necessary because we cannot parallelize tests using the global registry.
+	metrics.Register()
+
+	// 4. Pre-parse Base Resources
+	// We load the YAML once here to avoid unnecessary I/O in every test case.
+	baseResources = loadBaseResources()
+
+	code := m.Run()
+
+	_ = testEnv.Stop()
+	return code
+}
+
+// moduleDir returns the on-disk directory of a module in the build list.
+func moduleDir(path string) string {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", path).Output()
+	if err != nil {
+		// go list reports the actual reason on stderr, which ExitError carries.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			err = fmt.Errorf("%w: %s", err, exitErr.Stderr)
+		}
+		panic(fmt.Sprintf("failed to locate module %s: %v", path, err))
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		// An empty dir turns the CRD paths relative, which envtest reports as a
+		// missing path that does not look wrong.
+		panic("go list returned no directory for module " + path)
+	}
+	return dir
+}
+
+// loadBaseResources parses the YAML manifest once at startup.
+func loadBaseResources() []*unstructured.Unstructured {
+	path := filepath.Join(repoRootPath, "test", "testdata", "inferencepool-with-model-hermetic.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panic(fmt.Sprintf("failed to read manifest %s: %v", path, err))
+	}
+
+	var objs []*unstructured.Unstructured
+	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(string(data)), 4096)
+	for {
+		u := &unstructured.Unstructured{}
+		if err := decoder.Decode(u); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			panic(fmt.Sprintf("failed to decode YAML: %v", err))
+		}
+		objs = append(objs, u)
+	}
+	return objs
+}
+
+// K8sClient returns the client for the shared envtest API server. It is named for the
+// global it exposes: TestHarness.Client is the ext_proc stream client, not this one.
+func K8sClient() client.Client {
+	return k8sClient
+}
+
+// Config returns the rest config of the shared envtest API server.
+func Config() *rest.Config {
+	return testEnv.Config
+}
+
+// Logger returns the package-wide test logger.
+func Logger() logr.Logger {
+	return logger
+}
+
+// Scheme returns the scheme the shared client is built with.
+func Scheme() *runtime.Scheme {
+	return testScheme
+}
+
 const (
-	testPoolName = "vllm-qwen3-32b-pool"
+	// TestPoolName is the InferencePool name every harness-created pod is labelled with.
+	TestPoolName = "vllm-qwen3-32b-pool"
 
 	// mockDataSourceType is the plugin type name used for the mock data source in integration tests.
 	mockDataSourceType = "mock-metrics-source"
@@ -79,23 +211,30 @@ const (
 //go:embed testdata/datalayer-config.yaml
 var testDLConfig string
 
-type runMode string
-type standaloneStrategy string
+// RunMode selects which EPP deployment shape the harness boots.
+type RunMode string
+
+// StandaloneStrategy selects whether a standalone EPP watches CRDs.
+type StandaloneStrategy string
 
 const (
-	modeStandard    runMode            = "standard"
-	modeStandalone  runMode            = "standalone"
-	strategyNoCRD   standaloneStrategy = "no_crd"   // Pure standalone
-	strategyWithCRD standaloneStrategy = "with_crd" // Standalone but watching CRDs
+	// ModeStandard runs EPP against the CRD-backed control plane.
+	ModeStandard RunMode = "standard"
+	// ModeStandalone runs EPP without a control plane.
+	ModeStandalone RunMode = "standalone"
+	// StrategyNoCRD is pure standalone.
+	StrategyNoCRD StandaloneStrategy = "no_crd"
+	// StrategyWithCRD is standalone but watching CRDs.
+	StrategyWithCRD StandaloneStrategy = "with_crd"
 )
 
 // HarnessConfig holds configuration options for the TestHarness.
 type HarnessConfig struct {
-	// runMode is the master switch. It tells you explicitly what the config is for.
-	runMode runMode
+	// mode is the master switch. It tells you explicitly what the config is for.
+	mode RunMode
 
-	// standaloneStrategy settings are used when runMode == modeStandalone.
-	standaloneStrategy standaloneStrategy
+	// strategy settings are used when mode == ModeStandalone.
+	strategy StandaloneStrategy
 
 	// configText overrides the default testConfig if provided. A nil value means use default.
 	configText *string
@@ -110,18 +249,18 @@ type HarnessConfig struct {
 // HarnessOption is a functional option for configuring the TestHarness.
 type HarnessOption func(*HarnessConfig)
 
-// WithStandaloneMode configures the harness to run in standalone runMode
-func WithStandaloneMode(standaloneStrategy standaloneStrategy) HarnessOption {
+// WithStandaloneMode configures the harness to run in standalone mode
+func WithStandaloneMode(strategy StandaloneStrategy) HarnessOption {
 	return func(c *HarnessConfig) {
-		c.runMode = modeStandalone
-		c.standaloneStrategy = standaloneStrategy
+		c.mode = ModeStandalone
+		c.strategy = strategy
 	}
 }
 
-// WithStandardMode configures the harness to run in standard runMode
+// WithStandardMode configures the harness to run in standard mode
 func WithStandardMode() HarnessOption {
 	return func(c *HarnessConfig) {
-		c.runMode = modeStandard
+		c.mode = ModeStandard
 	}
 }
 
@@ -168,9 +307,9 @@ type TestHarness struct {
 	Namespace string
 
 	// --- Config State ---
-	runMode            runMode
-	standaloneStrategy standaloneStrategy
-	Tracing            bool
+	mode     RunMode
+	strategy StandaloneStrategy
+	Tracing  bool
 
 	Client    extProcPb.ExternalProcessor_ProcessClient
 	Datastore datastore.Datastore
@@ -188,7 +327,7 @@ type TestHarness struct {
 
 // hasCRDs returns true when the harness is running in a mode that has CRD support.
 func (h *TestHarness) hasCRDs() bool {
-	return h.runMode != modeStandalone || h.standaloneStrategy != strategyNoCRD
+	return h.mode != ModeStandalone || h.strategy != StrategyNoCRD
 }
 
 // NewTestHarness boots up a fully isolated test environment.
@@ -235,9 +374,9 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 
 	eppOptions := defaultEppServerOptions(t, testNamespaceName, configText)
 	eppOptions.EmitEndpointScores = config.emitEndpointScores
-	if config.runMode == modeStandalone && config.standaloneStrategy == strategyNoCRD {
+	if config.mode == ModeStandalone && config.strategy == StrategyNoCRD {
 		// Only standalone EPP without crd need to set the EndpointSelector.
-		eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": testPoolName})
+		eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": TestPoolName})
 	}
 
 	// Shorten the Prometheus refresh interval so WaitForReadyPodsMetric (10s timeout)
@@ -285,7 +424,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		<-mgrDone
 	})
 
-	extProcClient, conn := integration.ExtProcServerClient(
+	extProcClient, conn := fwkepp.ExtProcServerClient(
 		mgrCtx,
 		t,
 		grpcPort,
@@ -294,19 +433,19 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	)
 
 	h := &TestHarness{
-		t:                  t,
-		ctx:                mgrCtx,
-		Namespace:          eppOptions.PoolNamespace,
-		runMode:            config.runMode,
-		standaloneStrategy: config.standaloneStrategy,
-		Tracing:            config.Tracing,
-		Client:             extProcClient,
-		Datastore:          dataStore,
-		Exporter:           exporter,
-		tp:                 tp,
-		grpcConn:           conn,
-		metricsBackend:     backend,
-		Runner:             runner,
+		t:              t,
+		ctx:            mgrCtx,
+		Namespace:      eppOptions.PoolNamespace,
+		mode:           config.mode,
+		strategy:       config.strategy,
+		Tracing:        config.Tracing,
+		Client:         extProcClient,
+		Datastore:      dataStore,
+		Exporter:       exporter,
+		tp:             tp,
+		grpcConn:       conn,
+		metricsBackend: backend,
+		Runner:         runner,
 	}
 
 	return h
@@ -316,7 +455,7 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	t.Helper()
 
 	eppOptions := eppServer.NewOptions()
-	eppOptions.PoolName = testPoolName
+	eppOptions.PoolName = TestPoolName
 	eppOptions.PoolNamespace = namespace
 	eppOptions.ConfigText = configText
 
@@ -329,6 +468,16 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	return eppOptions
 }
 
+// GRPCConn returns the connection to this harness's ext_proc server.
+func (h *TestHarness) GRPCConn() *grpc.ClientConn {
+	return h.grpcConn
+}
+
+// SetPodMetrics injects pod metrics into the harness's metrics backend.
+func (h *TestHarness) SetPodMetrics(m map[types.NamespacedName]*fwkdl.Metrics) {
+	h.metricsBackend.SetPodMetrics(m)
+}
+
 // GetSpans returns the currently recorded spans from the in-memory exporter.
 func (h *TestHarness) GetSpans() tracetest.SpanStubs {
 	return h.Exporter.GetSpans()
@@ -337,7 +486,7 @@ func (h *TestHarness) GetSpans() tracetest.SpanStubs {
 // --- Fluent Builder API ---
 
 // WithBaseResources injects the standard pool and objective definitions into the test namespace.
-// These resources are pre-parsed in TestMain to avoid I/O overhead in the loop.
+// The resources are parsed once at startup to avoid I/O overhead in the loop.
 func (h *TestHarness) WithBaseResources() *TestHarness {
 	h.t.Helper()
 	for _, obj := range baseResources {
@@ -374,10 +523,10 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	for _, p := range pods {
 		name := fmt.Sprintf("pod-%d", p.index)
 
-		pod := testutil.MakePod(name).
+		pod := fwkk8s.MakePod(name).
 			Namespace(h.Namespace).
 			ReadyCondition(). // Sets Status.Conditions.
-			Labels(map[string]string{"app": testPoolName}).
+			Labels(map[string]string{"app": TestPoolName}).
 			IP(fmt.Sprintf("192.168.1.%d", p.index+1)).
 			Complete().
 			ObjRef()
@@ -401,7 +550,7 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 func (h *TestHarness) WaitForReadyPodsMetric(expectedCount int) {
 	h.t.Helper()
 
-	expected := cleanMetric(metricReadyPods(expectedCount))
+	expected := CleanMetric(MetricReadyPods(expectedCount))
 	require.Eventually(h.t, func() bool {
 		err := metricsutils.GatherAndCompare(crmetrics.Registry, strings.NewReader(expected),
 			"inference_pool_ready_pods")
@@ -430,9 +579,9 @@ func (h *TestHarness) WaitForSync(expectedPods int, checkModelObjective string) 
 		}
 		return true
 	}, 10*time.Second, 50*time.Millisecond,
-		"Datastore sync timed out (runMode=%v standaloneStrategy=%v poolSynced=%v podsFound=%d expected=%d)",
-		h.runMode,
-		h.standaloneStrategy,
+		"Datastore sync timed out (mode=%v strategy=%v poolSynced=%v podsFound=%d expected=%d)",
+		h.mode,
+		h.strategy,
 		lastPoolSynced,
 		lastPodsFound,
 		expectedPods,
@@ -454,4 +603,61 @@ func (h *TestHarness) ExpectMetrics(expected map[string]string) {
 			h.t.Errorf("Metric mismatch for %s: %v", name, err)
 		}
 	}
+}
+
+// --- Data Structures & Metrics Helpers ---
+
+type PodState struct {
+	index        int
+	queueSize    int
+	kvCacheUsage float64
+	activeModels []string
+}
+
+// P constructs a Pod State: Index, Queue, KV%, Models...
+// Usage: P(0, 5, 0.2, "model-a")
+func P(idx int, q int, kv float64, models ...string) PodState {
+	return PodState{index: idx, queueSize: q, kvCacheUsage: kv, activeModels: models}
+}
+
+type label struct{ name, value string }
+
+func labelsToString(labels []label) string {
+	parts := make([]string, len(labels))
+	for i, l := range labels {
+		parts[i] = fmt.Sprintf("%s=%q", l.name, l.value)
+	}
+	return strings.Join(parts, ",")
+}
+
+// MetricReqTotal renders the expected inference_objective_request_total exposition text.
+func MetricReqTotal(model, target string, priority int) string {
+	return fmt.Sprintf(`
+    # HELP inference_objective_request_total [ALPHA] [Deprecated: Use llm_d_epp_request_total] Counter of inference objective requests broken out for each model and target model.
+    # TYPE inference_objective_request_total counter
+    inference_objective_request_total{%s} 1
+    `, labelsToString([]label{{"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+}
+
+// MetricReadyPods renders the expected inference_pool_ready_pods exposition text.
+func MetricReadyPods(count int) string {
+	return fmt.Sprintf(`
+    # HELP inference_pool_ready_pods [ALPHA] [Deprecated: Use llm_d_epp_ready_endpoints] The number of ready pods in the inference server pool.
+    # TYPE inference_pool_ready_pods gauge
+    inference_pool_ready_pods{%s} %d
+    `, labelsToString([]label{{"name", TestPoolName}}), count)
+}
+
+// CleanMetric removes indentation from multiline metric strings and ensures a trailing newline exists, which is
+// required by the Prometheus text parser.
+func CleanMetric(s string) string {
+	lines := strings.Split(s, "\n")
+	var cleaned []string
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	return strings.Join(cleaned, "\n") + "\n"
 }

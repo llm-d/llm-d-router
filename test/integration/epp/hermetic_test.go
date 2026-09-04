@@ -20,9 +20,6 @@ package epp
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,22 +31,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/yaml"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-
-	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 const (
@@ -61,79 +48,24 @@ const (
 	inferenceObjectiveWithPriority4 = "inference-objective-with-priority-4"
 )
 
-// repoRootPath is the on-disk path to this repository. Hermetic tests use local
-// llm-d CRDs and fixtures so API group migrations are exercised before CI.
-var repoRootPath string
-
-func TestMain(m *testing.M) {
-	ctrl.SetLogger(logger)
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		panic("failed to locate hermetic test source file")
-	}
-	repoRootPath = filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-
-	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}",
-		"sigs.k8s.io/gateway-api-inference-extension").Output()
-	if err != nil {
-		panic(fmt.Sprintf("failed to locate gateway-api-inference-extension module: %v", err))
-	}
-	gaieModulePath := strings.TrimSpace(string(out))
-	crdPaths := []string{
-		filepath.Join(gaieModulePath, "config", "crd", "bases"),
-		filepath.Join(repoRootPath, "config", "crd", "bases"),
-	}
-
-	// 1. EnvTest Setup (API Server + Etcd)
-	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     crdPaths,
-		ErrorIfCRDPathMissing: true,
-	}
-	cfg, err := testEnv.Start()
-	if err != nil {
-		panic(fmt.Sprintf("failed to start test environment: %v", err))
-	}
-
-	// 2. Client & Scheme Registration
-	utilruntime.Must(clientgoscheme.AddToScheme(testScheme))
-	utilruntime.Must(v1alpha2.Install(testScheme))
-	utilruntime.Must(v1.Install(testScheme))
-	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
-	if err != nil {
-		panic(err)
-	}
-
-	// 3. Global Metric Registration
-	// Necessary because we cannot parallelize tests using the global registry.
-	metrics.Register()
-
-	// 4. Pre-parse Base Resources
-	// We load the YAML once here to avoid unnecessary I/O in every test case.
-	baseResources = loadBaseResources()
-
-	code := m.Run()
-
-	_ = testEnv.Stop()
-	os.Exit(code)
-}
+func TestMain(m *testing.M) { os.Exit(eppharness.Run(m)) }
 
 func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 	// executionModes defines the permutations of EPP deployment modes to test.
 	executionModes := []struct {
-		name               string
-		mode               runMode
-		standaloneStrategy standaloneStrategy
+		name     string
+		mode     eppharness.RunMode
+		strategy eppharness.StandaloneStrategy
 	}{
-		{name: "Standard", mode: modeStandard},
-		{name: "Standalone-NoCRD", mode: modeStandalone, standaloneStrategy: strategyNoCRD},
-		{name: "Standalone-WithCRD", mode: modeStandalone, standaloneStrategy: strategyWithCRD},
+		{name: "Standard", mode: eppharness.ModeStandard},
+		{name: "Standalone-NoCRD", mode: eppharness.ModeStandalone, strategy: eppharness.StrategyNoCRD},
+		{name: "Standalone-WithCRD", mode: eppharness.ModeStandalone, strategy: eppharness.StrategyWithCRD},
 	}
 
 	for _, executionMode := range executionModes {
 		t.Run(executionMode.name, func(t *testing.T) {
 			// Determine if we are running in the standalone mode without CRDs
-			isNoCRD := executionMode.mode == modeStandalone && executionMode.standaloneStrategy == strategyNoCRD
+			isNoCRD := executionMode.mode == eppharness.ModeStandalone && executionMode.strategy == eppharness.StrategyNoCRD
 
 			// Helper function to override priority to 0 when in NoCRD mode
 			prio := func(p int) int {
@@ -146,15 +78,15 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 			hermeticTests := []testCase{
 				{
 					name:     "select lora despite higher kv cache (affinity)",
-					requests: integration.ReqLLM(logger, "test3", modelSQLLora, modelSQLLoraTarget),
-					pods: []PodState{
-						P(0, 10, 0.2, "foo", "bar"),
-						P(1, 10, 0.4, "foo", modelSQLLoraTarget), // Winner (Affinity overrides KV)
-						P(2, 10, 0.3, "foo"),
+					requests: fwkepp.ReqLLM(eppharness.Logger(), "test3", modelSQLLora, modelSQLLoraTarget),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 10, 0.2, "foo", "bar"),
+						eppharness.P(1, 10, 0.4, "foo", modelSQLLoraTarget), // Winner (Affinity overrides KV)
+						eppharness.P(2, 10, 0.3, "foo"),
 					},
 					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test3"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+						"inference_objective_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
 				},
 				{
@@ -179,7 +111,7 @@ dataLayer:
   sources:
   - pluginRef: mock-metrics-source
 `,
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							"hi":                         "mom",
 							reqcommon.RequestIDHeaderKey: "test-request-id",
@@ -187,40 +119,40 @@ dataLayer:
 						},
 						"passthrough-parser",
 					),
-					pods: []PodState{
-						P(0, 3, 0.2),
-						P(1, 0, 0.1), // Winner
-						P(2, 10, 0.2),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 3, 0.2),
+						eppharness.P(1, 0, 0.1), // Winner
+						eppharness.P(2, 10, 0.2),
 					},
 					wantResponses: ExpectPassthroughRouteTo("192.168.1.2:8000", []byte("passthrough-parser")),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal("", "", prio(2))),
-						"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+						"inference_objective_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal("", "", prio(2))),
+						"inference_pool_ready_pods":         eppharness.CleanMetric(eppharness.MetricReadyPods(3)),
 					},
 				},
 				{
 					name:     "do not shed requests by default",
-					requests: integration.ReqLLM(logger, "test4", modelSQLLora, modelSQLLoraTarget),
-					pods: []PodState{
-						P(0, 6, 0.2, "foo", "bar", modelSQLLoraTarget), // Winner (Lowest saturated)
-						P(1, 0, 0.85, "foo"),
-						P(2, 10, 0.9, "foo"),
+					requests: fwkepp.ReqLLM(eppharness.Logger(), "test4", modelSQLLora, modelSQLLoraTarget),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 6, 0.2, "foo", "bar", modelSQLLoraTarget), // Winner (Lowest saturated)
+						eppharness.P(1, 0, 0.85, "foo"),
+						eppharness.P(2, 10, 0.9, "foo"),
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSQLLoraTarget, "test4"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+						"inference_objective_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
 				},
 
 				// --- Error Handling & Edge Cases ----
 				{
 					name: "invalid json body",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{"hi": "mom"},
 						"no healthy upstream",
 					),
-					pods: []PodState{
-						P(0, 0, 0.2, "foo", "bar"),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 0, 0.2, "foo", "bar"),
 					},
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
@@ -229,7 +161,7 @@ dataLayer:
 				},
 				{
 					name: "split body across chunks",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							"hi":                         "mom",
 							metadata.ObjectiveKey:        modelSheddable,
@@ -239,18 +171,18 @@ dataLayer:
 						`{"max_tokens":100,"model":"sql-lo`,
 						`ra-sheddable","prompt":"test6","temperature":0}`,
 					),
-					pods: []PodState{
-						P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
-						P(1, 4, 0.85, "foo", modelSheddableTarget),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
+						eppharness.P(1, 4, 0.85, "foo", modelSheddableTarget),
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSheddableTarget, "test6"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
+						"inference_objective_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
 					},
 				},
 				{
 					name: "images edits: multipart body split across chunks, routed unchanged",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							":path":                      "/v1/images/edits",
 							"content-type":               "multipart/form-data; boundary=" + imagesEditsBoundary,
@@ -259,16 +191,16 @@ dataLayer:
 						imagesEditsBody[:40],
 						imagesEditsBody[40:],
 					),
-					pods: []PodState{
-						P(0, 3, 0.2),
-						P(1, 0, 0.1), // Winner (Low Queue, Low KV)
-						P(2, 10, 0.2),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 3, 0.2),
+						eppharness.P(1, 0, 0.1), // Winner (Low Queue, Low KV)
+						eppharness.P(2, 10, 0.2),
 					},
 					wantResponses: expectImagesEditsRouteTo("192.168.1.2:8000"),
 				},
 				{
 					name: "images edits: non-multipart content-type rejected",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							":path":        "/v1/images/edits",
 							"content-type": "application/json",
@@ -280,14 +212,14 @@ dataLayer:
 				},
 				{
 					name:     "no backend pods available",
-					requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+					requests: fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 					pods:     nil,
 					wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
 						"inference error: Internal - no pods available in datastore"),
 				},
 				{
 					name: "request missing model field",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{"content-type": "application/json"},
 						`{"prompt":"hello world"}`,
 					),
@@ -301,29 +233,29 @@ dataLayer:
 					// Only pods in the subset list are eligible.
 					requests: ReqSubset("test2", modelSQLLora, modelSQLLoraTarget,
 						"192.168.1.1:8000", "192.168.1.2:8000", "192.168.1.3:8000"),
-					pods: []PodState{
-						P(0, 0, 0.2, "foo"),
-						P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Low Queue + Matches Subset)
-						P(2, 10, 0.2, "foo"),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 0, 0.2, "foo"),
+						eppharness.P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Low Queue + Matches Subset)
+						eppharness.P(2, 10, 0.2, "foo"),
 					},
 					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
 				},
 				{
 					name:     "subsetting: partial match",
 					requests: ReqSubset("test2", modelSQLLora, modelSQLLoraTarget, "192.168.1.3:8000"),
-					pods: []PodState{
-						P(0, 0, 0.2, "foo"),
-						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
-						P(2, 10, 0.2, "foo"), // Winner (Matches Subset, despite load)
+					pods: []eppharness.PodState{
+						eppharness.P(0, 0, 0.2, "foo"),
+						eppharness.P(1, 0, 0.1, "foo", modelSQLLoraTarget),
+						eppharness.P(2, 10, 0.2, "foo"), // Winner (Matches Subset, despite load)
 					},
 					wantResponses: ExpectRouteTo("192.168.1.3:8000", modelSQLLoraTarget, "test2"),
 				},
 				{
 					name:     "subsetting: no pods match",
 					requests: ReqSubset("test2", modelSQLLora, modelSQLLoraTarget, "192.168.1.99:8000"),
-					pods: []PodState{
-						P(0, 0, 0.2, "foo"),
-						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 0, 0.2, "foo"),
+						eppharness.P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
 					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
 						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
@@ -333,7 +265,7 @@ dataLayer:
 				// --- Request Modification (Passthrough & Rewrite) ---
 				{
 					name: "passthrough: model not in objectives",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							"hi":                         "mom",
 							metadata.ObjectiveKey:        modelDirect,
@@ -343,33 +275,33 @@ dataLayer:
 						`{"max_tokens":100,"model":"direct-`,
 						`model","prompt":"test6","temperature":0}`,
 					),
-					pods: []PodState{
-						P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelDirect, "test6"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelDirect, modelDirect, prio(2))),
+						"inference_objective_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelDirect, modelDirect, prio(2))),
 					},
 				},
 				{
 					name:     "rewrite request model",
-					requests: integration.ReqLLM(logger, "test-rewrite", modelToBeWritten, modelToBeWritten),
-					pods: []PodState{
-						P(0, 0, 0.1, "foo", modelAfterRewrite),
+					requests: fwkepp.ReqLLM(eppharness.Logger(), "test-rewrite", modelToBeWritten, modelToBeWritten),
+					pods: []eppharness.PodState{
+						eppharness.P(0, 0, 0.1, "foo", modelAfterRewrite),
 					},
 					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, "test-rewrite"),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
+						"inference_objective_request_total": eppharness.CleanMetric(eppharness.MetricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
 					},
 					requiresCRDs: true,
 				},
 				{
 					name: "protocol: simple GET (header only)",
-					requests: integration.ReqHeaderOnly(map[string]string{
+					requests: fwkepp.ReqHeaderOnly(map[string]string{
 						"content-type": "text/event-stream",
 						"status":       "200",
 					}),
-					pods:          []PodState{P(0, 0, 0, "foo")},
+					pods:          []eppharness.PodState{eppharness.P(0, 0, 0, "foo")},
 					wantResponses: nil,
 				},
 
@@ -381,7 +313,7 @@ dataLayer:
 						`{"max_tokens":100,"model":"sql-lo`,
 						`ra-sheddable","prompt":"test6","temperature":0}`,
 					),
-					pods: []PodState{P(0, 4, 0.2, modelSheddableTarget)},
+					pods: []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					wantResponses: ExpectBufferResp(
 						fmt.Sprintf(`{"max_tokens":100,"model":%q,"prompt":"test6","temperature":0}`, modelSheddable),
 						"application/json"),
@@ -392,7 +324,7 @@ dataLayer:
 						map[string]string{"content-type": "application/json"},
 						"no healthy upstream",
 					),
-					pods:          []PodState{P(0, 4, 0.2, modelSheddableTarget)},
+					pods:          []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					wantResponses: ExpectBufferResp("no healthy upstream", "application/json"),
 				},
 				{
@@ -402,7 +334,7 @@ dataLayer:
 						`{"max_tokens":100,"model":"sql-lora-sheddable","prompt":"test6","temperature":0}`,
 						"",
 					),
-					pods: []PodState{P(0, 4, 0.2, modelSheddableTarget)},
+					pods: []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					wantResponses: ExpectBufferResp(
 						fmt.Sprintf(`{"max_tokens":100,"model":%q,"prompt":"test6","temperature":0}`, modelSheddable),
 						"application/json"),
@@ -417,7 +349,7 @@ dataLayer:
 						`data: {"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`+"\n"+`data: [DONE]`,
 						"", // EndOfStream
 					),
-					pods:         []PodState{P(0, 4, 0.2, modelSheddableTarget)},
+					pods:         []eppharness.PodState{eppharness.P(0, 4, 0.2, modelSheddableTarget)},
 					waitForModel: modelSheddable,
 					wantResponses: ExpectStreamResp(
 						`data: {}`,
@@ -426,7 +358,7 @@ dataLayer:
 					),
 					// Labels are empty because we skipped the Request phase.
 					wantMetrics: map[string]string{
-						"inference_objective_input_tokens": cleanMetric(`
+						"inference_objective_input_tokens": eppharness.CleanMetric(`
               # HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.
               # TYPE inference_objective_input_tokens histogram
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
@@ -465,30 +397,30 @@ dataLayer:
 
 					ctx := t.Context()
 
-					var h *TestHarness
-					var harnessOpts []HarnessOption
+					var h *eppharness.TestHarness
+					var harnessOpts []eppharness.HarnessOption
 
 					if len(tc.wantSpans) > 0 {
-						harnessOpts = append(harnessOpts, WithTracing())
+						harnessOpts = append(harnessOpts, eppharness.WithTracing())
 					}
 
-					if executionMode.mode == modeStandalone {
-						harnessOpts = append(harnessOpts, WithStandaloneMode(executionMode.standaloneStrategy))
+					if executionMode.mode == eppharness.ModeStandalone {
+						harnessOpts = append(harnessOpts, eppharness.WithStandaloneMode(executionMode.strategy))
 					} else {
-						harnessOpts = append(harnessOpts, WithStandardMode())
+						harnessOpts = append(harnessOpts, eppharness.WithStandardMode())
 					}
 
 					if tc.configText != "" {
-						harnessOpts = append(harnessOpts, WithConfigText(tc.configText))
+						harnessOpts = append(harnessOpts, eppharness.WithConfigText(tc.configText))
 					}
 
-					h = NewTestHarness(ctx, t, harnessOpts...)
+					h = eppharness.NewTestHarness(ctx, t, harnessOpts...)
 
-					if executionMode.mode == modeStandard || executionMode.standaloneStrategy == strategyWithCRD {
+					if executionMode.mode == eppharness.ModeStandard || executionMode.strategy == eppharness.StrategyWithCRD {
 						h = h.WithBaseResources()
 					}
 
-					// In standalone runMode without crd, we cannot wait for an Objective CRD to sync as it doesn't exist.
+					// In standalone mode without crd, we cannot wait for an Objective CRD to sync as it doesn't exist.
 					// We only wait for Pod discovery.
 					modelToSync := tc.waitForModel
 					if modelToSync == "" {
@@ -500,7 +432,7 @@ dataLayer:
 						h.WaitForReadyPodsMetric(len(tc.pods))
 					}
 
-					responses, err := integration.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
+					responses, err := fwkepp.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
 					require.NoError(t, err)
 
 					if diff := cmp.Diff(tc.wantResponses, responses,
@@ -564,7 +496,7 @@ var imagesEditsBody = strings.Join([]string{
 // expectImagesEditsRouteTo asserts the multipart request is routed to endpoint with its body
 // forwarded unchanged: multipart payloads are raw bytes, so no model rewrite is applied.
 func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint,
 		[]byte(imagesEditsBody),
 		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
@@ -577,27 +509,4 @@ func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
 			Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("test-request-id"),
 		}},
 	)
-}
-
-// loadBaseResources parses the YAML manifest once at startup.
-func loadBaseResources() []*unstructured.Unstructured {
-	path := filepath.Join(repoRootPath, "test", "testdata", "inferencepool-with-model-hermetic.yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		panic(fmt.Sprintf("failed to read manifest %s: %v", path, err))
-	}
-
-	var objs []*unstructured.Unstructured
-	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(string(data)), 4096)
-	for {
-		u := &unstructured.Unstructured{}
-		if err := decoder.Decode(u); err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
-			panic(fmt.Sprintf("failed to decode YAML: %v", err))
-		}
-		objs = append(objs, u)
-	}
-	return objs
 }

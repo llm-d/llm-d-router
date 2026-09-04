@@ -38,7 +38,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 var endpointPoolCmpOpts = []cmp.Option{
@@ -58,24 +59,24 @@ var (
 	selectorV2 = map[string]string{"app": "vllm_v2"}
 	pods       = []*corev1.Pod{
 		// Two ready pods matching pool1
-		testutil.MakePod("pod1").
+		fwkk8s.MakePod("pod1").
 			Namespace("pool1-ns").
 			Labels(selectorV1).ReadyCondition().ObjRef(),
-		testutil.MakePod("pod2").
+		fwkk8s.MakePod("pod2").
 			Namespace("pool1-ns").
 			Labels(selectorV1).
 			ReadyCondition().ObjRef(),
 		// A not ready pod matching pool1
-		testutil.MakePod("pod3").
+		fwkk8s.MakePod("pod3").
 			Namespace("pool1-ns").
 			Labels(selectorV1).ObjRef(),
 		// A pod not matching pool1 namespace
-		testutil.MakePod("pod4").
+		fwkk8s.MakePod("pod4").
 			Namespace("pool2-ns").
 			Labels(selectorV1).
 			ReadyCondition().ObjRef(),
 		// A ready pod matching pool1 with a new selector
-		testutil.MakePod("pod5").
+		fwkk8s.MakePod("pod5").
 			Namespace("pool1-ns").
 			Labels(selectorV2).
 			ReadyCondition().ObjRef(),
@@ -90,13 +91,13 @@ func TestInferencePoolReconciler(t *testing.T) {
 		Version: v1.GroupVersion.Version,
 		Kind:    "InferencePool",
 	}
-	pool1 := testutil.MakeInferencePool("pool1").
+	pool1 := fwkgaie.MakeInferencePool("pool1").
 		Namespace("pool1-ns").
 		Selector(selectorV1).
 		TargetPorts(8080).
 		EndpointPickerRef("epp-service").ObjRef()
 	pool1.SetGroupVersionKind(gvk)
-	pool2 := testutil.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
+	pool2 := fwkgaie.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
 	pool2.SetGroupVersionKind(gvk)
 
 	period := time.Second

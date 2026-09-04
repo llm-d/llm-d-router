@@ -39,6 +39,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 const (
@@ -125,14 +126,14 @@ func setupIntegrationTest(t *testing.T, withReconciler bool) *testSetup {
 	uid := uuid.New().String()[:8] // create unique namespace
 	nsName := "epp-test-" + uid
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
-	require.NoError(t, k8sClient.Create(context.Background(), ns))
+	require.NoError(t, eppharness.K8sClient().Create(context.Background(), ns))
 
 	t.Cleanup(func() {
-		_ = k8sClient.Delete(context.Background(), ns)
+		_ = eppharness.K8sClient().Delete(context.Background(), ns)
 		metrics.Reset()
 	})
 
-	mgr, mgrClient := setupTestManager(t, testEnv.Config, nsName)
+	mgr, mgrClient := setupTestManager(t, eppharness.Config(), nsName)
 
 	var reconciler *testPodReconciler
 	if withReconciler {
@@ -168,7 +169,7 @@ func setupTestManager(t *testing.T, cfg *rest.Config, nsName string) (ctrl.Manag
 
 	skipValidation := true
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: testScheme,
+		Scheme: eppharness.Scheme(),
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{
 				nsName: {},
@@ -202,7 +203,7 @@ func startManagerAndWaitForSync(ctx context.Context, t *testing.T, mgr ctrl.Mana
 				t.Errorf("Manager failed to start: %v", err)
 				errChan <- err
 			} else {
-				logger.Info("Manager stopped due to context cancellation", "error", err)
+				eppharness.Logger().Info("Manager stopped due to context cancellation", "error", err)
 			}
 		}
 		close(errChan)

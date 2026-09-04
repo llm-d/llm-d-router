@@ -26,7 +26,8 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 func TestDynamicAttributes_Concurrency(t *testing.T) {
@@ -73,22 +74,22 @@ flowControl:
 `
 
 	ctx := t.Context()
-	h := NewTestHarness(ctx, t, WithConfigText(configText), WithStandardMode())
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithConfigText(configText), eppharness.WithStandardMode())
 	h = h.WithBaseResources()
 
 	// Add one pod. We need it to support modelMyModelTarget.
-	pods := []PodState{
-		P(0, 0, 0.0, modelMyModelTarget),
+	pods := []eppharness.PodState{
+		eppharness.P(0, 0, 0.0, modelMyModelTarget),
 	}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
 	// Stream 1: Request 1
-	client1, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+	client1, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 	require.NoError(t, err)
 
 	// Send Request 1 Headers
-	req1Headers := integration.ReqRaw(
+	req1Headers := fwkepp.ReqRaw(
 		map[string]string{
 			"hi":                         "mom",
 			metadata.ObjectiveKey:        modelMyModel,
@@ -126,11 +127,11 @@ flowControl:
 	// Load should be 1.
 
 	// Stream 2: Request 2
-	client2, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+	client2, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 	require.NoError(t, err)
 
 	// Send Request 2 Headers
-	req2Headers := integration.ReqRaw(
+	req2Headers := fwkepp.ReqRaw(
 		map[string]string{
 			"hi":                         "mom",
 			metadata.ObjectiveKey:        modelMyModel,

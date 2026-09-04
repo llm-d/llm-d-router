@@ -25,7 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 var reqLogger = zap.New(zap.UseDevMode(true), zap.Level(-1*zapcore.Level(logutil.DEFAULT)))
@@ -36,17 +37,17 @@ var requestAttributeReporterTestConfig string
 func TestRequestAttributeReporter(t *testing.T) {
 	ctx := t.Context()
 
-	// Use our new WithConfigText harness option to provide the custom config.
-	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(requestAttributeReporterTestConfig)).WithBaseResources()
+	// Use our new eppharness.WithConfigText harness option to provide the custom config.
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithStandardMode(), eppharness.WithConfigText(requestAttributeReporterTestConfig)).WithBaseResources()
 
 	// Pods must exist in datastore so that there's no early failure
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget)}
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
 	// Send the complete simulated transaction (Request headers -> target selection -> Response headers -> Response body)
 	// 1. Envoy sends the request (Headers + Body)
-	requests := integration.ReqLLM(reqLogger, "hello", "modelName", "modelName")
+	requests := fwkepp.ReqLLM(reqLogger, "hello", "modelName", "modelName")
 
 	// 2. Envoy sends the upstream response (Headers + Body)
 	respRequests := ReqResponseOnly(
@@ -60,7 +61,7 @@ func TestRequestAttributeReporter(t *testing.T) {
 	// 2. request body response
 	// 3. response header response
 	// 4. response body response (this is where dynamic metadata is attached)
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 4)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 4)
 	require.NoError(t, err)
 	require.Len(t, responses, 4)
 
