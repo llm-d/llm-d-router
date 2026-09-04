@@ -105,6 +105,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	compatibilityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/compatibilityfilter"
 	disaggregatedsetrollout "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -575,6 +576,7 @@ func (r *Runner) registerInTreePlugins() {
 	// request control screeners
 	// Alpha
 	fwkplugin.Register(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha, disaggregatedsetrollout.Factory)
+	fwkplugin.Register(compatibilityfilter.PluginType, fwkplugin.StabilityAlpha, compatibilityfilter.Factory)
 
 	// bylabel role filters
 	// Beta

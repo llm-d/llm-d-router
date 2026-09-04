@@ -386,6 +386,50 @@ func TestMetricsExtractionCustomScalarFromConfig(t *testing.T) {
 	assert.Zero(t, ep.GetMetrics().KVCacheUsagePercent)
 }
 
+func TestMetricsExtractionCustomStringLabelFromConfig(t *testing.T) {
+	const attributeKey = "vllm.io/nixl-compat-hash"
+
+	srv := createMockServer([]MetricMock{
+		{
+			Name:  "vllm:nixl_config_info",
+			Value: 1,
+			Labels: map[string]string{
+				"compatibility_hash": "sha256:abc123",
+			},
+		},
+	})
+	defer srv.Close()
+
+	params := &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{
+			{
+				Name: "vllm",
+				CustomMetrics: []customMetricConfigParams{
+					{
+						AttributeKey: attributeKey,
+						MetricSpec:   "vllm:nixl_config_info",
+						LabelName:    "compatibility_hash",
+					},
+				},
+			},
+		},
+	}
+
+	p, err := buildPipeline(t, srv.URL, params)
+	require.NoError(t, err)
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	require.NoError(t, p.Poll(context.Background(), ep))
+	got, ok := attrmetrics.ReadStringMetricValue(
+		ep.GetAttributes(),
+		attrmetrics.StringMetricDataKey(attributeKey),
+	)
+	require.True(t, ok)
+	assert.Equal(t, attrmetrics.StringMetricValue("sha256:abc123"), got)
+}
+
 func TestMetricsExtractionCustomCounterFromConfig(t *testing.T) {
 	const attributeKey = "custom.total_requests"
 

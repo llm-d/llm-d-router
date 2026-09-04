@@ -159,3 +159,17 @@ func extractValue(metric *dto.Metric) float64 {
 	}
 	return 0
 }
+
+// extractLabelValue returns the value of the named Prometheus label on the
+// given metric, or ("", false) if the label is not present.
+func extractLabelValue(metric *dto.Metric, labelName string) (string, bool) {
+	if metric == nil {
+		return "", false
+	}
+	for _, lp := range metric.GetLabel() {
+		if lp.GetName() == labelName {
+			return lp.GetValue(), true
+		}
+	}
+	return "", false
+}
