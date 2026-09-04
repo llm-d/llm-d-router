@@ -28,12 +28,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
-// BenchmarkScoreTokensKermit measures the tokens-in scoring path on the
-// Kermit shape: 1,034 blocks held by 40 endpoints that each report eight
+// BenchmarkScoreTokensMultiRank measures the tokens-in scoring path on the
+// multi-rank shape: 1,034 blocks held by 40 endpoints that each report eight
 // rank entries sharing the endpoint identifier, so every block carries 320
 // entries collapsing to 40 scored pods. Only APIs shared with main are used,
 // so the same file measures both sides of the comparison.
-func BenchmarkScoreTokensKermit(b *testing.B) {
+func BenchmarkScoreTokensMultiRank(b *testing.B) {
 	const (
 		blocks    = 1034
 		pods      = 40

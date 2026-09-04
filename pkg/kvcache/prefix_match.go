@@ -98,7 +98,14 @@ func (k *Indexer) matchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 		span.SetStatus(codes.Error, err.Error())
 		return nil, 0, err
 	}
-	keysFound = len(keyToPods)
+	// Count keys actually held: Index.Lookup is documented to return a map
+	// keyed by the requested keys, so a backend may report a miss as an
+	// empty entry and len(keyToPods) would publish it as a hit.
+	for _, pods := range keyToPods {
+		if len(pods) > 0 {
+			keysFound++
+		}
+	}
 
 	span.SetAttributes(
 		attribute.Int("llm_d.kv_cache.prefix_match.keys_found", keysFound),

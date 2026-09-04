@@ -27,7 +27,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
@@ -85,4 +88,54 @@ func TestScoreTokensBlockHitTelemetry(t *testing.T) {
 	assert.Equal(t, int64(2), matchAttrs["llm_d.kv_cache.prefix_match.keys_found"].AsInt64())
 	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.longest_chain"].AsInt64())
 	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.pods_matched"].AsInt64())
+}
+
+// emptyEntryIndex reports one requested key as an entry with no pods, the
+// miss shape Index.Lookup's contract allows. InMemoryIndex reaches it under
+// a race: Lookup reads cache.Len() and cache.Keys() as separate locked
+// calls, so evicting the last entry between them leaves the unfiltered
+// branch assigning an empty slice. The stub makes that deterministic.
+type emptyEntryIndex struct {
+	kvblock.Index
+	emptyKey kvblock.BlockHash
+}
+
+func (e *emptyEntryIndex) Lookup(ctx context.Context, requestKeys []kvblock.BlockHash,
+	podIdentifierSet sets.Set[string],
+) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+	found, err := e.Index.Lookup(ctx, requestKeys, podIdentifierSet)
+	if err != nil {
+		return nil, err
+	}
+	found[e.emptyKey] = nil
+	return found, nil
+}
+
+// A key returned with no pods is a miss, so it counts towards neither
+// blocks_found nor the hit ratio.
+func TestScoreTokensBlockHitTelemetryIgnoresEmptyEntries(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	keys := u64ToBlockKeys([]uint64{10, 20})
+	backing, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	populateIndex(t, backing, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: testPodA, DeviceTier: "gpu"}},
+	})
+
+	tp := &mockTokenProcessor{blockKeys: keys}
+	indexer := kvcache.NewIndexerForTest(tp,
+		&emptyEntryIndex{Index: backing, emptyKey: keys[1]},
+		kvcache.DefaultKVCacheBackendConfig())
+
+	_, err = indexer.ScoreTokens(ctx, []uint32{1, 2}, testModel, nil, nil)
+	require.NoError(t, err)
+
+	scoreAttrs := spanAttributes(t, recorder, "score_tokens")
+	assert.Equal(t, int64(1), scoreAttrs["llm_d.kv_cache.blocks_found"].AsInt64())
+	assert.InDelta(t, 0.5, scoreAttrs["llm_d.kv_cache.block_hit_ratio"].AsFloat64(), 0.0001)
+
+	matchAttrs := spanAttributes(t, recorder, "match_block_keys")
+	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.keys_found"].AsInt64())
 }

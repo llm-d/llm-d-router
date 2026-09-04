@@ -25,36 +25,36 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
-// Kermit-shaped fixture: 1,034 blocks held by 40 endpoints, each endpoint
+// Multi-rank fixture: 1,034 blocks held by 40 endpoints, each endpoint
 // carrying eight rank entries that share its PodIdentifier and differ only by
 // GroupIdx. Every block therefore holds 320 entries that must collapse to 40
 // matched pods.
 const (
-	kermitBlocks = 1034
-	kermitPods   = 40
-	kermitRanks  = 8
+	multiRankBlocks = 1034
+	multiRankPods   = 40
+	multiRankRanks  = 8
 )
 
-var kermitBackends = []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.0}, {Name: "cpu", Weight: 0.8}}
+var multiRankBackends = []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.0}, {Name: "cpu", Weight: 0.8}}
 
-func kermitPodID(i int) string { return fmt.Sprintf("10.0.%d.%d:8200", i/256, i%256) }
+func multiRankPodID(i int) string { return fmt.Sprintf("10.0.%d.%d:8200", i/256, i%256) }
 
-// kermitIndexer builds the fixture behind the production decorator chain.
-func kermitIndexer(tb testing.TB) (*kvcache.Indexer, []kvblock.BlockHash) {
+// multiRankIndexer builds the fixture behind the production decorator chain.
+func multiRankIndexer(tb testing.TB) (*kvcache.Indexer, []kvblock.BlockHash) {
 	tb.Helper()
 	inner, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 20, PodCacheSize: 512})
 	if err != nil {
 		tb.Fatal(err)
 	}
-	keys := make([]kvblock.BlockHash, kermitBlocks)
+	keys := make([]kvblock.BlockHash, multiRankBlocks)
 	for i := range keys {
 		keys[i] = kvblock.BlockHash(i + 1)
 	}
-	entries := make([]kvblock.PodEntry, 0, kermitPods*kermitRanks)
-	for p := range kermitPods {
-		for r := range kermitRanks {
+	entries := make([]kvblock.PodEntry, 0, multiRankPods*multiRankRanks)
+	for p := range multiRankPods {
+		for r := range multiRankRanks {
 			entries = append(entries, kvblock.PodEntry{
-				PodIdentifier: kermitPodID(p), DeviceTier: "gpu",
+				PodIdentifier: multiRankPodID(p), DeviceTier: "gpu",
 				HasGroup: true, GroupIdx: kvblock.GroupID(r),
 			})
 		}
@@ -63,49 +63,49 @@ func kermitIndexer(tb testing.TB) (*kvcache.Indexer, []kvblock.BlockHash) {
 		tb.Fatal(err)
 	}
 	wrapped := kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(inner))
-	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, wrapped, kermitBackends), keys
+	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, wrapped, multiRankBackends), keys
 }
 
-// validateKermit checks complete semantics outside any timed region.
-func validateKermit(tb testing.TB, matches map[string]kvcache.PodMatch) {
+// validateMultiRank checks complete semantics outside any timed region.
+func validateMultiRank(tb testing.TB, matches map[string]kvcache.PodMatch) {
 	tb.Helper()
-	if len(matches) != kermitPods {
-		tb.Fatalf("got %d matched pods, want %d (rank entries must collapse per endpoint)", len(matches), kermitPods)
+	if len(matches) != multiRankPods {
+		tb.Fatalf("got %d matched pods, want %d (rank entries must collapse per endpoint)", len(matches), multiRankPods)
 	}
-	for p := range kermitPods {
-		m, ok := matches[kermitPodID(p)]
+	for p := range multiRankPods {
+		m, ok := matches[multiRankPodID(p)]
 		if !ok {
-			tb.Fatalf("missing endpoint %s", kermitPodID(p))
+			tb.Fatalf("missing endpoint %s", multiRankPodID(p))
 		}
-		if m.MatchedBlocks != kermitBlocks {
-			tb.Fatalf("%s matched %d blocks, want %d", kermitPodID(p), m.MatchedBlocks, kermitBlocks)
+		if m.MatchedBlocks != multiRankBlocks {
+			tb.Fatalf("%s matched %d blocks, want %d", multiRankPodID(p), m.MatchedBlocks, multiRankBlocks)
 		}
-		if m.WeightedScore != float64(kermitBlocks) {
-			tb.Fatalf("%s weighted score %v, want %d", kermitPodID(p), m.WeightedScore, kermitBlocks)
+		if m.WeightedScore != float64(multiRankBlocks) {
+			tb.Fatalf("%s weighted score %v, want %d", multiRankPodID(p), m.WeightedScore, multiRankBlocks)
 		}
-		if m.BlocksByTier["gpu"] != kermitBlocks {
-			tb.Fatalf("%s gpu tier count %d, want %d", kermitPodID(p), m.BlocksByTier["gpu"], kermitBlocks)
+		if m.BlocksByTier["gpu"] != multiRankBlocks {
+			tb.Fatalf("%s gpu tier count %d, want %d", multiRankPodID(p), m.BlocksByTier["gpu"], multiRankBlocks)
 		}
 	}
 }
 
-func TestKermitFixtureSemantics(t *testing.T) {
-	indexer, keys := kermitIndexer(t)
+func TestMultiRankFixtureSemantics(t *testing.T) {
+	indexer, keys := multiRankIndexer(t)
 	matches, err := indexer.MatchBlockKeys(context.Background(), keys, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	validateKermit(t, matches)
+	validateMultiRank(t, matches)
 }
 
-func BenchmarkKermitMatchBlockKeys(b *testing.B) {
-	indexer, keys := kermitIndexer(b)
+func BenchmarkMatchBlockKeysMultiRank(b *testing.B) {
+	indexer, keys := multiRankIndexer(b)
 	ctx := context.Background()
 	matches, err := indexer.MatchBlockKeys(ctx, keys, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	validateKermit(b, matches)
+	validateMultiRank(b, matches)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -115,8 +115,8 @@ func BenchmarkKermitMatchBlockKeys(b *testing.B) {
 	}
 }
 
-func BenchmarkKermitMatchBlockKeysParallel(b *testing.B) {
-	indexer, keys := kermitIndexer(b)
+func BenchmarkMatchBlockKeysMultiRankParallel(b *testing.B) {
+	indexer, keys := multiRankIndexer(b)
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
