@@ -45,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 type tokenizer interface {
@@ -399,6 +400,9 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
+	if auth, ok := metadata.GetLowerCaseHeaderValue(request.Headers, "authorization"); ok {
+		ctx = withAuthHeader(ctx, auth)
+	}
 
 	ctx, span := tracing.Tracer(rcplugins.TracerScope).Start(ctx, "tokenize",
 		trace.WithSpanKind(trace.SpanKindInternal),

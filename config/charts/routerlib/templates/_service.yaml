@@ -1,4 +1,5 @@
 {{- define "llm-d-epp.service" -}}
+{{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
 {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
 {{- if $gkePB.enabled }}
 {{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
@@ -64,5 +65,29 @@ spec:
     {{- . | toYaml | nindent 4 }}
     {{- end }}
   type: ClusterIP
+{{- if $isPriorityRouting }}
+---
+# Headless Service is required for Priority Routing to provide deterministic, per-pod DNS records
+# (<pod-name>.<service-name>-headless.<namespace>.svc) for each StatefulSet replica.
+# publishNotReadyAddresses allows Envoy active gRPC health checking to probe newly created pods
+# before they are marked Ready by Kubernetes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-headless" (include "llm-d-router.name" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "llm-d-router.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+      appProtocol: kubernetes.io/h2c
+{{- end }}
 {{- end }}
 {{- end }}
