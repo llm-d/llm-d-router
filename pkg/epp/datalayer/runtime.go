@@ -404,8 +404,7 @@ func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 	})
 }
 
-// StartCrossReplicaSync starts the shared cross-replica publishing loop for
-// runtimes without a controller manager.
+// StartCrossReplicaSync starts the shared cross-replica publishing loop.
 func (r *Runtime) StartCrossReplicaSync(ctx context.Context) {
 	if r.crossReplicaPub == nil {
 		return
