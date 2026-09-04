@@ -70,6 +70,7 @@ import (
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
+	k8speer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -385,6 +386,16 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	}
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
 
+	// Resolve the peer discovery plugin from config, if configured.
+	var peerDiscPlugin fwkdl.PeerDiscovery
+	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil && rawConfig.DataLayer.Discovery.Peers != nil {
+		peerDiscPlugin, err = r.resolvePeerDiscovery(rawConfig)
+		if err != nil {
+			setupLog.Error(err, "Failed to resolve peer discovery plugin")
+			return nil, nil, err
+		}
+	}
+
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
@@ -505,6 +516,13 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to setup EPP controllers")
 		return nil, nil, err
+	}
+
+	if kp, ok := peerDiscPlugin.(*k8speer.Plugin); ok {
+		if err := kp.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to setup peer discovery")
+			return nil, nil, err
+		}
 	}
 
 	// --- Add Runnables to Manager ---
@@ -727,6 +745,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(discoveryfile.PluginType, fwkplugin.StabilityBeta, discoveryfile.Factory)
 	// multicluster variant
 	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
+	// Alpha
+	fwkplugin.Register(k8speer.PluginType, fwkplugin.StabilityAlpha, k8speer.Factory)
 
 	// register request header processor plugins
 	// Alpha
@@ -950,6 +970,23 @@ func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fw
 	disc, ok := p.(fwkdl.EndpointDiscovery)
 	if !ok {
 		return nil, fmt.Errorf("discovery: plugin %q does not implement EndpointDiscovery", ref)
+	}
+	return disc, nil
+}
+
+// resolvePeerDiscovery returns the peer discovery plugin identified by
+// rawConfig.DataLayer.Discovery.Peers.PluginRef. The plugin is expected to
+// have been instantiated and registered in r.PluginHandle by
+// parseConfigurationPhaseTwo.
+func (r *Runner) resolvePeerDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.PeerDiscovery, error) {
+	ref := rawConfig.DataLayer.Discovery.Peers.PluginRef
+	p := r.PluginHandle.Plugin(ref)
+	if p == nil {
+		return nil, fmt.Errorf("peerDiscovery: no plugin found with name %q", ref)
+	}
+	disc, ok := p.(fwkdl.PeerDiscovery)
+	if !ok {
+		return nil, fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
 	}
 	return disc, nil
 }
