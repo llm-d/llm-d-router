@@ -59,6 +59,11 @@ func buildPredictionRequest(
 	}
 }
 
+type trainingEntryOptions struct {
+	PredictedTTFT *float64
+	PredictedTPOT *float64
+}
+
 // buildTrainingEntry constructs a training entry from actual latency measurements.
 func buildTrainingEntry(
 	endpointRoleLabel string,
@@ -72,6 +77,7 @@ func buildTrainingEntry(
 	prefixCacheScore float64,
 	encoderInputSize int,
 	encoderMatchedSize int,
+	options trainingEntryOptions,
 ) latencypredictor.TrainingEntry {
 	podType := ""
 	if endpointRoleLabel != "" && targetEndpointMetadata != nil && targetEndpointMetadata.Labels != nil {
@@ -91,6 +97,8 @@ func buildTrainingEntry(
 		EncoderInputSize:   encoderInputSize,
 		EncoderMatchedSize: encoderMatchedSize,
 		PodType:            podType,
+		PredictedTTFT:      options.PredictedTTFT,
+		PredictedTPOT:      options.PredictedTPOT,
 	}
 }
 
@@ -119,6 +127,7 @@ func recordTTFTTrainingData(
 		prefixCacheScore,
 		predictedLatencyCtx.encoderInputSize,
 		encoderMatchedSize,
+		trainingEntryOptions{PredictedTTFT: predictedLatencyMSPtr(predictedLatencyCtx.predictedTTFT)},
 	)
 	// In disaggregated serving TTFT is incurred on the prefill endpoint, so the
 	// in-flight features are snapshotted from that endpoint; otherwise the decode
@@ -131,7 +140,6 @@ func recordTTFTTrainingData(
 		entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatch
 	}
 	entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
-	entry.PredictedTTFT = predictedLatencyMSPtr(predictedLatencyCtx.predictedTTFT)
 	if err := predictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 		logger.V(logutil.DEBUG).Error(err, "record TTFT training failed")
 	}

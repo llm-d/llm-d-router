@@ -179,7 +179,7 @@ func TestBuildPredictionRequestAndTrainingEntry_EncoderSizes(t *testing.T) {
 	assert.Equal(t, 5, req.EncoderInputSize)
 	assert.Equal(t, 4, req.EncoderMatchedSize)
 
-	entry := buildTrainingEntry("", pod, m, 10, 100, 0, time.Now(), 0, 0.0, 5, 4)
+	entry := buildTrainingEntry("", pod, m, 10, 100, 0, time.Now(), 0, 0.0, 5, 4, trainingEntryOptions{})
 	assert.Equal(t, 5, entry.EncoderInputSize)
 	assert.Equal(t, 4, entry.EncoderMatchedSize)
 }
