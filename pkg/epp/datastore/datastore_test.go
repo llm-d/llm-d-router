@@ -46,6 +46,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 var endpointPoolCmpOpts = []cmp.Option{
@@ -1500,7 +1501,7 @@ func TestPodUpdateOrAddIfNotExist_RegistrationDropReturnsError(t *testing.T) {
 // equal to the one already stored (#2060).
 func TestPoolSet_ResyncRetriedAfterDropError(t *testing.T) {
 	ctx := context.Background()
-	readyPod := testutil.FromBase(pod1).ReadyCondition().ObjRef()
+	readyPod := fwkk8s.FromBase(pod1).ReadyCondition().ObjRef()
 	fakeClient := fake.NewClientBuilder().WithObjects(readyPod).Build()
 
 	fail := true

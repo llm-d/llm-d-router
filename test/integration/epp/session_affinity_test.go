@@ -31,7 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 	integration "github.com/llm-d/llm-d-router/test/integration"
 )
 
@@ -235,7 +235,7 @@ func setupPDHarness(t *testing.T, configText string) *TestHarness {
 			ActiveModels:  map[string]int{modelMyModelTarget: 1},
 			WaitingModels: make(map[string]int),
 		}
-		pod := testutil.MakePod(name).
+		pod := fwkk8s.MakePod(name).
 			Namespace(h.Namespace).
 			ReadyCondition().
 			Labels(map[string]string{
