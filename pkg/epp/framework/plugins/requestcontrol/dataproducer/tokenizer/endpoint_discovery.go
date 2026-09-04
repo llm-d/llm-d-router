@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -24,17 +25,33 @@ import (
 	"strconv"
 	"sync"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const roundRobinLoadBalancerType = "round-robin"
+
+// errNoRenderEndpoints indicates that discovery has no selectable render URL.
+var errNoRenderEndpoints = errors.New("no vLLM render endpoints discovered")
 
 type loadBalancerConfig struct {
 	Type string `json:"type,omitempty"`
 }
 
+// endpointPortRule maps matching inference endpoints to a render port range.
+type endpointPortRule struct {
+	Selector metav1.LabelSelector `json:"selector,omitempty"`
+	BasePort int                  `json:"basePort"`
+}
+
 type endpointDiscoveryConfig struct {
 	LoadBalancer *loadBalancerConfig `json:"loadBalancer,omitempty"`
+	// PortRules resolve render ports as BasePort + RankIndex. An empty list uses
+	// the inference port published by discovery.
+	PortRules []endpointPortRule `json:"portRules,omitempty"`
 }
 
 // loadBalancerType returns the configured algorithm or the default round-robin algorithm.
@@ -48,6 +65,12 @@ func (c *endpointDiscoveryConfig) loadBalancerType() string {
 // renderEndpointPicker resolves the base URL for one render request.
 type renderEndpointPicker interface {
 	Pick() (string, error)
+}
+
+// retryingRenderEndpointPicker can avoid endpoints already attempted by a request.
+type retryingRenderEndpointPicker interface {
+	renderEndpointPicker
+	PickExcluding(excluded map[string]struct{}) (string, error)
 }
 
 // fixedEndpointPicker always returns the statically configured render URL.
@@ -85,10 +108,16 @@ type roundRobinLoadBalancer struct {
 	next int
 }
 
+// compiledEndpointPortRule holds a validated selector and base port.
+type compiledEndpointPortRule struct {
+	selector labels.Selector
+	basePort int
+}
+
 // Pick returns the next endpoint and advances the concurrency-safe cursor.
 func (b *roundRobinLoadBalancer) Pick(endpoints []string) (string, error) {
 	if len(endpoints) == 0 {
-		return "", errors.New("no vLLM render endpoints discovered")
+		return "", errNoRenderEndpoints
 	}
 
 	b.mu.Lock()
@@ -107,25 +136,47 @@ type discoveredEndpointPicker struct {
 	endpoints    map[string]string
 	ordered      []string
 	loadBalancer endpointLoadBalancer
+	portRules    []compiledEndpointPortRule
 }
 
 // newDiscoveredEndpointPicker constructs a picker with the configured algorithm.
-func newDiscoveredEndpointPicker(loadBalancerType string) (*discoveredEndpointPicker, error) {
-	loadBalancer, err := newEndpointLoadBalancer(loadBalancerType)
+func newDiscoveredEndpointPicker(config *endpointDiscoveryConfig) (*discoveredEndpointPicker, error) {
+	loadBalancer, err := newEndpointLoadBalancer(config.loadBalancerType())
+	if err != nil {
+		return nil, err
+	}
+	portRules, err := compileEndpointPortRules(config)
 	if err != nil {
 		return nil, err
 	}
 	return &discoveredEndpointPicker{
 		endpoints:    map[string]string{},
 		loadBalancer: loadBalancer,
+		portRules:    portRules,
 	}, nil
 }
 
 // Pick selects a render URL from a stable endpoint snapshot.
 func (p *discoveredEndpointPicker) Pick() (string, error) {
+	return p.PickExcluding(nil)
+}
+
+// PickExcluding selects a render URL that has not been attempted by the request.
+func (p *discoveredEndpointPicker) PickExcluding(excluded map[string]struct{}) (string, error) {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.loadBalancer.Pick(p.ordered)
+	endpoints := append([]string(nil), p.ordered...)
+	p.mu.RUnlock()
+
+	if len(excluded) > 0 {
+		available := endpoints[:0]
+		for _, endpoint := range endpoints {
+			if _, found := excluded[endpoint]; !found {
+				available = append(available, endpoint)
+			}
+		}
+		endpoints = available
+	}
+	return p.loadBalancer.Pick(endpoints)
 }
 
 // Upsert validates endpoint metadata and stores its HTTP render URL by identity.
@@ -139,14 +190,14 @@ func (p *discoveredEndpointPicker) Upsert(meta *fwkdl.EndpointMetadata) error {
 	if meta.Address == "" {
 		return fmt.Errorf("discovered endpoint %s has an empty address", meta.ID)
 	}
-	port, err := strconv.Atoi(meta.Port)
-	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("discovered endpoint %s has invalid port %q", meta.ID, meta.Port)
+	port, err := p.resolveRenderPort(meta)
+	if err != nil {
+		return err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.endpoints[meta.ID.String()] = "http://" + net.JoinHostPort(meta.Address, meta.Port)
+	p.endpoints[meta.ID.String()] = "http://" + net.JoinHostPort(meta.Address, port)
 	p.rebuildOrdered()
 	return nil
 }
@@ -176,4 +227,98 @@ func (p *discoveredEndpointPicker) rebuildOrdered() {
 		ordered = append(ordered, p.endpoints[id])
 	}
 	p.ordered = ordered
+}
+
+// compileEndpointPortRules validates configured selectors and render port ranges.
+func compileEndpointPortRules(config *endpointDiscoveryConfig) ([]compiledEndpointPortRule, error) {
+	if config == nil || len(config.PortRules) == 0 {
+		return nil, nil
+	}
+
+	rules := make([]compiledEndpointPortRule, 0, len(config.PortRules))
+	for i, rule := range config.PortRules {
+		if rule.BasePort < 1 || rule.BasePort > 65535 {
+			return nil, fmt.Errorf("port rule %d has invalid base port %d", i, rule.BasePort)
+		}
+		selector, err := metav1.LabelSelectorAsSelector(&rule.Selector)
+		if err != nil {
+			return nil, fmt.Errorf("port rule %d has invalid selector: %w", i, err)
+		}
+		rules = append(rules, compiledEndpointPortRule{selector: selector, basePort: rule.BasePort})
+	}
+	return rules, nil
+}
+
+// resolveRenderPort returns the configured render port for an endpoint.
+func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadata) (string, error) {
+	if len(p.portRules) == 0 {
+		port, err := strconv.Atoi(meta.Port)
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("discovered endpoint %s has invalid port %q", meta.ID, meta.Port)
+		}
+		return meta.Port, nil
+	}
+
+	for _, rule := range p.portRules {
+		if !rule.selector.Matches(labels.Set(meta.Labels)) {
+			continue
+		}
+		if meta.RankIndex < 0 {
+			return "", fmt.Errorf("discovered endpoint %s has invalid rank index %d", meta.ID, meta.RankIndex)
+		}
+		if meta.RankIndex > 65535-rule.basePort {
+			return "", fmt.Errorf("discovered endpoint %s resolved render port outside 1-65535", meta.ID)
+		}
+		return strconv.Itoa(rule.basePort + meta.RankIndex), nil
+	}
+	return "", fmt.Errorf("discovered endpoint %s does not match any port rule", meta.ID)
+}
+
+// endpointDiscoveryHandler gives each token producer an independent extractor identity.
+type endpointDiscoveryHandler struct {
+	typedName           plugin.TypedName
+	picker              *discoveredEndpointPicker
+	registeredEndpoints sync.Map
+}
+
+var _ fwkdl.EndpointExtractor = &endpointDiscoveryHandler{}
+
+// newEndpointDiscoveryHandler binds endpoint events to one token producer's picker.
+func newEndpointDiscoveryHandler(owner plugin.TypedName, picker *discoveredEndpointPicker) *endpointDiscoveryHandler {
+	return &endpointDiscoveryHandler{
+		typedName: plugin.TypedName{
+			Type: PluginType + "-endpoint-discovery-" + owner.Name,
+			Name: owner.Name,
+		},
+		picker: picker,
+	}
+}
+
+// TypedName returns the per-instance extractor identity used by the data layer.
+func (h *endpointDiscoveryHandler) TypedName() plugin.TypedName {
+	return h.typedName
+}
+
+// Extract keeps the picker synchronized with endpoint lifecycle events.
+func (h *endpointDiscoveryHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) error {
+	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
+		return nil
+	}
+
+	meta := event.Endpoint.GetMetadata()
+	id := meta.ID.String()
+	switch event.Type {
+	case fwkdl.EventAddOrUpdate:
+		if err := h.picker.Upsert(meta); err != nil {
+			return err
+		}
+		h.registeredEndpoints.Store(id, event.Endpoint)
+	case fwkdl.EventDelete:
+		if registered, ok := h.registeredEndpoints.Load(id); ok && registered != event.Endpoint {
+			return nil
+		}
+		h.registeredEndpoints.Delete(id)
+		h.picker.Delete(meta)
+	}
+	return nil
 }

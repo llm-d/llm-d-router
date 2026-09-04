@@ -19,14 +19,20 @@ package tokenizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -37,16 +43,22 @@ import (
 )
 
 func discoveredEndpoint(name, address, port string) fwkdl.Endpoint {
+	return discoveredEndpointWithRank(name, address, port, 0, nil)
+}
+
+func discoveredEndpointWithRank(name, address, port string, rank int, labels map[string]string) fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
-		ID:      types.NamespacedName{Namespace: "default", Name: name},
-		Name:    name,
-		Address: address,
-		Port:    port,
+		ID:        types.NamespacedName{Namespace: "default", Name: name},
+		Name:      name,
+		Address:   address,
+		Port:      port,
+		Labels:    labels,
+		RankIndex: rank,
 	}, nil)
 }
 
-func TestDiscoveredEndpointPicker_RoundRobin(t *testing.T) {
-	picker, err := newDiscoveredEndpointPicker(roundRobinLoadBalancerType)
+func TestDiscoveredEndpointPicker_RoundRobinUsesInferencePortsByDefault(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
 	require.NoError(t, err)
 
 	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-b", "10.0.0.2", "8001").GetMetadata()))
@@ -65,7 +77,7 @@ func TestDiscoveredEndpointPicker_RoundRobin(t *testing.T) {
 }
 
 func TestDiscoveredEndpointPicker_TracksUpdatesAndDeletes(t *testing.T) {
-	picker, err := newDiscoveredEndpointPicker(roundRobinLoadBalancerType)
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
 	require.NoError(t, err)
 
 	meta := discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()
@@ -91,6 +103,12 @@ func (firstEndpointLoadBalancer) Pick(endpoints []string) (string, error) {
 	return endpoints[0], nil
 }
 
+type endpointLoadBalancerFunc func(endpoints []string) (string, error)
+
+func (f endpointLoadBalancerFunc) Pick(endpoints []string) (string, error) {
+	return f(endpoints)
+}
+
 func TestDiscoveredEndpointPicker_LoadBalancerIsPluggable(t *testing.T) {
 	const loadBalancerType = "test-first"
 	endpointLoadBalancerFactories[loadBalancerType] = func() endpointLoadBalancer {
@@ -98,7 +116,9 @@ func TestDiscoveredEndpointPicker_LoadBalancerIsPluggable(t *testing.T) {
 	}
 	t.Cleanup(func() { delete(endpointLoadBalancerFactories, loadBalancerType) })
 
-	picker, err := newDiscoveredEndpointPicker(loadBalancerType)
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{
+		LoadBalancer: &loadBalancerConfig{Type: loadBalancerType},
+	})
 	require.NoError(t, err)
 	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()))
 
@@ -108,7 +128,7 @@ func TestDiscoveredEndpointPicker_LoadBalancerIsPluggable(t *testing.T) {
 }
 
 func TestDiscoveredEndpointPicker_RejectsInvalidEndpoint(t *testing.T) {
-	picker, err := newDiscoveredEndpointPicker(roundRobinLoadBalancerType)
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
 	require.NoError(t, err)
 
 	for _, meta := range []*fwkdl.EndpointMetadata{
@@ -119,6 +139,104 @@ func TestDiscoveredEndpointPicker_RejectsInvalidEndpoint(t *testing.T) {
 	} {
 		require.Error(t, picker.Upsert(meta))
 	}
+}
+
+func TestDiscoveredEndpointPicker_PortRules(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{
+		PortRules: []endpointPortRule{
+			{
+				Selector: metav1.LabelSelector{MatchLabels: map[string]string{"llm-d.ai/role": "prefill"}},
+				BasePort: 8000,
+			},
+			{
+				Selector: metav1.LabelSelector{MatchLabels: map[string]string{"llm-d.ai/role": "decode"}},
+				BasePort: 8200,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, picker.Upsert(discoveredEndpointWithRank(
+		"prefill-rank", "10.0.0.1", "9002", 2, map[string]string{"llm-d.ai/role": "prefill"},
+	).GetMetadata()))
+	require.NoError(t, picker.Upsert(discoveredEndpointWithRank(
+		"decode-rank", "10.0.0.2", "8003", 3, map[string]string{"llm-d.ai/role": "decode"},
+	).GetMetadata()))
+
+	for _, want := range []string{"http://10.0.0.2:8203", "http://10.0.0.1:8002"} {
+		got, pickErr := picker.Pick()
+		require.NoError(t, pickErr)
+		assert.Equal(t, want, got)
+	}
+}
+
+func TestDiscoveredEndpointPicker_PortRulesRejectInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *endpointDiscoveryConfig
+		wantErr string
+	}{
+		{
+			name: "invalid selector",
+			config: &endpointDiscoveryConfig{PortRules: []endpointPortRule{{
+				Selector: metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key: "role", Operator: "not-an-operator",
+				}}},
+				BasePort: 8200,
+			}}},
+			wantErr: "invalid selector",
+		},
+		{
+			name:    "invalid base port",
+			config:  &endpointDiscoveryConfig{PortRules: []endpointPortRule{{BasePort: 0}}},
+			wantErr: "invalid base port",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newDiscoveredEndpointPicker(tt.config)
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestDiscoveredEndpointPicker_PortRulesRejectUnmatchedAndInvalidRank(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{
+		PortRules: []endpointPortRule{{
+			Selector: metav1.LabelSelector{MatchLabels: map[string]string{"llm-d.ai/role": "decode"}},
+			BasePort: 65535,
+		}},
+	})
+	require.NoError(t, err)
+
+	require.ErrorContains(t, picker.Upsert(discoveredEndpointWithRank(
+		"prefill", "10.0.0.1", "8000", 0, map[string]string{"llm-d.ai/role": "prefill"},
+	).GetMetadata()), "does not match any port rule")
+	require.ErrorContains(t, picker.Upsert(discoveredEndpointWithRank(
+		"negative", "10.0.0.1", "8000", -1, map[string]string{"llm-d.ai/role": "decode"},
+	).GetMetadata()), "invalid rank index")
+	require.ErrorContains(t, picker.Upsert(discoveredEndpointWithRank(
+		"overflow", "10.0.0.1", "8000", 1, map[string]string{"llm-d.ai/role": "decode"},
+	).GetMetadata()), "resolved render port")
+}
+
+func TestDiscoveredEndpointPicker_ReleasesLockBeforeLoadBalancing(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()))
+
+	picker.loadBalancer = endpointLoadBalancerFunc(func(endpoints []string) (string, error) {
+		locked := picker.mu.TryLock()
+		if locked {
+			picker.mu.Unlock()
+		}
+		assert.True(t, locked, "picker lock must not cover the pluggable load balancer")
+		return endpoints[0], nil
+	})
+
+	_, err = picker.Pick()
+	require.NoError(t, err)
 }
 
 func TestVLLMHTTPRenderer_DiscoveryRoundRobin(t *testing.T) {
@@ -147,6 +265,131 @@ func TestVLLMHTTPRenderer_DiscoveryRoundRobin(t *testing.T) {
 	}
 }
 
+func TestVLLMHTTPRenderer_DiscoveryRetriesDifferentEndpoint(t *testing.T) {
+	var failedCalls atomic.Int32
+	failedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		failedCalls.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(failedServer.Close)
+
+	var successfulCalls atomic.Int32
+	successfulServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		successfulCalls.Add(1)
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{42}}})
+	}))
+	t.Cleanup(successfulServer.Close)
+
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}}, testHTTPModel)
+	require.NoError(t, err)
+	picker := renderer.endpointPicker.(*discoveredEndpointPicker)
+	for name, server := range map[string]*httptest.Server{"rank-a": failedServer, "rank-b": successfulServer} {
+		address := server.Listener.Addr().(*net.TCPAddr)
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, address.IP.String(), strconv.Itoa(address.Port)).GetMetadata()))
+	}
+
+	tokens, _, err := renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{42}}, tokens)
+	assert.Equal(t, int32(1), failedCalls.Load())
+	assert.Equal(t, int32(1), successfulCalls.Load())
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestVLLMHTTPRenderer_DiscoveryRetriesTransportFailureWithinRequestTimeout(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()))
+	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-b", "10.0.0.2", "8000").GetMetadata()))
+
+	var deadlines []time.Time
+	renderer := &vllmHTTPRenderer{
+		client: &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+			deadline, ok := request.Context().Deadline()
+			require.True(t, ok)
+			deadlines = append(deadlines, deadline)
+			if request.URL.Host == "10.0.0.1:8000" {
+				return nil, errors.New("connection refused")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`[{"token_ids":[7]}]`)),
+				Request:    request,
+			}, nil
+		})},
+		endpointPicker: picker,
+		modelName:      testHTTPModel,
+		timeout:        time.Second,
+	}
+
+	tokens, _, err := renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{7}}, tokens)
+	require.Len(t, deadlines, 2)
+	assert.Equal(t, deadlines[0], deadlines[1])
+}
+
+func TestVLLMHTTPRenderer_DiscoveryDoesNotRetryDeterministicClientError(t *testing.T) {
+	var clientErrorCalls atomic.Int32
+	clientErrorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		clientErrorCalls.Add(1)
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	t.Cleanup(clientErrorServer.Close)
+
+	var alternateCalls atomic.Int32
+	alternateServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		alternateCalls.Add(1)
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{42}}})
+	}))
+	t.Cleanup(alternateServer.Close)
+
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}}, testHTTPModel)
+	require.NoError(t, err)
+	picker := renderer.endpointPicker.(*discoveredEndpointPicker)
+	for name, server := range map[string]*httptest.Server{"rank-a": clientErrorServer, "rank-b": alternateServer} {
+		address := server.Listener.Addr().(*net.TCPAddr)
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, address.IP.String(), strconv.Itoa(address.Port)).GetMetadata()))
+	}
+
+	_, _, err = renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.ErrorContains(t, err, "status 400")
+	assert.Equal(t, int32(1), clientErrorCalls.Load())
+	assert.Zero(t, alternateCalls.Load())
+}
+
+func TestVLLMHTTPRenderer_RetryableStatus(t *testing.T) {
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		assert.True(t, isRetryableRenderStatus(status), "status %d", status)
+	}
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, 600} {
+		assert.False(t, isRetryableRenderStatus(status), "status %d", status)
+	}
+}
+
+type errorEndpointPicker struct {
+	err error
+}
+
+func (p errorEndpointPicker) Pick() (string, error) {
+	return "", p.err
+}
+
+func TestVLLMHTTPRenderer_EndpointPickErrorHasContext(t *testing.T) {
+	pickErr := errors.New("picker failed")
+	renderer := &vllmHTTPRenderer{endpointPicker: errorEndpointPicker{err: pickErr}}
+
+	err := renderer.postJSON(context.Background(), completionsRenderPath, map[string]any{}, time.Second, &renderResponse{})
+	require.ErrorContains(t, err, "pick render endpoint")
+	assert.ErrorIs(t, err, pickErr)
+}
+
 type recordingRegistrar struct {
 	registrations []fwkdl.PendingRegistration
 }
@@ -166,7 +409,6 @@ func TestPlugin_DiscoveryRegistersAndTracksEndpointNotifications(t *testing.T) {
 	require.NoError(t, err)
 
 	var _ fwkdl.Registrant = p
-	var _ fwkdl.EndpointExtractor = p
 
 	registrar := &recordingRegistrar{}
 	require.NoError(t, p.RegisterDependencies(registrar))
@@ -174,25 +416,66 @@ func TestPlugin_DiscoveryRegistersAndTracksEndpointNotifications(t *testing.T) {
 	registration := registrar.registrations[0]
 	assert.Equal(t, p.TypedName(), registration.Owner)
 	assert.Equal(t, sourcenotifications.EndpointNotificationSourceType, registration.SourceType)
-	assert.Same(t, p, registration.Extractor)
 	require.NotNil(t, registration.DefaultSource)
+	handler, ok := registration.Extractor.(*endpointDiscoveryHandler)
+	require.True(t, ok)
 
 	ep := discoveredEndpoint("rank-a", "10.0.0.1", "8000")
-	require.NoError(t, p.Extract(context.Background(), fwkdl.EndpointEvent{
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventAddOrUpdate,
 		Endpoint: ep,
 	}))
 
-	got, err := p.endpointDiscovery.Pick()
+	got, err := handler.picker.Pick()
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.1:8000", got)
 
-	require.NoError(t, p.Extract(context.Background(), fwkdl.EndpointEvent{
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
 		Endpoint: ep,
 	}))
-	_, err = p.endpointDiscovery.Pick()
+	_, err = handler.picker.Pick()
 	require.Error(t, err)
+}
+
+func TestEndpointDiscoveryHandler_IgnoresStaleDelete(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	handler := newEndpointDiscoveryHandler(plugin.TypedName{Type: PluginType, Name: "test"}, picker)
+	oldEndpoint := discoveredEndpoint("rank-a", "10.0.0.1", "8000")
+	replacement := discoveredEndpoint("rank-a", "10.0.0.2", "8000")
+
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: oldEndpoint}))
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: replacement}))
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: oldEndpoint}))
+
+	got, err := picker.Pick()
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.2:8000", got)
+
+	require.NoError(t, handler.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: replacement}))
+	_, err = picker.Pick()
+	require.ErrorContains(t, err, "no vLLM render endpoints discovered")
+}
+
+func TestPlugin_DiscoveryHandlersHavePerInstanceTypes(t *testing.T) {
+	registrations := make([]fwkdl.PendingRegistration, 0, 2)
+	for _, name := range []string{"first", "second"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		p, err := NewPlugin(ctx, name, &tokenizerPluginConfig{
+			ModelName: "model",
+			VLLM:      &vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}},
+		})
+		require.NoError(t, err)
+
+		registrar := &recordingRegistrar{}
+		require.NoError(t, p.RegisterDependencies(registrar))
+		require.Len(t, registrar.registrations, 1)
+		registrations = append(registrations, registrar.registrations[0])
+	}
+
+	assert.NotEqual(t, registrations[0].Extractor.TypedName().Type, registrations[1].Extractor.TypedName().Type)
 }
 
 func TestPlugin_StaticURLDoesNotRegisterForEndpointNotifications(t *testing.T) {
@@ -217,7 +500,10 @@ func TestPluginFactory_EndpointDiscoveryValidation(t *testing.T) {
 			name: "accepts endpoint discovery",
 			parameters: `{
 				"modelName": "m",
-				"vllm": {"endpointDiscovery": {"loadBalancer": {"type": "round-robin"}}}
+				"vllm": {"endpointDiscovery": {
+					"portRules": [{"selector": {"matchLabels": {"llm-d.ai/role": "decode"}}, "basePort": 8200}],
+					"loadBalancer": {"type": "round-robin"}
+				}}
 			}`,
 		},
 		{
