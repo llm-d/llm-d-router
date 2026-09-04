@@ -297,7 +297,7 @@ func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var backend tokenInputProducer
 	var backendName string
-	var endpointDiscovery *discoveredEndpointPicker
+	var endpointPicker *discoveredEndpointPicker
 	switch {
 	case config.VLLM != nil || config.ModelName != "":
 		cfg := config.VLLM
@@ -310,18 +310,21 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 		backendName = backendVLLM
-		endpointDiscovery, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
+		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 		backendName = backendEstimate
 	}
 
+	typedName := plugin.TypedName{Type: PluginType, Name: name}
 	p := &Plugin{
-		typedName:         plugin.TypedName{Type: PluginType, Name: name},
-		backend:           backend,
-		backendName:       backendName,
-		dk:                TokenizedPromptDataKey.WithNonEmptyProducerName(name),
-		endpointDiscovery: endpointDiscovery,
+		typedName:   typedName,
+		backend:     backend,
+		backendName: backendName,
+		dk:          TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+	}
+	if endpointPicker != nil {
+		p.endpointDiscovery = newEndpointDiscoveryHandler(typedName, endpointPicker)
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -337,7 +340,7 @@ type Plugin struct {
 	// backendName identifies the configured backend on the tokenize span.
 	backendName       string
 	dk                plugin.DataKey
-	endpointDiscovery *discoveredEndpointPicker
+	endpointDiscovery *endpointDiscoveryHandler
 }
 
 // compile-time assertions.
@@ -345,7 +348,6 @@ var (
 	_ requestcontrol.DataProducer         = &Plugin{}
 	_ requestcontrol.TimeoutAwareProducer = &Plugin{}
 	_ datalayer.Registrant                = &Plugin{}
-	_ datalayer.EndpointExtractor         = &Plugin{}
 )
 
 // TypedName returns the typed name of the plugin.
@@ -366,24 +368,9 @@ func (p *Plugin) RegisterDependencies(r datalayer.Registrar) error {
 	return r.Register(datalayer.PendingRegistration{
 		Owner:         p.TypedName(),
 		SourceType:    sourcenotifications.EndpointNotificationSourceType,
-		Extractor:     p,
+		Extractor:     p.endpointDiscovery,
 		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
 	})
-}
-
-// Extract updates the render endpoint set from data-layer lifecycle events.
-func (p *Plugin) Extract(_ context.Context, event datalayer.EndpointEvent) error {
-	if p.endpointDiscovery == nil || event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
-		return nil
-	}
-	meta := event.Endpoint.GetMetadata()
-	switch event.Type {
-	case datalayer.EventAddOrUpdate:
-		return p.endpointDiscovery.Upsert(meta)
-	case datalayer.EventDelete:
-		p.endpointDiscovery.Delete(meta)
-	}
-	return nil
 }
 
 // ProduceTimeout surfaces the backend's render timeout when it manages one, so

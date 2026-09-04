@@ -46,7 +46,8 @@ Backend selection:
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
 | `modelName`                | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests.            |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
-| `vllm.endpointDiscovery`   | unset                   | Use the address and port of each endpoint published by data-layer discovery. |
+| `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
+| `vllm.endpointDiscovery.portRules` | empty             | Ordered label-selector rules that resolve render ports as `basePort + RankIndex`; an empty list uses each endpoint's inference port. |
 | `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Load-balancing algorithm for discovered endpoints.                 |
 | `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
 | `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
@@ -178,6 +179,15 @@ Plugin config - discovered engine endpoints:
     modelName: "${MODEL_NAME}"
     vllm:
       endpointDiscovery:
+        portRules:
+          - selector:
+              matchLabels:
+                llm-d.ai/role: prefill
+            basePort: 8000
+          - selector:
+              matchLabels:
+                llm-d.ai/role: decode
+            basePort: 8200
         loadBalancer:
           type: round-robin
 ```
@@ -185,7 +195,10 @@ Plugin config - discovered engine endpoints:
 The Kubernetes discovery path supplies Ready `InferencePool` endpoints and
 their target ports. Other discovery plugins feed the same renderer path; for
 example, `file-discovery` can supply explicit render addresses and ports.
-Discovered endpoints use HTTP.
+With no `portRules`, the renderer uses those inference ports. When rules are
+configured, the first matching Kubernetes label selector chooses the render
+base port and each endpoint's `RankIndex` supplies the port offset. Every
+discovered endpoint must match a rule. Discovered endpoints use HTTP.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 

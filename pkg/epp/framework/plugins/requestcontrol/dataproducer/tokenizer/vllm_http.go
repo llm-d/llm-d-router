@@ -136,7 +136,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 
 	var endpointPicker renderEndpointPicker
 	if cfg.EndpointDiscovery != nil {
-		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery.loadBalancerType())
+		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery)
 		if err != nil {
 			return nil, err
 		}
@@ -454,37 +454,75 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
-	baseURL, err := r.endpointPicker.Pick()
-	if err != nil {
-		return err
-	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	excluded := map[string]struct{}{}
+	var lastErr error
+	for {
+		var baseURL string
+		if len(excluded) == 0 {
+			baseURL, err = r.endpointPicker.Pick()
+		} else {
+			picker, ok := r.endpointPicker.(retryingRenderEndpointPicker)
+			if !ok {
+				return lastErr
+			}
+			baseURL, err = picker.PickExcluding(excluded)
+		}
+		if err != nil {
+			if lastErr != nil {
+				if errors.Is(err, errNoRenderEndpoints) {
+					return lastErr
+				}
+				return fmt.Errorf("pick alternate render endpoint: %w", err)
+			}
+			return fmt.Errorf("pick render endpoint: %w", err)
+		}
+
+		retryable, attemptErr := r.postJSONAttempt(reqCtx, ctx, baseURL, path, payload, out)
+		if attemptErr == nil {
+			return nil
+		}
+		if !retryable {
+			return attemptErr
+		}
+		lastErr = attemptErr
+		excluded[baseURL] = struct{}{}
+	}
+}
+
+// postJSONAttempt sends one render request and reports whether another endpoint may succeed.
+func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx, authCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return false, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// The render endpoint may require the same credential as inference;
 	// forward the inbound Authorization when present.
-	if auth := authHeaderFromContext(ctx); auth != "" {
+	if auth := authHeaderFromContext(authCtx); auth != "" {
 		httpReq.Header.Set("Authorization", auth)
 	}
 
 	httpResp, err := r.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("post %s: %w", path, err)
+		return reqCtx.Err() == nil, fmt.Errorf("post %s: %w", path, err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodySnippetBytes))
-		return &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
+		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
+		return false, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return nil
+	return false, nil
+}
+
+// isRetryableRenderStatus reports whether a different endpoint may succeed.
+func isRetryableRenderStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 && status <= 599
 }
