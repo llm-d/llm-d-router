@@ -30,7 +30,8 @@ Backend selection:
   scheme (`https://`). For in-cluster endpoints using self-signed or private CA
   certificates, configure `vllm.caCertPath` to trust the CA, and optionally
   `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS. Future protocol fields
-  (e.g. `grpc`) can be added alongside `url` under the same `vllm` block.
+  (e.g. `grpc`) can be added under the same `vllm` block. The HTTP renderer uses
+  either one configured URL or endpoints supplied by data-layer discovery.
 
 > [!WARNING]
 > The `estimate` backend approximates token boundaries (≈4 bytes/token); its
@@ -44,7 +45,9 @@ Backend selection:
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
 | `modelName`                | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests.            |
-| `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
+| `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
+| `vllm.endpointDiscovery`   | unset                   | Use the address and port of each endpoint published by data-layer discovery. |
+| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Load-balancing algorithm for discovered endpoints.                 |
 | `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
 | `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
@@ -166,6 +169,23 @@ containers:
     - "--ssl-certfile=/path/to/tls.crt"
     - "--ssl-keyfile=/path/to/tls.key"
 ```
+
+Plugin config - discovered engine endpoints:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      endpointDiscovery:
+        loadBalancer:
+          type: round-robin
+```
+
+The Kubernetes discovery path supplies Ready `InferencePool` endpoints and
+their target ports. Other discovery plugins feed the same renderer path; for
+example, `file-discovery` can supply explicit render addresses and ports.
+Discovered endpoints use HTTP.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 

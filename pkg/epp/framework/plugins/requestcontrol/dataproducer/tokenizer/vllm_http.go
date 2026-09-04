@@ -90,12 +90,15 @@ func isRenderAuthError(err error) bool {
 }
 
 // vllmConfig configures the vLLM /render backend. Future protocol fields
-// (e.g., grpc) can be added alongside url.
+// (e.g., grpc) can be added under the same vllm block.
 type vllmConfig struct {
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.
 	URL string `json:"url,omitempty"`
+	// EndpointDiscovery sends render requests directly to endpoints published
+	// by the configured data-layer discovery provider. Mutually exclusive with URL.
+	EndpointDiscovery *endpointDiscoveryConfig `json:"endpointDiscovery,omitempty"`
 	// Timeout is the per-request timeout for text-only requests
 	// (Go duration string, e.g. "5s"). Defaults to 5s.
 	Timeout string `json:"timeout,omitempty"`
@@ -119,17 +122,31 @@ type vllmConfig struct {
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
 // /v1/completions/render and /v1/chat/completions/render endpoints.
 type vllmHTTPRenderer struct {
-	client    *http.Client
-	baseURL   string
-	modelName string
-	timeout   time.Duration
-	mmTimeout time.Duration
+	client         *http.Client
+	endpointPicker renderEndpointPicker
+	modelName      string
+	timeout        time.Duration
+	mmTimeout      time.Duration
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, error) {
-	url := strings.TrimRight(cfg.URL, "/")
-	if url == "" {
-		url = defaultHTTPRenderURL
+	if cfg.URL != "" && cfg.EndpointDiscovery != nil {
+		return nil, errors.New("only one of 'url' or 'endpointDiscovery' may be set")
+	}
+
+	var endpointPicker renderEndpointPicker
+	if cfg.EndpointDiscovery != nil {
+		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery.loadBalancerType())
+		if err != nil {
+			return nil, err
+		}
+		endpointPicker = discovered
+	} else {
+		url := strings.TrimRight(cfg.URL, "/")
+		if url == "" {
+			url = defaultHTTPRenderURL
+		}
+		endpointPicker = fixedEndpointPicker(url)
 	}
 	timeout, err := parseHTTPDuration(cfg.Timeout, defaultHTTPRenderTimeout)
 	if err != nil {
@@ -149,10 +166,10 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
 		))},
-		baseURL:   url,
-		modelName: modelName,
-		timeout:   timeout,
-		mmTimeout: mmTimeout,
+		endpointPicker: endpointPicker,
+		modelName:      modelName,
+		timeout:        timeout,
+		mmTimeout:      mmTimeout,
 	}, nil
 }
 
@@ -437,11 +454,15 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
+	baseURL, err := r.endpointPicker.Pick()
+	if err != nil {
+		return err
+	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.baseURL+path, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}

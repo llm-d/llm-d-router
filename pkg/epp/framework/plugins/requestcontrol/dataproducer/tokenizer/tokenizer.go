@@ -38,11 +38,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -295,6 +297,7 @@ func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var backend tokenInputProducer
 	var backendName string
+	var endpointDiscovery *discoveredEndpointPicker
 	switch {
 	case config.VLLM != nil || config.ModelName != "":
 		cfg := config.VLLM
@@ -307,16 +310,18 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer}
 		backendName = backendVLLM
+		endpointDiscovery, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 		backendName = backendEstimate
 	}
 
 	p := &Plugin{
-		typedName:   plugin.TypedName{Type: PluginType, Name: name},
-		backend:     backend,
-		backendName: backendName,
-		dk:          TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+		typedName:         plugin.TypedName{Type: PluginType, Name: name},
+		backend:           backend,
+		backendName:       backendName,
+		dk:                TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+		endpointDiscovery: endpointDiscovery,
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -330,14 +335,17 @@ type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
 	// backendName identifies the configured backend on the tokenize span.
-	backendName string
-	dk          plugin.DataKey
+	backendName       string
+	dk                plugin.DataKey
+	endpointDiscovery *discoveredEndpointPicker
 }
 
 // compile-time assertions.
 var (
 	_ requestcontrol.DataProducer         = &Plugin{}
 	_ requestcontrol.TimeoutAwareProducer = &Plugin{}
+	_ datalayer.Registrant                = &Plugin{}
+	_ datalayer.EndpointExtractor         = &Plugin{}
 )
 
 // TypedName returns the typed name of the plugin.
@@ -348,6 +356,34 @@ func (p *Plugin) TypedName() plugin.TypedName {
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+}
+
+// RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.
+func (p *Plugin) RegisterDependencies(r datalayer.Registrar) error {
+	if p.endpointDiscovery == nil {
+		return nil
+	}
+	return r.Register(datalayer.PendingRegistration{
+		Owner:         p.TypedName(),
+		SourceType:    sourcenotifications.EndpointNotificationSourceType,
+		Extractor:     p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
+
+// Extract updates the render endpoint set from data-layer lifecycle events.
+func (p *Plugin) Extract(_ context.Context, event datalayer.EndpointEvent) error {
+	if p.endpointDiscovery == nil || event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
+		return nil
+	}
+	meta := event.Endpoint.GetMetadata()
+	switch event.Type {
+	case datalayer.EventAddOrUpdate:
+		return p.endpointDiscovery.Upsert(meta)
+	case datalayer.EventDelete:
+		p.endpointDiscovery.Delete(meta)
+	}
+	return nil
 }
 
 // ProduceTimeout surfaces the backend's render timeout when it manages one, so
