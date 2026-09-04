@@ -20,6 +20,7 @@ Producers may also implement additional lifecycle hooks:
 | `burst-prefix-cache-producer` | [`burstprefix`](burstprefix/) | `PrefixCacheMatchInfo` | Batches requests within a time window and co-locates prompt-sharing samples (e.g. RL rollout groups) onto shared replicas; requires `token-producer` upstream. |
 | `inflight-load-producer` | [`inflightload`](inflightload/) | `InFlightLoad` | Tracks real-time in-flight request and token counts per endpoint across the full request lifecycle. |
 | `predicted-latency-producer` | [`predictedlatency`](predictedlatency/) | `LatencyPredictionInfo` | Trains XGBoost models via a sidecar and generates per-endpoint TTFT/TPOT predictions. |
+| `latency-observer-producer-hub` | [`latencyobserver`](latencyobserver/) | `TTFTPercentiles` | Measures each request's actual time-to-first-token and publishes per-endpoint percentile anchors for `latency-observation-scorer-hub`. Needs nothing from the endpoint but its response. |
 | `session-id-producer` | [`sessionid`](sessionid/) | `SessionID` | Extracts a session identifier from a request header or cookie and publishes it for affinity-aware plugins. |
 | `mm-embeddings-cache-producer` | [`multimodal`](multimodal/) | `EncoderCacheMatchInfo` | Tracks which pods recently processed each multimodal input hash and scores encoder-cache affinity. |
 | `p2p-source-producer` | [`p2psource`](p2psource/) | request attribute only | Sets the `x-kv-cache-source-host-port` header to the candidate holding the most cached prefix tokens when it out-caches the pod computing the prefix, for P2P KV pulls. |
@@ -34,6 +35,7 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 - `inflight-load-producer` **optionally** consumes `PrefixCacheMatchInfo` from an approx or precise prefix producer; prefix-discounting is applied automatically when the attribute is present.
 - `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error) — set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
 - `predicted-latency-producer` **optionally** consumes `PrefixCacheMatchInfo`; set `prefixMatchInfoProducerName` in its config to the name of the prefix producer instance.
+- `latency-observer-producer-hub` **requires** `InFlightLoad`, so `inflight-load-producer` is ordered ahead of it and auto-created when absent. It must itself be listed under `dataLayer.sources`; auto-creation from `latency-observation-scorer-hub`'s required data key only wires the attribute, not the periodic tick that publishes it. See the [producer README](latencyobserver/README.md#configuration).
 
 ## Related documentation
 
@@ -43,5 +45,6 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 - [Token Producer](tokenizer/README.md)
 - [In-Flight Load Producer](inflightload/README.md)
 - [Predicted Latency Producer](predictedlatency/README.md)
+- [Latency Observer Producer](latencyobserver/README.md)
 - [Session ID Producer](sessionid/README.md)
 - [Multimodal Embeddings Cache Producer](multimodal/README.md)
