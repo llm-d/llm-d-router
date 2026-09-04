@@ -28,7 +28,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 // Model name constants shared across test suites.
@@ -53,7 +53,7 @@ func buildEnvoyHeaders(headers map[string]string) []*envoyCorev3.HeaderValue {
 // This simulates the "Subset Load Balancing" flow where EPP picks a specific pod IP.
 func ReqSubset(prompt, model, target string, subsets ...string) []*extProcPb.ProcessingRequest {
 	// Uses the shared low-level generator which handles the metadata construction
-	return integration.GenerateStreamedRequestSet(logger, prompt, model, target, subsets)
+	return fwkepp.GenerateStreamedRequestSet(logger, prompt, model, target, subsets)
 }
 
 // ReqResponseOnly creates a sequence simulating only the response phase from Envoy.
@@ -146,7 +146,7 @@ func buildRouteResponse(endpoint, targetModel, prompt string, stream bool) []*ex
 	}
 	j, _ := json.Marshal(bodyMap)
 
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint, j,
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -157,9 +157,9 @@ func buildRouteResponse(endpoint, targetModel, prompt string, stream bool) []*ex
 }
 
 func buildGRPCRouteResponse(endpoint, prompt, methodName string, stream bool) []*extProcPb.ProcessingResponse {
-	j, _ := integration.CreateGrpcPayload(integration.GRPCRequestProto(prompt, methodName, stream))
+	j, _ := fwkepp.CreateGrpcPayload(fwkepp.GRPCRequestProto(prompt, methodName, stream))
 
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint, j,
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -184,7 +184,7 @@ func ExpectRouteToWithStream(endpoint, targetModel, prompt string) []*extProcPb.
 // ExpectPassthroughRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
 // not parsed.
 func ExpectPassthroughRouteTo(endpoint string, rawBytes []byte) []*extProcPb.ProcessingResponse {
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint, rawBytes,
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -206,13 +206,13 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 
 // ExpectReject asserts that the EPP immediately rejected the request with the given code and message.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg)
+	return fwkepp.NewImmediateErrorResponse(code, msg)
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
 func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
+	return fwkepp.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
 		Header: &envoyCorev3.HeaderValue{
 			Key:      errcommon.RequestDroppedReasonHeaderKey,
 			RawValue: []byte(reason),
@@ -223,7 +223,7 @@ func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
 // This uses the shared primitive but adds EPP-specific headers we expect.
 func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingResponse {
-	return integration.NewResponseBufferedResponse(
+	return fwkepp.NewResponseBufferedResponse(
 		body,
 		contentType != "application/grpc", // For gRPC, the EoS will not be set to true but it will return a trailer.
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -243,7 +243,7 @@ func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingRe
 // 2. ResponseBody chunks (with EndOfStream=true on the final chunk)
 func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, integration.NewResponseHeaders(
+	res = append(res, fwkepp.NewResponseHeaders(
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
@@ -257,7 +257,7 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 
 	// 2. The Body Chunk Frames
 	for i, chunk := range chunks {
-		res = append(res, integration.NewResponseStreamChunk(chunk, i == len(chunks)-1))
+		res = append(res, fwkepp.NewResponseStreamChunk(chunk, i == len(chunks)-1))
 	}
 	return res
 }
@@ -265,7 +265,7 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 // ExpectGRPCStreamResp asserts that the EPP streams the gRPC response chunks.
 func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, integration.NewResponseHeaders(
+	res = append(res, fwkepp.NewResponseHeaders(
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
@@ -277,7 +277,7 @@ func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 	))
 
 	for _, chunk := range chunks {
-		res = append(res, integration.NewResponseStreamChunk(chunk, false))
+		res = append(res, fwkepp.NewResponseStreamChunk(chunk, false))
 	}
 	return res
 }
@@ -306,7 +306,7 @@ func commonTestCases(prio func(int) int) []testCase {
 	return []testCase{
 		{
 			name:     "select lower queue and kv cache",
-			requests: integration.ReqLLM(logger, "test1", modelMyModel, modelMyModelTarget),
+			requests: fwkepp.ReqLLM(logger, "test1", modelMyModel, modelMyModelTarget),
 			pods: []PodState{
 				P(0, 3, 0.2),
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
@@ -321,7 +321,7 @@ func commonTestCases(prio func(int) int) []testCase {
 		},
 		{
 			name:     "select active lora, low queue",
-			requests: integration.ReqLLM(logger, "test2", modelSQLLora, modelSQLLoraTarget),
+			requests: fwkepp.ReqLLM(logger, "test2", modelSQLLora, modelSQLLoraTarget),
 			pods: []PodState{
 				P(0, 0, 0.2, "foo", "bar"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Has LoRA)
@@ -334,14 +334,14 @@ func commonTestCases(prio func(int) int) []testCase {
 		},
 		{
 			name:     "no backend pods available",
-			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			requests: fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 			pods:     nil,
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
 				"inference error: Internal - no pods available in datastore"),
 		},
 		{
 			name: "request missing model field",
-			requests: integration.ReqRaw(
+			requests: fwkepp.ReqRaw(
 				map[string]string{"content-type": "application/json"},
 				`{"prompt":"hello world"}`,
 			),

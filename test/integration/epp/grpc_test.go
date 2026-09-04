@@ -30,7 +30,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 const (
@@ -74,13 +74,13 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		// --- Standard Routing Logic ---
 		{
 			name:     "select lower queue and kv cache",
-			requests: integration.ReqGRPCLLM(logger, "test1", inferenceObjectiveWithPriority4, integration.GenerateGRPCMethodName),
+			requests: fwkepp.ReqGRPCLLM(logger, "test1", inferenceObjectiveWithPriority4, fwkepp.GenerateGRPCMethodName),
 			pods: []PodState{
 				P(0, 3, 0.2),
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
 				P(2, 10, 0.2),
 			},
-			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test1", integration.GenerateGRPCMethodName),
+			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test1", fwkepp.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 4)),
 				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
@@ -88,13 +88,13 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		},
 		{
 			name:     "select lower queue and kv cache for embedRequest",
-			requests: integration.ReqGRPCLLM(logger, "test1", inferenceObjectiveWithPriority4, integration.EmbedGRPCMethodName),
+			requests: fwkepp.ReqGRPCLLM(logger, "test1", inferenceObjectiveWithPriority4, fwkepp.EmbedGRPCMethodName),
 			pods: []PodState{
 				P(0, 3, 0.2),
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
 				P(2, 10, 0.2),
 			},
-			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test1", integration.EmbedGRPCMethodName),
+			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test1", fwkepp.EmbedGRPCMethodName),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 4)),
 				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
@@ -102,13 +102,13 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		},
 		{
 			name:     "select lower queue with streaming request",
-			requests: integration.ReqGRPCLLMWithStream(logger, "test-stream", inferenceObjectiveWithPriority4, integration.GenerateGRPCMethodName),
+			requests: fwkepp.ReqGRPCLLMWithStream(logger, "test-stream", inferenceObjectiveWithPriority4, fwkepp.GenerateGRPCMethodName),
 			pods: []PodState{
 				P(0, 3, 0.2),
 				P(1, 0, 0.1), // Winner
 				P(2, 10, 0.2),
 			},
-			wantResponses: ExpectGRPCRouteToWithStream("192.168.1.2:8000", "test-stream", integration.GenerateGRPCMethodName),
+			wantResponses: ExpectGRPCRouteToWithStream("192.168.1.2:8000", "test-stream", fwkepp.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 4)),
 				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
@@ -116,13 +116,13 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		},
 		{
 			name:     "do not shed requests by default",
-			requests: integration.ReqGRPCLLM(logger, "test2", "", integration.GenerateGRPCMethodName),
+			requests: fwkepp.ReqGRPCLLM(logger, "test2", "", fwkepp.GenerateGRPCMethodName),
 			pods: []PodState{
 				P(0, 6, 0.2, "foo", "bar"), // Winner (Lowest saturated)
 				P(1, 0, 0.85, "foo"),
 				P(2, 10, 0.9, "foo"),
 			},
-			wantResponses: ExpectGRPCRouteTo("192.168.1.1:8000", "test2", integration.GenerateGRPCMethodName),
+			wantResponses: ExpectGRPCRouteTo("192.168.1.1:8000", "test2", fwkepp.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 0)),
 			},
@@ -147,12 +147,12 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						Text: "test3",
 					},
 				}
-				gRPCPayload, _ := integration.CreateGrpcPayload(req)
-				return integration.ReqRaw(
+				gRPCPayload, _ := fwkepp.CreateGrpcPayload(req)
+				return fwkepp.ReqRaw(
 					map[string]string{
 						"hi":                         "mom",
 						reqcommon.RequestIDHeaderKey: "test-request-id",
-						":path":                      integration.GenerateGRPCMethodName,
+						":path":                      fwkepp.GenerateGRPCMethodName,
 					},
 					string(gRPCPayload[0:len(gRPCPayload)/2]),
 					string(gRPCPayload[len(gRPCPayload)/2:]),
@@ -162,14 +162,14 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				P(0, 4, 0.2, "foo", "bar"),
 				P(1, 4, 0.85, "foo"),
 			},
-			wantResponses: ExpectGRPCRouteTo("192.168.1.1:8000", "test3", integration.GenerateGRPCMethodName),
+			wantResponses: ExpectGRPCRouteTo("192.168.1.1:8000", "test3", fwkepp.GenerateGRPCMethodName),
 			wantMetrics: map[string]string{
 				"inference_objective_request_total": cleanMetric(metricReqTotal("", "", 0)),
 			},
 		},
 		{
 			name:     "no backend pods available",
-			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			requests: fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 			pods:     nil,
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
 				"inference error: Internal - no pods available in datastore"),
@@ -179,28 +179,28 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		{
 			name: "subsetting: select best from subset",
 			// Only pods in the subset list are eligible.
-			requests: integration.GenerateStreamedGRPCRequestSet(logger, "test2", "",
-				[]string{"192.168.1.1:8000", "192.168.1.2:8000", "192.168.1.3:8000"}, integration.GenerateGRPCMethodName),
+			requests: fwkepp.GenerateStreamedGRPCRequestSet(logger, "test2", "",
+				[]string{"192.168.1.1:8000", "192.168.1.2:8000", "192.168.1.3:8000"}, fwkepp.GenerateGRPCMethodName),
 			pods: []PodState{
 				P(0, 0, 0.2, "foo"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Low Queue + Matches Subset)
 				P(2, 10, 0.2, "foo"),
 			},
-			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test2", integration.GenerateGRPCMethodName),
+			wantResponses: ExpectGRPCRouteTo("192.168.1.2:8000", "test2", fwkepp.GenerateGRPCMethodName),
 		},
 		{
 			name:     "subsetting: partial match",
-			requests: integration.GenerateStreamedGRPCRequestSet(logger, "test2", "", []string{"192.168.1.3:8000"}, integration.GenerateGRPCMethodName),
+			requests: fwkepp.GenerateStreamedGRPCRequestSet(logger, "test2", "", []string{"192.168.1.3:8000"}, fwkepp.GenerateGRPCMethodName),
 			pods: []PodState{
 				P(0, 0, 0.2, "foo"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 				P(2, 10, 0.2, "foo"), // Winner (Matches Subset, despite load)
 			},
-			wantResponses: ExpectGRPCRouteTo("192.168.1.3:8000", "test2", integration.GenerateGRPCMethodName),
+			wantResponses: ExpectGRPCRouteTo("192.168.1.3:8000", "test2", fwkepp.GenerateGRPCMethodName),
 		},
 		{
 			name:     "subsetting: no pods match",
-			requests: integration.GenerateStreamedGRPCRequestSet(logger, "test2", "", []string{"192.168.1.99:8000"}, integration.GenerateGRPCMethodName),
+			requests: fwkepp.GenerateStreamedGRPCRequestSet(logger, "test2", "", []string{"192.168.1.99:8000"}, fwkepp.GenerateGRPCMethodName),
 			pods: []PodState{
 				P(0, 0, 0.2, "foo"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget),
@@ -221,9 +221,9 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						},
 					},
 				}
-				gRPCPayload, _ := integration.CreateGrpcPayload(resp)
+				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
 				return ReqRequestHeadersAndResponseGRPC(
-					map[string]string{":path": integration.GenerateGRPCMethodName},
+					map[string]string{":path": fwkepp.GenerateGRPCMethodName},
 					map[string]string{"content-type": "application/grpc"},
 					gRPCPayload[:len(gRPCPayload)/2],
 					gRPCPayload[len(gRPCPayload)/2:],
@@ -238,14 +238,14 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						},
 					},
 				}
-				gRPCPayload, _ := integration.CreateGrpcPayload(resp)
+				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
 				return ExpectBufferResp(string(gRPCPayload), "application/grpc")
 			}(),
 		},
 		{
 			name: "response buffering: invalid gRPC",
 			requests: ReqRequestHeadersAndResponseGRPC(
-				map[string]string{":path": integration.GenerateGRPCMethodName},
+				map[string]string{":path": fwkepp.GenerateGRPCMethodName},
 				map[string]string{"content-type": "application/grpc"},
 				[]byte("no healthy upstream"),
 			),
@@ -263,9 +263,9 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						},
 					},
 				}
-				gRPCPayload, _ := integration.CreateGrpcPayload(resp)
+				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
 				return ReqRequestHeadersAndResponseGRPC(
-					map[string]string{":path": integration.GenerateGRPCMethodName},
+					map[string]string{":path": fwkepp.GenerateGRPCMethodName},
 					map[string]string{"content-type": "application/grpc"},
 					gRPCPayload[:len(gRPCPayload)/2],
 					gRPCPayload[len(gRPCPayload)/2:],
@@ -281,7 +281,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						},
 					},
 				}
-				gRPCPayload, _ := integration.CreateGrpcPayload(resp)
+				gRPCPayload, _ := fwkepp.CreateGrpcPayload(resp)
 				return ExpectBufferResp(string(gRPCPayload), "application/grpc")
 			}(),
 			// Labels are empty because we skipped the Request phase.
@@ -317,7 +317,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		{
 			name: "response streaming with token usage",
 			requests: func() []*extProcPb.ProcessingRequest {
-				reqs := integration.ReqGRPCLLMWithStream(logger, "test-stream", inferenceObjectiveWithPriority4, integration.GenerateGRPCMethodName)
+				reqs := fwkepp.ReqGRPCLLMWithStream(logger, "test-stream", inferenceObjectiveWithPriority4, fwkepp.GenerateGRPCMethodName)
 
 				resp1 := &pb.GenerateResponse{
 					Response: &pb.GenerateResponse_Chunk{
@@ -335,8 +335,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					},
 				}
 
-				gRPCPayload1, _ := integration.CreateGrpcPayload(resp1)
-				gRPCPayload2, _ := integration.CreateGrpcPayload(resp2)
+				gRPCPayload1, _ := fwkepp.CreateGrpcPayload(resp1)
+				gRPCPayload2, _ := fwkepp.CreateGrpcPayload(resp2)
 
 				respHeaders := &extProcPb.ProcessingRequest{
 					Request: &extProcPb.ProcessingRequest_ResponseHeaders{
@@ -371,7 +371,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			}(),
 			pods: []PodState{P(0, 4, 0.2)},
 			wantResponses: func() []*extProcPb.ProcessingResponse {
-				reqs := ExpectGRPCRouteToWithStream("192.168.1.1:8000", "test-stream", integration.GenerateGRPCMethodName)
+				reqs := ExpectGRPCRouteToWithStream("192.168.1.1:8000", "test-stream", fwkepp.GenerateGRPCMethodName)
 
 				resp1 := &pb.GenerateResponse{
 					Response: &pb.GenerateResponse_Chunk{
@@ -388,11 +388,11 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						},
 					},
 				}
-				gRPCPayload1, _ := integration.CreateGrpcPayload(resp1)
-				gRPCPayload2, _ := integration.CreateGrpcPayload(resp2)
+				gRPCPayload1, _ := fwkepp.CreateGrpcPayload(resp1)
+				gRPCPayload2, _ := fwkepp.CreateGrpcPayload(resp2)
 
 				// Expect Headers response
-				respRespHeaders := integration.NewResponseHeaders(
+				respRespHeaders := fwkepp.NewResponseHeaders(
 					&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
 						Key:      "x-went-into-resp-headers",
 						RawValue: []byte("true"),
@@ -404,8 +404,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				)
 
 				// Expect Streaming body frame responses
-				respChunk1 := integration.NewResponseStreamChunk(string(gRPCPayload1), false)
-				respChunk2 := integration.NewResponseStreamChunk(string(gRPCPayload2), false)
+				respChunk1 := fwkepp.NewResponseStreamChunk(string(gRPCPayload1), false)
+				respChunk2 := fwkepp.NewResponseStreamChunk(string(gRPCPayload2), false)
 
 				return append(reqs, respRespHeaders, respChunk1, respChunk2)
 			}(),
@@ -470,7 +470,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				h.WaitForReadyPodsMetric(len(tc.pods))
 			}
 
-			responses, err := integration.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
+			responses, err := fwkepp.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
 			require.NoError(t, err)
 
 			if diff := cmp.Diff(tc.wantResponses, responses,
