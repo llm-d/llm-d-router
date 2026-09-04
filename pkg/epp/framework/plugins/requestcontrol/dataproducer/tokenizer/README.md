@@ -109,7 +109,8 @@ continues; downstream scorers fall back to their own paths.
 
 The plugin calls `POST {http}/v1/completions/render` and
 `POST {http}/v1/chat/completions/render`, both of which are exposed by
-`vllm serve <model>` and by the GPU-less `vllm launch render <model>`.
+`vllm serve <model>`, the Python-based GPU-less `vllm launch render <model>`,
+and the standalone Rust renderer `vllm-rs render <model>`.
 Any reachable HTTP endpoint serving the same model the scheduler tokenizes
 for will work — sidecar in the EPP pod (loopback) or a dedicated Service
 shared by multiple EPP replicas. When the inbound request carries an
@@ -119,11 +120,19 @@ sends no `Authorization` header, so against such an endpoint it is skipped
 and the first request pays the cold-start cost.
 
 ```yaml
-# EPP pod spec
+# EPP pod spec (Python renderer)
 containers:
 - name: vllm-render
   image: vllm/vllm-openai:latest          # any image shipping `vllm launch render`
   command: ["vllm", "launch", "render"]
+  args: ["${MODEL_NAME}", "--port=8000"]
+  ports: [{name: render-http, containerPort: 8000}]
+  readinessProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 5}
+
+# EPP pod spec (Rust renderer, ~40x lighter image)
+- name: vllm-render
+  image: vllm/vllm-rs:latest              # image shipping `vllm-rs render`
+  command: ["vllm-rs", "render"]
   args: ["${MODEL_NAME}", "--port=8000"]
   ports: [{name: render-http, containerPort: 8000}]
   readinessProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 5}

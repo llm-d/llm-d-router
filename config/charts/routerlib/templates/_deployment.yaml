@@ -220,12 +220,16 @@
         {{- if .Values.router.tokenizer.enabled }}
         {{- $tokenizer := .Values.router.tokenizer }}
         {{- $renderPort := $tokenizer.port | default 8000 | int }}
+        {{- $flavor := $tokenizer.flavor | default "python" | lower }}
         - name: vllm-render
           image: {{ $tokenizer.image.registry }}/{{ $tokenizer.image.repository }}:{{ $tokenizer.image.tag }}
           imagePullPolicy: {{ $tokenizer.image.pullPolicy | default "IfNotPresent" }}
           command:
           {{- if $tokenizer.command }}
           {{- toYaml $tokenizer.command | nindent 12 }}
+          {{- else if eq $flavor "rust" }}
+            - vllm-rs
+            - render
           {{- else }}
             - vllm
             - launch

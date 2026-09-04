@@ -506,12 +506,18 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- end -}}
 
 {{/*
-Tokenizer validations: require modelName for the render sidecar's command args.
+Tokenizer validations: require modelName and valid flavor for the render sidecar.
 */}}
 {{- define "llm-d-router.validations.epp.tokenizer" -}}
 {{- $tokenizer := .Values.router.tokenizer | default dict }}
-{{- if and (dig "enabled" false $tokenizer) (not (dig "modelName" "" $tokenizer)) }}
+{{- if (dig "enabled" false $tokenizer) }}
+{{- if not (dig "modelName" "" $tokenizer) }}
 {{- fail ".Values.router.tokenizer.modelName is required when the tokenizer is enabled." }}
+{{- end }}
+{{- $flavor := dig "flavor" "python" $tokenizer | lower }}
+{{- if not (or (eq $flavor "python") (eq $flavor "rust")) }}
+{{- fail (printf ".Values.router.tokenizer.flavor must be one of [python, rust], got %q" (dig "flavor" "" $tokenizer)) }}
+{{- end }}
 {{- end }}
 {{- end -}}
 

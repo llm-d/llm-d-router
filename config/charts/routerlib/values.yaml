@@ -92,12 +92,15 @@ epp:
 proxy:
   enabled: false    
 
-# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` and exposes
-# `/render` over loopback HTTP to EPP. modelName is passed as the first
-# positional arg to the render command (required when enabled). EPP is wired to
-# the sidecar via `router.epp.pluginsCustomConfig`.
+# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
+# `vllm-rs render <modelName>` (Rust) and exposes `/render` over loopback HTTP
+# to EPP. modelName is passed as the first positional arg to the render command
+# (required when enabled). EPP is wired to the sidecar via
+# `router.epp.pluginsCustomConfig`.
 tokenizer:
   enabled: false
+  # Backend renderer flavor: "python" (default, runs vllm launch render) or "rust" (runs vllm-rs render).
+  flavor: "python"
   modelName: ""
   image:
     registry: docker.io
