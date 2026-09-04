@@ -203,8 +203,14 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 
 	// TTFT load gate: break stickiness if sticky endpoints are too slow.
 	if p.config.MaxTTFTPenaltyMs > 0 && len(nonSticky) > 0 {
-		bestStickyTTFT := p.bestTTFT(sticky)
-		bestNonStickyTTFT := p.bestTTFT(nonSticky)
+		bestStickyTTFT, stickyOk := p.bestTTFT(sticky)
+		bestNonStickyTTFT, nonStickyOk := p.bestTTFT(nonSticky)
+		if !stickyOk || !nonStickyOk {
+			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate skipped, missing signal",
+				"stickyObserved", stickyOk, "nonStickyObserved", nonStickyOk)
+			recordDecision(p.typedName.Name, outcomeMissingSignal)
+			return sticky
+		}
 		if bestStickyTTFT-bestNonStickyTTFT > p.config.MaxTTFTPenaltyMs {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
@@ -248,39 +254,44 @@ func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
 }
 
 // bestTTFT returns the lowest per-endpoint TTFT (ms) across endpoints.
-func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
+func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) (float64, bool) {
 	best := math.MaxFloat64
+	found := false
 	for _, ep := range endpoints {
-		if ttft := p.endpointTTFT(ep); ttft < best {
+		if ttft, ok := p.endpointTTFT(ep); ok && ttft < best {
 			best = ttft
+			found = true
 		}
 	}
-	return best
+	return best, found
 }
 
 // endpointTTFT returns the predicted TTFT (ms) for an endpoint, either from the
 // latency predictor or estimated from in-flight tokens and peak prefill
 // throughput. Endpoints missing the required attribute contribute no signal:
-// MaxFloat64 on the predictor path (never the fastest), 0 in-flight tokens on
-// the throughput path (no observed load).
-func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
+// the function returns false and the endpoint is excluded from the bestTTFT calculation.
+func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if p.config.usesLatencyPredictor() {
 		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
-			return info.TTFT()
+			return info.TTFT(), true
 		}
-		return math.MaxFloat64
+		return math.MaxFloat64, false
 	}
-	return float64(p.inFlightTokens(ep)) / p.config.PeakPrefillThroughput * 1000
+	tokens, ok := p.inFlightTokens(ep)
+	if !ok {
+		return 0, false
+	}
+	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
-// inFlightTokens returns an endpoint's in-flight token count, or 0 when the
-// attribute is absent (no observed load).
-func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) int64 {
+// inFlightTokens returns an endpoint's in-flight token count. If the attribute is
+// absent, it returns ok=false so the caller can treat the signal as missing.
+func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
-			return load.Tokens
+			return load.Tokens, true
 		}
 	}
-	return 0
+	return 0, false
 }
