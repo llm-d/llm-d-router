@@ -40,56 +40,81 @@ func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	return endpointSet
 }
 
-// matchedBlockCount returns the number of contiguous cached prefix blocks held
-// by podID, counting from the first block until the first block the pod does
-// not hold. This is the unweighted counterpart of the device-tier-weighted
-// kvblock scorer: every cached block counts as one regardless of device tier,
-// so a pod present at keys[0..n-1] yields n.
-func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
-	count := 0
-	for _, key := range keys {
-		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool { return e.PodIdentifier == podID }) {
-			break
-		}
-		count++
-	}
-	return count
-}
-
-// matchedBlockCountByTier returns, per device tier, the number of contiguous
-// cached prefix blocks podID holds in that tier, counting from the first
-// block until the first block the pod does not hold in that tier. A block
-// held in several tiers counts once per tier, so each tier's count is at most
-// matchedBlockCount for the same pod. Tiers are recorded as found in the
-// index, except speculative entries, which count under
-// attrprefix.SpeculativeTierKey: PreRequest inserts them before vLLM has
-// reported placement, so they carry no device tier.
-// Returns a non-nil (possibly empty) map.
-func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) map[string]int {
+// matchedBlocks returns the number of contiguous cached prefix blocks held by
+// podID, counting from the first block until the first block the pod does not
+// hold, together with the per-tier contiguous counts. Every held block counts
+// once in the first return value regardless of device tier, and once per tier
+// in the map, so each tier's count is at most the any-tier count. A tier's
+// chain may end before the any-tier chain; that tier's count then stops
+// growing while the first return value keeps advancing.
+// Tiers are recorded as found in the index, except speculative entries, which
+// count under attrprefix.SpeculativeTierKey: PreRequest inserts them before
+// vLLM has reported placement, so they carry no device tier.
+// The map is non-nil (possibly empty).
+func matchedBlocks(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) (int, map[string]int) {
+	var count int
 	counts := map[string]int{}
-	var alive sets.Set[string]
+
+	var chainTiers, tiers []string
+	// tierChainEnded is set when chainTiers becomes empty. The intersection
+	// can only shrink, so no tier counts change afterwards; only the any-tier
+	// count keeps advancing. While set, per-block tier collection is skipped
+	// and the entry scan stops at the pod's first entry.
+	var tierChainEnded bool
 	for _, key := range keys {
-		tiersAtKey := sets.New[string]()
+		var podHas bool
+		tiers = tiers[:0]
 		for _, e := range keyToPods[key] {
-			if e.PodIdentifier == podID {
-				if e.Speculative {
-					tiersAtKey.Insert(attrprefix.SpeculativeTierKey)
-				} else {
-					tiersAtKey.Insert(e.DeviceTier)
-				}
+			if e.PodIdentifier != podID {
+				continue
+			}
+			podHas = true
+			if tierChainEnded {
+				break
+			}
+
+			tier := e.DeviceTier
+			if e.Speculative {
+				tier = attrprefix.SpeculativeTierKey
+			}
+			if !slices.Contains(tiers, tier) {
+				tiers = append(tiers, tier)
 			}
 		}
-		if alive == nil {
-			alive = tiersAtKey
-		} else {
-			alive = alive.Intersection(tiersAtKey)
+		if !podHas {
+			break // any-tier chain broken: both counts stop
 		}
-		if alive.Len() == 0 {
-			break
+
+		count++
+		if tierChainEnded {
+			continue
 		}
-		for tier := range alive {
-			counts[tier]++
+
+		if chainTiers == nil {
+			// First held block seeds the tier chain with a copy of tiers,
+			// which is reused for every block.
+			chainTiers = slices.Clone(tiers)
+			for _, t := range chainTiers {
+				counts[t]++
+			}
+			continue
+		}
+
+		n := 0
+		for _, t := range chainTiers {
+			if slices.Contains(tiers, t) {
+				chainTiers[n] = t
+				n++
+			}
+		}
+		chainTiers = chainTiers[:n]
+		if len(chainTiers) == 0 {
+			tierChainEnded = true // tier counts stop; the any-tier count continues
+			continue
+		}
+		for _, t := range chainTiers {
+			counts[t]++
 		}
 	}
-	return counts
+	return count, counts
 }

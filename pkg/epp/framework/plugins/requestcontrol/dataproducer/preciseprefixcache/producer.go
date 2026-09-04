@@ -385,9 +385,10 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		cachedBlocks := 0
 		cachedBlocksByTier := map[string]int{}
 		for _, lu := range lookups {
-			cachedBlocks += matchedBlockCount(lu.keys, lu.keyToPods, addr)
-			for tier, count := range matchedBlockCountByTier(lu.keys, lu.keyToPods, addr) {
-				cachedBlocksByTier[tier] += count
+			blockCount, byTier := matchedBlocks(lu.keys, lu.keyToPods, addr)
+			cachedBlocks += blockCount
+			for tier, n := range byTier {
+				cachedBlocksByTier[tier] += n
 			}
 		}
 		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
