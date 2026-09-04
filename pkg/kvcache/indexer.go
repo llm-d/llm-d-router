@@ -40,6 +40,9 @@ type Config struct {
 	KVBlockIndexConfig  *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
 	KVBlockScorerConfig *KVBlockScorerConfig    // not exported
 	BackendConfigs      []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
+	// DefaultBackendWeight is the scoring weight for device tiers absent from
+	// BackendConfigs.
+	DefaultBackendWeight float64 `json:"kvCacheDefaultBackendWeight"`
 
 	// TokenizersPoolConfig configured the deprecated in-process tokenization
 	// pool. The pool itself lives in llm-d-kv-cache; the indexer no longer
@@ -53,9 +56,10 @@ type Config struct {
 // NewDefaultConfig returns a default configuration for the Indexer module.
 func NewDefaultConfig() (*Config, error) {
 	return &Config{
-		KVBlockIndexConfig:  kvblock.DefaultIndexConfig(),
-		KVBlockScorerConfig: DefaultKVBlockScorerConfig(),
-		BackendConfigs:      DefaultKVCacheBackendConfig(),
+		KVBlockIndexConfig:   kvblock.DefaultIndexConfig(),
+		KVBlockScorerConfig:  DefaultKVBlockScorerConfig(),
+		BackendConfigs:       DefaultKVCacheBackendConfig(),
+		DefaultBackendWeight: DefaultBackendWeight,
 	}, nil
 }
 
@@ -89,6 +93,7 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 
 	// override backend configs with the ones from the config, if the defaults are not used.
 	config.KVBlockScorerConfig.BackendConfigs = config.BackendConfigs
+	config.KVBlockScorerConfig.DefaultWeight = config.DefaultBackendWeight
 	scorer, err := NewKVBlockScorer(config.KVBlockScorerConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KVBlockScorer: %w", err)

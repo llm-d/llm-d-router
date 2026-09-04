@@ -37,6 +37,9 @@ type EndpointMetadata struct {
 	// NodeAddress is the node IP hosting this pod (pod.Status.HostIP).
 	// Empty for non-Kubernetes discovery sources (e.g. file discovery).
 	NodeAddress string
+	// NodeName is the name of the node hosting this pod (pod.Spec.NodeName).
+	// Empty for non-Kubernetes discovery sources.
+	NodeName    string
 	Port        string
 	MetricsHost string
 	Labels      map[string]string
@@ -69,6 +72,7 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 		Name:        epm.Name,
 		Address:     epm.Address,
 		NodeAddress: epm.NodeAddress,
+		NodeName:    epm.NodeName,
 		Port:        epm.Port,
 		MetricsHost: epm.MetricsHost,
 		Labels:      clonedLabels,
@@ -86,6 +90,7 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		epm.Name == other.Name &&
 		epm.Address == other.Address &&
 		epm.NodeAddress == other.NodeAddress &&
+		epm.NodeName == other.NodeName &&
 		epm.Port == other.Port &&
 		epm.MetricsHost == other.MetricsHost &&
 		epm.RankIndex == other.RankIndex &&
@@ -125,6 +130,14 @@ func (epm *EndpointMetadata) GetNodeAddress() string {
 		return ""
 	}
 	return epm.NodeAddress
+}
+
+// GetNodeName returns the name of the node hosting this endpoint.
+func (epm *EndpointMetadata) GetNodeName() string {
+	if epm == nil {
+		return ""
+	}
+	return epm.NodeName
 }
 
 // GetPort returns the Endpoint's inference port.

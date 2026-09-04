@@ -30,6 +30,31 @@ indexer owns block-key computation, index lookup, and scoring.
   consecutive block hits starting from block 0, weighted per device tier
   (`BackendConfigs`), so a pod that holds a longer contiguous prefix ranks
   higher.
+- **Shared tiers.** Index entries keyed by a pseudo-pod identifier
+  (`node:<nodeName>` for a node-local tier shared by all pods on a node,
+  `pool:<name>` for a fleet-wide tier) are resolved to the candidate endpoints
+  they cover before scoring (`kvblock.ResolvePseudoPods`). `pool:` entries
+  pass every `Lookup` filter; `node:` entries must be named in the filter.
+
+## Device Tier Weights
+
+`kvCacheBackendConfigs` maps a `medium` string carried by KV events to a
+scoring weight. Defaults: `gpu` 1.0, `cpu` 0.8, `lmcache-l1` 0.8. Tiers absent
+from the list score at `kvCacheDefaultBackendWeight` (default 1.0). Slower
+shared tiers such as `lmcache-l2-<backend>` have no default entry; configure
+them explicitly, for example:
+
+```yaml
+indexerConfig:
+  kvCacheDefaultBackendWeight: 0.5
+  kvCacheBackendConfigs:
+    - name: gpu
+      weight: 1.0
+    - name: lmcache-l1
+      weight: 0.8
+    - name: lmcache-l2-fs
+      weight: 0.4
+```
 - **Tracing.** The index and scorer are wrapped with OpenTelemetry
   instrumentation that is a no-op when tracing is not configured.
 

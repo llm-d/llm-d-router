@@ -27,17 +27,42 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
-// extractEndpointSet builds the "address:port" identifier set used to filter
-// kvblock.Index lookups to candidate endpoints. Endpoints without metadata
-// are skipped.
+// extractEndpointSet builds the identifier set used to filter kvblock.Index
+// lookups to candidate endpoints: each endpoint's "address:port" plus the
+// node pseudo-pod of every node hosting a candidate. Endpoints without
+// metadata are skipped.
 func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	endpointSet := sets.New[string]()
 	for _, ep := range endpoints {
 		if m := ep.GetMetadata(); m != nil {
 			endpointSet.Insert(fmt.Sprintf("%s:%s", m.Address, m.Port))
+			if m.NodeName != "" {
+				endpointSet.Insert(kvblock.NodePseudoPod(m.NodeName))
+			}
 		}
 	}
 	return endpointSet
+}
+
+// endpointsByNode groups candidate "address:port" identifiers by the node
+// hosting them, and returns the flat list of all identifiers. Endpoints
+// without metadata are skipped; endpoints without a node name appear only in
+// the flat list.
+func endpointsByNode(endpoints []scheduling.Endpoint) (map[string][]string, []string) {
+	byNode := map[string][]string{}
+	all := make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		m := ep.GetMetadata()
+		if m == nil {
+			continue
+		}
+		addr := fmt.Sprintf("%s:%s", m.Address, m.Port)
+		all = append(all, addr)
+		if m.NodeName != "" {
+			byNode[m.NodeName] = append(byNode[m.NodeName], addr)
+		}
+	}
+	return byNode, all
 }
 
 // matchedBlockCount returns the number of contiguous cached prefix blocks held
