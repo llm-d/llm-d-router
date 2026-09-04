@@ -32,6 +32,8 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -40,6 +42,18 @@ import (
 	schedprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 )
+
+// kvAttr carries the KV-cache utilization attribute the core metrics extractor
+// publishes, which the kv-cache-utilization scorer reads. The Metrics struct is
+// still populated alongside it: the queue and lora scorers in this profile read
+// from there.
+func kvAttr(util float64) fwkdl.AttributeMap {
+	attr := fwkdl.NewAttributes()
+	attr.Put(
+		fwkplugin.NewDataKey(extractormetrics.KVCacheUsagePercentKey, extractormetrics.MetricsExtractorType),
+		attrmetrics.ScalarMetricValue(util))
+	return attr
+}
 
 // Tests the default scheduler configuration and expected behavior.
 func TestSchedule(t *testing.T) {
@@ -100,7 +114,7 @@ func TestSchedule(t *testing.T) {
 							"foo": 1,
 							"bar": 1,
 						},
-					}, nil),
+					}, kvAttr(0.2)),
 				fwksched.NewEndpoint(
 					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
 					&fwkdl.Metrics{
@@ -111,7 +125,7 @@ func TestSchedule(t *testing.T) {
 							"foo":      1,
 							"critical": 1,
 						},
-					}, nil),
+					}, kvAttr(0.2)),
 				fwksched.NewEndpoint(
 					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}},
 					&fwkdl.Metrics{
@@ -121,7 +135,7 @@ func TestSchedule(t *testing.T) {
 						ActiveModels: map[string]int{
 							"foo": 1,
 						},
-					}, nil),
+					}, kvAttr(0.8)),
 			},
 			wantRes: &fwksched.SchedulingResult{
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -138,7 +152,7 @@ func TestSchedule(t *testing.T) {
 											"foo":      1,
 											"critical": 1,
 										},
-									}, nil),
+									}, kvAttr(0.2)),
 								Score: 2.8,
 							},
 						},

@@ -22,8 +22,14 @@ import (
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
+
+// kvCacheUsageDataKey is the attribute this scorer declares and reads. Keeping
+// it in one place stops the declaration in Consumes and the read in Score from
+// naming different things, which is how they came apart in the first place.
+var kvCacheUsageDataKey = fwkplugin.NewDataKey(metrics.KVCacheUsagePercentKey, metrics.MetricsExtractorType)
 
 const (
 	KvCacheUtilizationScorerType = "kv-cache-utilization-scorer"
@@ -62,14 +68,14 @@ func (s *KVCacheUtilizationScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes declares that the scorer reads the KV-cache utilization field
-// from the endpoint's Metrics struct. The DataKey names the field the
-// core-metrics-extractor publishes; the registry validates the consumer's
+// Consumes declares the KV-cache utilization attribute the core metrics
+// extractor publishes. Required, so a config with no producer for it fails at
+// init rather than scoring on an absent value; the registry validates the
 // declared type against the producer's declaration.
 func (s *KVCacheUtilizationScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			fwkplugin.NewDataKey(metrics.KVCacheUsagePercentKey, metrics.MetricsExtractorType): float64(0),
+			kvCacheUsageDataKey: attrmetrics.ScalarMetricValue(0),
 		},
 	}
 }
@@ -80,11 +86,24 @@ func (s *KVCacheUtilizationScorer) WithName(name string) *KVCacheUtilizationScor
 	return s
 }
 
-// Score returns the scoring result for the given list of endpoints based on context.
+// Score scores each endpoint as 1 - its KV-cache utilization, read from the
+// attribute Consumes declares.
+//
+// An endpoint without the attribute is left unscored rather than scored. The
+// read went through GetMetrics() before, where an endpoint the extractor has
+// not populated is indistinguishable from one reporting an empty cache: both
+// give 0, so the unknown endpoint scored 1.0 and outranked every endpoint
+// whose utilization was actually known. Reading the attribute makes absence
+// observable, and omitting is what the multi-cluster variant in this package
+// already does.
 func (s *KVCacheUtilizationScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		scores[endpoint] = 1 - endpoint.GetMetrics().KVCacheUsagePercent
+		util, ok := attrmetrics.ReadScalarMetricValue(endpoint, kvCacheUsageDataKey)
+		if !ok {
+			continue
+		}
+		scores[endpoint] = 1 - float64(util)
 	}
 	return scores
 }

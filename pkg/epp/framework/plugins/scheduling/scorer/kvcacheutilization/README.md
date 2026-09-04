@@ -13,7 +13,14 @@ For each candidate endpoint, the plugin computes:
   {score(endpoint)} = 1 - {kvCacheUsagePercent}
 ```
 
-Where `kvCacheUsagePercent` is read from endpoint metrics.
+Where `kvCacheUsagePercent` is read from the `KVCacheUsagePercent` attribute
+the core metrics extractor publishes — the same attribute the plugin declares
+in `Consumes`.
+
+An endpoint without that attribute is left **unscored**, rather than scored as
+if its cache were empty. The two used to be the same reading, so an endpoint
+the extractor had not populated outranked every endpoint whose utilization was
+known.
 
 This means:
 
