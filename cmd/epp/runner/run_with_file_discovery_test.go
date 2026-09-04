@@ -108,6 +108,7 @@ dataLayer:
 	require.NoError(t, err)
 	require.NotNil(t, rawConfig.DataLayer)
 	require.NotNil(t, rawConfig.DataLayer.Discovery)
+	require.NotNil(t, rawConfig.DataLayer.Discovery.Endpoints)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()

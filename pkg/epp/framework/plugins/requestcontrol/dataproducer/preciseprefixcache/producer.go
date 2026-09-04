@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -293,15 +294,15 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedPrompt dependency from token-producer so
+// Consumes declares the TokenizedRequest dependency from token-producer so
 // the data-layer DAG orders tokenization before this producer runs.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedPrompt{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
-// Produce hashes the request's TokenizedPrompt into KV-block keys, looks
+// Produce hashes the request's TokenizedRequest into KV-block keys, looks
 // them up in the per-endpoint KV-block index, and writes PrefixCacheMatchInfo
 // to each candidate endpoint. No-op when the request carries no tokens.
 // With speculativeIndexing enabled, the computed block keys are stashed
@@ -314,13 +315,13 @@ func (p *Producer) Produce(ctx context.Context,
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.epp.producer.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(semconv.LLMDEPPProducerCandidateEndpoints(len(endpoints)))
 	if request != nil {
 		if request.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+			span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 		}
 		if request.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+			span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
 		}
 	}
 
@@ -330,7 +331,7 @@ func (p *Producer) Produce(ctx context.Context,
 		return fmt.Errorf("failed to compute block keys: %w", err)
 	}
 	if len(perPromptKeys) == 0 {
-		span.SetAttributes(attribute.String("llm_d.epp.producer.result", "skipped_no_tokens"))
+		span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
 		return nil
 	}
 
@@ -395,7 +396,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, cachedBlocks)})
 		}
-		ep.Put(p.dk.String(), info)
+		ep.Put(p.dk, info)
 	}
 
 	if p.speculativeEnabled {

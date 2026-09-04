@@ -112,7 +112,7 @@ func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest
 	if id == "" {
 		return nil
 	}
-	request.PutAttribute(p.dk.String(), attrsession.SessionID(id))
+	request.PutAttribute(p.dk, attrsession.SessionID(id))
 	return nil
 }
 

@@ -44,7 +44,7 @@ type multiClusterMetricsExtractorParams struct {
 
 type poolMetric struct {
 	spec *Spec
-	key  string
+	key  fwkplugin.DataKey
 }
 
 // MultiClusterMetricsExtractor writes a pool's aggregate KV-cache utilization and queue
@@ -70,8 +70,8 @@ func NewMultiClusterMetricsExtractor(name string, params *multiClusterMetricsExt
 	return &MultiClusterMetricsExtractor{
 		typedName: fwkplugin.TypedName{Type: MultiClusterMetricsExtractorType, Name: name},
 		metrics: []poolMetric{
-			{spec: kvSpec, key: attrmetrics.MultiClusterKVCacheUtilizationKey},
-			{spec: queueSpec, key: attrmetrics.MultiClusterQueueSizeKey},
+			{spec: kvSpec, key: attrmetrics.MultiClusterKVCacheUtilizationDataKey},
+			{spec: queueSpec, key: attrmetrics.MultiClusterQueueSizeDataKey},
 		},
 	}, nil
 }
@@ -103,7 +103,7 @@ var _ fwkplugin.ProducerPlugin = &MultiClusterMetricsExtractor{}
 func (e *MultiClusterMetricsExtractor) Produces() map[fwkplugin.DataKey]any {
 	out := make(map[fwkplugin.DataKey]any, len(e.metrics))
 	for _, m := range e.metrics {
-		out[fwkplugin.NewDataKey(m.key, "")] = attrmetrics.ScalarMetricValue(0)
+		out[m.key] = attrmetrics.ScalarMetricValue(0)
 	}
 	return out
 }

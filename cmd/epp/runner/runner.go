@@ -47,6 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/internal/runnable"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/profiling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
@@ -56,8 +57,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fccontroller "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	fceviction "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
@@ -101,11 +104,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	disaggregatedsetrollout "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
@@ -223,6 +228,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Apply the process-wide plugin-state staleness threshold before any plugin is instantiated.
+	fwkplugin.SetDefaultStalenessThreshold(opts.PluginStateStalenessThreshold)
+
 	// Print flag values, skipping deprecated metric flags configured via engineConfigs
 	flags := make(map[string]any)
 	pflag.VisitAll(func(f *pflag.Flag) {
@@ -255,7 +263,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
-	if rawConfig.DataLayer != nil && rawConfig.DataLayer.Discovery != nil {
+	dlCfg := rawConfig.DataLayer
+	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
 	}
 
@@ -377,6 +386,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
 
 	// --- Setup Metrics Server ---
+	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)
@@ -459,9 +469,12 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	endpointCandidates, admissionController, priorityBandControlPlane := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	endpointCandidates, admissionController, priorityBandControlPlane, requestEvictor := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	if requestEvictor != nil {
+		director.SetRequestEvictor(requestEvictor)
+	}
 
 	serverRunner := &runserver.ExtProcServerRunner{
 		GrpcPort:                         opts.GRPCPort,
@@ -484,6 +497,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
+	}
+	if requestEvictor != nil {
+		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
@@ -607,8 +623,6 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityBeta, single.SingleProfileHandlerFactory)
 	fwkplugin.RegisterDeprecated(disagg.DisaggHeadersHandlerType, fwkplugin.StabilityBeta, disagg.HeadersHandlerFactory, "v0.9.0", "v0.11.0", disagg.DisaggProfileHandlerType) //nolint:staticcheck // deprecated in v0.9.0 (#905)
 	fwkplugin.RegisterDeprecated(disagg.PrefillHeaderHandlerType, fwkplugin.StabilityBeta, disagg.HeadersHandlerFactory, "v0.9.0", "v0.11.0", disagg.DisaggProfileHandlerType) //nolint:staticcheck // deprecated in v0.9.0 (#905)
-	fwkplugin.RegisterDeprecatedWithPluginDependencies(disagg.PdProfileHandlerType, fwkplugin.StabilityBeta, disagg.PdProfileHandlerFactory,                                   //nolint:staticcheck // deprecated in v0.7.0 (#732/#756)
-		disagg.PdProfileHandlerConfigParser, "v0.7.0", "v0.9.0", disagg.DisaggProfileHandlerType)
 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
@@ -700,6 +714,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityBeta, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityBeta, vllmhttp.VllmHTTPParserPluginFactory)
+	fwkplugin.Register(sglanghttp.SGLangHTTPParserType, fwkplugin.StabilityBeta, sglanghttp.SGLangHTTPParserPluginFactory)
 	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityBeta, vertexai.VertexAIParserPluginFactory)
 
 	// register saturation detector plugins
@@ -716,6 +731,7 @@ func (r *Runner) registerInTreePlugins() {
 	// register request header processor plugins
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
+	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
@@ -746,7 +762,7 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 
 	r.registerInTreePlugins()
 
-	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger)
+	rawConfig, featureGates, err := loader.LoadRawConfig(configBytes, logger, opts.FeatureGates...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config - %w", err)
 	}
@@ -812,6 +828,11 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
 	r.requestControlConfig.OrderDataProducerPlugins(dag)
+
+	// Derive the endpoint-scope allowed-key sets while the full plugin set,
+	// including auto-created producers, is known. A plugin missing here is
+	// confined to nothing at request time.
+	datalayer.RegisterScopeSpecs(handle.GetAllPlugins())
 
 	r.parserRegistry = cfg.ParserRegistry
 	logger.Info("loaded configuration from file/text successfully")
@@ -915,13 +936,13 @@ func resolvePoolNamespace(poolNamespace string) string {
 }
 
 // resolveDiscovery returns the discovery plugin identified by
-// rawConfig.DataLayer.Discovery.PluginRef. The plugin is expected to have
-// already been instantiated and registered in r.PluginHandle by
+// rawConfig.DataLayer.Discovery.Endpoints.PluginRef. The plugin is expected to
+// have already been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo; this function only looks it up and verifies its
 // type, so the loader-created instance (with its real Handle wired in) is the
 // one the runner drives.
 func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
-	ref := rawConfig.DataLayer.Discovery.PluginRef
+	ref := rawConfig.DataLayer.Discovery.Endpoints.PluginRef
 	p := r.PluginHandle.Plugin(ref)
 	if p == nil {
 		return nil, fmt.Errorf("discovery: no plugin found with name %q", ref)
@@ -943,28 +964,90 @@ func (r *Runner) initAdmissionControl(
 	opts *runserver.Options,
 	eppConfig *config.Config,
 	endpointCandidates contracts.EndpointCandidates,
-) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane) {
+) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane, *fceviction.RequestEvictor) {
 	if !r.featureGates[flowcontrol.FeatureGate] {
 		setupLog.Info("Flow Control layer is disabled via the flowControl feature gate, using legacy admission control")
 		return endpointCandidates,
 			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
+			nil,
 			nil
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing Flow Control layer")
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
-	fc := fccontroller.NewFlowController(
-		ctx,
-		opts.PoolName,
-		eppConfig.FlowControlConfig.Controller,
-		fccontroller.Deps{
-			Registry:           registry,
-			SaturationDetector: eppConfig.SaturationDetector,
-			EndpointCandidates: endpointCandidates,
-			UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
-		},
-	)
-	return endpointCandidates, requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates), registry
+
+	deps := fccontroller.Deps{
+		Registry:           registry,
+		SaturationDetector: eppConfig.SaturationDetector,
+		EndpointCandidates: endpointCandidates,
+		UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+	}
+
+	var requestEvictor *fceviction.RequestEvictor
+	if eppConfig.FlowControlConfig.Controller.EnableEviction {
+		var err error
+		requestEvictor, err = buildRequestEvictor()
+		if err != nil {
+			setupLog.Error(err, "Failed to build eviction plumbing; in-flight eviction disabled")
+		} else {
+			deps.InFlightEvictor = requestEvictor
+			grace := deriveEvictionConfirmationGrace(eppConfig.SaturationDetector, opts)
+			eppConfig.FlowControlConfig.Controller.EvictionConfirmationGrace = grace
+			setupLog.Info("In-flight eviction plumbing initialized",
+				"filter", evictfiltering.SheddableFilterType,
+				"ordering", evictordering.PriorityThenTimeOrderingType,
+				"confirmationGrace", grace)
+		}
+	}
+
+	fc := fccontroller.NewFlowController(ctx, opts.PoolName, eppConfig.FlowControlConfig.Controller, deps)
+	return endpointCandidates,
+		requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates),
+		registry,
+		requestEvictor
+}
+
+const (
+	// evictionEngineReclaimBudget covers the engine-side abort and KV garbage-collection time
+	// between a revoked request's stream termination and the freed capacity appearing in scraped
+	// metrics.
+	evictionEngineReclaimBudget = 250 * time.Millisecond
+	// evictionLeadingSensorGrace covers scheduling jitter for sensors whose gauge updates in the
+	// same event chain as the confirmation (a few dispatch ticks).
+	evictionLeadingSensorGrace = 10 * time.Millisecond
+)
+
+// deriveEvictionConfirmationGrace computes the reclamation pacing grace from the paired saturation
+// detector's confirmation-to-visibility lag. The grace is a property of the sensor, not a
+// preference, so it is derived rather than configured (see docs/flow-control-eviction.md).
+func deriveEvictionConfirmationGrace(detector fwkfc.SaturationDetector, opts *runserver.Options) time.Duration {
+	if detector != nil && detector.TypedName().Type == concurrency.ConcurrencyDetectorType {
+		// The concurrency detector's counters decrement when the stream terminates: the gauge leads
+		// physical reclamation, and only dispatch-loop jitter separates confirmation from visibility.
+		return evictionLeadingSensorGrace
+	}
+	// Scraped sensors (utilization detector, or any custom detector, conservatively): the freed
+	// capacity is visible only after the engine reclaims it and the next non-stale scrape lands.
+	return opts.RefreshMetricsInterval + opts.MetricsStalenessThreshold + evictionEngineReclaimBudget
+}
+
+// buildRequestEvictor assembles the in-flight eviction plumbing: the victim filter and ordering
+// policies, the ImmediateResponse eviction mechanism, and the tracking queue that ties them
+// together. See docs/flow-control-eviction.md.
+func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
+	orderingPlugin, err := evictordering.PriorityThenTimeOrderingFactory(evictordering.PriorityThenTimeOrderingType, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create eviction ordering policy: %w", err)
+	}
+	filterPlugin, err := evictfiltering.SheddableFilterFactory(evictfiltering.SheddableFilterType, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create eviction filter policy: %w", err)
+	}
+	return fceviction.NewRequestEvictor(
+		orderingPlugin.(fwkfc.EvictionOrderingPolicy),
+		filterPlugin.(fwkfc.EvictionFilterPolicy),
+		fceviction.NewImmediateResponseEvictor(),
+	), nil
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
@@ -1046,8 +1129,11 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
 	// File-discovery mode has no InferenceObjective reconciler to drive the
 	// control plane; static bands from config apply at registry construction.
-	endpointCandidates, admissionController, _ := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+	endpointCandidates, admissionController, _, requestEvictor := r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	if requestEvictor != nil {
+		director.SetRequestEvictor(requestEvictor)
+	}
 
 	gknn := common.GKNN{
 		NamespacedName: types.NamespacedName{Name: poolName, Namespace: namespace},
@@ -1072,6 +1158,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
+	}
+	if requestEvictor != nil {
+		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))

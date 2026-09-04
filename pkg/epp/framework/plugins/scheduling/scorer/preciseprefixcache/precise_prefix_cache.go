@@ -31,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -66,7 +67,7 @@ type Plugin struct {
 	typedName    plugin.TypedName
 	producer     *legacyProducer
 	scorer       *prefixscorer.Plugin
-	matchInfoKey string
+	matchInfoKey plugin.DataKey
 }
 
 var (
@@ -136,7 +137,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		typedName:    plugin.TypedName{Type: PrecisePrefixCachePluginType, Name: name},
 		producer:     producer,
 		scorer:       scorer,
-		matchInfoKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name).String(),
+		matchInfoKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}, nil
 }
 
@@ -175,13 +176,13 @@ func (p *Plugin) Score(ctx context.Context,
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.epp.scorer.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(semconv.LLMDEPPScorerCandidateEndpoints(len(endpoints)))
 	if req != nil {
 		if req.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", req.TargetModel))
+			span.SetAttributes(semconv.GenAIRequestModel(req.TargetModel))
 		}
 		if req.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", req.RequestID))
+			span.SetAttributes(semconv.GenAIRequestID(req.RequestID))
 		}
 	}
 	span.SetAttributes(mmobs.SpanAttributes(req)...)
@@ -197,9 +198,9 @@ func (p *Plugin) Score(ctx context.Context,
 			totalScore += s
 		}
 		span.SetAttributes(
-			attribute.Float64("llm_d.epp.scorer.score.max", maxScore),
-			attribute.Float64("llm_d.epp.scorer.score.avg", totalScore/float64(len(scores))),
-			attribute.Int("llm_d.epp.scorer.endpoints_scored", len(scores)),
+			semconv.LLMDEPPScorerScoreMax(maxScore),
+			semconv.LLMDEPPScorerScoreAvg(totalScore/float64(len(scores))),
+			semconv.LLMDEPPScorerEndpointsScored(len(scores)),
 		)
 	}
 
@@ -211,7 +212,7 @@ func (p *Plugin) Score(ctx context.Context,
 
 // anyMMHit returns (hit, tracked). When no endpoint had MM tracked, the
 // caller should omit mm.hit (OTel: don't emit attributes whose value is unknown).
-func anyMMHit(endpoints []scheduling.Endpoint, key string) (hit, tracked bool) {
+func anyMMHit(endpoints []scheduling.Endpoint, key plugin.DataKey) (hit, tracked bool) {
 	for _, ep := range endpoints {
 		v, ok := ep.Get(key)
 		if !ok {
