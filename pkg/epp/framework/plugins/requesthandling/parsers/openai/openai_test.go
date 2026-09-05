@@ -1269,8 +1269,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				if !got.SkipResponseProcessing {
 					t.Fatal("render response must pass through")
 				}
-				if diff := cmp.Diff(&fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(bodyBytes)}, got.Body); diff != "" {
-					t.Fatalf("render body mismatch (-want +got):\\n%s", diff)
+				if !got.Body.RenderRequest || string(got.Body.RawBody) != string(bodyBytes) || got.Body.Model != tt.body["model"] {
+					t.Fatal("render request must preserve bytes and model routing metadata")
 				}
 				return
 			}

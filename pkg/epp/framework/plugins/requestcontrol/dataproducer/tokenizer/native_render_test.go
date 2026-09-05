@@ -65,7 +65,9 @@ func TestNativeRenderPreservesRequest(t *testing.T) {
 			defer srv.Close()
 			parsed, err := tt.parser.ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": tt.path})
 			require.NoError(t, err)
-			p := newTestPlugin(newHTTPRenderer(t, srv))
+			renderer := newHTTPRenderer(t, srv)
+			p := newTestPlugin(renderer)
+			p.backend = renderBackend{tk: renderer, modelName: "probe-model"}
 			req := &scheduling.InferenceRequest{Body: parsed.Body, TargetModel: "adapter", Headers: map[string]string{"authorization": "Bearer native-render"}}
 			require.NoError(t, p.Produce(context.Background(), req, nil))
 			require.Equal(t, tt.path+"/render", path)
@@ -168,7 +170,8 @@ func TestDirectRenderRequestsPassThrough(t *testing.T) {
 			parsed, err := tt.parser.ParseRequest(context.Background(), raw, map[string]string{":path": tt.path})
 			require.NoError(t, err)
 			require.True(t, parsed.SkipResponseProcessing)
-			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.Payload)
+			require.True(t, parsed.Body.RenderRequest)
+			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
 			req := &scheduling.InferenceRequest{Body: parsed.Body}
 			require.NoError(t, newTestPlugin(&mockTokenizer{}).Produce(context.Background(), req, nil))
 			require.Nil(t, req.Body.TokenizedRequest)

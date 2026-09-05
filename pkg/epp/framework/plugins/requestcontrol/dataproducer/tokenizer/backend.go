@@ -170,7 +170,13 @@ func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 
 // renderCompletions delegates every prompt shape, including token IDs, to vLLM.
 func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
-	allTokenIDs, _, err := b.tk.Render(ctx, body.WirePayload())
+	payload := body.WirePayload()
+	// Native gRPC text has no HTTP envelope. Keep its compatibility path
+	// separate from native HTTP rendering; tokenized gRPC bypasses Produce.
+	if _, ok := payload.(fwkrh.PayloadProto); ok {
+		payload = fwkrh.PayloadMap{"model": b.modelName, "prompt": body.Completions.Prompt.PlainText()}
+	}
+	allTokenIDs, _, err := b.tk.Render(ctx, payload)
 	if err != nil {
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}

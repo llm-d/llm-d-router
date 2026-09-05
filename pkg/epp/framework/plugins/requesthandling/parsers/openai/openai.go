@@ -134,7 +134,7 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	if path := strings.TrimRight(request.GetRequestPath(headers), "/"); strings.HasSuffix(path, "/"+chatCompletionsAPI+"/render") || strings.HasSuffix(path, "/"+completionsAPI+"/render") {
-		return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)}, SkipResponseProcessing: true}, nil
+		return parserutil.ParseRenderRequest(body)
 	}
 	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
 	if apiType == imagesEditsAPI {

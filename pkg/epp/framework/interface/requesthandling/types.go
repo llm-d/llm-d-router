@@ -120,6 +120,8 @@ type InferenceRequestBody struct {
 	// RawBody is the original HTTP JSON body (including JSON embedded in gRPC).
 	// Routing projections must not reconstruct content sent to a native renderer.
 	RawBody []byte `json:"-"`
+	// RenderRequest bypasses token production while retaining model routing.
+	RenderRequest bool `json:"-"`
 	// TokenizedRequest contains parser-derived tokenization results when available.
 	// It is nil when the request was not already tokenized.
 	TokenizedRequest *TokenizedRequest `json:"-"`

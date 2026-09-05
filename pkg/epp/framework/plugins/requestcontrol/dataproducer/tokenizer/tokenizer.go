@@ -87,8 +87,8 @@ type tokenizerPluginConfig struct {
 	// Estimate selects the tokenizer-free byte-packing backend; mutually
 	// exclusive with 'vllm' and needs no 'modelName'.
 	Estimate *estimateConfig `json:"estimate,omitempty"`
-	// ModelName is the model used for startup probes. Inference requests keep
-	// their effective model, including aliases and adapter names.
+	// ModelName is used for startup probes and native gRPC text compatibility.
+	// HTTP requests keep their effective model, including aliases and adapters.
 	ModelName string `json:"modelName"`
 }
 
@@ -350,6 +350,9 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
+	}
+	if request.Body.RenderRequest {
+		return nil
 	}
 	if _, raw := request.Body.Payload.(fwkrh.RawPayload); raw {
 		return nil

@@ -48,10 +48,15 @@ token production; metadata added afterward must not affect tokenization.
 
 Completions requests with token arrays still go through vLLM, which owns
 truncation and other input preprocessing. Native Generate requests already
-carry final tokens and bypass rendering. Protocols without a supported native
-render endpoint are not converted into another protocol. Direct requests to
-the three `/render` endpoints pass through without local token production or
-response parsing.
+carry final tokens and bypass rendering. Direct requests to the three
+`/render` endpoints retain model routing and pass through without local token
+production or response parsing.
+
+Native gRPC text has no HTTP JSON envelope. Its compatibility path submits
+the text to Completions rendering with the configured `modelName`; this does
+not establish native gRPC token parity. Pretokenized gRPC requests use their
+parser-provided tokens without rendering. This exception does not apply to
+HTTP requests or the HTTP JSON embedded in Vertex AI gRPC requests.
 
 Chat and Messages requests use the larger of `vllm.timeout` and
 `vllm.mmTimeout`. The renderer does not inspect content to select a timeout.
@@ -73,7 +78,7 @@ EPP contract does not establish parity for them.
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `modelName`                | – (required for `vllm`) | Model for startup probes; inference requests retain their effective model.   |
+| `modelName`                | – (required for `vllm`) | Model for startup probes and native gRPC text compatibility; HTTP requests retain their effective model. |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
 | `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages timeout.                      |
 | `vllm.mmTimeout`           | `30s`                   | Chat/Messages timeout budget, including multimodal processing.               |

@@ -76,6 +76,9 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 		{"/v1/chat/completions", `"messages":[{"role":"user","content":"hi"}]`, openai.NewOpenAIParser()},
 		{"/v1/messages", `"max_tokens":8,"messages":[{"role":"user","content":"hi"}]`, anthropic.NewAnthropicParser()},
 		{"/v1/completions", `"prompt":[1,2,3],"truncate_prompt_tokens":2`, openai.NewOpenAIParser()},
+		{"/v1/chat/completions/render", `"messages":[{"role":"user","content":"hi"}]`, openai.NewOpenAIParser()},
+		{"/v1/completions/render", `"prompt":[1,2,3]`, openai.NewOpenAIParser()},
+		{"/v1/messages/render", `"messages":[{"role":"user","content":"hi"}]`, anthropic.NewAnthropicParser()},
 	} {
 		for _, rewrite := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/rewrite=%t", tt.path, rewrite), func(t *testing.T) {
