@@ -40,9 +40,9 @@ import (
 
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
 // prefiller stores KV under a kv_request_id with no peer address; the decoder
-// pulls it using the prefiller's OffloadingConnector P2P tier host/port. Both legs are
+// pulls it using the prefiller's OffloadingConnector P2P tier host/port. Both requests are
 // dispatched concurrently: the connector parks any KV blocks stored before the
-// decoder's fetch binds the session, so ordering between the legs is safe.
+// decoder's fetch binds the session, so ordering between the requests is safe.
 func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -67,7 +67,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		"kv_request_id", kvRequestID,
 		"p2p_connector_port", prefillP2PPort)
 
-	// Prefill leg: store KV under kv_request_id, no peer address. Capped to a
+	// Prefill request: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
 	prefillData := make(map[string]any, len(requestData)+1)
 	for k, v := range requestData {
@@ -93,7 +93,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		v.Info("prefill request body", "body", string(prefillBody))
 	}
 
-	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
+	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
 	decodeData := make(map[string]any, len(requestData)+1)
 	for k, v := range requestData {
@@ -225,7 +225,7 @@ func (s *Server) p2pPullAvailable() bool {
 }
 
 // addP2PPullToPrefill adds the OffloadingConnector P2P pull block to a prefill
-// leg's kv_transfer_params so the prefiller pulls cached prefix from
+// request's kv_transfer_params so the prefiller pulls cached prefix from
 // kvCacheSource while keeping its own computed blocks available for the
 // decoder. It is a no-op when no source is set or the source is the selected
 // prefill endpoint, since there is nothing to pull from oneself. The

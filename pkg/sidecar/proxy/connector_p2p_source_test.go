@@ -99,7 +99,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should add remote_kv_source params to the prefill leg under disaggregation", func() {
+	It("should add remote_kv_source params to the prefill request under disaggregation", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -112,7 +112,7 @@ var _ = Describe("P2P KV cache source header", func() {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
 
-		// Prefill leg: remote_decoder + remote_kv_source, each with its own
+		// Prefill request: remote_decoder + remote_kv_source, each with its own
 		// kv_request_id.
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
 		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
@@ -126,7 +126,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
 		Expect(p2p[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
-		// Decode leg: remote_prefiller only, never remote_kv_source.
+		// Decode request: remote_prefiller only, never remote_kv_source.
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
 		decodeKVParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
@@ -138,12 +138,12 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not add remote_kv_source params to the prefill leg when the source is the prefiller itself", func() {
+	It("should not add remote_kv_source params to the prefill request when the source is the prefiller itself", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
 		// The source resolves to the selected prefiller - there is nothing to
-		// pull from itself, so the prefill leg carries remote_decoder only.
+		// pull from itself, so the prefill request carries remote_decoder only.
 		sendRequest(proxyBaseAddr, map[string]string{
 			routing.PrefillEndpointHeader: prefillHostPort,
 			routing.KVCacheSourceHeader:   prefillHostPort,

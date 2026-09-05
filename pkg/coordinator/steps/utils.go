@@ -75,7 +75,7 @@ func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
 }
 
 // capSingleTokenOutput rewrites body into a single-output-token, non-streaming
-// request for the synthetic prefill and encode legs.
+// request for the synthetic prefill and encode requests.
 //
 // Intentionally distinct from the sidecar's reqcommon.PrimeSingleTokenRequest
 // for now.
@@ -102,7 +102,7 @@ func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 
 	// TODO: max_output_tokens is another client-supplied output cap (Responses
 	// API) that a client can send instead of max_tokens/max_completion_tokens; it
-	// should be capped to 1 here as well so the synthetic legs stay single-token.
+	// should be capped to 1 here as well so the synthetic requests stay single-token.
 
 	body[reqcommon.FieldStream] = false
 	delete(body, reqcommon.FieldStreamOptions)

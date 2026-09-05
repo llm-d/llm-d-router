@@ -29,7 +29,7 @@ import (
 
 // NIXL PD composed with the OffloadingConnector P2P tier via vLLM MultiConnector:
 // the sidecar orchestrates PD over NIXL and additionally injects the p2p pull
-// block on the prefill leg, gated by --enable-p2p-pull.
+// block on the prefill request, gated by --enable-p2p-pull.
 var _ = Describe("NIXL Connector with P2P pull", func() {
 
 	var testInfo *sidecarTestInfo
@@ -89,7 +89,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		return kv
 	}
 
-	It("composes the p2p pull onto the NIXL prefill leg when --enable-p2p-pull is set", func() {
+	It("composes the p2p pull onto the NIXL prefill request when --enable-p2p-pull is set", func() {
 		testInfo.proxy.config.EnableP2PPull = true
 		proxyBaseAddr := startProxy()
 
@@ -136,9 +136,9 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		Expect(prefillKV()).ToNot(HaveKey(requestFieldRemoteKVSource))
 	})
 
-	// The parallel-dispatch (MoRI-IO WRITE) path builds the prefill leg in a
+	// The parallel-dispatch (MoRI-IO WRITE) path builds the prefill request in a
 	// separate function, so it has its own p2p injection site.
-	It("composes the p2p pull onto the NIXL prefill leg in parallel-dispatch mode", func() {
+	It("composes the p2p pull onto the NIXL prefill request in parallel-dispatch mode", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 			c.EnableP2PPull = true
@@ -157,7 +157,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		body, _ := io.ReadAll(resp.Body) //nolint:errcheck
 		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(body))
 
-		// Prefill leg keeps the NIXL WRITE fields and gains the composed remote_kv_source block.
+		// Prefill request keeps the NIXL WRITE fields and gains the composed remote_kv_source block.
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
 		p2p, ok := pkv[requestFieldRemoteKVSource].(map[string]any)
