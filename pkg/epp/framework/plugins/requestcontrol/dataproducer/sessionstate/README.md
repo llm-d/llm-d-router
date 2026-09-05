@@ -11,7 +11,9 @@ or cookie for general session-affinity use.
 ## Configuration
 
 Both plugins must be enabled, and Alpha plugins must be allowed by the EPP
-process.
+process. `agent-identity` is a required data dependency, so configuration
+loading fails if no plugin declares that it produces the agent identity
+attribute.
 
 ```yaml
 plugins:

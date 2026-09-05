@@ -1,6 +1,6 @@
 # Session Attributes
 
-Per-request session identity used by session-aware scheduling plugins.
+Per-request session identity used by affinity-aware scorers and filters.
 
 ## `SessionID`
 
@@ -16,5 +16,4 @@ Holds the session identifier extracted from a request. Stored on the
 ## Producers
 
 - **`session-id-producer`** (Request Control): extracts the session
-  identifier from a configured request header or named cookie for general
-  session-affinity use.
+  identifier from a configured request header or named cookie.

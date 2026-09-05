@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -84,6 +85,53 @@ func TestFactoryAndProduces(t *testing.T) {
 	assert.IsType(t, SessionState{}, produced)
 	assert.Equal(t, defaultEvictionTTL, producer.evictionTTL)
 	assert.Equal(t, defaultEvictionSweepInterval, producer.evictionSweepInterval)
+
+	dependencies := producer.Consumes()
+	consumed, ok := dependencies.Required[agentidentity.AgentIdentityKey]
+	require.True(t, ok)
+	assert.IsType(t, "", consumed)
+	assert.Empty(t, dependencies.Optional)
+}
+
+func TestAgentIdentityIsARequiredDependency(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	handle := fwkplugin.NewEppHandle(context.Background(), nil)
+	handle.AddPlugin(producer.TypedName().Name, producer)
+
+	err := eppdatalayer.CreateMissingDataProducers(
+		context.Background(),
+		map[string]string{},
+		map[string]fwkplugin.FactoryFunc{},
+		handle,
+	)
+	require.ErrorIs(t, err, eppdatalayer.ErrNoDefaultProducer)
+	assert.ErrorContains(t, err, agentidentity.AgentIdentityKey.String())
+	assert.ErrorContains(t, err, producer.TypedName().Name)
+}
+
+func TestAgentIdentitySatisfiesRequiredDependency(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	handle := fwkplugin.NewEppHandle(context.Background(), nil)
+	handle.AddPlugin(producer.TypedName().Name, producer)
+
+	identityProvider, err := agentidentity.PluginFactory("custom-agent-identity", nil, handle)
+	require.NoError(t, err)
+	handle.AddPlugin(identityProvider.TypedName().Name, identityProvider)
+
+	require.NoError(t, eppdatalayer.CreateMissingDataProducers(
+		context.Background(),
+		map[string]string{},
+		map[string]fwkplugin.FactoryFunc{},
+		handle,
+	))
+
+	ordered, err := eppdatalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	require.NoError(t, err)
+	assert.Equal(t, []string{identityProvider.TypedName().String(), producer.TypedName().String()}, ordered)
 }
 
 func TestFactoryParameters(t *testing.T) {
