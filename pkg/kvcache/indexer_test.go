@@ -240,3 +240,19 @@ func TestScoreTokens(t *testing.T) {
 		})
 	}
 }
+
+// A nil KVBlockIndexConfig keeps selecting kvblock's defaults.
+func TestNewKVCacheIndexerNilIndexConfig(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	cfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	cfg.KVBlockIndexConfig = nil
+
+	indexer, err := kvcache.NewKVCacheIndexer(ctx, cfg, &mockTokenProcessor{blockKeys: u64ToBlockKeys([]uint64{10})})
+	require.NoError(t, err)
+	require.NotNil(t, indexer)
+
+	scores, err := indexer.ScoreTokens(ctx, []uint32{1}, testModel, nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, scores)
+}
