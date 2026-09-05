@@ -27,7 +27,12 @@ If an Alpha plugin is configured while `--allow-experimental-plugins` is not set
 
 ## Multi-cluster variants
 
-A few plugins ship a multi-cluster variant beside the stock plugin, for a cluster-scoped EPP whose candidate endpoints are clusters. The scheduling variants are `multicluster-kv-cache-utilization-scorer`, `multicluster-queue-scorer`, `multicluster-session-affinity-filter`, and `multicluster-prefix-cache-scorer`. The `multicluster-approx-prefix-cache-producer` is the matching request-control data producer. They rely on three datalayer variants: `multicluster-file-discovery` discovers peer clusters as endpoints, and `multicluster-metrics-data-source` with `multicluster-metrics-extractor` scrape each cluster and write its pool-aggregate metrics into the attributes the scorers read.
+A few plugins ship a multi-cluster variant beside the stock plugin, for a cluster-scoped EPP whose candidate endpoints are clusters.
+
+- Scheduling variants: `multicluster-kv-cache-utilization-scorer`, `multicluster-queue-scorer`, `multicluster-topology-scorer`, `multicluster-session-affinity-filter`, `multicluster-prefix-cache-scorer`.
+- Request-control data producer: `multicluster-approx-prefix-cache-producer`.
+- Datalayer variants: `multicluster-file-discovery` discovers peer clusters as endpoints; `multicluster-metrics-data-source` and `multicluster-metrics-extractor` scrape each cluster and write its pool-aggregate metrics into the attributes the scorers read.
+- `multicluster-topology-scorer` is the exception: it needs only `multicluster-file-discovery` plus `topology-extractor`, scoring clusters from a static per-gateway weight over a topology label (region by default) on each discovery entry, not from scraped metrics.
 
 The pure-delegation variants (`multicluster-session-affinity-filter`, `multicluster-prefix-cache-scorer`, `multicluster-approx-prefix-cache-producer`) reuse the stock plugin's behavior and only rename the type, so their per-plugin Prometheus metrics report under the stock type label rather than the multicluster one.
 
