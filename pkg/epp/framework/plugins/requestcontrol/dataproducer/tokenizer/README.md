@@ -27,12 +27,36 @@ Backend selection:
   P/D routing) without declaring a `token-producer`.
 - **`vllm`** (or `modelName`): forwards requests to vLLM's native
   `/v1/completions/render`, `/v1/chat/completions/render`, and
-  `/v1/messages/render` endpoints over HTTP or HTTPS. TLS is driven by the URL
+  `/v1/messages/render` endpoints over HTTP or HTTPS. Messages endpoint selection
+  is controlled by `vllm.messagesRenderMode`. TLS is driven by the URL
   scheme (`https://`). For in-cluster endpoints using self-signed or private CA
   certificates, configure `vllm.caCertPath` to trust the CA, and optionally
   `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS.
 
+## Deprecated Messages conversion
+
+`vllm.messagesRenderMode: legacy` converts Anthropic Messages into Chat
+Completions render input and uses the configured `modelName`. The mode logs a
+deprecation warning once per plugin instance. Conversion does not guarantee
+token parity with inference. It does not mutate the request forwarded to
+inference.
+
+Set `vllm.messagesRenderMode: native` to forward Messages to
+`/v1/messages/render` without conversion. This mode requires a renderer with
+that endpoint.
+
+The compatibility implementation and tests are contained in
+`legacy_messages.go` and `legacy_messages_test.go`. Its integration points are
+the `MessagesRenderMode` configuration field, `configureLegacyMessages` in the
+plugin constructor, and the `legacyMessages` field and branch in Messages
+dispatch. Removing these files and integration points leaves native rendering
+and token production intact. Helpers required by estimation are owned by
+`estimate.go`.
+
 ## Native render contract
+
+Completions and Chat Completions use native rendering. Messages uses this
+contract when `vllm.messagesRenderMode: native`.
 
 The renderer sends the original HTTP JSON body when EPP has not mutated it.
 It does not substitute the model, translate protocols, rewrite messages or
@@ -46,10 +70,11 @@ tool schemas or other nested content. Plugins use the typed protocol
 projections to read content. Prompt-affecting mutations must finish before
 token production; metadata added afterward must not affect tokenization.
 
-Completions requests with token arrays still go through vLLM, which owns
-truncation and other input preprocessing. Native Generate requests already
-carry final tokens and bypass rendering. Direct requests to the three
-`/render` endpoints retain model routing and pass through without local token
+Completions requests with token arrays go through vLLM, which owns truncation
+and other input preprocessing. These requests require a render round trip and
+an available renderer. Native Generate requests carry final tokens and bypass
+rendering. Direct requests to the three `/render` endpoints retain model
+routing and pass through without local token
 production or response parsing.
 
 Native gRPC text has no HTTP JSON envelope. Its compatibility path submits
@@ -78,7 +103,8 @@ EPP contract does not establish parity for them.
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `modelName`                | – (required for `vllm`) | Model for startup probes and native gRPC text compatibility; HTTP requests retain their effective model. |
+| `modelName`                | - (required for `vllm`) | Model for startup probes, native gRPC text, and legacy Messages conversion. Native HTTP rendering retains the effective request model. |
+| `vllm.messagesRenderMode`  | `legacy`               | `legacy` (deprecated conversion) or `native` (Messages pass-through). |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
 | `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages timeout.                      |
 | `vllm.mmTimeout`           | `30s`                   | Chat/Messages timeout budget, including multimodal processing.               |
@@ -130,23 +156,23 @@ apply to every video in the request.
 
 ## Failure mode
 
-Per-request errors are returned to the Director, which currently logs and
-continues; downstream scorers fall back to their own paths. A missing native
+Per-request errors are returned to the Director, which logs and continues;
+downstream scorers fall back to their own paths. A missing selected render
 endpoint, render error, or empty token result does not publish token IDs.
-The vLLM backend does not fall back to protocol conversion or estimation.
+Neither Messages mode falls back to the other mode or to estimation.
 
 ## Deployment
 
-Use a vLLM build exposing the native render endpoint for each protocol in use.
-Messages rendering requires [native `/v1/messages/render` support](https://github.com/vllm-project/vllm/pull/45803);
-older builds are not supported by a local conversion fallback.
+Use a vLLM build exposing the render endpoints selected by the configuration.
+Native Messages rendering requires [native `/v1/messages/render` support](https://github.com/vllm-project/vllm/pull/45803).
+The deprecated `legacy` mode uses `/v1/chat/completions/render` for Messages.
 `vllm launch render <model>` exposes render endpoints without a GPU.
 For `vllm serve <model>`, set `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`.
 
-The renderer can run beside EPP or behind a dedicated Service. It must accept
-the effective model name used for inference, including configured served-model
-aliases and adapters. `modelName` does not replace those names in render
-requests. When the inbound request carries an
+The renderer can run beside EPP or behind a dedicated Service. Native HTTP
+rendering requires it to accept the effective inference model, including
+configured served-model aliases and adapters. `modelName` does not replace
+those names in native render requests. When the inbound request carries an
 `Authorization` header, it is forwarded verbatim on render requests, so an
 endpoint started with `--api-key` accepts them; the startup warmup probe
 sends no `Authorization` header, so against such an endpoint it is skipped
@@ -171,6 +197,7 @@ Plugin config — sidecar (loopback):
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://localhost:8000"       # optional; this is the default
+      messagesRenderMode: native
 ```
 
 Plugin config — dedicated render Service:
@@ -181,6 +208,7 @@ Plugin config — dedicated render Service:
     modelName: "${MODEL_NAME}"
     vllm:
       url: "http://vllm-render.default.svc.cluster.local:8000"
+      messagesRenderMode: native
 ```
 
 Plugin config — dedicated render Service with TLS:
@@ -191,6 +219,7 @@ Plugin config — dedicated render Service with TLS:
     modelName: "${MODEL_NAME}"
     vllm:
       url: "https://vllm-render.default.svc.cluster.local:8000"
+      messagesRenderMode: native
       caCertPath: "/path/to/ca.crt"
 ```
 

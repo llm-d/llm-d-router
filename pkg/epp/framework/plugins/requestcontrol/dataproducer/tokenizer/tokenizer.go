@@ -87,8 +87,8 @@ type tokenizerPluginConfig struct {
 	// Estimate selects the tokenizer-free byte-packing backend; mutually
 	// exclusive with 'vllm' and needs no 'modelName'.
 	Estimate *estimateConfig `json:"estimate,omitempty"`
-	// ModelName is used for startup probes and native gRPC text compatibility.
-	// HTTP requests keep their effective model, including aliases and adapters.
+	// ModelName is used for startup probes, native gRPC text, and legacy Messages.
+	// Native HTTP rendering keeps the effective model, including aliases and adapters.
 	ModelName string `json:"modelName"`
 }
 
@@ -286,7 +286,11 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
 		}
-		backend = renderBackend{tk: renderer, modelName: config.ModelName}
+		legacyMessages, err := configureLegacyMessages(ctx, name, cfg.MessagesRenderMode)
+		if err != nil {
+			return nil, err
+		}
+		backend = renderBackend{tk: renderer, modelName: config.ModelName, legacyMessages: legacyMessages}
 		backendName = backendVLLM
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}

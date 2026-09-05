@@ -88,6 +88,10 @@ func isRenderAuthError(err error) bool {
 // vllmConfig configures the vLLM /render backend. Future protocol fields
 // (e.g., grpc) can be added alongside url.
 type vllmConfig struct {
+	// MessagesRenderMode selects "legacy" (default) or "native" Messages rendering.
+	//
+	// Deprecated: legacy conversion does not guarantee token parity; use "native".
+	MessagesRenderMode string `json:"messagesRenderMode,omitempty"`
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.

@@ -108,8 +108,9 @@ func warmupChat(model string, imageURLs ...string) *fwkrh.InferenceRequestBody {
 // renderBackend produces real token IDs and owns protocol dispatch, including
 // the pre-tokenized (Generate) passthrough.
 type renderBackend struct {
-	tk        tokenizer
-	modelName string
+	tk             tokenizer
+	modelName      string
+	legacyMessages bool
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
@@ -126,6 +127,9 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
 	case body.Messages != nil:
+		if b.legacyMessages {
+			return b.renderLegacyMessages(ctx, body.Messages)
+		}
 		tokenIDs, mmFeatures, err := b.tk.RenderMessages(ctx, body.WirePayload())
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
