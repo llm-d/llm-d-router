@@ -255,6 +255,14 @@ type testPlugin struct {
 	WinnerEndpointScore   float64
 }
 
+type eligibilityTestPlugin struct {
+	*testPlugin
+	eligibleNames       []k8stypes.NamespacedName
+	eligibilityInputLen int
+}
+
+var _ fwksched.EndpointEligibilityFilter = &eligibilityTestPlugin{}
+
 func (tp *testPlugin) TypedName() fwkplugin.TypedName {
 	return tp.typedName
 }
@@ -267,6 +275,44 @@ func (tp *testPlugin) Filter(_ context.Context, _ *fwksched.InferenceRequest, en
 	tp.FilterCallCount++
 	return findEndpoints(endpoints, tp.FilterRes...)
 
+}
+
+func (tp *eligibilityTestPlugin) EligibleEndpoints(_ context.Context, _ *fwksched.InferenceRequest,
+	endpoints []fwksched.Endpoint,
+) []fwksched.Endpoint {
+	tp.eligibilityInputLen = len(endpoints)
+	return findEndpoints(endpoints, tp.eligibleNames...)
+}
+
+func TestRunEndpointEligibilityFiltersUsesOriginalCandidates(t *testing.T) {
+	pod1 := k8stypes.NamespacedName{Name: "pod1"}
+	pod2 := k8stypes.NamespacedName{Name: "pod2"}
+	pod3 := k8stypes.NamespacedName{Name: "pod3"}
+	endpoints := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod1}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod2}, nil, nil),
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: pod3}, nil, nil),
+	}
+	first := &eligibilityTestPlugin{
+		testPlugin:    &testPlugin{typedName: fwkplugin.TypedName{Type: "eligibility", Name: "first"}},
+		eligibleNames: []k8stypes.NamespacedName{pod1, pod2},
+	}
+	second := &eligibilityTestPlugin{
+		testPlugin:    &testPlugin{typedName: fwkplugin.TypedName{Type: "eligibility", Name: "second"}},
+		eligibleNames: []k8stypes.NamespacedName{pod2, pod3},
+	}
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{first, second})
+
+	profile := NewSchedulerProfile().WithFilters(first, second)
+	got, hasEligibilityFilters := profile.runEndpointEligibilityFilters(
+		context.Background(), &fwksched.InferenceRequest{}, endpoints)
+
+	assert.True(t, hasEligibilityFilters)
+	assert.Equal(t, 3, first.eligibilityInputLen)
+	assert.Equal(t, 3, second.eligibilityInputLen)
+	if assert.Len(t, got, 1) {
+		assert.Equal(t, pod2, got[0].GetMetadata().ID)
+	}
 }
 
 func (tp *testPlugin) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {

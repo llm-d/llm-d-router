@@ -129,19 +129,22 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", handlerName)
 	}
 
-	// Profile handlers see failed profiles only as nil results and report them
-	// with fresh untyped errors. Join the retained profile errors so a typed
-	// errcommon.Error raised inside a profile run (e.g. filters draining the
-	// candidate set) stays reachable via errors.As in the caller.
 	if err != nil && len(profileRunErrors) > 0 {
-		errs := make([]error, 0, len(profileRunErrors)+1)
-		errs = append(errs, err)
-		// Sorted so error composition, and therefore errors.As selection when
-		// profiles fail with different typed codes, is deterministic.
-		for _, name := range slices.Sorted(maps.Keys(profileRunErrors)) {
-			errs = append(errs, profileRunErrors[name])
+		var profileErr *fwksched.ProfileError
+		if errors.As(err, &profileErr) {
+			if cause := profileRunErrors[profileErr.ProfileName]; cause != nil {
+				// Keep the selected profile's code first for errors.As.
+				err = errors.Join(cause, err)
+			}
+		} else {
+			// Preserve error propagation for handlers that do not identify a failed profile.
+			errs := make([]error, 0, len(profileRunErrors)+1)
+			errs = append(errs, err)
+			for _, name := range slices.Sorted(maps.Keys(profileRunErrors)) {
+				errs = append(errs, profileRunErrors[name])
+			}
+			err = errors.Join(errs...)
 		}
-		err = errors.Join(errs...)
 	}
 
 	return result, err
