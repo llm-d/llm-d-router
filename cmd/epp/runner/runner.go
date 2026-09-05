@@ -524,7 +524,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	r.draining = &atomic.Bool{}
 	r.serverRunner = serverRunner
 	r.healthGRPCPort = opts.GRPCHealthPort
-	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()))
+	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
+	readinessCheckers = append(readinessCheckers, r.dlRuntime)
+	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
 }
 
