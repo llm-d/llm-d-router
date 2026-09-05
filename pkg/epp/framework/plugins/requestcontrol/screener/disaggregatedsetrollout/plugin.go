@@ -38,22 +38,26 @@ import (
 )
 
 const (
-	// PluginType is the plugin type for revision gating, strict header
-	// filtering, and response-header stamping.
+	// PluginType is the plugin type for revision gating, strict revision
+	// filtering, and revision response-header stamping.
 	PluginType       = "disaggregatedset-rollout-screener"
 	podExtractorType = "disaggregatedset-rollout-pod-extractor"
 )
 
 var podGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
 
-// Screener gates revisions and applies strict selectors before scheduling.
-// ResponseHeader stamps the selected endpoint's labels.
+// Screener gates revisions before scheduling. ResponseHeader stamps the
+// selected endpoint's revision.
 type Screener struct {
-	typedName        fwkplugin.TypedName
-	config           Config
-	scope            labels.Selector
-	revisionLabelKey string
-	roleLabelKey     string
+	typedName                fwkplugin.TypedName
+	config                   Config
+	scope                    labels.Selector
+	revisionHeaderName       string
+	revisionLabelKey         string
+	roleLabelKey             string
+	revisionDecisionStateKey fwkdl.StateKey
+	handle                   fwkplugin.Handle
+	localRevisionDecisions   *fwkplugin.PluginState
 
 	mu           sync.RWMutex
 	pods         map[types.NamespacedName]podInfo
@@ -79,7 +83,7 @@ var (
 )
 
 // Factory creates a disaggregatedset-rollout-screener from normal plugin parameters.
-func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	if name == "" {
 		name = PluginType
 	}
@@ -98,24 +102,31 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		return nil, fmt.Errorf("parse scope.labelSelector: %w", err)
 	}
 	registerMetrics()
-	return newScreener(name, config, scope), nil
+	return newScreener(name, config, scope, handle), nil
 }
 
-func newScreener(name string, config Config, scope labels.Selector) *Screener {
+func newScreener(name string, config Config, scope labels.Selector, handle fwkplugin.Handle) *Screener {
+	revisionHeaderName := ""
 	revisionLabelKey := ""
 	roleLabelKey := ""
 	if config.RevisionGating != nil {
+		revisionHeaderName = config.RevisionGating.RevisionHeaderName
 		revisionLabelKey = config.RevisionGating.RevisionLabelKey
 		roleLabelKey = config.RevisionGating.RoleLabelKey
 	}
-	return &Screener{
-		typedName:        fwkplugin.TypedName{Type: PluginType, Name: name},
-		config:           config,
-		scope:            scope,
-		revisionLabelKey: revisionLabelKey,
-		roleLabelKey:     roleLabelKey,
-		pods:             make(map[types.NamespacedName]podInfo),
+	screener := &Screener{
+		typedName:                fwkplugin.TypedName{Type: PluginType, Name: name},
+		config:                   config,
+		scope:                    scope,
+		revisionHeaderName:       revisionHeaderName,
+		revisionLabelKey:         revisionLabelKey,
+		roleLabelKey:             roleLabelKey,
+		revisionDecisionStateKey: fwkdl.StateKey("disaggregatedset-rollout:" + name),
+		handle:                   handle,
+		localRevisionDecisions:   fwkplugin.NewPluginState(handle.Context()),
+		pods:                     make(map[types.NamespacedName]podInfo),
 	}
+	return screener
 }
 
 func (c *Screener) TypedName() fwkplugin.TypedName { return c.typedName }
@@ -139,16 +150,14 @@ func (c *Screener) RegisterDependencies(registrar fwkdl.Registrar) error {
 	})
 }
 
-// ResponseHeader stamps configured selector values after the selected upstream
-// endpoint begins responding.
+// ResponseHeader stamps the selected revision after the upstream endpoint
+// begins responding.
 func (c *Screener) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, response *fwkrc.Response, endpoint *fwkdl.EndpointMetadata) {
 	if endpoint == nil || response == nil || response.Headers == nil {
 		return
 	}
-	for _, selector := range c.config.HeaderSelectors {
-		if value := endpoint.Labels[selector.LabelKey]; value != "" {
-			response.Headers[selector.HeaderName] = value
-		}
+	if revision := endpoint.Labels[c.revisionLabelKey]; revision != "" {
+		response.Headers[c.revisionHeaderName] = revision
 	}
 }
 
@@ -212,7 +221,7 @@ func (c *Screener) rebuildDistributionLocked() {
 	var requiredRoles []string
 	var mode GatingMode
 	if c.config.RevisionGating.Active() {
-		requiredRoles = c.config.RevisionGating.RequireRoles.Values
+		requiredRoles = c.config.RevisionGating.RequiredRoles
 		mode = c.config.RevisionGating.Mode
 	}
 	roleCounts := make(map[string]map[string]int)

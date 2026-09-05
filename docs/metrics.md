@@ -203,7 +203,7 @@ These metrics are exposed by the Alpha `disaggregatedset-rollout-screener` plugi
 
 | Name | Type | Labels | Notes |
 |---|---|---|---|
-| `disaggregatedset_strict_header_no_match_total` | Counter | `plugin_type`, `plugin_name`, `selector` | Strict header selections that matched no endpoint and failed closed. |
+| `disaggregatedset_strict_revision_no_match_total` | Counter | `plugin_type`, `plugin_name` | Strict revision selections that matched no endpoint and failed closed. |
 | `disaggregatedset_revision_gating_share` | Gauge | `plugin_type`, `plugin_name`, `mode`, `revision` | Current weighted share from `0` to `1`. Incomplete revisions report `0`; a revision's series is removed when it disappears from the observed Pod set. |
 
 ### Flow control

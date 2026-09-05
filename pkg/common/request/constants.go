@@ -18,6 +18,10 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// RevisionDecisionIDHeaderKey groups downstream requests into one rollout
+	// decision. A coordinator can assign distinct request IDs to the prefill and
+	// decode requests that must use the same revision.
+	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"

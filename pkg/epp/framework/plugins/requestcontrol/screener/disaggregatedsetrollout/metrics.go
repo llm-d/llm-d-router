@@ -30,16 +30,16 @@ import (
 const metricsPrefix = "disaggregatedset"
 
 var (
-	strictHeaderNoMatchTotal = prometheus.NewCounterVec(
+	strictRevisionNoMatchTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      metricsPrefix + "_strict_header_no_match_total",
+			Name:      metricsPrefix + "_strict_revision_no_match_total",
 			Help: metricsutil.HelpMsgWithStability(
-				"Strict header selections that matched no endpoint and failed closed.",
+				"Strict revision selections that matched no endpoint and failed closed.",
 				compbasemetrics.ALPHA,
 			),
 		},
-		[]string{"plugin_type", "plugin_name", "selector"},
+		[]string{"plugin_type", "plugin_name"},
 	)
 
 	revisionGatingShare = prometheus.NewGaugeVec(
@@ -60,14 +60,14 @@ var registerMetricsOnce sync.Once
 func registerMetrics() {
 	registerMetricsOnce.Do(func() {
 		ctrlmetrics.Registry.MustRegister(
-			strictHeaderNoMatchTotal,
+			strictRevisionNoMatchTotal,
 			revisionGatingShare,
 		)
 	})
 }
 
-func recordStrictHeaderNoMatch(pluginName, selectorName string) {
-	strictHeaderNoMatchTotal.WithLabelValues(PluginType, pluginName, selectorName).Inc()
+func recordStrictRevisionNoMatch(pluginName string) {
+	strictRevisionNoMatchTotal.WithLabelValues(PluginType, pluginName).Inc()
 }
 
 func recordRevisionGatingShares(
