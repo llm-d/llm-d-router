@@ -182,6 +182,10 @@ func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, APITypeResponses)
 }
 
+func TestServer_messagesHandler(t *testing.T) {
+	testPrefillHeaderRouting(t, APITypeMessages)
+}
+
 func TestServer_encoderEndpointRouting(t *testing.T) {
 	encoderHeader := http.CanonicalHeaderKey(routing.EncoderEndpointsHeader)
 	prefillHeader := http.CanonicalHeaderKey(routing.PrefillEndpointHeader)
@@ -312,7 +316,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 			var epdEncoders []string
 			var capturedReq *http.Request
 			if tt.epdConfigured {
-				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string) {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ APIType) {
 					epdCalled = true
 					epdPrefill = prefillHost
 					epdEncoders = encoders
@@ -405,6 +409,9 @@ func TestAPIType_String(t *testing.T) {
 	}
 	if g, w := APITypeResponses.String(), "responses"; g != w {
 		t.Errorf("APITypeResponses.String() = %q, want %q", g, w)
+	}
+	if g, w := APITypeMessages.String(), "messages"; g != w {
+		t.Errorf("APITypeMessages.String() = %q, want %q", g, w)
 	}
 	if g, w := APIType(7).String(), fmt.Sprintf("APIType(%d)", 7); g != w {
 		t.Errorf("APIType(7).String() = %q, want %q", g, w)

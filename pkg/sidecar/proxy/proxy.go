@@ -121,6 +121,8 @@ const (
 	APITypeResponses
 	// APITypeGenerate is vLLM's token-in generate API (/inference/v1/generate)
 	APITypeGenerate
+	// APITypeMessages is the Anthropic Messages API (/v1/messages)
+	APITypeMessages
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -132,6 +134,8 @@ func (a APIType) String() string {
 		return "responses"
 	case APITypeGenerate:
 		return "generate"
+	case APITypeMessages:
+		return "messages"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -143,6 +147,7 @@ var (
 	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens, requestFieldMinTokens}
 	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
 	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
+	messagesStyleTokenLimitFields  = []string{requestFieldMaxTokens}
 )
 
 // tokenLimitFieldsForAPIType returns token limit field names for the given API.
@@ -153,6 +158,8 @@ func tokenLimitFieldsForAPIType(api APIType) []string {
 		return responsesStyleTokenLimitFields
 	case APITypeGenerate:
 		return generateStyleTokenLimitFields
+	case APITypeMessages:
+		return messagesStyleTokenLimitFields
 	default:
 		return chatCompletionTokenLimitFields
 	}
@@ -338,7 +345,7 @@ func (c Config) String() string {
 // (if any) need special handling.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, APIType)
 
 // Server is the reverse proxy server
 type Server struct {
@@ -626,7 +633,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	})
 	mux.HandleFunc("POST "+ChatCompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
-	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
+	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeMessages))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
 	mux.HandleFunc("POST "+GeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 

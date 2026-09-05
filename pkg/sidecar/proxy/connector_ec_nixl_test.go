@@ -179,7 +179,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, APITypeChatCompletions)
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -235,7 +235,7 @@ func TestHandleECEPDAllMissingDoesNotAddField(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, APITypeChatCompletions)
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -297,7 +297,7 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, APITypeChatCompletions)
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -535,7 +535,7 @@ func TestHandleECNIXLEmptyEncodeEndPoints(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", nil)
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", nil, APITypeChatCompletions)
 
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
 		return
@@ -585,7 +585,7 @@ func TestHandleECNIXLTextOnlyRequest(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
-	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, APITypeChatCompletions)
 
 	assert.False(t, encoderCalled, "encoder backend must not be called for a text-only request")
 	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
@@ -642,7 +642,7 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 	rw := httptest.NewRecorder()
 
 	// Empty prefillEndPoint triggers the decoder-direct branch.
-	srv.handleECNIXL(rw, httpReq, "", []string{encoderURL.Host})
+	srv.handleECNIXL(rw, httpReq, "", []string{encoderURL.Host}, APITypeChatCompletions)
 
 	assert.False(t, pdConnectorCalled, "handlePDConnector must not be called when prefillEndPoint is empty")
 	if !assert.NotNil(t, decoderBody, "decoder backend should have received the request") {

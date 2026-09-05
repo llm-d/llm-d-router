@@ -344,6 +344,9 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(prq1).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
 		Expect(prq1).To(HaveKeyWithValue("stream", false))
+		Expect(prq1).ToNot(HaveKey("max_completion_tokens"))
+		Expect(prq1).ToNot(HaveKey("max_output_tokens"))
+		Expect(prq1).ToNot(HaveKey("min_tokens"))
 
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
