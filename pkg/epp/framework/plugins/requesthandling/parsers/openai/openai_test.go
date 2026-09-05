@@ -1283,12 +1283,11 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				tt.want.RawBody = bodyBytes
 				payload, _ := tt.want.Payload.AsMap()
 				for key, value := range payload {
-					switch value.(type) {
-					case []any, map[string]any:
-						raw, err := json.Marshal(value)
-						if err != nil {
-							t.Fatal(err)
-						}
+					raw, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if key == promptField || raw[0] == '{' || raw[0] == '[' {
 						payload[key] = json.RawMessage(raw)
 					}
 				}

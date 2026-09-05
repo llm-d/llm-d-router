@@ -43,6 +43,7 @@ const (
 	responsesAPI       = "responses"
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
+	promptField        = "prompt"
 	embeddingsAPI      = "embeddings"
 	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
 	imagesGenerationsAPI = "images/generations"
@@ -147,7 +148,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	var bodyMap fwkrh.PayloadMap
 	if apiType == chatCompletionsAPI || apiType == completionsAPI {
 		var payload map[string]any
-		payload, err = parserutil.UnmarshalEnvelope(body)
+		payload, err = parserutil.UnmarshalEnvelope(body, promptField)
 		bodyMap = fwkrh.PayloadMap(payload)
 		extractedBody.RawBody = body
 	} else if rawField := tokenInputField(extractedBody); rawField == "" {

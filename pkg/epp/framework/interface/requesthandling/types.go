@@ -46,8 +46,8 @@ const (
 type RequestPayload interface {
 	isRequestPayload()
 	IsParsed() bool
-	// AsMap returns the JSON envelope. Values may contain opaque json.RawMessage
-	// objects and arrays; use the protocol projections to inspect request content.
+	// AsMap returns the JSON envelope. Content may be opaque json.RawMessage;
+	// use the protocol projections to inspect it.
 	AsMap() (PayloadMap, bool)
 }
 

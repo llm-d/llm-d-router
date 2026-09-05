@@ -98,7 +98,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, fmt.Errorf("unsupported API endpoint: %s", path)
 	}
 
-	bodyMap, err := parserutil.UnmarshalEnvelope(body)
+	bodyMap, err := parserutil.UnmarshalEnvelope(body, "system")
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
 	}

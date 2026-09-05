@@ -448,18 +448,15 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
 
-			if true {
-				tt.want.RawBody = bodyBytes
-				payload, _ := tt.want.Payload.AsMap()
-				for key, value := range payload {
-					switch value.(type) {
-					case []any, map[string]any:
-						raw, err := json.Marshal(value)
-						if err != nil {
-							t.Fatal(err)
-						}
-						payload[key] = json.RawMessage(raw)
-					}
+			tt.want.RawBody = bodyBytes
+			payload, _ := tt.want.Payload.AsMap()
+			for key, value := range payload {
+				raw, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if key == "system" || raw[0] == '{' || raw[0] == '[' {
+					payload[key] = json.RawMessage(raw)
 				}
 			}
 			// Model is extracted from the request body's "model" field.

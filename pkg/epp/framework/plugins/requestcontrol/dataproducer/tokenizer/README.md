@@ -39,7 +39,8 @@ It does not substitute the model, translate protocols, rewrite messages or
 tools, or reconstruct content from routing projections. Model rewrites happen
 before token production and apply to both rendering and forwarding.
 
-The parsed payload keeps nested objects and arrays as `json.RawMessage`.
+The parsed payload keeps nested objects, arrays, Completions `prompt`, and
+Messages `system` as `json.RawMessage`.
 Envelope mutations can therefore change routing fields without reordering
 tool schemas or other nested content. Plugins use the typed protocol
 projections to read content. Prompt-affecting mutations must finish before

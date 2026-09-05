@@ -19,6 +19,7 @@ package parserutil
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -41,15 +42,15 @@ func TestUnmarshalUsesNumber(t *testing.T) {
 
 func TestUnmarshalEnvelope(t *testing.T) {
 	got, err := UnmarshalEnvelope([]byte(` {
- "model": "m", "stream": true, "seed": 9007199254740993, "null": null,
+ "model": "m", "stream": true, "seed": 9007199254740993, "null": null, "prompt": "raw\ntext",
  "tools": [ {"parameters": {"z": 1e0, "a": 2}} ],
  "extra": { "z": "last", "a": "<first>" }
-}`))
+}`), "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{
-		"model": "m", "stream": true, "seed": json.Number("9007199254740993"), "null": nil,
+		"model": "m", "stream": true, "seed": json.Number("9007199254740993"), "null": nil, "prompt": json.RawMessage(`"raw\ntext"`),
 		"tools": json.RawMessage(`[ {"parameters": {"z": 1e0, "a": 2}} ]`),
 		"extra": json.RawMessage(`{ "z": "last", "a": "<first>" }`),
 	}
@@ -57,9 +58,58 @@ func TestUnmarshalEnvelope(t *testing.T) {
 		t.Fatalf("envelope mismatch (-want +got):\n%s", diff)
 	}
 	for _, input := range []string{"{", "[]", "{} {}", "{} trailing"} {
-		if _, err := UnmarshalEnvelope([]byte(input)); err == nil {
+		if _, err := UnmarshalEnvelope([]byte(input), "prompt"); err == nil {
 			t.Errorf("accepted invalid envelope %q", input)
 		}
+	}
+}
+
+func TestUnmarshalEnvelopeScalars(t *testing.T) {
+	const input = `{"prompt":"line\n\"quoted\" \\ \uD83D\uDE00","stream":false,"max_tokens":8,"seed":-9007199254740993,"large":1e1000,"fraction":-1.50e-2,"empty":"","null":null}`
+	var want map[string]any
+	if err := Unmarshal([]byte(input), &want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnmarshalEnvelope([]byte(input), "system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("scalar mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestUnmarshalEnvelopeStringAllocations(t *testing.T) {
+	allocations := func(size int) float64 {
+		data := []byte(`{"model":"m","max_tokens":1,"prompt":"` + strings.Repeat("x", size) + `"}`)
+		return testing.AllocsPerRun(100, func() {
+			if _, err := UnmarshalEnvelope(data, "prompt"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	small, large := allocations(1024), allocations(240*1024)
+	if large > small+1 {
+		t.Fatalf("string decoding allocations grow with input size: 1 KiB = %.0f, 240 KiB = %.0f", small, large)
+	}
+}
+
+func BenchmarkUnmarshalEnvelope(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{{"1KiB", 1024}, {"240KiB", 240 * 1024}} {
+		b.Run(tc.name, func(b *testing.B) {
+			data := []byte(`{"model":"m","max_tokens":1,"prompt":"` + strings.Repeat("x", tc.size) + `"}`)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(data)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := UnmarshalEnvelope(data, "prompt"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
