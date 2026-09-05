@@ -11,7 +11,7 @@ plugins:
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
-      blockSize: 16
+      blockSizeTokens: 16
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
     indexerConfig:
