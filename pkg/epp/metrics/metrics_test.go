@@ -37,25 +37,35 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-const (
-	requestTotalMetric                 = inferenceObjectiveComponent + "_request_total"
-	requestErrorTotalMetric            = inferenceObjectiveComponent + "_request_error_total"
-	requestLatenciesMetric             = inferenceObjectiveComponent + "_request_duration_seconds"
-	requestSizesMetric                 = inferenceObjectiveComponent + "_request_sizes"
-	responseSizesMetric                = inferenceObjectiveComponent + "_response_sizes"
-	inputTokensMetric                  = inferenceObjectiveComponent + "_input_tokens"
-	outputTokensMetric                 = inferenceObjectiveComponent + "_output_tokens"
-	normalizedTimePerOutputTokenMetric = inferenceObjectiveComponent + "_normalized_time_per_output_token_seconds"
-	runningRequestsMetric              = inferenceObjectiveComponent + "_running_requests"
-	kvCacheAvgUsageMetric              = inferencePoolComponent + "_average_kv_cache_utilization"
-	queueAvgSizeMetric                 = inferencePoolComponent + "_average_queue_size"
-	runningRequestsAvgMetric           = inferencePoolComponent + "_average_running_requests"
-)
-
 func TestMain(m *testing.M) {
 	// Register all metrics once for the entire test suite.
 	Register()
 	os.Exit(m.Run())
+}
+
+func TestCoreLegacyMetricFamiliesAreNotRegistered(t *testing.T) {
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+
+	legacy := map[string]struct{}{
+		"inference_objective_request_total":            {},
+		"inference_objective_request_error_total":      {},
+		"inference_objective_request_duration_seconds": {},
+		"inference_objective_request_sizes":            {},
+		"inference_objective_response_sizes":           {},
+		"inference_objective_input_tokens":             {},
+		"inference_objective_output_tokens":            {},
+		"inference_objective_prompt_cached_tokens":     {},
+		"inference_objective_running_requests":         {},
+		"inference_pool_average_kv_cache_utilization":  {},
+		"inference_pool_average_queue_size":            {},
+		"inference_pool_average_running_requests":      {},
+		"inference_pool_ready_pods":                    {},
+	}
+	for _, family := range families {
+		_, found := legacy[family.GetName()]
+		require.Falsef(t, found, "legacy metric family %q must not be registered", family.GetName())
+	}
 }
 
 func TestRecordRequestCounterandSizes(t *testing.T) {
@@ -105,26 +115,7 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 				RecordRequestSizes(req.modelName, req.targetModelName, req.fairnessID, "0", req.reqSize)
 			}
 
-			// Verify deprecated metrics
-			wantRequestTotal, err := os.Open("testdata/request_total_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantRequestTotal.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantRequestTotal, requestTotalMetric); err != nil {
-				t.Error(err)
-			}
-
-			wantRequestSizes, err := os.Open("testdata/request_sizes_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantRequestSizes.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantRequestSizes, requestSizesMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metrics
+			// Verify llm_d_epp metrics.
 			wantRequestTotalNew, err := os.Open("testdata/llm_d_request_total_metric")
 			if err != nil {
 				t.Fatal(err)
@@ -190,17 +181,7 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 				RecordRequestErrCounter(req.modelName, req.targetModelName, "", "0", req.error)
 			}
 
-			// Verify deprecated metric
-			wantRequestErrorCounter, err := os.Open("testdata/request_error_total_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantRequestErrorCounter.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantRequestErrorCounter, requestErrorTotalMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metric
+			// Verify llm_d_epp metric.
 			wantRequestErrorCounterNew, err := os.Open("testdata/llm_d_request_error_total_metric")
 			if err != nil {
 				t.Fatal(err)
@@ -279,17 +260,7 @@ func TestRecordRequestLatencies(t *testing.T) {
 				}
 			}
 
-			// Verify deprecated metric
-			wantRequestLatencies, err := os.Open("testdata/request_duration_seconds_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantRequestLatencies.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantRequestLatencies, requestLatenciesMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metric
+			// Verify llm_d_epp metric.
 			wantRequestLatenciesNew, err := os.Open("testdata/llm_d_request_duration_seconds_metric")
 			if err != nil {
 				t.Fatal(err)
@@ -387,17 +358,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 				}
 			}
 
-			// Verify deprecated metric
-			wantLatencyPerToken, err := os.Open("testdata/normalized_time_per_output_token_seconds_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantLatencyPerToken.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantLatencyPerToken, normalizedTimePerOutputTokenMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metric
+			// Verify llm_d_epp metric.
 			wantLatencyPerTokenNew, err := os.Open("testdata/llm_d_normalized_time_per_output_token_seconds_metric")
 			if err != nil {
 				t.Fatal(err)
@@ -477,35 +438,7 @@ func TestRecordResponseMetrics(t *testing.T) {
 				RecordPromptCachedTokens(resp.modelName, resp.targetModelName, "", "0", resp.cachedToken)
 			}
 
-			// Verify deprecated metrics
-			wantResponseSize, err := os.Open("testdata/response_sizes_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantResponseSize.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantResponseSize, responseSizesMetric); err != nil {
-				t.Error(err)
-			}
-
-			wantInputToken, err := os.Open("testdata/input_tokens_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantInputToken.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantInputToken, inputTokensMetric); err != nil {
-				t.Error(err)
-			}
-
-			wantOutputToken, err := os.Open("testdata/output_tokens_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantOutputToken.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantOutputToken, outputTokensMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metrics
+			// Verify llm_d_epp metrics.
 			wantResponseSizeNew, err := os.Open("testdata/llm_d_response_size_bytes_metric")
 			if err != nil {
 				t.Fatal(err)
@@ -595,17 +528,7 @@ func TestRunningRequestsMetrics(t *testing.T) {
 				}
 			}
 
-			// Verify deprecated metric
-			wantRunningRequests, err := os.Open("testdata/running_requests_metrics")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantRunningRequests.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantRunningRequests, runningRequestsMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metric
+			// Verify llm_d_epp metric.
 			wantRunningRequestsNew, err := os.Open("testdata/llm_d_running_requests_metrics")
 			if err != nil {
 				t.Fatal(err)
@@ -650,35 +573,7 @@ func TestInferencePoolMetrics(t *testing.T) {
 			RecordInferencePoolStdDevQueueSize(scenario.poolName, scenario.queueSizeStdDev)
 			RecordInferencePoolStdDevRunningRequests(scenario.poolName, scenario.runningRequestsStdDev)
 
-			// Verify deprecated metrics
-			wantKVCache, err := os.Open("testdata/kv_cache_avg_metrics")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantKVCache.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantKVCache, kvCacheAvgUsageMetric); err != nil {
-				t.Error(err)
-			}
-
-			wantQueueSize, err := os.Open("testdata/queue_avg_size_metrics")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantQueueSize.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantQueueSize, queueAvgSizeMetric); err != nil {
-				t.Error(err)
-			}
-
-			wantRunningRequests, err := os.Open("testdata/running_requests_avg_metrics")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantRunningRequests.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantRunningRequests, runningRequestsAvgMetric); err != nil {
-				t.Error(err)
-			}
-
-			// Verify llm_d_epp metrics
+			// Verify llm_d_epp metrics.
 			wantKVCacheNew, err := os.Open("testdata/llm_d_kv_cache_avg_metrics")
 			if err != nil {
 				t.Fatal(err)

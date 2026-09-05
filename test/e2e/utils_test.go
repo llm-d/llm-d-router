@@ -117,7 +117,7 @@ func getPodNames(labels map[string]string, nsName string) []string {
 	return names
 }
 
-// waitForEPPToDiscoverPods blocks until the EPP's inference_pool_ready_pods
+// waitForEPPToDiscoverPods blocks until the EPP's llm_d_epp_ready_endpoints
 // gauge for poolName reports at least one pod, indicating the InferencePool
 // controller has finished its initial pod discovery. The EPP reports gRPC
 // health as SERVING as soon as the pool is set, even if pod discovery found
@@ -131,7 +131,7 @@ func waitForEPPToDiscoverPods(poolName string) {
 	startEPPMetricsPortForward()
 	labelMatch := fmt.Sprintf(`name="%s"`, poolName)
 	gomega.Eventually(func() int {
-		return getCounterMetric(metricsURL, "inference_pool_ready_pods", labelMatch)
+		return getCounterMetric(metricsURL, "llm_d_epp_ready_endpoints", labelMatch)
 	}, readyTimeout, time.Second).Should(gomega.BeNumerically(">", 0), "EPP should discover pool members within the ready timeout")
 }
 

@@ -397,16 +397,16 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	return h
 }
 
-// WaitForReadyPodsMetric blocks until the prometheus metric 'inference_pool_ready_pods' matches the expected count.
+// WaitForReadyPodsMetric blocks until the prometheus metric 'llm_d_epp_ready_endpoints' matches the expected count.
 func (h *TestHarness) WaitForReadyPodsMetric(expectedCount int) {
 	h.t.Helper()
 
 	expected := cleanMetric(metricReadyPods(expectedCount))
 	require.Eventually(h.t, func() bool {
 		err := metricsutils.GatherAndCompare(crmetrics.Registry, strings.NewReader(expected),
-			"inference_pool_ready_pods")
+			"llm_d_epp_ready_endpoints")
 		return err == nil
-	}, 10*time.Second, 50*time.Millisecond, "Timed out waiting for inference_pool_ready_pods metric to settle")
+	}, 10*time.Second, 50*time.Millisecond, "Timed out waiting for llm_d_epp_ready_endpoints metric to settle")
 }
 
 // WaitForSync blocks until the EPP Datastore has synced the expected number of pods.

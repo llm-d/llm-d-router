@@ -314,8 +314,8 @@ func commonTestCases(prio func(int) int) []testCase {
 			},
 			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1"),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
-				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+				"llm_d_epp_request_total":   cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
+				"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 			},
 			wantSpans: []string{"request", "request_orchestration"},
 		},
@@ -329,7 +329,7 @@ func commonTestCases(prio func(int) int) []testCase {
 			},
 			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+				"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 			},
 		},
 		{
@@ -378,17 +378,17 @@ func labelsToString(labels []label) string {
 
 func metricReqTotal(model, target string, priority int) string {
 	return fmt.Sprintf(`
-    # HELP inference_objective_request_total [ALPHA] [Deprecated: Use llm_d_epp_request_total] Counter of inference objective requests broken out for each model and target model.
-    # TYPE inference_objective_request_total counter
-    inference_objective_request_total{%s} 1
-    `, labelsToString([]label{{"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
+    # TYPE llm_d_epp_request_total counter
+    llm_d_epp_request_total{%s} 1
+    `, labelsToString([]label{{"fairness_id", ""}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {
 	return fmt.Sprintf(`
-    # HELP inference_pool_ready_pods [ALPHA] [Deprecated: Use llm_d_epp_ready_endpoints] The number of ready pods in the inference server pool.
-    # TYPE inference_pool_ready_pods gauge
-    inference_pool_ready_pods{%s} %d
+	# HELP llm_d_epp_ready_endpoints [ALPHA] The number of ready endpoints in the inference server pool.
+	# TYPE llm_d_epp_ready_endpoints gauge
+	llm_d_epp_ready_endpoints{%s} %d
     `, labelsToString([]label{{"name", testPoolName}}), count)
 }
 

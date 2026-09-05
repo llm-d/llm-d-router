@@ -13,7 +13,7 @@ A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses the canoni
 | `llm_d_epp_` | Canonical, EPP-wide: request/latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, predicted latency, and embedded KV-cache metrics. |
 
 Earlier releases emitted metrics under `llm_d_inference_scheduler_`, `inference_objective_`,
-`inference_pool_`, `inference_extension_`, `llm_d_router_epp_`, and `kvcache_`. Those prefixes are **deprecated** but
+`inference_extension_`, `llm_d_router_epp_`, and `kvcache_`. Those prefixes are **deprecated** but
 still emitted: each recorder that has a deprecated predecessor writes both the legacy series and its
 current twin (dual emission), so existing dashboards keep working during migration. See [Deprecated series](#deprecated-series).
 
@@ -51,8 +51,7 @@ the current `llm_d_epp_*` names in new dashboards and alerts.
 | Deprecated prefix | Current replacement |
 |---|---|
 | `llm_d_inference_scheduler_*` (disagg, data-layer errors) | `llm_d_epp_*` |
-| `inference_objective_*` (request/latency, predicted latency) | `llm_d_epp_*` |
-| `inference_pool_*` (pool averages, queue size) | `llm_d_epp_*` |
+| `inference_objective_*` (predicted latency only) | `llm_d_epp_*` |
 | `inference_extension_*` (scheduler, plugin, info, flow control, prefix indexer) | `llm_d_epp_*` |
 | `kvcache_index_*`, `kvcache_kvevents_*` | `llm_d_epp_kv_cache_*` |
 
