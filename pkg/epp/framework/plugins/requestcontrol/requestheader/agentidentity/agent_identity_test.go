@@ -261,3 +261,16 @@ func TestAgentIdentityKeyMatchesDocumentedConfig(t *testing.T) {
 		t.Errorf("config %q resolves to %s, want %s", documented, got, AgentIdentityKey)
 	}
 }
+
+func TestProducesAgentIdentity(t *testing.T) {
+	t.Parallel()
+
+	plugin := &Plugin{}
+	produced, ok := plugin.Produces()[AgentIdentityKey]
+	if !ok {
+		t.Fatalf("Produces() does not declare %s", AgentIdentityKey)
+	}
+	if _, ok := produced.(string); !ok {
+		t.Fatalf("Produces()[%s] has type %T, want string", AgentIdentityKey, produced)
+	}
+}

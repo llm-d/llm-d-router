@@ -59,6 +59,7 @@ var (
 	_ requestcontrol.DataProducer          = &Producer{}
 	_ requestcontrol.PreRequest            = &Producer{}
 	_ requestcontrol.ResponseBodyProcessor = &Producer{}
+	_ fwkplugin.ConsumerPlugin             = &Producer{}
 )
 
 // Producer tracks session history within one EPP instance.
@@ -107,6 +108,15 @@ func (p *Producer) TypedName() fwkplugin.TypedName {
 // Produces declares the SessionState request attribute written by this producer.
 func (p *Producer) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{p.dk: SessionState{}}
+}
+
+// Consumes declares agent identity as a required input. The agent-identity
+// plugin is intentionally not a default producer, so operators must enable an
+// identity provider explicitly rather than having one auto-created.
+func (p *Producer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{agentidentity.AgentIdentityKey: ""},
+	}
 }
 
 // Produce publishes the history observed before the current request is
