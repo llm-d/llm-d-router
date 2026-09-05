@@ -135,3 +135,43 @@ jobs:
           path: gosec.sarif
           retention-days: 7
           if-no-files-found: warn
+
+  # The configs under test/testdata/plugins/stable/ are the written-down form of the
+  # backwards-compatibility promise made when a plugin is promoted to Stable. Editing
+  # one to make TestStablePluginConfigs pass would silently retract that promise, so
+  # within a major version they may only be added to, never changed or removed.
+  frozen-stable-configs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          # The diff below needs the merge base with the target branch.
+          fetch-depth: 0
+
+      - name: Fail on modified or deleted frozen plugin configs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # Added files (status A) are how a newly promoted plugin lands here, so
+          # only modifications, deletions and renames are rejected.
+          changed=$(git diff --name-status --diff-filter=MDR "$BASE_SHA...HEAD" \
+            -- 'test/testdata/plugins/stable/v*' || true)
+
+          if [ -n "$changed" ]; then
+            echo "::error::This PR changes frozen stable plugin configs:"
+            echo "$changed"
+            echo
+            echo "Files under test/testdata/plugins/stable/v*/ record the config surface a"
+            echo "Stable plugin promised to keep working for the whole major version, so they"
+            echo "may only be added to. If TestStablePluginConfigs is failing, the plugin"
+            echo "changed incompatibly: fix the plugin or drop it back to Beta. A change that"
+            echo "cannot be made compatibly belongs in the next major version's directory."
+            exit 1
+          fi
+
+          echo "No frozen stable plugin configs were changed."
