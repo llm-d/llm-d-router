@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -30,6 +31,37 @@ func TestVLLMShardingKey(t *testing.T) {
 	adapter := NewVLLMAdapter()
 	assert.Equal(t, "pod-123", adapter.ShardingKey(&kvevents.RawMessage{Topic: "kv@pod-123@llama-2-7b"}))
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
+}
+
+func TestVLLMBlockStoredSessionID(t *testing.T) {
+	for _, stamp := range []any{nil, "request-stamp"} {
+		for _, encoding := range []string{"map", "array"} {
+			t.Run(fmt.Sprintf("%s/%v", encoding, stamp), func(t *testing.T) {
+				var event any = map[string]any{
+					"type": "BlockStored", "block_hashes": []uint64{42},
+					"token_ids": []uint32{1}, "block_size": 1,
+					"locality": "LOCAL", "ownership": "owner", "session_id": stamp,
+				}
+				if encoding == "array" {
+					event = []any{"BlockStored", []uint64{42}, nil, []uint32{1}, 1,
+						nil, "GPU", nil, nil, nil, nil, nil, "LOCAL", "owner", stamp}
+				}
+				payload, err := msgpack.Marshal([]any{1.0, []any{event}, 0})
+				require.NoError(t, err)
+				_, _, batch, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+				require.NoError(t, err)
+				stored := batch.Events[0].(*kvevents.BlockStoredEvent)
+				assert.Equal(t, "LOCAL", stored.Locality)
+				assert.Equal(t, "owner", stored.Ownership)
+				if stamp == nil {
+					require.Nil(t, stored.SessionID)
+				} else {
+					require.NotNil(t, stored.SessionID)
+					assert.Equal(t, stamp, *stored.SessionID)
+				}
+			})
+		}
+	}
 }
 
 // TestVLLMParseMessage_Valid tests full message parsing through the adapter.

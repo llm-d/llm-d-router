@@ -49,6 +49,7 @@ const PluginType = "precise-prefix-cache-producer"
 
 // PluginConfig configures the precise-prefix-cache-producer.
 type PluginConfig struct {
+	SessionManager       string                        `json:"sessionManager,omitempty" pluginRef:""`
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
 	IndexerConfig        *kvcache.Config               `json:"indexerConfig"`
 	KVEventsConfig       *kvevents.Config              `json:"kvEventsConfig"`
@@ -104,6 +105,9 @@ type Producer struct {
 	speculativeEnabled bool
 
 	blockSizeTokens int
+	sessionManager  requestcontrol.SessionCacheManager
+	sessionDataKey  plugin.DataKey
+	sessionEvents   *sessionEventConsumer
 
 	// Plugin-lifetime, not request-scoped: SubscriberManager binds each
 	// subscriber's goroutine to the ctx passed at registration.
@@ -113,6 +117,27 @@ type Producer struct {
 // PluginFactory parses the raw plugin configuration and returns a configured
 // Producer.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	rawConfig, err := PluginConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
+	}
+	parameters := rawConfig.(PluginConfig)
+	var manager requestcontrol.SessionCacheManager
+	if parameters.SessionManager != "" {
+		manager, err = plugin.PluginByType[requestcontrol.SessionCacheManager](handle, parameters.SessionManager)
+		if err != nil {
+			return nil, err
+		}
+		key := requestcontrol.SessionCacheRequestDataKey.WithNonEmptyProducerName(parameters.SessionManager)
+		if _, ok := manager.Produces()[key].(requestcontrol.SessionCacheRequest); !ok {
+			return nil, fmt.Errorf("session manager %q must produce SessionCacheRequest", parameters.SessionManager)
+		}
+	}
+	return newProducer(handle.Context(), name, parameters, manager)
+}
+
+// PluginConfigParser exposes named manager dependencies to the plugin loader.
+func PluginConfigParser(rawParameters *json.Decoder, _ plugin.Handle) (any, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize indexer config: %w", err)
@@ -132,12 +157,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	if parameters.IndexerConfig == nil {
 		return nil, errors.New("indexerConfig is required")
 	}
-	p, err := New(handle.Context(), name, parameters)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
-	}
-
-	return p, nil
+	return parameters, nil
 }
 
 // New constructs a precise-prefix-cache-producer. The instance name becomes
@@ -146,6 +166,25 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 // The kvcache indexer, KV-events pool, and any local ZMQ subscriber start
 // in background goroutines bound to ctx.
 func New(ctx context.Context, name string, config PluginConfig) (*Producer, error) {
+	if config.SessionManager != "" {
+		return nil, errors.New("sessionManager requires PluginFactory to resolve its dependency")
+	}
+	return newProducer(ctx, name, config, nil)
+}
+
+func newProducer(ctx context.Context, name string, config PluginConfig, manager requestcontrol.SessionCacheManager) (*Producer, error) {
+	if manager != nil {
+		if config.SpeculativeIndexing {
+			return nil, errors.New("sessionManager does not support speculativeIndexing")
+		}
+		if config.KVEventsConfig == nil || !config.KVEventsConfig.DiscoverPods ||
+			config.KVEventsConfig.PodDiscoveryConfig == nil || config.KVEventsConfig.ZMQEndpoint != "" {
+			return nil, errors.New("sessionManager requires per-endpoint KV event discovery")
+		}
+		if config.KVEventsConfig.EngineType != "" && config.KVEventsConfig.EngineType != engineadapter.EngineTypeVLLM {
+			return nil, errors.New("sessionManager requires vLLM KV events")
+		}
+	}
 	if config.TokenProcessorConfig == nil {
 		config.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
 	}
@@ -165,7 +204,15 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
 	}
-	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+	var pool *kvevents.Pool
+	var sessionEvents *sessionEventConsumer
+	if manager != nil {
+		sessionEvents = &sessionEventConsumer{index: indexer.KVBlockIndex(), manager: manager,
+			locations: make(map[string][]sessionLocation)}
+		pool = kvevents.NewConsumerPool(config.KVEventsConfig, adapter, sessionEvents)
+	} else {
+		pool = kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+	}
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
@@ -192,6 +239,9 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
+		sessionManager:     manager,
+		sessionDataKey:     requestcontrol.SessionCacheRequestDataKey.WithNonEmptyProducerName(config.SessionManager),
+		sessionEvents:      sessionEvents,
 		subscriberCtx:      ctx,
 	}, nil
 }
@@ -271,9 +321,13 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedRequest dependency from token-producer so
-// the data-layer DAG orders tokenization before this producer runs.
+// Consumes orders lookup after the configured session manager or token producer.
 func (p *Producer) Consumes() plugin.DataDependencies {
+	if p.sessionManager != nil {
+		return plugin.DataDependencies{Required: map[plugin.DataKey]any{
+			p.sessionDataKey: requestcontrol.SessionCacheRequest{},
+		}}
+	}
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
@@ -293,6 +347,9 @@ func (p *Producer) Produce(ctx context.Context,
 	defer span.End()
 
 	span.SetAttributes(semconv.LLMDEPPProducerCandidateEndpoints(len(endpoints)))
+	if p.sessionManager != nil {
+		return p.produceFromSession(ctx, request, endpoints)
+	}
 	if request != nil {
 		if request.TargetModel != "" {
 			span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
