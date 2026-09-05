@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -100,16 +101,40 @@ func TestDiscoveredEndpointPicker_TracksUpdatesAndDeletes(t *testing.T) {
 	require.ErrorContains(t, err, "no vLLM render endpoints discovered")
 }
 
-type firstEndpointLoadBalancer struct{}
-
-func (firstEndpointLoadBalancer) Pick(endpoints []string) (string, error) {
-	return endpoints[0], nil
+func TestDiscoveredEndpointPicker_ExclusionsPreserveCursor(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	for _, name := range []string{"a", "b", "c"} {
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+	}
+	first, err := picker.Pick()
+	require.NoError(t, err)
+	assert.Equal(t, "http://a:8000", first)
+	second, err := picker.PickExcluding(map[string]struct{}{"http://a:8000": {}, "http://b:8000": {}})
+	require.NoError(t, err)
+	assert.Equal(t, "http://c:8000", second)
+	_, err = picker.PickExcluding(map[string]struct{}{"http://a:8000": {}, "http://b:8000": {}, "http://c:8000": {}})
+	require.ErrorIs(t, err, errNoRenderEndpoints)
+	third, err := picker.Pick()
+	require.NoError(t, err)
+	assert.Equal(t, "http://a:8000", third)
 }
 
-type endpointLoadBalancerFunc func(endpoints []string) (string, error)
+type firstEndpointLoadBalancer struct{}
 
-func (f endpointLoadBalancerFunc) Pick(endpoints []string) (string, error) {
-	return f(endpoints)
+func (firstEndpointLoadBalancer) Pick(endpoints []string, excluded map[string]struct{}) (string, error) {
+	for _, endpoint := range endpoints {
+		if _, skip := excluded[endpoint]; !skip {
+			return endpoint, nil
+		}
+	}
+	return "", errNoRenderEndpoints
+}
+
+type endpointLoadBalancerFunc func(endpoints []string, excluded map[string]struct{}) (string, error)
+
+func (f endpointLoadBalancerFunc) Pick(endpoints []string, excluded map[string]struct{}) (string, error) {
+	return f(endpoints, excluded)
 }
 
 func TestDiscoveredEndpointPicker_LoadBalancerIsPluggable(t *testing.T) {
@@ -231,7 +256,7 @@ func TestDiscoveredEndpointPicker_ReleasesLockBeforeLoadBalancing(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, picker.Upsert(discoveredEndpoint("rank-a", "10.0.0.1", "8000").GetMetadata()))
 
-	picker.loadBalancer = endpointLoadBalancerFunc(func(endpoints []string) (string, error) {
+	picker.loadBalancer = endpointLoadBalancerFunc(func(endpoints []string, _ map[string]struct{}) (string, error) {
 		locked := picker.mu.TryLock()
 		if locked {
 			picker.mu.Unlock()
@@ -337,10 +362,10 @@ func TestVLLMHTTPRenderer_DiscoveryRetriesTransportFailureWithinRequestTimeout(t
 	require.NoError(t, err)
 	assert.Equal(t, [][]uint32{{7}}, tokens)
 	require.Len(t, deadlines, 2)
-	assert.True(t, deadlines[0].Before(deadlines[1]), "first attempt reserves time for retry")
+	assert.Equal(t, deadlines[0], deadlines[1], "retry must retain the original request deadline")
 }
 
-func TestVLLMHTTPRenderer_DiscoveryRetriesSlowEndpoint(t *testing.T) {
+func TestVLLMHTTPRenderer_DiscoveryRetriesSlowEndpointWithAttemptTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
 		require.NoError(t, err)
@@ -351,6 +376,7 @@ func TestVLLMHTTPRenderer_DiscoveryRetriesSlowEndpoint(t *testing.T) {
 		renderer := &vllmHTTPRenderer{
 			endpointPicker: picker,
 			timeout:        time.Second,
+			attemptTimeout: 100 * time.Millisecond,
 			client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				hosts = append(hosts, req.URL.Host)
 				if req.URL.Host == "10.0.0.1:8000" {
@@ -389,6 +415,112 @@ func TestVLLMHTTPRenderer_DiscoveryAttemptsAreBounded(t *testing.T) {
 	assert.NotEqual(t, hosts[0], hosts[1])
 }
 
+func TestVLLMHTTPRenderer_DiscoveryRetriesDoNotStarveHealthyEndpoints(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	for _, name := range []string{"a", "b", "c"} {
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+	}
+	calls := map[string]int{}
+	renderer := &vllmHTTPRenderer{
+		endpointPicker: picker,
+		timeout:        time.Second,
+		client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls[req.URL.Hostname()]++
+			if req.URL.Hostname() == "a" {
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("unavailable"))}, nil
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`[{"token_ids":[7]}]`))}, nil
+		})},
+	}
+	for range 12 {
+		_, _, err := renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 6, calls["b"])
+	assert.Equal(t, 6, calls["c"])
+}
+
+type failingRenderBody struct {
+	err error
+}
+
+func (b failingRenderBody) Read([]byte) (int, error) { return 0, b.err }
+func (b failingRenderBody) Close() error             { return nil }
+
+func TestVLLMHTTPRenderer_DiscoveryRetriesResponseBodyNetworkError(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	for _, name := range []string{"a", "b"} {
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+	}
+	var hosts []string
+	renderer := &vllmHTTPRenderer{
+		endpointPicker: picker,
+		timeout:        time.Second,
+		client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			hosts = append(hosts, req.URL.Hostname())
+			body := io.NopCloser(strings.NewReader(`[{"token_ids":[7]}]`))
+			if req.URL.Hostname() == "a" {
+				body = failingRenderBody{err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+		})},
+	}
+	tokens, _, err := renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{7}}, tokens)
+	assert.Equal(t, []string{"a", "b"}, hosts)
+}
+
+func TestVLLMHTTPRenderer_DiscoveryPreservesFullTimeoutByDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+		require.NoError(t, err)
+		for _, name := range []string{"a", "b"} {
+			require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+		}
+		calls := 0
+		renderer := &vllmHTTPRenderer{
+			endpointPicker: picker,
+			timeout:        5 * time.Second,
+			client: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				select {
+				case <-time.After(3 * time.Second):
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`[{"token_ids":[7]}]`))}, nil
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
+			})},
+		}
+		tokens, _, err := renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+		require.NoError(t, err)
+		assert.Equal(t, [][]uint32{{7}}, tokens)
+		assert.Equal(t, 1, calls)
+	})
+}
+
+func TestVLLMHTTPRenderer_DiscoveryAttemptTimeoutConfiguration(t *testing.T) {
+	for _, value := range []string{"", "100ms", "0s", "-1s", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			renderer, err := newVLLMHTTPRenderer(&vllmConfig{
+				EndpointDiscovery: &endpointDiscoveryConfig{AttemptTimeout: value},
+			}, testHTTPModel)
+			switch value {
+			case "":
+				require.NoError(t, err)
+				assert.Zero(t, renderer.attemptTimeout)
+			case "100ms":
+				require.NoError(t, err)
+				assert.Equal(t, 100*time.Millisecond, renderer.attemptTimeout)
+			default:
+				require.ErrorContains(t, err, "invalid 'endpointDiscovery.attemptTimeout'")
+			}
+		})
+	}
+}
+
 func TestVLLMHTTPRenderer_DiscoveryHonorsCallerDeadline(t *testing.T) {
 	for _, endpointCount := range []int{1, 2} {
 		t.Run(strconv.Itoa(endpointCount), func(t *testing.T) {
@@ -414,7 +546,7 @@ func TestVLLMHTTPRenderer_DiscoveryHonorsCallerDeadline(t *testing.T) {
 				start := time.Now()
 				_, _, err = renderer.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
 				require.ErrorIs(t, err, context.DeadlineExceeded)
-				assert.Equal(t, endpointCount, calls)
+				assert.Equal(t, 1, calls, "caller deadline must stop retries")
 				assert.Equal(t, 200*time.Millisecond, time.Since(start))
 			})
 		})
@@ -618,6 +750,7 @@ func TestPluginFactory_EndpointDiscoveryValidation(t *testing.T) {
 			parameters: `{
 				"modelName": "m",
 				"vllm": {"endpointDiscovery": {
+					"attemptTimeout": "1s",
 					"portRules": [{"selector": {"matchLabels": {"llm-d.ai/role": "decode"}}, "basePort": 8200}],
 					"loadBalancer": {"type": "round-robin"}
 				}}

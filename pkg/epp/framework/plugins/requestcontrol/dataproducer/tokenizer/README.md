@@ -49,6 +49,7 @@ Backend selection:
 | `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
 | `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
 | `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm; `round-robin` is the only built-in algorithm. |
+| `vllm.endpointDiscovery.attemptTimeout` | unset         | Optional positive duration limiting each render attempt, e.g. `1s`. |
 | `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
 | `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
@@ -225,11 +226,18 @@ reject plugin configuration at startup.
 Transport failures, attempt timeouts, HTTP 408, HTTP 429, and HTTP 5xx permit
 one retry on a different discovered URL. Other HTTP errors return immediately.
 Both attempts share `vllm.timeout` or `vllm.mmTimeout`, capped by the caller's
-deadline. When an alternate URL is available, the first attempt gets half the
-remaining budget and the retry gets the remainder. A single endpoint uses the
-full budget. With no discovered endpoints, rendering returns an error. Failed
-URLs remain eligible for subsequent requests until discovery removes them;
-there is no circuit breaker or separate render health probe.
+deadline. By default, each attempt can use the full remaining request budget.
+Set `vllm.endpointDiscovery.attemptTimeout` to opt into a shorter deadline on
+each attempt, including retries. For example, `attemptTimeout: 1s` with
+`timeout: 5s` permits retrying a slow endpoint after one second; the alternate
+also has at most one second. Choose an attempt timeout that accommodates normal
+render latency, including multimodal processing. Without an attempt timeout,
+a slow endpoint can consume the request budget and leave no time for a retry.
+
+With no discovered endpoints, rendering returns an error. Failed URLs remain
+eligible for subsequent requests until discovery removes them; there is no
+circuit breaker or separate render health probe. Retry exclusions preserve
+round-robin cursor progression across the full endpoint list.
 
 Each named token producer maintains its own endpoint set and balancing state.
 Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
@@ -237,7 +245,7 @@ global idle-connection cap; idle connections expire after 90 seconds.
 Alternative algorithms can be implemented in the tokenizer package through
 `endpointLoadBalancer` and registered in `endpointLoadBalancerFactories`.
 The picker supplies an independent snapshot without holding its endpoint lock;
-algorithms must support concurrent calls to `Pick`.
+algorithms must support concurrent calls to `Pick` and skip excluded URLs.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 

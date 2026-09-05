@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -127,6 +128,7 @@ type vllmHTTPRenderer struct {
 	modelName      string
 	timeout        time.Duration
 	mmTimeout      time.Duration
+	attemptTimeout time.Duration
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, error) {
@@ -135,12 +137,19 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 	}
 
 	var endpointPicker renderEndpointPicker
+	var attemptTimeout time.Duration
 	if cfg.EndpointDiscovery != nil {
 		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery)
 		if err != nil {
 			return nil, err
 		}
 		endpointPicker = discovered
+		if value := cfg.EndpointDiscovery.AttemptTimeout; value != "" {
+			attemptTimeout, err = time.ParseDuration(value)
+			if err != nil || attemptTimeout <= 0 {
+				return nil, fmt.Errorf("invalid 'endpointDiscovery.attemptTimeout' %q: must be a positive duration", value)
+			}
+		}
 	} else {
 		url := strings.TrimRight(cfg.URL, "/")
 		if url == "" {
@@ -170,6 +179,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 		modelName:      modelName,
 		timeout:        timeout,
 		mmTimeout:      mmTimeout,
+		attemptTimeout: attemptTimeout,
 	}, nil
 }
 
@@ -464,15 +474,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 		return fmt.Errorf("pick render endpoint: %w", err)
 	}
 	picker, canRetry := r.endpointPicker.(retryingRenderEndpointPicker)
-	attemptCtx := reqCtx
-	cancelAttempt := func() {}
-	if canRetry && picker.HasAlternative(baseURL) {
-		// Reserve half the remaining budget so a slow endpoint cannot consume it all.
-		deadline, _ := reqCtx.Deadline()
-		attemptCtx, cancelAttempt = context.WithTimeout(reqCtx, time.Until(deadline)/2)
-	}
-	retryable, attemptErr := r.postJSONAttempt(attemptCtx, baseURL, path, payload, out)
-	cancelAttempt()
+	retryable, attemptErr := r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
 	if attemptErr == nil || !retryable || !canRetry || reqCtx.Err() != nil {
 		return attemptErr
 	}
@@ -489,6 +491,11 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 
 // postJSONAttempt sends one render request and reports whether another endpoint may succeed.
 func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
+	if r.attemptTimeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(reqCtx, r.attemptTimeout)
+		defer cancel()
+	}
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return false, fmt.Errorf("build request: %w", err)
@@ -511,7 +518,10 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
-		return reqCtx.Err() != nil || errors.Is(err, io.ErrUnexpectedEOF), fmt.Errorf("unmarshal response: %w", err)
+		// Connection failures can surface after successful response headers.
+		var networkErr net.Error
+		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		return retryable, fmt.Errorf("unmarshal response: %w", err)
 	}
 	return false, nil
 }
