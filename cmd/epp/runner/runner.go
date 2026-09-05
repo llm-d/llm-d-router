@@ -241,6 +241,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	setupLog.Info("Flags processed", "flags", flags)
 
 	logutil.InitLogging(&opts.ZapOptions)
+	tracing.InitTextMapPropagator()
 
 	if opts.Tracing {
 		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-epp")

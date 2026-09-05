@@ -48,6 +48,12 @@ func (h *errorHandler) Handle(err error) {
 	h.logger.V(logging.DEFAULT).Error(err, "trace error occurred")
 }
 
+// InitTextMapPropagator installs W3C trace context and baggage propagators.
+// Processes call this at startup so extract/inject work when span export is disabled.
+func InitTextMapPropagator() {
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+}
+
 func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName string) (func(context.Context) error, error) {
 	logger = logger.WithName("trace")
 	loggerWrap := &errorHandler{logger: logger}
@@ -90,7 +96,7 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 
 	tracerProvider := sdktrace.NewTracerProvider(opt...)
 	otel.SetTracerProvider(tracerProvider)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	InitTextMapPropagator()
 	otel.SetErrorHandler(loggerWrap)
 
 	return tracerProvider.Shutdown, nil
