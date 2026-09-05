@@ -289,6 +289,29 @@ func TestNewPriorityBandConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), "fairness policy cannot be nil")
 		assert.Nil(t, pb)
 	})
+
+	t.Run("ShouldPreserveOmittedRequestTTL", func(t *testing.T) {
+		t.Parallel()
+		pb, err := NewPriorityBandConfig(1, defaults)
+		require.NoError(t, err)
+		assert.Nil(t, pb.DefaultRequestTTL)
+	})
+
+	t.Run("ShouldPreserveExplicitZeroRequestTTL", func(t *testing.T) {
+		t.Parallel()
+		pb, err := NewPriorityBandConfig(1, defaults, WithBandDefaultRequestTTL(0))
+		require.NoError(t, err)
+		require.NotNil(t, pb.DefaultRequestTTL)
+		assert.Zero(t, *pb.DefaultRequestTTL)
+	})
+
+	t.Run("ShouldRejectNegativeRequestTTL", func(t *testing.T) {
+		t.Parallel()
+		pb, err := NewPriorityBandConfig(1, defaults, WithBandDefaultRequestTTL(-time.Second))
+		require.Error(t, err)
+		assert.Nil(t, pb)
+		assert.Contains(t, err.Error(), "defaultRequestTTL cannot be negative")
+	})
 }
 
 func TestConfig_Partition(t *testing.T) {
@@ -353,13 +376,18 @@ func TestConfig_Clone(t *testing.T) {
 
 	t.Run("ShouldDeepCopyDefaultPriorityBand", func(t *testing.T) {
 		t.Parallel()
-		original, err := NewConfig(newTestPriorityBandPolicyDefaults())
+		defaults := newTestPriorityBandPolicyDefaults()
+		defaultBand, err := NewPriorityBandConfig(0, defaults, WithBandDefaultRequestTTL(time.Minute))
+		require.NoError(t, err)
+		original, err := NewConfig(defaults, WithDefaultPriorityBand(defaultBand))
 		require.NoError(t, err)
 
 		clone := original.Clone()
 
 		require.NotSame(t, original.DefaultPriorityBand, clone.DefaultPriorityBand,
 			"Clone should have a distinct pointer for DefaultPriorityBand")
+		require.NotSame(t, original.DefaultPriorityBand.DefaultRequestTTL, clone.DefaultPriorityBand.DefaultRequestTTL,
+			"Clone should have a distinct pointer for DefaultRequestTTL")
 	})
 }
 

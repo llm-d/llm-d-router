@@ -19,10 +19,12 @@ package loader
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
@@ -108,6 +110,33 @@ func TestBuildRegistryConfig(t *testing.T) {
 				require.NotNil(t, cfg.DefaultPriorityBand, "DefaultPriorityBand should be configured")
 				assert.Equal(t, uint64(10), cfg.DefaultPriorityBand.MaxBytes,
 					"DefaultPriorityBand template MaxBytes should be translated")
+			},
+		},
+		{
+			name: "ShouldResolveBandRequestTTLs",
+			apiConfig: &configapi.FlowControlConfig{
+				DefaultPriorityBand: &configapi.PriorityBandConfig{
+					DefaultRequestTTL: &metav1.Duration{Duration: 10 * time.Second},
+				},
+				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+					DefaultRequestTTL: &metav1.Duration{Duration: 20 * time.Second},
+				},
+				PriorityBands: []configapi.PriorityBandConfig{
+					{Priority: 1},
+					{Priority: 2, DefaultRequestTTL: &metav1.Duration{}},
+					{Priority: 3, DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Second}},
+				},
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				assert.Nil(t, cfg.PriorityBands[1].DefaultRequestTTL)
+				require.NotNil(t, cfg.PriorityBands[2].DefaultRequestTTL)
+				assert.Zero(t, *cfg.PriorityBands[2].DefaultRequestTTL)
+				require.NotNil(t, cfg.PriorityBands[3].DefaultRequestTTL)
+				assert.Equal(t, 5*time.Second, *cfg.PriorityBands[3].DefaultRequestTTL)
+				require.NotNil(t, cfg.DefaultPriorityBand.DefaultRequestTTL)
+				assert.Equal(t, 10*time.Second, *cfg.DefaultPriorityBand.DefaultRequestTTL)
+				require.NotNil(t, cfg.DefaultNegativePriorityBand.DefaultRequestTTL)
+				assert.Equal(t, 20*time.Second, *cfg.DefaultNegativePriorityBand.DefaultRequestTTL)
 			},
 		},
 		{
@@ -255,6 +284,15 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 
 		// --- Validation Errors ---
+		{
+			name: "ShouldError_WithNegativePriorityBandRequestTTL",
+			apiConfig: &configapi.FlowControlConfig{
+				PriorityBands: []configapi.PriorityBandConfig{
+					{Priority: 1, DefaultRequestTTL: &metav1.Duration{Duration: -time.Second}},
+				},
+			},
+			expectedErr: "defaultRequestTTL cannot be negative",
+		},
 		{
 			name: "ShouldError_WithNegativeGlobalMaxBytes",
 			apiConfig: &configapi.FlowControlConfig{

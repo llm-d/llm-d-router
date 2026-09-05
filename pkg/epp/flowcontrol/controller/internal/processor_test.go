@@ -319,6 +319,24 @@ func TestProcessor(t *testing.T) {
 			require.NoError(t, err, "A successful dispatch should not produce an error")
 		})
 
+		t.Run("should evict item that expires in the enqueue buffer", func(t *testing.T) {
+			t.Parallel()
+			h := newTestHarness(t, testCleanupTick)
+			item := h.newTestItem("req-expired-before-enqueue", testFlow, testShortTTL)
+			q := h.addQueue(testFlow)
+
+			h.Start()
+			require.NoError(t, h.processor.Submit(item), "precondition: Submit should not fail")
+			h.clock.Step(testShortTTL)
+			h.Go()
+
+			outcome, err := h.waitForFinalization(item)
+			assert.Equal(t, types.QueueOutcomeEvictedTTL, outcome)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, types.ErrTTLExpired)
+			assert.Zero(t, q.Len(), "expired item must not enter the managed queue")
+		})
+
 		t.Run("should reject item when at capacity", func(t *testing.T) {
 			t.Parallel()
 			// --- ARRANGE ---
