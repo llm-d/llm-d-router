@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -96,6 +97,9 @@ type stepTiming struct {
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
+	if reqCtx.RevisionDecisionID == "" {
+		reqCtx.RevisionDecisionID = uuid.NewString()
+	}
 
 	timings := make([]stepTiming, len(p.steps))
 	started := map[string]bool{}

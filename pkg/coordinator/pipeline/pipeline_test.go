@@ -66,6 +66,21 @@ func TestPipeline_ExecutesStepsInOrder(t *testing.T) {
 	}
 }
 
+func TestPipeline_GeneratesRevisionDecisionID(t *testing.T) {
+	var decisionID string
+	p := New([]Step{&mockStep{name: "capture", fn: func(_ context.Context, rc *RequestContext) error {
+		decisionID = rc.RevisionDecisionID
+		return nil
+	}}})
+
+	if err := p.Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decisionID == "" {
+		t.Fatal("pipeline did not generate a revision decision ID")
+	}
+}
+
 func TestPipeline_AbortsOnError(t *testing.T) {
 	executed := map[string]bool{}
 	steps := []Step{

@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 var hopByHopHeaders = map[string]bool{
@@ -34,7 +36,8 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var internalForwardingHeaders = map[string]bool{
-	"epp-profile": true,
+	"epp-profile":                         true,
+	reqcommon.RevisionDecisionIDHeaderKey: true,
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding
@@ -44,9 +47,6 @@ var internalForwardingHeaders = map[string]bool{
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
 	out := make(map[string]string)
-	if rc.OriginalHeaders == nil {
-		return out
-	}
 	for key, vals := range rc.OriginalHeaders {
 		lower := strings.ToLower(key)
 		if hopByHopHeaders[lower] || internalForwardingHeaders[lower] || lower == "content-length" || lower == "host" || lower == "content-type" {
@@ -56,18 +56,22 @@ func (rc *RequestContext) ForwardedHeaders() map[string]string {
 			out[lower] = vals[0]
 		}
 	}
+	if rc.RevisionDecisionID != "" {
+		out[reqcommon.RevisionDecisionIDHeaderKey] = rc.RevisionDecisionID
+	}
 	return out
 }
 
 // RequestContext carries all state for a single request through the pipeline.
 type RequestContext struct {
-	RequestID       string
-	OriginalPath    string
-	OriginalHeaders http.Header
-	OriginalBody    []byte
-	Body            map[string]any
-	Model           string
-	Stream          bool
+	RequestID          string
+	RevisionDecisionID string
+	OriginalPath       string
+	OriginalHeaders    http.Header
+	OriginalBody       []byte
+	Body               map[string]any
+	Model              string
+	Stream             bool
 
 	// ParseDuration is the time the server spent reading and JSON-parsing the
 	// request body before the pipeline ran. Execute reports it as the first
