@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -28,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -76,8 +78,15 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	proxy := newDecodeProxy(logger, s.gwClient.Transport(), nil)
+	transport := instrumentedTransport(s.gwClient.Transport(), coordmetrics.UpstreamDecode)
+	proxy, out := newDecodeProxy(logger, transport, nil)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	if out.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, Cause: out.TransportErr}
+	}
+	if out.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: out.Status}
+	}
 	return nil
 }
 
@@ -88,17 +97,30 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
-	reqCtx.Body[reqcommon.FieldKVTransferParams] = s.kv.PrepareDecodeKVParams(ctx, reqCtx)
+	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
 	case gateway.FormatChatCompletions:
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		s.injectTokensField(reqCtx)
 	case gateway.FormatCompletions:
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
+	case gateway.FormatGenerate:
+		// The /inference/v1/generate engine reads transfer params only from
+		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
+		// so the decode worker never pulls the prefill KV over NIXL. Merge into
+		// the client's sampling_params to preserve max_tokens and other fields.
+		sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
+		if !ok {
+			sampling = map[string]any{}
+			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
+		}
+		setGenerateTransferParams(sampling, kvParams, nil)
 	}
 }
 

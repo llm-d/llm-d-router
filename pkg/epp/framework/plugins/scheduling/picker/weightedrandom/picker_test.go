@@ -33,11 +33,11 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 		tolerance      = 0.05 // Verify within tolerance ±5%
 	)
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
-	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
-	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil)
-	endpoint4 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod4"}}, nil, nil)
-	endpoint5 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod5"}}, nil, nil)
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
+	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil)
+	endpoint4 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod4"}}, nil, nil)
+	endpoint5 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod5"}}, nil, nil)
 
 	// A-Res algorithm uses U^(1/w) transformation which introduces statistical variance
 	// beyond simple proportional sampling. Generous tolerance is required to prevent
@@ -98,7 +98,7 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 			// Calculate expected probabilities based on scores
 			expectedProbabilities := make(map[string]float64)
 			for _, endpoint := range test.input {
-				podName := endpoint.GetMetadata().NamespacedName.Name
+				podName := endpoint.GetMetadata().ID.Name
 				if totalScore > 0 {
 					expectedProbabilities[podName] = endpoint.Score / totalScore
 				} else {
@@ -109,7 +109,7 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 			// Initialize selection counters for each pod
 			selectionCounts := make(map[string]int)
 			for _, endpoint := range test.input {
-				endpointName := endpoint.GetMetadata().NamespacedName.Name
+				endpointName := endpoint.GetMetadata().ID.Name
 				selectionCounts[endpointName] = 0
 			}
 
@@ -118,7 +118,7 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 				result := picker.Pick(context.Background(), test.input)
 
 				// Count selections for probability analysis
-				selectedEndpointName := result.TargetEndpoints[0].GetMetadata().NamespacedName.Name
+				selectedEndpointName := result.TargetEndpoints[0].GetMetadata().ID.Name
 				selectionCounts[selectedEndpointName]++
 			}
 

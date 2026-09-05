@@ -1,0 +1,102 @@
+# Topology-independent Envoy resources for the coordinator e2e suite: the Envoy
+# Deployment and its NodePort Service. Both are identical across EPP topologies,
+# so they live here and the suite applies this file regardless of
+# E2E_EPP_TOPOLOGY. What differs per topology is the routing ConfigMap (also
+# named "envoy", mounted by this Deployment), which lives in envoy.yaml
+# (single EPP) or envoy-3-epp.yaml (per-role EPPs).
+#
+# Placeholder ${NAMESPACE} is substituted by the suite before apply.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+  labels:
+    app: envoy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy
+  template:
+    metadata:
+      labels:
+        app: envoy
+      annotations:
+        prometheus.io/path: /stats/prometheus
+        prometheus.io/port: "19001"
+        prometheus.io/scrape: "true"
+    spec:
+      containers:
+        - name: envoy
+          image: docker.io/envoyproxy/envoy:distroless-v1.33.2
+          args:
+            - "--service-cluster"
+            - "${NAMESPACE}/inference-gateway"
+            - "--service-node"
+            - "$(ENVOY_POD_NAME)"
+            - "--log-level"
+            - "info"
+            - "--cpuset-threads"
+            - "--drain-strategy"
+            - "immediate"
+            - "--drain-time-s"
+            - "60"
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+          command:
+            - envoy
+          env:
+            - name: ENVOY_NS_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ENVOY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 8081
+              name: http-8081
+            - containerPort: 19001
+              name: metrics
+          readinessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /ready
+              port: 19001
+              scheme: HTTP
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: envoy
+            items:
+              - key: envoy.yaml
+                path: envoy.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: envoy
+  name: envoy
+spec:
+  ports:
+    - name: http-8081
+      port: 8081
+      protocol: TCP
+      targetPort: 8081
+      nodePort: 30080
+  selector:
+    app: envoy
+  type: NodePort

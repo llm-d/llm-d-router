@@ -23,16 +23,20 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
-	"github.com/llm-d/llm-d-router/pkg/telemetry"
 )
 
 type tracedScorer struct {
 	next KVBlockScorer
 }
 
-// NewTracedScorer wraps a KVBlockScorer and emits OpenTelemetry traces for Score operations.
-// This encapsulates all tracing logic for the KVBlockScorer interface.
+// NewTracedScorer wraps a KVBlockScorer and emits OpenTelemetry traces for
+// Score operations.
+//
+// Deprecated: Indexer.ScoreTokens scores through Indexer.MatchBlockKeys,
+// which emits its own span. The wrapper serves callers that hold a
+// KVBlockScorer themselves.
 func NewTracedScorer(next KVBlockScorer) KVBlockScorer {
 	return &tracedScorer{next: next}
 }
@@ -46,8 +50,8 @@ func (t *tracedScorer) Score(
 	keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 ) (map[string]float64, error) {
-	tracer := telemetry.Tracer("llm-d-kv-cache/pkg/kvcache")
-	_, span := tracer.Start(ctx, "llm_d.kv_cache.scorer.compute",
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "compute_scores",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

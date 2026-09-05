@@ -18,14 +18,19 @@ package scheduling
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
@@ -43,6 +48,9 @@ func TestSchedule(t *testing.T) {
 	prefixCacheScorer, err := schedprefix.New(context.Background(), schedprefix.PrefixCacheScorerPluginType, "approx-prefix-cache-producer")
 	assert.NoError(t, err)
 	loraAffinityScorer := loraaffinity.NewLoraAffinityScorer()
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{
+		kvCacheUtilizationScorer, queueingScorer, prefixCacheScorer, loraAffinityScorer,
+	})
 
 	defaultProfile := NewSchedulerProfile().
 		WithScorers(NewWeightedScorer(kvCacheUtilizationScorer, 1),
@@ -83,7 +91,7 @@ func TestSchedule(t *testing.T) {
 			// model being active, and has low KV cache.
 			input: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 					&fwkdl.Metrics{
 						WaitingQueueSize:    0,
 						KVCacheUsagePercent: 0.2,
@@ -94,7 +102,7 @@ func TestSchedule(t *testing.T) {
 						},
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
 					&fwkdl.Metrics{
 						WaitingQueueSize:    0,
 						KVCacheUsagePercent: 0.2,
@@ -105,7 +113,7 @@ func TestSchedule(t *testing.T) {
 						},
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}},
 					&fwkdl.Metrics{
 						WaitingQueueSize:    10,
 						KVCacheUsagePercent: 0.8,
@@ -121,7 +129,7 @@ func TestSchedule(t *testing.T) {
 						TargetEndpoints: []fwksched.Endpoint{
 							&fwksched.ScoredEndpoint{
 								Endpoint: fwksched.NewEndpoint(
-									&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}},
+									&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
 									&fwkdl.Metrics{
 										WaitingQueueSize:    0,
 										KVCacheUsagePercent: 0.2,
@@ -149,9 +157,44 @@ func TestSchedule(t *testing.T) {
 				t.Errorf("Unexpected error, got %v, want %v", err, test.err)
 			}
 
-			if diff := cmp.Diff(test.wantRes, got, cmp.Comparer(fwksched.ScoredEndpointComparer)); diff != "" {
+			// ScoredCandidates covers the whole candidate set in unspecified order and
+			// is asserted in TestSchedulerProfileScoredCandidates.
+			if diff := cmp.Diff(test.wantRes, got, cmp.Comparer(fwksched.ScoredEndpointComparer),
+				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
 			}
 		})
 	}
+}
+
+// Tests that a filter draining the candidate set surfaces a typed capacity
+// rejection from Schedule.
+func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
+	drainingFilter := &testPlugin{typedName: fwkplugin.TypedName{Type: "drain-filter", Name: "drain-filter"}} // empty FilterRes drops every endpoint
+
+	profile := NewSchedulerProfile().
+		WithFilters(drainingFilter).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	schedulerConfig := NewSchedulerConfig(single.NewSingleProfileHandler(), map[string]fwksched.SchedulerProfile{"default": profile})
+	scheduler := NewSchedulerWithConfig(schedulerConfig)
+
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "any-model",
+	}
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, nil),
+	}
+
+	result, err := scheduler.Schedule(context.Background(), req, input)
+	assert.Nil(t, result)
+	assert.Error(t, err)
+
+	var typedErr errcommon.Error
+	if !errors.As(err, &typedErr) {
+		t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
+	}
+	assert.Equal(t, errcommon.ResourceExhausted, typedErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }

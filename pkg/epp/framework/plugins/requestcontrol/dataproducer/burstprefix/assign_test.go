@@ -29,7 +29,7 @@ import (
 
 func testEndpoint(name string) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}},
 		fwkdl.NewMetrics(), fwkdl.NewAttributes())
 }
 
@@ -37,7 +37,7 @@ func assignedName(e *entry) string {
 	if e.assigned == nil {
 		return ""
 	}
-	return e.assigned.GetMetadata().NamespacedName.Name
+	return e.assigned.GetMetadata().ID.Name
 }
 
 // group builds n entries sharing one prompt prefix over the given replicas.

@@ -78,7 +78,7 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-1"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: [][]kvblock.BlockHash{blockKeys}})
 
-	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
+	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	require.Len(t, calls, 1)
 	assert.Equal(t, blockKeys, calls[0].keys)
@@ -109,7 +109,7 @@ func TestPreRequest_EmptyBlockKeys_NoAdd(t *testing.T) {
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-empty"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: nil})
 
-	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
+	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
 }
@@ -139,7 +139,7 @@ func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
 			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}},
 		},
 	}
-	p.PreRequest(ctx, req, result)
+	_ = p.PreRequest(ctx, req, result)
 
 	require.Len(t, calls, 2)
 	assert.Equal(t, "10.0.0.1:8080", calls[0].entries[0].PodIdentifier)
@@ -169,7 +169,7 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	p.pluginState.Write(req.RequestID, blockKeysStateKey,
 		&blockKeysState{perPromptKeys: [][]kvblock.BlockHash{{0xDD}}})
 
-	p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
+	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
 }

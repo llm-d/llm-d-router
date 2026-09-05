@@ -91,7 +91,7 @@ func TestPolicyType(t *testing.T) {
 
 func TestComputeLimit_NoBands(t *testing.T) {
 	p := newTestPolicy()
-	got := p.ComputeLimit(context.Background(), 0.9, nil)
+	got := computeLimits(p, 0.9, nil)
 	if len(got) != 0 {
 		t.Errorf("expected empty ceilings, got %v", got)
 	}
@@ -100,7 +100,7 @@ func TestComputeLimit_NoBands(t *testing.T) {
 func TestComputeLimit_SingleBand(t *testing.T) {
 	p := newTestPolicy()
 	for _, sat := range []float64{0.0, 0.5, 0.99, 1.0} {
-		got := p.ComputeLimit(context.Background(), sat, []int{100})
+		got := computeLimits(p, sat, []int{100})
 		if len(got) != 1 || got[0] != 1.0 {
 			t.Errorf("saturation=%.2f single-band ceilings=%v, want [1.0]", sat, got)
 		}
@@ -111,7 +111,7 @@ func TestComputeLimit_CriticalBandNeverGated(t *testing.T) {
 	p := newTestPolicy()
 	priorities := []int{100, 0, -50}
 	for _, sat := range []float64{0.0, 0.3, 0.5, 0.7, 0.99, 1.0, 1.5} {
-		got := p.ComputeLimit(context.Background(), sat, priorities)
+		got := computeLimits(p, sat, priorities)
 		if got[0] != 1.0 {
 			t.Errorf("saturation=%.2f: ceilings[0]=%v, want 1.0", sat, got[0])
 		}
@@ -123,7 +123,7 @@ func TestComputeLimit_BelowCeilingAllOpen(t *testing.T) {
 	//   [1.0, 1-0.15=0.85, 1-0.30=0.70].
 	// Saturation is below all ceilings, so every band returns 1.0.
 	p := newTestPolicy()
-	got := p.ComputeLimit(context.Background(), 0.3, []int{100, 0, -50})
+	got := computeLimits(p, 0.3, []int{100, 0, -50})
 	for i, c := range got {
 		if c != 1.0 {
 			t.Errorf("band %d: got %v, want 1.0 (below ceiling)", i, c)
@@ -134,7 +134,7 @@ func TestComputeLimit_BelowCeilingAllOpen(t *testing.T) {
 func TestComputeLimit_FullySaturated(t *testing.T) {
 	// At saturation>=1.0, non-critical bands hard-block (ceiling=0.0).
 	p := newTestPolicy()
-	got := p.ComputeLimit(context.Background(), 1.0, []int{100, 0, -50})
+	got := computeLimits(p, 1.0, []int{100, 0, -50})
 	if got[0] != 1.0 {
 		t.Errorf("ceilings[0]=%v, want 1.0 (critical band)", got[0])
 	}
@@ -152,7 +152,7 @@ func TestComputeLimit_ReflectiveFormula(t *testing.T) {
 	// Band 1 is below its ceiling (open), bands 2 and 3 are at/over their
 	// ceilings (gated). This exercises both branches of the formula.
 	p := newTestPolicy()
-	got := p.ComputeLimit(context.Background(), 0.7, []int{100, 50, 0, -50})
+	got := computeLimits(p, 0.7, []int{100, 50, 0, -50})
 
 	if got[0] != 1.0 {
 		t.Errorf("band 0: got %v, want 1.0 (critical)", got[0])
@@ -175,7 +175,7 @@ func TestComputeLimit_Alternation(t *testing.T) {
 	p := newTestPolicy()
 	want := []float64{0.0, 1.0, 0.0, 1.0, 0.0, 1.0}
 	for i, w := range want {
-		got := p.ComputeLimit(context.Background(), 0.7, []int{100, -50})
+		got := computeLimits(p, 0.7, []int{100, -50})
 		if got[0] != 1.0 {
 			t.Errorf("call %d: critical band gated unexpectedly: %v", i, got[0])
 		}
@@ -191,7 +191,7 @@ func TestComputeLimit_AlternationLongerPeriod(t *testing.T) {
 	p := newTestPolicy()
 	want := []float64{0.0, 0.0, 1.0, 0.0, 0.0, 1.0}
 	for i, w := range want {
-		got := p.ComputeLimit(context.Background(), 0.75, []int{100, -50})
+		got := computeLimits(p, 0.75, []int{100, -50})
 		if got[1] != w {
 			t.Errorf("call %d: ceilings[1]=%v, want %v (period=3)", i, got[1], w)
 		}
@@ -202,8 +202,8 @@ func TestComputeLimit_GrowingPriorities(t *testing.T) {
 	// The active priority domain can expand mid-flight without panic and
 	// band 0 stays ungated.
 	p := newTestPolicy()
-	_ = p.ComputeLimit(context.Background(), 0.7, []int{100, -50})
-	got := p.ComputeLimit(context.Background(), 0.7, []int{100, 50, 0, -50})
+	_ = computeLimits(p, 0.7, []int{100, -50})
+	got := computeLimits(p, 0.7, []int{100, 50, 0, -50})
 	if len(got) != 4 {
 		t.Fatalf("len(ceilings)=%d, want 4", len(got))
 	}
@@ -229,14 +229,14 @@ func TestComputeLimit_NoStarvationUnderRisingSaturation(t *testing.T) {
 	priorities := []int{100, 0, -50}
 
 	for i := 0; i < 3; i++ {
-		p.ComputeLimit(context.Background(), 0.6, priorities)
+		computeLimits(p, 0.6, priorities)
 	}
 
 	band1Open := 0
 	band2Open := 0
 	const iterations = 100
 	for i := 0; i < iterations; i++ {
-		got := p.ComputeLimit(context.Background(), 0.7, priorities)
+		got := computeLimits(p, 0.7, priorities)
 		if got[1] == 1.0 {
 			band1Open++
 		}
@@ -258,4 +258,15 @@ func TestComputeLimit_NoStarvationUnderRisingSaturation(t *testing.T) {
 	if band2Open == 0 {
 		t.Errorf("band 2 opened %d times over %d calls; expected non-zero (starvation regression)", band2Open, iterations)
 	}
+}
+
+// computeLimits invokes ComputeLimit with a framework-style output buffer (pre-filled with 1.0,
+// sized to priorities) and returns the filled ceilings.
+func computeLimits(p *policy, saturation float64, priorities []int) []float64 {
+	ceilings := make([]float64, len(priorities))
+	for i := range ceilings {
+		ceilings[i] = 1.0
+	}
+	p.ComputeLimit(context.Background(), saturation, priorities, ceilings)
+	return ceilings
 }

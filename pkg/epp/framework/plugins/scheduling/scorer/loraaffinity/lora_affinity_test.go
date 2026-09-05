@@ -39,7 +39,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-1": 1},
 						WaitingModels:   map[string]int{},
@@ -55,7 +55,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-2": 2},
 						WaitingModels:   map[string]int{"active-model-1": 1},
@@ -71,14 +71,14 @@ func TestLoraAffinityScorer(t *testing.T) {
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-2": 2},
 						WaitingModels:   map[string]int{"active-model-3": 1},
 						MaxActiveModels: 2,
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{},
 						WaitingModels:   map[string]int{},
@@ -95,35 +95,35 @@ func TestLoraAffinityScorer(t *testing.T) {
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-1": 1},
 						WaitingModels:   map[string]int{},
 						MaxActiveModels: 5,
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-2": 4},
 						WaitingModels:   map[string]int{"active-model-1": 1},
 						MaxActiveModels: 5,
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-2": 1},
 						WaitingModels:   map[string]int{},
 						MaxActiveModels: 2,
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod4"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod4"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-3": 1},
 						WaitingModels:   map[string]int{"active-model-1": 1},
 						MaxActiveModels: 2,
 					}, nil),
 				fwksched.NewEndpoint(
-					&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod5"}},
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod5"}},
 					&fwkdl.Metrics{
 						ActiveModels:    map[string]int{"active-model-4": 1, "active-model-5": 1},
 						WaitingModels:   map[string]int{},
@@ -152,11 +152,11 @@ func TestLoraAffinityScorer(t *testing.T) {
 			scores := scorer.Score(context.Background(), test.request, test.endpoints)
 
 			for _, endpoint := range test.endpoints {
-				expectedScore, ok := test.expectedScoresEndpoint[endpoint.GetMetadata().NamespacedName.Name]
+				expectedScore, ok := test.expectedScoresEndpoint[endpoint.GetMetadata().ID.Name]
 				if !ok {
-					t.Fatalf("Expected score not found for endpoint %s in test %s", endpoint.GetMetadata().NamespacedName, test.name)
+					t.Fatalf("Expected score not found for endpoint %s in test %s", endpoint.GetMetadata().ID, test.name)
 				}
-				assert.InDelta(t, expectedScore, scores[endpoint], 0.0001, "Endpoint %s should have score %f", endpoint.GetMetadata().NamespacedName.Name, expectedScore)
+				assert.InDelta(t, expectedScore, scores[endpoint], 0.0001, "Endpoint %s should have score %f", endpoint.GetMetadata().ID.Name, expectedScore)
 			}
 			assert.Len(t, scores, len(test.expectedScoresEndpoint), "Number of scored endpoints should match expected")
 		})

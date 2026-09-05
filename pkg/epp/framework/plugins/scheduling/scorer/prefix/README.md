@@ -58,3 +58,7 @@ plugins:
 
 *   **Tuning `matchLengthScaleTokens`**: This should be set to reflect your workload. A good rule of thumb is to set it to the **P95 prompt length** of your typical requests. Setting it too high (e.g., to the model's maximum limit when actual requests are short) will compress the score range and make the scorer less effective.
 *   The scorer is stateless; it does not manage cache state or hash prompts itself. It relies entirely on the data producer.
+
+## Multi-cluster support
+
+`multicluster-prefix-cache-scorer` is the cluster-scoped variant. Over cluster-endpoints it homes a repeated prefix to the cluster that served it, scoring from the per-cluster match info produced by `multicluster-approx-prefix-cache-producer`.

@@ -18,18 +18,36 @@ package tokenizer
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -42,23 +60,29 @@ func newHTTPRenderer(t *testing.T, srv *httptest.Server) *vllmHTTPRenderer {
 	return r
 }
 
-// httpFixture mimics vLLM's /render endpoints and captures request bodies.
+// httpFixture mimics vLLM's /render endpoints and captures request bodies
+// and Authorization headers.
 func httpFixture(t *testing.T, completionsResp []renderResponse, chatResp renderResponse) (*httptest.Server, *httpCaptured) {
 	t.Helper()
 	cap := &httpCaptured{}
 	mux := http.NewServeMux()
 	mux.HandleFunc(completionsRenderPath, func(w http.ResponseWriter, r *http.Request) {
 		cap.completions, _ = io.ReadAll(r.Body)
+		cap.completionsAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(completionsResp)
 	})
 	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, r *http.Request) {
 		cap.chat, _ = io.ReadAll(r.Body)
+		cap.chatAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(chatResp)
 	})
 	return httptest.NewServer(mux), cap
 }
 
-type httpCaptured struct{ completions, chat []byte }
+type httpCaptured struct {
+	completions, chat         []byte
+	completionsAuth, chatAuth string
+}
 
 func TestVLLMHTTPRenderer_Render(t *testing.T) {
 	srv, cap := httpFixture(t,
@@ -96,8 +120,8 @@ func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.completions, &sent))
@@ -229,14 +253,159 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 
 	p := newTestPlugin(newHTTPRenderer(t, srv))
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedPrompt)
-	assert.Equal(t, []uint32{9, 10}, req.Body.TokenizedPrompt.PerPromptTokens[0])
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{9, 10}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.chat, &sent))
 	assert.Equal(t, "kept", sent["dummy"])
 	assert.Equal(t, map[string]any{"effort": "high"}, sent["reasoning"])
 	assert.Equal(t, testHTTPModel, sent["model"])
+}
+
+// TestProduce_MessagesVLLMHTTPFullAgenticTurn covers the complete production
+// path from a parsed Anthropic request through the rebuilt OpenAI-shaped
+// payload sent to vLLM's chat render endpoint.
+func TestProduce_MessagesVLLMHTTPFullAgenticTurn(t *testing.T) {
+	srv, captured := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{11, 12, 13}})
+	defer srv.Close()
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			Messages: &fwkrh.MessagesRequest{
+				System: fwkrh.AnthropicContent{Raw: "You can use tools."},
+				Tools: []fwkrh.AnthropicTool{{
+					Name:        "get_weather",
+					Description: "Get the weather",
+					InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+				}},
+				Messages: []fwkrh.AnthropicMessage{
+					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Weather in Zurich?"}},
+					{Role: "assistant", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "thinking", Thinking: "I should check."},
+						{Type: "tool_use", ID: "toolu_01", Name: "get_weather", Input: json.RawMessage(`{"city":"Zurich"}`)},
+					}}},
+					{Role: "user", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
+						{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"}},
+					}}},
+				},
+			},
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{11, 12, 13}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+
+	var sent struct {
+		Model    string           `json:"model"`
+		Messages []map[string]any `json:"messages"`
+		Tools    []map[string]any `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(captured.chat, &sent))
+	assert.Equal(t, testHTTPModel, sent.Model)
+	require.Len(t, sent.Tools, 1)
+	assert.Equal(t, "function", sent.Tools[0]["type"])
+	function, ok := sent.Tools[0]["function"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "get_weather", function["name"])
+	parameters, ok := function["parameters"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", parameters["type"])
+
+	require.Len(t, sent.Messages, 4)
+	assert.Equal(t, "system", sent.Messages[0]["role"])
+	assert.Equal(t, "user", sent.Messages[1]["role"])
+	assistant := sent.Messages[2]
+	assert.Equal(t, "assistant", assistant["role"])
+	assert.NotContains(t, assistant, "content")
+	assert.Equal(t, "I should check.", assistant["reasoning"])
+	toolCalls, ok := assistant["tool_calls"].([]any)
+	require.True(t, ok)
+	require.Len(t, toolCalls, 1)
+	toolCall, ok := toolCalls[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "toolu_01", toolCall["id"])
+	toolFunction, ok := toolCall["function"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, `{"city": "Zurich"}`, toolFunction["arguments"])
+
+	toolResult := sent.Messages[3]
+	assert.Equal(t, "tool", toolResult["role"])
+	assert.Equal(t, "toolu_01", toolResult["tool_call_id"])
+	assert.Equal(t, "Sunny, 22C", toolResult["content"])
+}
+
+func TestProduce_VLLMHTTPForwardsAuthorization(t *testing.T) {
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{1}}}, renderResponse{TokenIDs: []uint32{2}})
+	defer srv.Close()
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+
+	authReq := func() *scheduling.InferenceRequest {
+		return &scheduling.InferenceRequest{
+			Headers: map[string]string{"authorization": "Bearer secret-token"},
+			Body: &fwkrh.InferenceRequestBody{
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+				},
+			},
+		}
+	}
+
+	require.NoError(t, p.Produce(context.Background(), authReq(), nil))
+	assert.Equal(t, "Bearer secret-token", cap.chatAuth)
+
+	completions := authReq()
+	completions.Body = &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
+	}
+	require.NoError(t, p.Produce(context.Background(), completions, nil))
+	assert.Equal(t, "Bearer secret-token", cap.completionsAuth)
+
+	cap.chatAuth = ""
+	require.NoError(t, p.Produce(context.Background(), &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+			},
+		},
+	}, nil))
+	assert.Empty(t, cap.chatAuth, "request without Authorization must not send one")
+}
+
+func TestRenderBackend_WarmupStopsOnAuthRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantsRetry bool
+	}{
+		{name: "401 gives up", status: http.StatusUnauthorized},
+		{name: "403 gives up", status: http.StatusForbidden},
+		{name: "503 retries", status: http.StatusServiceUnavailable, wantsRetry: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), warmupRetryInterval/2)
+			defer cancel()
+			renderBackend{tk: newHTTPRenderer(t, srv)}.warmup(ctx)
+
+			assert.Equal(t, 1, calls)
+			if tc.wantsRetry {
+				assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "non-auth failure must keep retrying until ctx ends")
+			} else {
+				assert.NoError(t, ctx.Err(), "auth failure must return before the retry interval")
+			}
+		})
+	}
 }
 
 func TestVLLMHTTPRenderer_RenderMultiPrompt(t *testing.T) {
@@ -269,7 +438,7 @@ func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
 func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	params := `{
 		"modelName": "m",
-		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"},
+		"estimate": {},
 		"vllm": {"url": "http://localhost:8000"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
@@ -277,6 +446,20 @@ func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "only one of")
+}
+
+// The plugin has no UDS backend, so a config still carrying its parameter is
+// rejected by strict decoding rather than silently ignored.
+func TestPluginFactory_RejectsUDSTokenizerConfig(t *testing.T) {
+	params := `{
+		"modelName": "m",
+		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"}
+	}`
+	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
+	require.Error(t, err)
+	assert.Nil(t, p)
+	assert.Contains(t, err.Error(), `unknown field "udsTokenizerConfig"`)
 }
 
 func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
@@ -289,4 +472,258 @@ func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "invalid 'timeout'")
+}
+
+// The render transport must inject W3C trace context so the vLLM pod shares
+// the same trace id as the EPP request.
+func TestVLLMHTTPRenderer_RenderPropagatesTraceContext(t *testing.T) {
+	prevProp := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	t.Cleanup(func() { otel.SetTextMapPropagator(prevProp) })
+
+	var gotTraceparent string
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		close(done)
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{1}}})
+	}))
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	require.NoError(t, err)
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	require.NoError(t, err)
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	_, _, err = r.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	<-done
+
+	if gotTraceparent == "" {
+		t.Fatal("expected traceparent header to be injected into outbound render request, got none")
+	}
+	if !strings.Contains(gotTraceparent, traceID.String()) {
+		t.Fatalf("expected outbound traceparent to carry trace ID %s, got %q", traceID, gotTraceparent)
+	}
+}
+
+// TestVLLMHTTPRenderer_ChatTimeoutRawMessages asserts that pre-marshaled
+// (Anthropic-rebuilt) messages with array content still select the multimodal
+// timeout.
+func TestVLLMHTTPRenderer_ChatTimeoutRawMessages(t *testing.T) {
+	r := &vllmHTTPRenderer{timeout: 5 * time.Second, mmTimeout: 30 * time.Second}
+
+	textOnly := fwkrh.PayloadMap{"messages": []any{
+		json.RawMessage(`{"role":"user","content":"hi"}`),
+	}}
+	assert.Equal(t, 5*time.Second, r.chatTimeout(textOnly))
+
+	multimodal := fwkrh.PayloadMap{"messages": []any{
+		json.RawMessage(`{"role":"user","content":"hi"}`),
+		json.RawMessage(`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}`),
+	}}
+	assert.Equal(t, 30*time.Second, r.chatTimeout(multimodal))
+}
+
+func TestVLLMHTTPRenderer_TLSInsecureSkipVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{1, 2}}})
+	}))
+	defer srv.Close()
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                srv.URL,
+		InsecureSkipVerify: true,
+	}, testHTTPModel)
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{1, 2}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSWithCACert(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{3, 4}}})
+	}))
+	defer srv.Close()
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caFile, encodeCertPEM(srv.Certificate()), 0o600))
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:        srv.URL,
+		CACertPath: caFile,
+	}, testHTTPModel)
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{3, 4}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSWithMTLS(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{5, 6}}})
+	}))
+	srv.TLS = &tls.Config{
+		ClientAuth: tls.RequireAnyClientCert,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	clientCert, clientKey := generateTestCert(t, dir)
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                srv.URL,
+		InsecureSkipVerify: true,
+		ClientCertPath:     clientCert,
+		ClientKeyPath:      clientKey,
+	}, testHTTPModel)
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{5, 6}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSBadCACertPath(t *testing.T) {
+	_, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:        "https://localhost:9999",
+		CACertPath: "/nonexistent/ca.pem",
+	}, testHTTPModel)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading render CA cert")
+}
+
+func TestVLLMHTTPRenderer_TLSBadClientCert(t *testing.T) {
+	_, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:            "https://localhost:9999",
+		ClientCertPath: "/nonexistent/client.pem",
+		ClientKeyPath:  "/nonexistent/client.key",
+	}, testHTTPModel)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading render client cert")
+}
+
+// encodeCertPEM encodes an x509 certificate as PEM.
+func encodeCertPEM(cert *x509.Certificate) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+}
+
+// generateTestCert creates a self-signed cert/key pair for mTLS testing.
+func generateTestCert(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	certPath = filepath.Join(dir, "client.pem")
+	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600))
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	keyPath = filepath.Join(dir, "client.key")
+	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
+	return certPath, keyPath
+}
+
+// TestBuildChatRenderRequest_MessageFields asserts the wire shape of rebuilt
+// messages: tool_calls and reasoning ride along, tool messages carry
+// tool_call_id, and content is omitted when absent.
+func TestBuildChatRenderRequest_MessageFields(t *testing.T) {
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "assistant", Content: nil, Reasoning: "hmm", ToolCalls: []any{map[string]any{
+				"id":   "t1",
+				"type": "function",
+				"function": map[string]any{
+					"name":      "run",
+					"arguments": `{"cmd": "ls"}`,
+				},
+			}}},
+			{Role: "tool", ToolCallID: "t1", Content: &tokenizerTypes.Content{Raw: "out"}},
+		},
+	}
+
+	data, err := json.Marshal(buildChatRenderRequest(req))
+	require.NoError(t, err)
+
+	var msgs []map[string]any
+	require.NoError(t, json.Unmarshal(data, &struct {
+		Messages *[]map[string]any `json:"messages"`
+	}{&msgs}))
+	require.Len(t, msgs, 2)
+
+	assert.NotContains(t, msgs[0], "content", "assistant with only tool_calls omits content")
+	assert.Equal(t, "hmm", msgs[0]["reasoning"])
+	assert.Equal(t, []any{map[string]any{
+		"id":   "t1",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "run",
+			"arguments": `{"cmd": "ls"}`,
+		},
+	}}, msgs[0]["tool_calls"])
+
+	assert.Equal(t, "tool", msgs[1]["role"])
+	assert.Equal(t, "t1", msgs[1]["tool_call_id"])
+	assert.Equal(t, "out", msgs[1]["content"])
+}
+
+// TestVLLMHTTPRenderer_RenderSpanName asserts the outbound render span is
+// named after the render route instead of the transport default "HTTP POST".
+func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		_ = tp.Shutdown(context.Background())
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"token_ids":[1]}]`))
+	}))
+	defer srv.Close()
+
+	// The transport resolves its tracer from the global provider at
+	// construction, so the renderer must be built after the swap above.
+	r := newHTTPRenderer(t, srv)
+
+	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
+	_, _, err := r.Render(ctx, fwkrh.PayloadMap{"prompt": "hello"})
+	span.End()
+	require.NoError(t, err)
+
+	var clientSpans []tracetest.SpanStub
+	for _, s := range exporter.GetSpans() {
+		if s.SpanKind == trace.SpanKindClient {
+			clientSpans = append(clientSpans, s)
+		}
+	}
+	require.NotEmpty(t, clientSpans, "expected a client span for the render call")
+	for _, s := range clientSpans {
+		assert.Equal(t, "tokenize_render /v1/completions/render", s.Name)
+	}
 }

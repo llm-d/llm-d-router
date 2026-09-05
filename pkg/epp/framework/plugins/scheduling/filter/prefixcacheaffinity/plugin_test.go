@@ -35,17 +35,17 @@ import (
 // (prefixMatch out of 100 total blocks), predicted TTFT, and in-flight tokens.
 func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: "default"},
+		ID: types.NamespacedName{Name: name, Namespace: "default"},
 	}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if prefixMatch >= 0 {
-		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
 	}
 	if ttft >= 0 {
-		ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(), attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
+		ep.Put(attrlatency.LatencyPredictionInfoDataKey, attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
 	}
 	if tokens >= 0 {
-		ep.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: tokens})
+		ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens})
 	}
 	return ep
 }
@@ -129,7 +129,7 @@ func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "throughput-derived TTFT within threshold should NOT break stickiness")
-	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "a", result[0].GetMetadata().ID.Name)
 }
 
 func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
@@ -140,7 +140,7 @@ func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "maxTTFTPenaltyMs=0 should NOT break stickiness")
-	assert.Equal(t, "a", result[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "a", result[0].GetMetadata().ID.Name)
 }
 
 func TestFilter_ExplorationProbability(t *testing.T) {

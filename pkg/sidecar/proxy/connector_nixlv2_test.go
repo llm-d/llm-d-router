@@ -1039,8 +1039,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	// 2P2D DP=16 multi-pod fan-out: each leg's remote_hosts is the opposite
 	// side's pod IPs (prefill leg -> decode IPs, decode leg -> prefill IPs).
 	It("parallel-dispatch 2P2D DP=EP=16 fans out remote_hosts with opposite host lists per leg", func() {
-		prefillHosts := []string{"10.0.0.1", "10.0.0.2"}
-		decodeHosts := []string{"10.0.1.1", "10.0.1.2"}
+		prefillHosts := []string{testPrefillHostIP1, testPrefillHostIP2}
+		decodeHosts := []string{testDecodeHostIP, testDecodeHostIP2}
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 			c.MoRIIODPSize = 16
@@ -1055,13 +1055,13 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		By("prefill leg fans out to the DECODE-side host list")
 		pkv := kvParams(env.prefillHandler, 0)
-		Expect(pkv["remote_hosts"]).To(Equal([]any{"10.0.1.1", "10.0.1.2"}))
+		Expect(pkv["remote_hosts"]).To(Equal([]any{testDecodeHostIP, testDecodeHostIP2}))
 		Expect(pkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
 		Expect(pkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 16)))
 
 		By("decode leg fans out to the PREFILL-side host list")
 		dkv := kvParams(env.decodeHandler, 0)
-		Expect(dkv["remote_hosts"]).To(Equal([]any{"10.0.0.1", "10.0.0.2"}))
+		Expect(dkv["remote_hosts"]).To(Equal([]any{testPrefillHostIP1, testPrefillHostIP2}))
 		Expect(dkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
 		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, true))
 
@@ -1134,6 +1134,22 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(pkv).ToNot(HaveKey("remote_hosts"))
 
 		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+	})
+
+	// Standard READ-mode parity: DP-rank propagation is a MoRI-IO WRITE-mode
+	// concern. With WRITE mode off, neither the decode body's remote_dp_rank /
+	// remote_dp_rank_override nor the x-data-parallel-rank header may be injected,
+	// even when a DP size > 1 is configured.
+	It("omits DP-rank body fields and header in standard NIXLv2 mode even with DP size set", func() {
+		testInfo.proxy.config.MoRIIODPSize = 8
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+
+		dkv, _ := testInfo.decodeHandler.CompletionRequests[0][requestFieldKVTransferParams].(map[string]any)
+		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRank))
+		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRankOverride))
+
 		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
 	})
 })

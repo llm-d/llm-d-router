@@ -34,6 +34,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
 
@@ -44,11 +47,14 @@ import (
 // RunnableGroup's Ready() gate firing once the plugin loads its initial file,
 // and (c) the health and ext_proc gRPC servers binding their ports.
 func TestRunWithFileDiscovery_Smoke(t *testing.T) {
+	fwkplugin.Register(localsyncer.LocalSyncerType, fwkplugin.StabilityBeta, localsyncer.LocalSyncerFactory)
+
 	dir := t.TempDir()
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
 	require.NoError(t, os.WriteFile(endpointsPath, []byte(
 		"endpoints:\n"+
 			"  - name: stub\n"+
+			"    namespace: test-ns\n"+
 			"    address: 127.0.0.1\n"+
 			"    port: \"19999\"\n"), 0o644))
 
@@ -68,12 +74,18 @@ plugins:
     type: metrics-data-source
   - name: metrics-extractor
     type: core-metrics-extractor
+  - name: local-syncer
+    type: local-syncer
+  - name: inflight-load-producer
+    type: inflight-load-producer
 schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: random-picker
 dataLayer:
   injectDefaults: false
+  crossReplicaSyncerPluginRef: local-syncer
+  crossReplicaSyncInterval: 5ms
   discovery:
     pluginRef: file-discovery
   sources:
@@ -107,6 +119,7 @@ dataLayer:
 	require.NoError(t, err)
 	require.NotNil(t, rawConfig.DataLayer)
 	require.NotNil(t, rawConfig.DataLayer.Discovery)
+	require.NotNil(t, rawConfig.DataLayer.Discovery.Endpoints)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
@@ -182,6 +195,13 @@ dataLayer:
 	assert.Equal(t, "file-discovery", disc.TypedName().Type)
 	assert.Equal(t, "file-discovery", disc.TypedName().Name)
 
+	syncer, ok := r.PluginHandle.Plugin("local-syncer").(fwkdl.CrossReplicaSyncer)
+	require.True(t, ok)
+	require.Eventually(t, func() bool {
+		_, found, err := syncer.Get(ctx, fwkdl.StateKey("inflight:inflight-load-producer"), "test-ns/stub")
+		return err == nil && found
+	}, 2*time.Second, 10*time.Millisecond, "file-discovery endpoints should publish cross-replica state")
+
 	cancel()
 	select {
 	case err := <-runErr:
@@ -212,4 +232,114 @@ func checkHealthServing(addr string) bool {
 	defer cancel()
 	resp, err := healthPb.NewHealthClient(cc).Check(ctx, &healthPb.HealthCheckRequest{})
 	return err == nil && resp.GetStatus() == healthPb.HealthCheckResponse_SERVING
+}
+
+type dummyAlphaPlugin struct {
+	name       string
+	pluginType string
+}
+
+func (p *dummyAlphaPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: p.pluginType, Name: p.name}
+}
+
+func TestRunWithFileDiscovery_AlphaPluginBlockedByDefault(t *testing.T) {
+	const alphaType = "alpha-test-plugin"
+	fwkplugin.Register(alphaType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &dummyAlphaPlugin{name: name, pluginType: alphaType}, nil
+	})
+
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: alpha-instance
+    type: %s
+dataLayer:
+  injectDefaults: false
+  discovery:
+    pluginRef: file-discovery
+`, endpointsPath, alphaType)
+
+	opts := runserver.NewOptions()
+	opts.AllowExperimentalPlugins = false
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	err = r.runWithFileDiscovery(ctx, opts, rawConfig)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
+}
+
+func TestRunWithFileDiscovery_AlphaPluginAllowedWithFlag(t *testing.T) {
+	const alphaType = "alpha-test-plugin-allowed"
+	fwkplugin.Register(alphaType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &dummyAlphaPlugin{name: name, pluginType: alphaType}, nil
+	})
+
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: alpha-instance
+    type: %s
+  - name: metrics-source
+    type: metrics-data-source
+  - name: metrics-extractor
+    type: core-metrics-extractor
+dataLayer:
+  injectDefaults: false
+  discovery:
+    pluginRef: file-discovery
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+`, endpointsPath, alphaType)
+
+	opts := runserver.NewOptions()
+	opts.AllowExperimentalPlugins = true
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	// With AllowExperimentalPlugins = true, runWithFileDiscovery should pass the stability check.
+	// We run it asynchronously and verify that it does NOT fail immediately with a stability error.
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+
+	select {
+	case err := <-runErr:
+		require.NoError(t, err, "runWithFileDiscovery should not fail on stability check when flag is enabled")
+	case <-time.After(300 * time.Millisecond):
+		// Clean shutdown
+		cancel()
+	}
 }

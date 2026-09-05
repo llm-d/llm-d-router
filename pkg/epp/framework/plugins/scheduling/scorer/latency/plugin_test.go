@@ -29,7 +29,7 @@ import (
 
 func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningReqs int) fwksched.Endpoint {
 	return fwksched.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: name}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}},
 		&fwkdl.Metrics{
 			KVCacheUsagePercent: kvCache,
 			WaitingQueueSize:    queueSize,
@@ -40,7 +40,7 @@ func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningR
 }
 
 func setLatencyPrediction(ep fwksched.Endpoint, ttftValid, tpotValid bool, ttftHeadroom, tpotHeadroom, ttft, tpot float64) {
-	ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
+	ep.Put(attrlatency.LatencyPredictionInfoDataKey,
 		attrlatency.NewLatencyPredictionInfo(ttftValid, tpotValid, ttftHeadroom, tpotHeadroom, ttft, tpot, 0))
 }
 
@@ -140,9 +140,9 @@ func TestScoreIdlePodPreference(t *testing.T) {
 
 	// Same predictions — both negative, same deficit.
 	// Use dispatch count for idle detection (matches EPP internal queue).
-	epBusy.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
+	epBusy.Put(attrlatency.LatencyPredictionInfoDataKey,
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 5))
-	epIdle.Put(attrlatency.LatencyPredictionInfoDataKey.String(),
+	epIdle.Put(attrlatency.LatencyPredictionInfoDataKey,
 		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
 
 	endpoints := []fwksched.Endpoint{epBusy, epIdle}
@@ -179,7 +179,7 @@ func TestScoreHierarchicalBuckets(t *testing.T) {
 	// All should have non-zero scores (they're all in the negative tier).
 	for _, ep := range endpoints {
 		if scores[ep] == 0 {
-			t.Errorf("%s should have non-zero score", ep.GetMetadata().NamespacedName.Name)
+			t.Errorf("%s should have non-zero score", ep.GetMetadata().ID.Name)
 		}
 	}
 

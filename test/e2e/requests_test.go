@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 func newOpenAIClient() *openai.Client {
@@ -115,6 +118,27 @@ func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 	gomega.Expect(resp.Choices[0].Text).Should(gomega.Equal(prompt))
 
 	return extractInferenceHeaders(httpResp)
+}
+
+// runCompletionWithModelRewrite POSTs a raw completion request carrying incomingModel in the
+// body. When targetModel is non-empty it is sent as the x-llm-d-model-name-rewrite header,
+// forcing EPP to rewrite the body's model field before forwarding. incomingModel is not a
+// name the model server recognizes on its own, so a 200 response with the rewritten model
+// echoed back proves EPP actually rewrote the body rather than passing it through.
+func runCompletionWithModelRewrite(prompt, incomingModel, targetModel string) string {
+	body := fmt.Sprintf(`{"model":%q,"prompt":%q,"max_tokens":10}`, incomingModel, prompt)
+	headers := map[string]string{}
+	if targetModel != "" {
+		headers[metadata.ModelNameRewriteKey] = targetModel
+	}
+	_, _, respBody := doPost("/v1/completions", body, headers)
+
+	var resp struct {
+		Model string `json:"model"`
+	}
+	gomega.Expect(json.Unmarshal(respBody, &resp)).ShouldNot(gomega.HaveOccurred())
+
+	return resp.Model
 }
 
 // tryCompletion is like runCompletion but returns an error instead of asserting,

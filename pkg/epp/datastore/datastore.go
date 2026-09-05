@@ -335,14 +335,14 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 		}
 		pods = append(pods,
 			&fwkdl.EndpointMetadata{
-				NamespacedName: createEndpointNamespacedName(pod, idx),
-				PodName:        pod.Name,
-				Address:        pod.Status.PodIP,
-				NodeAddress:    pod.Status.HostIP,
-				Port:           strconv.Itoa(port),
-				MetricsHost:    net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
-				Labels:         labels,
-				RankIndex:      idx,
+				ID:          createEndpointNamespacedName(pod, idx),
+				Name:        pod.Name,
+				Address:     pod.Status.PodIP,
+				NodeAddress: pod.Status.HostIP,
+				Port:        strconv.Itoa(port),
+				MetricsHost: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
+				Labels:      labels,
+				RankIndex:   idx,
 			})
 	}
 
@@ -356,7 +356,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	var errs []error
 	existingEpSet := sets.Set[types.NamespacedName]{}
 	for _, endpointMetadata := range pods {
-		existingEpSet.Insert(endpointMetadata.NamespacedName)
+		existingEpSet.Insert(endpointMetadata.ID)
 		created, err := ds.upsertEndpoint(ctx, endpointMetadata)
 		if err != nil {
 			errs = append(errs, err)
@@ -394,7 +394,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 func (ds *datastore) PodDelete(podName string) {
 	ds.pods.Range(func(k, v any) bool {
 		ep := v.(fwkdl.Endpoint)
-		if ep.GetMetadata().PodName == podName {
+		if ep.GetMetadata().Name == podName {
 			ds.pods.Delete(k)
 			ds.epf.ReleaseEndpoint(ep)
 		}
@@ -404,7 +404,7 @@ func (ds *datastore) PodDelete(podName string) {
 
 func (ds *datastore) EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMetadata) {
 	if _, err := ds.upsertEndpoint(ctx, meta); err != nil {
-		log.FromContext(ctx).Error(err, "failed to register endpoint", "endpoint", meta.NamespacedName)
+		log.FromContext(ctx).Error(err, "failed to register endpoint", "endpoint", meta.ID)
 	}
 }
 
@@ -426,7 +426,7 @@ func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 // or the collector failed to start), the endpoint is untracked and the caller must retry.
 func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMetadata) (bool, error) {
 	for {
-		if existing, ok := ds.pods.Load(meta.NamespacedName); ok {
+		if existing, ok := ds.pods.Load(meta.ID); ok {
 			ep := existing.(fwkdl.Endpoint)
 			if ep.GetMetadata().Equal(meta) {
 				return false, nil
@@ -437,14 +437,14 @@ func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMet
 		}
 		ep := ds.epf.NewEndpoint(ds.parentCtx, meta)
 		if ep == nil {
-			if _, ok := ds.pods.Load(meta.NamespacedName); ok {
+			if _, ok := ds.pods.Load(meta.ID); ok {
 				// A concurrent upsert won the registration; apply this call's metadata through
 				// the update path above.
 				continue
 			}
-			return false, fmt.Errorf("endpoint %s: %w", meta.NamespacedName, errRegistrationDropped)
+			return false, fmt.Errorf("endpoint %s: %w", meta.ID, errRegistrationDropped)
 		}
-		ds.pods.Store(meta.NamespacedName, ep)
+		ds.pods.Store(meta.ID, ep)
 		return true, nil
 	}
 }
@@ -480,7 +480,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 	// Remove endpoints that don't belong to the pool, are not ready, or are orphaned ranks.
 	ds.pods.Range(func(k, v any) bool {
 		ep := v.(fwkdl.Endpoint)
-		endpointName := ep.GetMetadata().NamespacedName
+		endpointName := ep.GetMetadata().ID
 		if !activeEndpoints.Has(endpointName) {
 			logger.V(logutil.VERBOSE).Info("Removing endpoint", "endpoint", endpointName)
 			ds.pods.Delete(k)

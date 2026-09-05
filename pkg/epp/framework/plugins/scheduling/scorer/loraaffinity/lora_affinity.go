@@ -30,7 +30,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &LoraAffinityScorer{}
+var (
+	_ fwksched.Scorer          = &LoraAffinityScorer{}
+	_ fwkplugin.ConsumerPlugin = &LoraAffinityScorer{}
+)
 
 // LoraAffinityScorerFactory defines the factory function for LoraAffinityScorer.
 func LoraAffinityScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -59,11 +62,15 @@ func (s *LoraAffinityScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Affinity
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (s *LoraAffinityScorer) Consumes() map[string]any {
-	return map[string]any{
-		metrics.ActiveModelsKey:  map[string]int{},
-		metrics.WaitingModelsKey: map[string]int{},
+// Consumes declares the scorer reads the per-pod active and waiting model
+// sets from the endpoint's Metrics struct, published by the core-metrics-
+// extractor.
+func (s *LoraAffinityScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(metrics.ActiveModelsKey, metrics.MetricsExtractorType):  map[string]int{},
+			fwkplugin.NewDataKey(metrics.WaitingModelsKey, metrics.MetricsExtractorType): map[string]int{},
+		},
 	}
 }
 

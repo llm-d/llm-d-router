@@ -12,11 +12,11 @@ registry. The [`kvblock`](../kvblock/README.md) instrumented index and the
 
 ## Naming
 
-Metrics are emitted under the router's standard `llm_d_router_epp` subsystem
-(for example `llm_d_router_epp_kv_cache_index_lookup_hits_total`). The former
+Metrics are emitted under the router's standard `llm_d_epp` subsystem
+(for example `llm_d_epp_kv_cache_index_lookup_hits_total`). The former
 `kvcache_*` names are still emitted as deprecated aliases via dual-emitting
 collectors, so existing scrapers keep working during the migration; update
-dashboards and alerts to the `llm_d_router_epp_*` names.
+dashboards and alerts to the `llm_d_epp_*` names.
 
 ## Usage
 

@@ -104,9 +104,9 @@ func (s *Scorer) Score(ctx context.Context, req *scheduling.InferenceRequest, en
 		scores[endpoint] = 0
 		pod := ""
 		if meta := endpoint.GetMetadata(); meta != nil {
-			pod = meta.PodName
+			pod = meta.Name
 		}
-		info, ok := endpoint.Get(s.mmMatchDataKey.String())
+		info, ok := endpoint.Get(s.mmMatchDataKey)
 		if !ok {
 			traceLogger.Info("mm-embeddings-cache: no match info, score 0", "requestID", requestID, "pod", pod, "scorer", s.typedName)
 			continue

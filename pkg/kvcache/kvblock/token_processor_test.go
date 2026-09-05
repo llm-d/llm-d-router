@@ -860,3 +860,221 @@ func TestHeterogeneousBlockSizeSupport(t *testing.T) {
 			"different parent keys should produce different first hashes")
 	})
 }
+
+func TestNewChunkedTokenDatabase_HashAlgorithmValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		algorithm string
+		wantErr   bool
+	}{
+		{name: "empty defaults to cbor-fnv", algorithm: ""},
+		{name: "cbor-fnv accepted", algorithm: kvblock.HashAlgorithmCBORFNV},
+		{name: "xxh64 accepted", algorithm: kvblock.HashAlgorithmXXH64},
+		{name: "xxhash rejected", algorithm: "xxhash", wantErr: true},
+		{name: "unknown value rejected", algorithm: "sha256", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+				BlockSizeTokens: 16,
+				HashAlgorithm:   tc.algorithm,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "unsupported hashAlgorithm")
+				assert.Nil(t, processor)
+			} else {
+				require.NoError(t, err)
+				assert.NotNil(t, processor)
+			}
+		})
+	}
+}
+
+func newXXH64Processor(t *testing.T, seed string) kvblock.TokenProcessor {
+	t.Helper()
+	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+		BlockSizeTokens: 16,
+		HashSeed:        seed,
+		HashAlgorithm:   kvblock.HashAlgorithmXXH64,
+	})
+	require.NoError(t, err)
+	return processor
+}
+
+func TestXXH64_Deterministic(t *testing.T) {
+	tokens := make([]uint32, 32)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+	}
+
+	// Across calls on one instance and across instances with the same config.
+	proc1 := newXXH64Processor(t, "test-seed")
+	proc2 := newXXH64Processor(t, "test-seed")
+
+	keys1, err := proc1.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	keys2, err := proc1.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	keys3, err := proc2.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+
+	require.Len(t, keys1, 2)
+	assert.Equal(t, keys1, keys2, "same instance must produce identical chains")
+	assert.Equal(t, keys1, keys3, "same config must produce identical chains across instances")
+	assert.NotEqual(t, kvblock.EmptyBlockHash, keys1[0], "hash should not be zero")
+}
+
+func TestXXH64_DifferentModelsProduceDifferentChains(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
+
+	tokens := make([]uint32, 16)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+	}
+
+	models := []string{"gpt-4", "llama-2-7b", "", "a"}
+	seenHashes := make(map[kvblock.BlockHash]string)
+	for _, modelName := range models {
+		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, keys, "should generate keys for model: %s", modelName)
+
+		if existingModel, exists := seenHashes[keys[0]]; exists {
+			t.Errorf("hash collision: models %q and %q share first key %d", modelName, existingModel, keys[0])
+		}
+		seenHashes[keys[0]] = modelName
+	}
+}
+
+func TestXXH64_DifferentSeedsProduceDifferentChains(t *testing.T) {
+	tokens := make([]uint32, 16)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+	}
+
+	seeds := []string{"", "seed1", "seed2"}
+	seenHashes := make(map[kvblock.BlockHash]string)
+	for _, seed := range seeds {
+		processor := newXXH64Processor(t, seed)
+		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, keys, "should generate keys for seed: %s", seed)
+
+		if existingSeed, exists := seenHashes[keys[0]]; exists {
+			t.Errorf("hash collision: seeds %q and %q share first key %d", seed, existingSeed, keys[0])
+		}
+		seenHashes[keys[0]] = seed
+	}
+}
+
+func TestXXH64_ExtraFeaturesTaintBlockHash(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
+
+	tokens := make([]uint32, 32) // 2 blocks
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+	}
+
+	plainKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, plainKeys, 2)
+
+	// Taint only the first block; the chain must propagate to the second.
+	taintedKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model",
+		[]*kvblock.BlockExtraFeatures{{MMHashes: []kvblock.MMHash{{Hash: "mm-hash-a"}}}, nil})
+	require.NoError(t, err)
+	require.Len(t, taintedKeys, 2)
+
+	assert.NotEqual(t, plainKeys[0], taintedKeys[0], "extra features must change the block hash")
+	assert.NotEqual(t, plainKeys[1], taintedKeys[1], "taint must propagate through the chain")
+
+	// Different MMHash values must produce different hashes.
+	otherKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model",
+		[]*kvblock.BlockExtraFeatures{{MMHashes: []kvblock.MMHash{{Hash: "mm-hash-b"}}}, nil})
+	require.NoError(t, err)
+	assert.NotEqual(t, taintedKeys[0], otherKeys[0], "different MMHash values must differ")
+
+	// Length-prefixing: two strings must not collide with their concatenation.
+	splitKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model",
+		[]*kvblock.BlockExtraFeatures{{MMHashes: []kvblock.MMHash{{Hash: "ab"}, {Hash: "c"}}}, nil})
+	require.NoError(t, err)
+	joinedKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model",
+		[]*kvblock.BlockExtraFeatures{{MMHashes: []kvblock.MMHash{{Hash: "abc"}}}, nil})
+	require.NoError(t, err)
+	assert.NotEqual(t, splitKeys[0], joinedKeys[0], "[ab, c] must not collide with [abc]")
+}
+
+func TestXXH64_ParentKeyContinuation(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
+
+	tokens := make([]uint32, 64) // 4 blocks
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+	}
+
+	fullKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, fullKeys, 4)
+
+	// Continuing from the second key over the remaining tokens must reproduce the tail.
+	tailKeys, err := processor.TokensToKVBlockKeys(fullKeys[1], tokens[32:], "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, tailKeys, 2)
+	assert.Equal(t, fullKeys[2:], tailKeys, "continuation from parent key must reproduce the chain tail")
+
+	// A different parent produces a different chain.
+	otherKeys, err := processor.TokensToKVBlockKeys(kvblock.BlockHash(999999), tokens[32:], "test-model", nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, tailKeys[0], otherKeys[0], "different parent keys must produce different chains")
+}
+
+func TestXXH64_PartialTrailingBlockExcluded(t *testing.T) {
+	processor := newXXH64Processor(t, "test-seed")
+
+	tokens := make([]uint32, 40) // 2 full blocks of 16, 8 leftover tokens
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+	}
+
+	keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	assert.Len(t, keys, 2, "trailing partial block must not produce a key")
+
+	// Fewer tokens than a block produce no keys.
+	shortKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens[:8], "test-model", nil)
+	require.NoError(t, err)
+	assert.Empty(t, shortKeys)
+}
+
+func benchmarkTokensToKVBlockKeys(b *testing.B, algorithm string) {
+	b.Helper()
+	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+		BlockSizeTokens: 16,
+		HashAlgorithm:   algorithm,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	tokens := make([]uint32, 10000)
+	for i := range tokens {
+		tokens[i] = uint32(i) // #nosec G115 -- test data, i is small
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "bench-model", nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkTokensToKVBlockKeysCBORFNV(b *testing.B) {
+	benchmarkTokensToKVBlockKeys(b, kvblock.HashAlgorithmCBORFNV)
+}
+
+func BenchmarkTokensToKVBlockKeysXXH64(b *testing.B) {
+	benchmarkTokensToKVBlockKeys(b, kvblock.HashAlgorithmXXH64)
+}

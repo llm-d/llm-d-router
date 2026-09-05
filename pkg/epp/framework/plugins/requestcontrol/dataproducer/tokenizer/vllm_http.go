@@ -20,18 +20,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -50,6 +54,41 @@ const (
 	maxErrorBodySnippetBytes = 1024
 )
 
+// arrayContentMarker detects an array-valued "content" field inside a
+// pre-marshaled chat message (multimodal parts).
+var arrayContentMarker = []byte(`"content":[`)
+
+// authHeaderCtxKey carries the inbound request's Authorization header from
+// Plugin.Produce to the render call without widening tokenInputProducer.produce.
+type authHeaderCtxKey struct{}
+
+// withAuthHeader returns ctx carrying the Authorization header value verbatim.
+func withAuthHeader(ctx context.Context, value string) context.Context {
+	return context.WithValue(ctx, authHeaderCtxKey{}, value)
+}
+
+// authHeaderFromContext returns the Authorization header value on ctx, or "".
+func authHeaderFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(authHeaderCtxKey{}).(string)
+	return value
+}
+
+// renderStatusError is a non-2xx response from the render endpoint.
+type renderStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *renderStatusError) Error() string {
+	return fmt.Sprintf("vLLM render returned status %d: %s", e.StatusCode, e.Body)
+}
+
+// isRenderAuthError reports whether err carries a 401 or 403 render response.
+func isRenderAuthError(err error) bool {
+	var se *renderStatusError
+	return errors.As(err, &se) && (se.StatusCode == http.StatusUnauthorized || se.StatusCode == http.StatusForbidden)
+}
+
 // vllmConfig configures the vLLM /render backend. Future protocol fields
 // (e.g., grpc) can be added alongside url.
 type vllmConfig struct {
@@ -63,6 +102,18 @@ type vllmConfig struct {
 	// MMTimeout is the per-request timeout for multimodal requests
 	// (image download/processing). Defaults to 30s.
 	MMTimeout string `json:"mmTimeout,omitempty"`
+	// CACertPath is a PEM CA bundle used to verify the render endpoint's
+	// server certificate when the URL scheme is https. When empty, the
+	// system CA pool is used.
+	CACertPath string `json:"caCertPath,omitempty"`
+	// ClientCertPath and ClientKeyPath present a client certificate for
+	// mTLS with the render endpoint. Both must be set together.
+	ClientCertPath string `json:"clientCertPath,omitempty"`
+	ClientKeyPath  string `json:"clientKeyPath,omitempty"`
+	// InsecureSkipVerify disables verification of the render endpoint's
+	// server certificate. Use for self-signed certificates in development
+	// or when the cluster manages its own PKI.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
@@ -88,8 +139,16 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid 'mmTimeout': %w", err)
 	}
+	transport, err := newRenderTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &vllmHTTPRenderer{
-		client:    &http.Client{Transport: newRenderTransport()},
+		client: &http.Client{Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(
+			// Name the outbound span after the render route instead of the
+			// transport's default "HTTP POST" so traces identify render calls.
+			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
+		))},
 		baseURL:   url,
 		modelName: modelName,
 		timeout:   timeout,
@@ -100,8 +159,10 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 // newRenderTransport returns an http.Transport tuned for the render endpoint:
 // HTTP/2 is disabled (vLLM doesn't support it) and the idle-connection pool
 // is sized for the in-pod sidecar case while still being reasonable for a
-// dedicated render Service.
-func newRenderTransport() *http.Transport {
+// dedicated render Service. When the config carries TLS fields (caCertPath,
+// clientCertPath/clientKeyPath, insecureSkipVerify), the transport is
+// configured for https.
+func newRenderTransport(cfg *vllmConfig) (*http.Transport, error) {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConns = 0
 	t.MaxIdleConnsPerHost = 16
@@ -110,7 +171,44 @@ func newRenderTransport() *http.Transport {
 	// not enough — clearing TLSNextProto prevents ALPN-negotiated h2 too.
 	t.ForceAttemptHTTP2 = false
 	t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	return t
+
+	if cfg.hasTLS() {
+		tlsCfg, err := renderTLSConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		t.TLSClientConfig = tlsCfg
+	}
+	return t, nil
+}
+
+func (c *vllmConfig) hasTLS() bool {
+	return c.InsecureSkipVerify || c.CACertPath != "" || c.ClientCertPath != "" || c.ClientKeyPath != ""
+}
+
+func renderTLSConfig(cfg *vllmConfig) (*tls.Config, error) {
+	tc := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec
+
+	if !cfg.InsecureSkipVerify && cfg.CACertPath != "" {
+		pem, err := os.ReadFile(cfg.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading render CA cert %s: %w", cfg.CACertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no valid CA certs in %s", cfg.CACertPath)
+		}
+		tc.RootCAs = pool
+	}
+
+	if cfg.ClientCertPath != "" || cfg.ClientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading render client cert: %w", err)
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+	return tc, nil
 }
 
 func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
@@ -176,13 +274,18 @@ func (r *vllmHTTPRenderer) chatTimeout(payload fwkrh.PayloadMap) time.Duration {
 		return r.timeout
 	}
 	for _, rawMessage := range messages {
-		message, ok := rawMessage.(map[string]any)
-		if !ok {
-			continue
-		}
 		// Array-shaped content may require multimodal rendering; use the longer timeout.
-		if parts, ok := message["content"].([]any); ok && len(parts) > 0 {
-			return r.mmTimeout
+		switch message := rawMessage.(type) {
+		case map[string]any:
+			if parts, ok := message["content"].([]any); ok && len(parts) > 0 {
+				return r.mmTimeout
+			}
+		case json.RawMessage:
+			// Rebuilt payloads (Anthropic messages) carry pre-marshaled messages;
+			// an array-valued content field signals multimodal parts.
+			if bytes.Contains(message, arrayContentMarker) {
+				return r.mmTimeout
+			}
 		}
 	}
 	return r.timeout
@@ -198,9 +301,9 @@ func (r *vllmHTTPRenderer) produceTimeout() time.Duration {
 }
 
 // chatRenderRequest is the wire body for POST /v1/chat/completions/render.
-// Used by the non-PayloadMap fallback path (gRPC, warmup).
+// Used by the non-PayloadMap fallback path (gRPC, warmup). The model is
+// stamped in by the renderer, not carried here.
 type chatRenderRequest struct {
-	Model                string         `json:"model"`
 	Messages             []chatMessage  `json:"messages"`
 	Tools                []any          `json:"tools,omitempty"`
 	Documents            []any          `json:"documents,omitempty"`
@@ -212,10 +315,14 @@ type chatRenderRequest struct {
 
 // chatMessage is one OpenAI-shaped message. Content is either a plain string
 // or an array of parts; chatContent's MarshalJSON picks the right wire form.
+// A nil Content omits the key entirely, matching messages that carry only
+// tool_calls or reasoning.
 type chatMessage struct {
-	Role      string      `json:"role"`
-	Content   chatContent `json:"content"`
-	ToolCalls []any       `json:"tool_calls,omitempty"`
+	Role       string       `json:"role"`
+	Content    *chatContent `json:"content,omitempty"`
+	ToolCalls  []any        `json:"tool_calls,omitempty"`
+	Reasoning  string       `json:"reasoning,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
 }
 
 // chatContent serializes either Raw (string) or Parts (array of typed parts).
@@ -245,18 +352,19 @@ type chatImageURL struct {
 
 // buildChatRenderRequest projects the kvcache RenderChatRequest into the
 // OpenAI-shaped wire body expected by vLLM's /v1/chat/completions/render.
-// Unknown content-block types are skipped (mirrors the UDS path's behavior).
-func buildChatRenderRequest(model string, req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
+// Unknown content-block types are skipped.
+func buildChatRenderRequest(req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
 	msgs := make([]chatMessage, len(req.Conversation))
 	for idx, c := range req.Conversation {
 		msgs[idx] = chatMessage{
-			Role:      c.Role,
-			Content:   toChatContent(c.Content),
-			ToolCalls: c.ToolCalls,
+			Role:       c.Role,
+			Content:    toChatContent(c.Content),
+			ToolCalls:  c.ToolCalls,
+			Reasoning:  c.Reasoning,
+			ToolCallID: c.ToolCallID,
 		}
 	}
 	return chatRenderRequest{
-		Model:                model,
 		Messages:             msgs,
 		Tools:                req.Tools,
 		Documents:            req.Documents,
@@ -267,22 +375,25 @@ func buildChatRenderRequest(model string, req *tokenizerTypes.RenderChatRequest)
 	}
 }
 
-func toChatContent(c tokenizerTypes.Content) chatContent {
-	if len(c.Structured) == 0 {
-		return chatContent{Raw: c.Raw}
+func toChatContent(c *tokenizerTypes.Content) *chatContent {
+	if c == nil {
+		return nil
 	}
-	parts := make([]chatPart, len(c.Structured))
-	for idx, b := range c.Structured {
+	if len(c.Structured) == 0 {
+		return &chatContent{Raw: c.Raw}
+	}
+	parts := make([]chatPart, 0, len(c.Structured))
+	for _, b := range c.Structured {
 		switch b.Type {
-		case "text":
-			parts[idx] = chatPart{Type: "text", Text: b.Text}
-		case "image_url":
-			parts[idx] = chatPart{Type: "image_url", ImageURL: &chatImageURL{URL: b.ImageURL.URL}}
+		case blockTypeText:
+			parts = append(parts, chatPart{Type: blockTypeText, Text: b.Text})
+		case blockTypeImageURL:
+			parts = append(parts, chatPart{Type: blockTypeImageURL, ImageURL: &chatImageURL{URL: b.ImageURL.URL}})
 		default:
 			// Unsupported by the kvcache ContentBlock schema; skip.
 		}
 	}
-	return chatContent{Parts: parts}
+	return &chatContent{Parts: parts}
 }
 
 // renderResponse is the subset of vLLM's GenerateRequest we consume.
@@ -335,6 +446,11 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 		return fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// The render endpoint may require the same credential as inference;
+	// forward the inbound Authorization when present.
+	if auth := authHeaderFromContext(ctx); auth != "" {
+		httpReq.Header.Set("Authorization", auth)
+	}
 
 	httpResp, err := r.client.Do(httpReq)
 	if err != nil {
@@ -344,7 +460,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, 
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodySnippetBytes))
-		return fmt.Errorf("vLLM render returned status %d: %s", httpResp.StatusCode, string(snippet))
+		return &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
 		return fmt.Errorf("unmarshal response: %w", err)

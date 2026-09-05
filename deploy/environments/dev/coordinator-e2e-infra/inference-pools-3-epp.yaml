@@ -1,0 +1,54 @@
+# Role-scoped InferencePools for the coordinator 3-EPP e2e topology. Each pool
+# selects a single worker role via the llm-d.ai/role label (all three roles share
+# the same app label, so role is what distinguishes them) and is backed by that
+# role's own EPP Service.
+#
+# Placeholders POOL_NAME_*, EPP_NAME_*, and TARGET_PORTS are substituted by the
+# suite before apply; TARGET_PORTS is the same pre-formatted YAML block-sequence
+# fragment used by inference-pools.yaml (see the note there). Referenced here
+# without the ${} wrapper so the raw-text substitution does not rewrite this
+# comment: TARGET_PORTS begins with a newline and would break out of it.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: ${POOL_NAME_ENCODE}
+spec:
+  selector:
+    matchLabels:
+      llm-d.ai/role: encode
+  endpointPickerRef:
+    name: ${EPP_NAME_ENCODE}
+    kind: Service
+    port:
+      number: 9002
+  targetPorts: ${TARGET_PORTS}
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: ${POOL_NAME_PREFILL}
+spec:
+  selector:
+    matchLabels:
+      llm-d.ai/role: prefill
+  endpointPickerRef:
+    name: ${EPP_NAME_PREFILL}
+    kind: Service
+    port:
+      number: 9002
+  targetPorts: ${TARGET_PORTS}
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: ${POOL_NAME_DECODE}
+spec:
+  selector:
+    matchLabels:
+      llm-d.ai/role: decode
+  endpointPickerRef:
+    name: ${EPP_NAME_DECODE}
+    kind: Service
+    port:
+      number: 9002
+  targetPorts: ${TARGET_PORTS}

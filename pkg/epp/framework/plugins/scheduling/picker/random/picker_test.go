@@ -33,9 +33,9 @@ func TestPickRandomPicker(t *testing.T) {
 		tolerance      = 0.05 // Verify within tolerance ±5%
 	)
 
-	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
-	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
-	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil)
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
+	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil)
 
 	tests := []struct {
 		name    string
@@ -97,13 +97,13 @@ func TestPickRandomPicker(t *testing.T) {
 			// should be min(numPods/numCandidates, 1.0), regardless of scores.
 			selectionCounts := make(map[string]int)
 			for _, ep := range test.input {
-				selectionCounts[ep.GetMetadata().NamespacedName.Name] = 0
+				selectionCounts[ep.GetMetadata().ID.Name] = 0
 			}
 
 			for range testIterations {
 				res := test.picker.Pick(context.Background(), test.input)
 				for _, ep := range res.TargetEndpoints {
-					selectionCounts[ep.GetMetadata().NamespacedName.Name]++
+					selectionCounts[ep.GetMetadata().ID.Name]++
 				}
 			}
 

@@ -121,7 +121,7 @@ func TestReadInFlightLoad(t *testing.T) {
 
 	// Attribute present: both fields come from InFlightLoad.
 	epWithLoad := createTestEndpoint("pod2", 0.5, 5, 0)
-	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
+	epWithLoad.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 42, Requests: 3})
 	got = pl.readInFlightLoad(epWithLoad)
 	assert.Equal(t, int64(42), got.tokens)
 	assert.Equal(t, 3, got.requests)
@@ -129,7 +129,7 @@ func TestReadInFlightLoad(t *testing.T) {
 
 func createTestEndpoint(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int) fwksched.Endpoint {
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-		NamespacedName: types.NamespacedName{
+		ID: types.NamespacedName{
 			Name:      name,
 			Namespace: "default",
 		}},
@@ -147,7 +147,7 @@ func createTestInferenceRequest(reqID string, ttftSLO, tpotSLO float64) *fwksche
 		Completions: &fwkrh.CompletionsRequest{
 			Prompt: fwkrh.Prompt{Raw: "test prompt"},
 		},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 2)}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 2)}}},
 	})
 }
 
@@ -159,7 +159,7 @@ func createTestChatCompletionsInferenceRequest(reqID string, ttftSLO, tpotSLO fl
 				{Role: "user", Content: fwkrh.Content{Raw: "Tell me a joke."}},
 			},
 		},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, 8)}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 8)}}},
 	})
 }
 
@@ -270,8 +270,8 @@ func TestPredictedLatency_GetPodRunningRequestCount(t *testing.T) {
 			name: "One running request",
 			setupRequests: func(r *PredictedLatency, p fwksched.Endpoint) {
 				podName := types.NamespacedName{
-					Name:      p.GetMetadata().NamespacedName.Name,
-					Namespace: p.GetMetadata().NamespacedName.Namespace,
+					Name:      p.GetMetadata().ID.Name,
+					Namespace: p.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.04)
@@ -283,8 +283,8 @@ func TestPredictedLatency_GetPodRunningRequestCount(t *testing.T) {
 			name: "Multiple running requests",
 			setupRequests: func(r *PredictedLatency, p fwksched.Endpoint) {
 				endpointName := types.NamespacedName{
-					Name:      p.GetMetadata().NamespacedName.Name,
-					Namespace: p.GetMetadata().NamespacedName.Namespace,
+					Name:      p.GetMetadata().ID.Name,
+					Namespace: p.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.04)
@@ -326,8 +326,8 @@ func TestPredictedLatency_GetPodMinTPOTSLO(t *testing.T) {
 			name: "One running request",
 			setupRequests: func(r *PredictedLatency, e fwksched.Endpoint) {
 				endpointName := types.NamespacedName{
-					Name:      e.GetMetadata().NamespacedName.Name,
-					Namespace: e.GetMetadata().NamespacedName.Namespace,
+					Name:      e.GetMetadata().ID.Name,
+					Namespace: e.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.04)
@@ -339,8 +339,8 @@ func TestPredictedLatency_GetPodMinTPOTSLO(t *testing.T) {
 			name: "Multiple running requests - should return minimum",
 			setupRequests: func(r *PredictedLatency, e fwksched.Endpoint) {
 				endpointName := types.NamespacedName{
-					Name:      e.GetMetadata().NamespacedName.Name,
-					Namespace: e.GetMetadata().NamespacedName.Namespace,
+					Name:      e.GetMetadata().ID.Name,
+					Namespace: e.GetMetadata().ID.Namespace,
 				}
 				queue := newRequestPriorityQueue()
 				queue.Add("req1", 0.05)
@@ -391,16 +391,10 @@ func TestPredictedLatencyFactory(t *testing.T) {
 			expectErr:  false,
 		},
 		{
-			name:       "invalid samplingMean <= 0",
-			pluginName: "bad-sampling-mean",
-			jsonParams: `{"samplingMean": -1.0}`,
-			expectErr:  true,
-		},
-		{
-			name:       "invalid maxSampledTokens < 0",
-			pluginName: "bad-max-tokens",
-			jsonParams: `{"maxDecodeTokenSamplesForPrediction": -1}`,
-			expectErr:  true,
+			name:       "deprecated sampling params are accepted and ignored",
+			pluginName: "deprecated-sampling-params",
+			jsonParams: `{"samplingMean": -1.0, "maxDecodeTokenSamplesForPrediction": -1}`,
+			expectErr:  false,
 		},
 		{
 			name:       "invalid sloBufferFactor <= 0",
@@ -473,7 +467,7 @@ func TestSloContextStoreEviction(t *testing.T) {
 	}
 
 	metadata := &fwkdl.EndpointMetadata{
-		NamespacedName: endpointName,
+		ID: endpointName,
 	}
 
 	sloCtx := newPredictedLatencyContext(req)

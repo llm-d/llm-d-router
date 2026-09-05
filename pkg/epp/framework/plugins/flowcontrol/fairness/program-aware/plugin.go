@@ -21,7 +21,7 @@ const ProgramAwarePluginType = "program-aware-fairness"
 
 // enqueueTimeAttributeKey is the per-request attribute under which Pick
 // stashes the flow-control enqueue timestamp for PreRequest to read back.
-const enqueueTimeAttributeKey = "program-aware/enqueue-time"
+var enqueueTimeAttributeKey = plugin.NewDataKey("enqueue-time", ProgramAwarePluginType)
 
 type Config struct {
 	Strategy             string  `json:"strategy,omitempty"`
@@ -30,7 +30,6 @@ type Config struct {
 
 	LASWeightService   float64 `json:"lasWeightService,omitempty"`
 	LASWeightHeadWait  float64 `json:"lasWeightHeadWait,omitempty"`
-	LASDecayFactor     float64 `json:"lasDecayFactor,omitempty"`
 	LASHalfLifeSeconds float64 `json:"lasHalfLifeSeconds,omitempty"`
 }
 
@@ -41,8 +40,7 @@ func DefaultConfig() Config {
 		EvictionSweepSeconds: 300,
 		LASWeightService:     0.8,
 		LASWeightHeadWait:    0.2,
-		LASDecayFactor:       0.99997,
-		LASHalfLifeSeconds:   0,
+		LASHalfLifeSeconds:   60,
 	}
 }
 
@@ -58,9 +56,6 @@ func (c Config) validate() error {
 	}
 	if c.LASWeightHeadWait < 0 {
 		return fmt.Errorf("lasWeightHeadWait must be >= 0, got %v", c.LASWeightHeadWait)
-	}
-	if c.LASDecayFactor <= 0 || c.LASDecayFactor > 1 {
-		return fmt.Errorf("lasDecayFactor must be in (0, 1], got %v", c.LASDecayFactor)
 	}
 	if c.LASHalfLifeSeconds < 0 {
 		return fmt.Errorf("lasHalfLifeSeconds must be >= 0, got %v", c.LASHalfLifeSeconds)
@@ -201,6 +196,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		return nil, nil //nolint:nilnil
 	}
 
+	// IterateQueues visits only active (non-empty) queues. That is sufficient: attained-service
+	// decay is time-anchored inside the strategy, so an idle program's service ages out without its
+	// queue being visited.
 	infos := make(map[string]QueueInfo)
 	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
 		if queue == nil {
@@ -232,9 +230,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 	return best, nil
 }
 
-func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) {
+func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	if request == nil {
-		return
+		return nil
 	}
 	id := programIDFor(request)
 	metrics := p.getOrCreateMetrics(id)
@@ -244,6 +242,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 	avgWaitTimeMs.WithLabelValues(id).Set(metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
+	return nil
 }
 
 // ResponseBody acts on the final stream chunk only; intermediate chunks are

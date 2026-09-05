@@ -8,7 +8,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: decode-filter
@@ -16,42 +16,6 @@ plugins:
 - type: single-profile-handler
 schedulingProfiles:
 - name: default
-  plugins:
-  - pluginRef: decode-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-`
-
-// EPP configuration for running with P/D
-// Uses deprecated pd-profile-handler
-const deprecatedPdConfig = `apiVersion: llm-d.ai/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- type: prefill-header-handler
-- type: approx-prefix-cache-producer
-  parameters:
-    blockSizeTokens: 16
-    maxPrefixBlocksToMatch: 256
-    lruCapacityPerServer: 256
-- type: prefix-cache-scorer
-- type: prefill-filter
-- type: decode-filter
-- type: max-score-picker
-- type: prefix-based-pd-decider
-  parameters:
-    nonCachedTokens: 16
-- type: pd-profile-handler
-  parameters:
-    deciderPluginName: prefix-based-pd-decider
-schedulingProfiles:
-- name: prefill
-  plugins:
-  - pluginRef: prefill-filter
-  - pluginRef: max-score-picker
-  - pluginRef: prefix-cache-scorer
-    weight: 2
-- name: decode
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
@@ -92,7 +56,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: max-score-picker
@@ -175,7 +139,7 @@ plugins:
 - type: approx-prefix-cache-producer
   parameters:
     blockSizeTokens: 16
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: prefill-filter
@@ -209,7 +173,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
   parameters:
-    maxPrefixBlocksToMatch: 256
+    maxPrefixTokensToMatch: 16384
     lruCapacityPerServer: 256
 - type: prefix-cache-scorer
 - type: encode-filter
@@ -240,14 +204,14 @@ plugins:
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
-      blockSize: 16
+      blockSizeTokens: 16
       hashSeed: "42"
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false                  # enable kv-block index metrics (prometheus)
-        metricsLoggingInterval: 6000000000    # log kv-block metrics as well (1m in nanoseconds)
+        metricsLoggingInterval: 60000000000   # log kv-block metrics as well (1m in nanoseconds)
 - type: decode-filter
 - type: max-score-picker
 - type: disagg-profile-handler
@@ -275,7 +239,7 @@ plugins:
 - type: precise-prefix-cache-scorer
   parameters:
     tokenProcessorConfig:
-      blockSize: 16
+      blockSizeTokens: 16
       hashSeed: "42"
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557

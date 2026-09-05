@@ -222,15 +222,37 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not inject remote_kv_source params when the source is the local pod", func() {
+	It("should not inject remote_kv_source params when the source is this rank's endpoint", func() {
 		GinkgoT().Setenv("POD_IP", "10.9.9.9")
 		proxyBaseAddr := testInfo.startProxy()
 
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
+		// Self is POD_IP:<config.Port>; the harness config uses port "0", so
+		// a source of POD_IP:0 is this rank's own serving endpoint.
+		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: "10.9.9.9:0"})
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
 		Expect(decodeReqs[0]).ToNot(HaveKey(requestFieldKVTransferParams))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should inject remote_kv_source params when the source is another rank on the local pod", func() {
+		GinkgoT().Setenv("POD_IP", "10.9.9.9")
+		proxyBaseAddr := testInfo.startProxy()
+
+		// Same pod IP, different serving port: a peer rank's cache is a valid
+		// pull source, so the guard must not collapse identity to the pod.
+		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
+
+		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
+		Expect(decodeReqs).To(HaveLen(1))
+		kvParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

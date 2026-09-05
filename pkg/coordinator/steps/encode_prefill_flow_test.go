@@ -109,21 +109,6 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 		t.Fatal("prefill was not called")
 	}
 
-	// Verify ec_transfer_params is a flat map keyed by mm_hash
-	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected ec_transfer_params map, got %T", prefillBody["ec_transfer_params"])
-	}
-	if len(ecParams) != 2 {
-		t.Fatalf("expected 2 ec_transfer_params entries, got %d: %v", len(ecParams), ecParams)
-	}
-	for _, want := range []string{"img-hash-1", "img-hash-2"} {
-		entry, ok := ecParams[want].(map[string]any)
-		if !ok || len(entry) == 0 {
-			t.Errorf("ec_transfer_params[%q] missing or empty: %v", want, ecParams[want])
-		}
-	}
-
 	// Verify features has kwargs_data with per-image base64 tensors
 	features, _ := prefillBody["features"].(map[string]any)
 	kwargsData, ok := features["kwargs_data"].(map[string]any)
@@ -157,6 +142,21 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	}
 	if kvParams["do_remote_decode"] != true {
 		t.Fatalf("expected do_remote_decode=true, got %v", kvParams["do_remote_decode"])
+	}
+
+	// Verify ec_transfer_params is a flat map keyed by mm_hash, nested in extra_args
+	ecParams, ok := extraArgs["ec_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected ec_transfer_params in extra_args, got %T", extraArgs["ec_transfer_params"])
+	}
+	if len(ecParams) != 2 {
+		t.Fatalf("expected 2 ec_transfer_params entries, got %d: %v", len(ecParams), ecParams)
+	}
+	for _, want := range []string{"img-hash-1", "img-hash-2"} {
+		entry, ok := ecParams[want].(map[string]any)
+		if !ok || len(entry) == 0 {
+			t.Errorf("ec_transfer_params[%q] missing or empty: %v", want, ecParams[want])
+		}
 	}
 
 	// Verify response populated KVTransferParams
@@ -247,9 +247,11 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 		t.Fatal("prefill was not called")
 	}
 
-	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
+	samplingParams, _ := prefillBody["sampling_params"].(map[string]any)
+	extraArgs, _ := samplingParams["extra_args"].(map[string]any)
+	ecParams, ok := extraArgs["ec_transfer_params"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected ec_transfer_params map (with reported hash only), got %T", prefillBody["ec_transfer_params"])
+		t.Fatalf("expected ec_transfer_params in extra_args (with reported hash only), got %T", extraArgs["ec_transfer_params"])
 	}
 	if len(ecParams) != 1 {
 		t.Fatalf("expected 1 ec_transfer_params entry, got %d: %v", len(ecParams), ecParams)

@@ -30,12 +30,16 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+// AgentIdentityKey is the request-attribute key under which this plugin
+// publishes the resolved agent identity. Downstream consumers such as the
+// Director read it via scheduling.ReadRequestAttribute to derive the
+// FairnessID.
+// The key carries no producer name: configuration names this attribute bare
+// ("attribute: agent-identity"), and any plugin able to resolve an agent
+// identity is an acceptable source.
+var AgentIdentityKey = plugin.NewDataKey("agent-identity", "")
+
 const (
-	// AgentIdentityKey is the request-attribute key under which
-	// this plugin publishes the resolved agent identity.
-	// Downstream consumers such as the Director read it
-	// via scheduling.ReadRequestAttribute to derive the FairnessID.
-	AgentIdentityKey        = "agent-identity"
 	PluginType              = "agent-identity"
 	ClaudeCodeSessionHeader = "x-claude-code-session-id"
 	OpenCodeSessionHeader   = "x-session-affinity"

@@ -19,8 +19,6 @@ func TestRoleFilterDecodeRole(t *testing.T) {
 			map[string]string{RoleLabel: RolePrefill}),
 		createEndpoint(k8stypes.NamespacedName{Name: "pd-pod"}, "10.0.0.3",
 			map[string]string{RoleLabel: RolePrefillDecode}),
-		createEndpoint(k8stypes.NamespacedName{Name: "both-pod"}, "10.0.0.4",
-			map[string]string{RoleLabel: RoleBoth}),
 		createEndpoint(k8stypes.NamespacedName{Name: "epd-pod"}, "10.0.0.5",
 			map[string]string{RoleLabel: RoleEncodePrefillDecode}),
 		createEndpoint(k8stypes.NamespacedName{Name: "encode-pod"}, "10.0.0.6",
@@ -40,11 +38,11 @@ func TestRoleFilterDecodeRole(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
-		names[i] = ep.GetMetadata().NamespacedName.Name
+		names[i] = ep.GetMetadata().ID.Name
 	}
 
 	assert.ElementsMatch(t, []string{
-		"decode-pod", "pd-pod", "both-pod", "epd-pod",
+		"decode-pod", "pd-pod", "epd-pod",
 		"no-label-pod", "empty-labels-pod",
 	}, names)
 }
@@ -57,8 +55,6 @@ func TestRoleFilterPrefillRole(t *testing.T) {
 			map[string]string{RoleLabel: RolePrefill}),
 		createEndpoint(k8stypes.NamespacedName{Name: "pd-pod"}, "10.0.0.3",
 			map[string]string{RoleLabel: RolePrefillDecode}),
-		createEndpoint(k8stypes.NamespacedName{Name: "both-pod"}, "10.0.0.4",
-			map[string]string{RoleLabel: RoleBoth}),
 		createEndpoint(k8stypes.NamespacedName{Name: "epd-pod"}, "10.0.0.5",
 			map[string]string{RoleLabel: RoleEncodePrefillDecode}),
 		createEndpoint(k8stypes.NamespacedName{Name: "encode-pod"}, "10.0.0.6",
@@ -76,11 +72,11 @@ func TestRoleFilterPrefillRole(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
-		names[i] = ep.GetMetadata().NamespacedName.Name
+		names[i] = ep.GetMetadata().ID.Name
 	}
 
 	assert.ElementsMatch(t, []string{
-		"prefill-pod", "pd-pod", "both-pod", "epd-pod", "ep-pod",
+		"prefill-pod", "pd-pod", "epd-pod", "ep-pod",
 	}, names)
 }
 
@@ -107,7 +103,7 @@ func TestRoleFilterEncodeRole(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, ep := range filtered {
-		names[i] = ep.GetMetadata().NamespacedName.Name
+		names[i] = ep.GetMetadata().ID.Name
 	}
 
 	assert.ElementsMatch(t, []string{

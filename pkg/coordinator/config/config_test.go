@@ -47,6 +47,7 @@ func TestLoadDefaults(t *testing.T) {
 	}{
 		{"log_level", cfg.LogLevel, 2},
 		{"server.listen_addr", cfg.Server.ListenAddr, ":8080"},
+		{"server.metrics_port", cfg.Server.MetricsPort, 9090},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
 		{"server.write_timeout", cfg.Server.WriteTimeout, 120 * time.Second},
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},

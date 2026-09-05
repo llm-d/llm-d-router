@@ -56,3 +56,7 @@ plugins:
 ## Related Documentation
 - [Prefix Cache Scorer](../../../scheduling/scorer/prefix/README.md)
 - [Prefix Cache Affinity Filter](../../../scheduling/filter/prefixcacheaffinity/README.md)
+
+## Multi-cluster support
+
+`multicluster-approx-prefix-cache-producer` is the cluster-scoped variant. Its indexer keys on endpoint identity, so over cluster-endpoints it tracks (cluster, block) and routes a repeated prefix back to its cluster. It hashes 64-token blocks, so a shared prefix must be at least about 64 tokens to match.

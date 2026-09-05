@@ -46,3 +46,7 @@ schedulingProfiles:
       - pluginRef: queue-depth
         weight: 1
 ```
+
+## Multi-cluster support
+
+`multicluster-queue-scorer` is the cluster-scoped variant. The stock per-pod queue field is empty on a cluster-endpoint, so it scores on the `llm-d.ai/multicluster-queue-size` attribute. The `multicluster-metrics-data-source` scrapes the peer cluster and the `multicluster-metrics-extractor` writes that attribute from the pool's aggregate queue metric. Configure both in `dataLayer`, otherwise this scorer sees no pool metric and returns no score. See the [wiring example](../../../README.md#example).

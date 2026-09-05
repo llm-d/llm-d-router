@@ -17,7 +17,6 @@ limitations under the License.
 package tokenizer
 
 import (
-	"bytes"
 	"encoding/base64"
 	"image"
 	"strings"
@@ -157,11 +156,10 @@ func imageDimensionsFromBase64(url string) (width, height int, ok bool) {
 // imageDimensionsFromBase64Payload decodes a bare base64 image payload and
 // returns its pixel dimensions.
 func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool) {
-	decoded, err := base64.StdEncoding.DecodeString(rawB64)
-	if err != nil {
-		return 0, 0, false
-	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(decoded))
+	// Image decoding is streamed to reduce memory overhead, since
+	// only headers are necessary.
+	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(rawB64))
+	cfg, _, err := image.DecodeConfig(r)
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
 		return 0, 0, false
 	}

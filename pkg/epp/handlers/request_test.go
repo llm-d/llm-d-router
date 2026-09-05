@@ -231,30 +231,118 @@ func TestGenerateRequestHeaderResponse_MergeMetadata(t *testing.T) {
 	assert.Equal(t, "1.2.3.4:8080", endpointKey.GetStringValue(), "Unexpected value for DestinationEndpointKey")
 }
 
+func TestGenerateRequestHeaderResponse_EndpointScores(t *testing.T) {
+	t.Parallel()
+
+	scores := map[string]float64{
+		"1.2.3.4:8080": 0.91,
+		"5.6.7.8:8080": 0.74,
+	}
+
+	tests := []struct {
+		name               string
+		emitEndpointScores bool
+		targetScores       map[string]float64
+		wantScores         map[string]float64
+	}{
+		{
+			name:               "enabled with scores",
+			emitEndpointScores: true,
+			targetScores:       scores,
+			wantScores:         scores,
+		},
+		{
+			name:               "enabled without scores",
+			emitEndpointScores: true,
+		},
+		{
+			name:         "disabled with scores",
+			targetScores: scores,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			server.SetEmitEndpointScores(tc.emitEndpointScores)
+			reqCtx := &RequestContext{
+				TargetEndpoint:       "1.2.3.4:8080,5.6.7.8:8080",
+				TargetEndpointScores: tc.targetScores,
+				Request: &Request{
+					Headers: make(map[string]string),
+				},
+				Response: &Response{},
+			}
+
+			resp := server.generateRequestHeaderResponse(context.Background(), reqCtx)
+
+			endpointNamespace, ok := resp.DynamicMetadata.Fields[metadata.DestinationEndpointNamespace]
+			assert.True(t, ok, "Expected DestinationEndpointNamespace to be in DynamicMetadata")
+			endpointKey, ok := endpointNamespace.GetStructValue().Fields[metadata.DestinationEndpointKey]
+			assert.True(t, ok, "Expected DestinationEndpointKey to be in DestinationEndpointNamespace")
+			assert.Equal(t, "1.2.3.4:8080,5.6.7.8:8080", endpointKey.GetStringValue(), "Unexpected value for DestinationEndpointKey")
+
+			scoresValue, ok := endpointNamespace.GetStructValue().Fields[metadata.DestinationEndpointScoresKey]
+			if tc.wantScores == nil {
+				assert.False(t, ok, "Expected DestinationEndpointScoresKey to be absent from DestinationEndpointNamespace")
+				return
+			}
+			assert.True(t, ok, "Expected DestinationEndpointScoresKey to be in DestinationEndpointNamespace")
+			gotScores := make(map[string]float64)
+			for endpoint, score := range scoresValue.GetStructValue().Fields {
+				gotScores[endpoint] = score.GetNumberValue()
+			}
+			assert.Equal(t, tc.wantScores, gotScores, "Unexpected values for DestinationEndpointScoresKey")
+		})
+	}
+}
+
 func TestFallbackToRandomEndpoint(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		requestSize     int
-		wantBodyRespLen int
+		name               string
+		endpoint           *datalayer.EndpointMetadata
+		requestSize        int
+		wantTargetEndpoint string
+		wantBodyRespLen    int
 	}{
 		{
-			name:            "No body",
-			requestSize:     0,
-			wantBodyRespLen: 0,
+			name: "IPv4 endpoint without body",
+			endpoint: &datalayer.EndpointMetadata{
+				Address: "1.2.3.4",
+				Port:    "80",
+			},
+			requestSize:        0,
+			wantTargetEndpoint: "1.2.3.4:80",
+			wantBodyRespLen:    0,
 		},
 		{
-			name:            "With body",
-			requestSize:     9,
-			wantBodyRespLen: 1,
+			name: "IPv6 endpoint without body",
+			endpoint: &datalayer.EndpointMetadata{
+				Address: "fd99:0:0:8::bec5",
+				Port:    "8000",
+			},
+			requestSize:        0,
+			wantTargetEndpoint: "[fd99:0:0:8::bec5]:8000",
+			wantBodyRespLen:    0,
+		},
+		{
+			name: "With body",
+			endpoint: &datalayer.EndpointMetadata{
+				Address: "1.2.3.4",
+				Port:    "80",
+			},
+			requestSize:        9,
+			wantTargetEndpoint: "1.2.3.4:80",
+			wantBodyRespLen:    1,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			server := &StreamingServer{
-				director: &mockDirectorRequest{},
+				director: &mockDirectorRequest{endpoint: tc.endpoint},
 			}
 			reqCtx := &RequestContext{
 				Request:  &Request{Headers: make(map[string]string), RawBody: []byte("test body")},
@@ -263,6 +351,7 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 
 			err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, tc.requestSize)
 			assert.NoError(t, err)
+			assert.Equal(t, tc.wantTargetEndpoint, reqCtx.TargetEndpoint)
 
 			if tc.wantBodyRespLen > 0 {
 				assert.NotNil(t, reqCtx.reqBodyResp)
@@ -281,9 +370,13 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 
 type mockDirectorRequest struct {
 	Director
+	endpoint *datalayer.EndpointMetadata
 }
 
 func (m *mockDirectorRequest) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	if m.endpoint != nil {
+		return m.endpoint
+	}
 	return &datalayer.EndpointMetadata{
 		Address: "1.2.3.4",
 		Port:    "80",

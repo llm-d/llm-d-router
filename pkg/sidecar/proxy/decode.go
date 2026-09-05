@@ -25,10 +25,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 const (
@@ -81,7 +83,7 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 // Non-streaming: accumulated chunks are reassembled into a single JSON response.
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
 func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
-	s.logger.V(4).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
+	s.logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
 	ctx, span := tracing.Tracer(tracerScope).Start(r.Context(), "chunked_decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -98,7 +100,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	// If the token budget fits within a single chunk, skip chunking entirely.
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
-		s.logger.V(4).Info("chunked decode: token budget <= chunk size, using regular decode",
+		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
 			"maxTokens", originalMaxTokens, "chunkSize", s.config.DecodeChunkSize)
 		s.decoderProxy.ServeHTTP(w, r)
 		return
@@ -134,7 +136,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		remaining := remainingTokens(originalMaxTokens, totalTokens)
 		if remaining == 0 {
-			s.logger.V(4).Info("chunked decode: token budget exhausted", "totalTokens", totalTokens)
+			s.logger.V(logging.DEBUG).Info("chunked decode: token budget exhausted", "totalTokens", totalTokens)
 			break
 		}
 
@@ -165,7 +167,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
-		s.logger.V(4).Info("chunked decode: dispatching chunk",
+		s.logger.V(logging.DEBUG).Info("chunked decode: dispatching chunk",
 			"chunk", chunkIndex, "chunkBudget", chunkBudget, "totalTokensSoFar", totalTokens)
 
 		bw := &bufferedResponseWriter{}
@@ -198,7 +200,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		}
 		chunkIndex++
 
-		s.logger.V(4).Info("chunked decode: chunk complete", "chunkTokens", chunkTokens, "totalTokens", totalTokens)
+		s.logger.V(logging.DEBUG).Info("chunked decode: chunk complete", "chunkTokens", chunkTokens, "totalTokens", totalTokens)
 
 		finishReason := extractFinishReason(chunkResponse)
 		chunkText := extractChoiceText(firstChoice(chunkResponse))
@@ -216,7 +218,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		}
 
 		if finishReason != "" && finishReason != finishReasonLength {
-			s.logger.V(4).Info("chunked decode: terminal finish reason, stopping",
+			s.logger.V(logging.DEBUG).Info("chunked decode: terminal finish reason, stopping",
 				"finishReason", finishReason, "chunks", chunkIndex)
 			break
 		}
@@ -231,7 +233,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		// Append the generated text to the request so the next chunk continues
 		// from where this one left off.
-		s.logger.V(5).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
+		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
 		appendChunkToRequest(completionRequest, chunkText)
 	}
 

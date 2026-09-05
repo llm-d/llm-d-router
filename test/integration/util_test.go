@@ -31,7 +31,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	testutils "github.com/llm-d/llm-d-router/test/utils"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
 // stubExtProc answers a single Process message, which is enough to prove the server is
@@ -75,7 +75,7 @@ const ephemeralDraws = 2000
 // kernel never hands it back as an ephemeral allocation. This is the property the
 // harness relies on to start a server on a known port without a bind race.
 func TestReserveListenerDefendsPort(t *testing.T) {
-	lis, err := testutils.ReserveListener()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lis.Close() })
 	reserved := lis.Addr().(*net.TCPAddr).Port
@@ -99,7 +99,7 @@ func TestReserveListenerDefendsPort(t *testing.T) {
 // listener succeeds, because the kernel accepts into the listen backlog. Only Ready
 // proves the server is serving.
 func TestPreBoundListenerQueuesDials(t *testing.T) {
-	lis, err := testutils.ReserveListener()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	port := lis.Addr().(*net.TCPAddr).Port
 
@@ -121,7 +121,7 @@ func TestPreBoundListenerQueuesDials(t *testing.T) {
 
 func TestWaitExtProcReady(t *testing.T) {
 	t.Run("ready once the server serves", func(t *testing.T) {
-		lis, err := testutils.ReserveListener()
+		lis, err := fwknet.ReserveListener()
 		require.NoError(t, err)
 		serveStub(t, lis)
 
@@ -132,7 +132,7 @@ func TestWaitExtProcReady(t *testing.T) {
 	t.Run("manager error returns before the timeout", func(t *testing.T) {
 		// Bound but never served: a dial would succeed, so only the manager error can
 		// end this wait early.
-		lis, err := testutils.ReserveListener()
+		lis, err := fwknet.ReserveListener()
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = lis.Close() })
 
@@ -149,7 +149,7 @@ func TestWaitExtProcReady(t *testing.T) {
 	})
 
 	t.Run("manager exit without error is not readiness", func(t *testing.T) {
-		lis, err := testutils.ReserveListener()
+		lis, err := fwknet.ReserveListener()
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = lis.Close() })
 
@@ -161,7 +161,7 @@ func TestWaitExtProcReady(t *testing.T) {
 	})
 
 	t.Run("cancelled context returns immediately", func(t *testing.T) {
-		lis, err := testutils.ReserveListener()
+		lis, err := fwknet.ReserveListener()
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = lis.Close() })
 

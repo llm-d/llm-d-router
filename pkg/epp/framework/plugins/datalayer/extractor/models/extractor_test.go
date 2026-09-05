@@ -67,7 +67,7 @@ func TestExtractorExtract(t *testing.T) {
 		},
 	}
 
-	key := attrmodels.ModelsAttributeKey.WithNonEmptyProducerName(attrmodels.ModelsExtractorType).String()
+	key := attrmodels.ModelsAttributeKey.WithNonEmptyProducerName(attrmodels.ModelsExtractorType)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer func() {

@@ -61,8 +61,16 @@ func New(cfg config.GatewayConfig) *Client {
 // NewWithTransport creates a Client using the provided transport and base URL.
 // A nil transport is valid; http.Client will fall back to http.DefaultTransport.
 func NewWithTransport(transport *http.Transport, baseURL string) *Client {
+	// A typed-nil *http.Transport assigned to the RoundTripper interface field
+	// yields a non-nil interface, which would defeat http.Client's own
+	// c.Transport != nil check and the wrapper's nil-guard below. Normalize
+	// to a plain nil interface so both paths pick up http.DefaultTransport.
+	var rt http.RoundTripper
+	if transport != nil {
+		rt = transport
+	}
 	return &Client{
-		httpClient: &http.Client{Transport: transport},
+		httpClient: &http.Client{Transport: rt},
 		baseURL:    baseURL,
 	}
 }
@@ -92,7 +100,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	logger := log.FromContext(ctx).WithName("gateway")
 	if body != nil {
 		if v := logger.V(logutil.TRACE); v.Enabled() {
-			v.Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), "body", redactBody(body))
+			v.Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), "body", RedactBody(body))
 		}
 	}
 
@@ -109,7 +117,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		if err != nil {
 			return nil, fmt.Errorf("reading response from gateway: %w", err)
 		}
-		v.Info("response body", "status", resp.StatusCode, "body", redactBody(respBody))
+		v.Info("response body", "status", resp.StatusCode, "body", RedactBody(respBody))
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
 
@@ -146,10 +154,11 @@ const (
 	maxRedactDepth = 32
 )
 
-// redactBody parses JSON and redacts oversized string values (see
+// RedactBody parses JSON and redacts oversized string values (see
 // maxRedactStringLen); a body that is not valid JSON is returned verbatim, or
-// truncated at maxRedactRawBodyLen.
-func redactBody(data []byte) any {
+// truncated at maxRedactRawBodyLen. It is exported for the decode reverse-proxy
+// path, which bypasses Client.Request and so redacts its own body before logging.
+func RedactBody(data []byte) any {
 	var v any
 	if err := json.Unmarshal(data, &v); err != nil {
 		if len(data) > maxRedactRawBodyLen {

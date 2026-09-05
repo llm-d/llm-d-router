@@ -14,12 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package external_tokenizer_scorer benchmarks the end-to-end request flow
-// through the EPP when using the external tokenizer DataProducer plugin
+// Package tokenizerbench benchmarks the end-to-end request flow
+// through the EPP when using the token-producer plugin
 // combined with the precise-prefix-cache-producer and prefix-cache-scorer.
 //
 // Prerequisites:
-//   - A kind cluster with the EPP deployed using the external tokenizer config.
+//   - A kind cluster with the EPP deployed using the KV cache config.
 //   - Gateway reachable on localhost (default: port 30080).
 //
 // Run:
@@ -28,7 +28,7 @@ limitations under the License.
 //
 // Or manually:
 //
-//	EXTERNAL_TOKENIZER_ENABLED=true KV_CACHE_ENABLED=true make env-dev-kind
+//	KV_CACHE_ENABLED=true make env-dev-kind
 //	MODEL_NAME="TinyLlama/TinyLlama-1.1B-Chat-v1.0" go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/
 package tokenizerbench
 

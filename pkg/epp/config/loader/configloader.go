@@ -79,7 +79,7 @@ func RegisterFeatureGate(gate string, isEnabledByDefault bool) {
 
 // LoadRawConfig parses the raw configuration bytes, applies initial defaults, and extracts feature gates.
 // It does not instantiate plugins.
-func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointPickerConfig, map[string]bool, error) {
+func LoadRawConfig(configBytes []byte, logger logr.Logger, extraGates ...string) (*configapi.EndpointPickerConfig, map[string]bool, error) {
 	var rawConfig *configapi.EndpointPickerConfig
 	var err error
 	if len(configBytes) != 0 {
@@ -121,6 +121,8 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 			}
 		}
 
+		migrateDiscoveryConfig(logger, rawConfig)
+
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
 		logger.Info("A configuration wasn't specified. A default one is being used.")
@@ -129,6 +131,16 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	}
 
 	applyStaticDefaults(rawConfig)
+
+	// Appended after the config's own entries because loadFeatureConfig is last-wins,
+	// so flag-supplied gates override file-supplied ones. This mutates rawConfig rather
+	// than only the returned map: InstantiateAndConfigure and validateConfig each
+	// re-derive gates from rawConfig.FeatureGates, and applying a gate to only one of
+	// the three leaves the EPP inconsistent.
+	if len(extraGates) > 0 {
+		rawConfig.FeatureGates = append(rawConfig.FeatureGates, extraGates...)
+		logger.Info("Applied feature gates from flags", "gates", extraGates)
+	}
 
 	// We validate gates early because they might dictate downstream loading logic.
 	if err := validateFeatureGates(rawConfig.FeatureGates); err != nil {
@@ -143,6 +155,25 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	return rawConfig, featureConfig, nil
 }
 
+// migrateDiscoveryConfig lifts the deprecated bare pluginRef into the
+// consolidated discovery section:
+//
+//	dataLayer.discovery.pluginRef -> dataLayer.discovery.endpoints.pluginRef
+func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPickerConfig) {
+	if rawConfig.DataLayer == nil {
+		return
+	}
+	dl := rawConfig.DataLayer
+
+	//nolint:staticcheck // SA1019: dl.Discovery.PluginRef is deprecated: use discovery.endpoints instead.
+	if dl.Discovery != nil && dl.Discovery.PluginRef != "" {
+		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead. If both are set, the new field is used.")
+		if dl.Discovery.Endpoints == nil {
+			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
+		}
+	}
+}
+
 // InstantiateAndConfigure performs the heavy lifting of plugin instantiation, system architecture injection, and
 // scheduler construction.
 func InstantiateAndConfigure(
@@ -154,7 +185,7 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	if err := instantiatePlugins(rawConfig.Plugins, handle); err != nil {
+	if err := instantiatePlugins(rawConfig.Plugins, handle, logger); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
 	}
 
@@ -172,17 +203,17 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("scheduler config build failed: %w", err)
 	}
 
-	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load feature gates: %w", err)
-	}
-
 	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle)
 	if err != nil {
 		return nil, fmt.Errorf("data layer config build failed: %w", err)
 	}
 	if len(dataConfig.Sources) == 0 {
 		logger.Info("No data sources configured; metrics collection is disabled")
+	}
+
+	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load feature gates: %w", err)
 	}
 
 	var flowControlConfig *flowcontrol.Config
@@ -192,6 +223,8 @@ func InstantiateAndConfigure(
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
+	} else if flowControlSettingsConfigured(rawConfig.FlowControl) {
+		logger.Info("WARNING: the flowControl config section is set but the flowControl feature gate is disabled; its settings (other than saturationDetector) are ignored")
 	}
 
 	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle, logger)
@@ -217,6 +250,20 @@ func InstantiateAndConfigure(
 	}, nil
 }
 
+// flowControlSettingsConfigured reports whether the flowControl config section carries settings
+// beyond the saturation detector. The saturation detector is honored by the legacy admission path
+// even when the flowControl feature gate is disabled, so it alone does not indicate ignored
+// configuration.
+func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
+	if fc == nil {
+		return false
+	}
+	return fc.MaxBytes != nil || fc.MaxRequests != nil || fc.DefaultRequestTTL != nil ||
+		fc.NoEndpointRequestTTL != nil || fc.DefaultPriorityBand != nil ||
+		fc.DefaultNegativePriorityBand != nil || len(fc.PriorityBands) > 0 ||
+		fc.UsageLimitPolicyPluginRef != ""
+}
+
 func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error) {
 	cfg := &configapi.EndpointPickerConfig{}
 	codecs := serializer.NewCodecFactory(scheme, serializer.EnableStrict)
@@ -226,13 +273,18 @@ func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error
 	return cfg, nil
 }
 
-func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) error {
+func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle, logger logr.Logger) error {
 	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
 	if err != nil {
 		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
 	}
 
 	for _, spec := range orderedPlugins {
+
+		if meta, ok := fwkplugin.RegistryMetadata[spec.Type]; ok && meta.Deprecated {
+			logger.Info("DEPRECATION warning: plugin is deprecated", "plugin", spec.Name, "type", spec.Type)
+		}
+
 		factory := fwkplugin.Registry[spec.Type]
 		plugin, err := factory(spec.Name, fwkplugin.StrictDecoder(spec.Parameters), handle)
 		if err != nil {
@@ -432,6 +484,23 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
+	if ref := rawDataConfig.CrossReplicaSyncerPluginRef; ref != "" {
+		syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
+		if !ok {
+			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+		}
+		cfg.Syncer = syncer
+	}
+	if iv := rawDataConfig.CrossReplicaSyncInterval; iv != nil {
+		cfg.SyncInterval = iv.Duration
+	}
+	if timeout := rawDataConfig.CrossReplicaPublishTimeout; timeout != nil {
+		if timeout.Duration <= 0 {
+			return nil, fmt.Errorf("crossReplicaPublishTimeout must be positive, got %s", timeout.Duration)
+		}
+		cfg.PublishTimeout = timeout.Duration
+	}
+
 	for _, source := range rawDataConfig.Sources {
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
 			sourceConfig := datalayer.DataSourceConfig{
@@ -450,5 +519,6 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 			return nil, fmt.Errorf("the plugin %s is not a fwkdl.DataSource", source.PluginRef)
 		}
 	}
+	handle.SetCrossReplicaSyncer(cfg.Syncer)
 	return &cfg, nil
 }

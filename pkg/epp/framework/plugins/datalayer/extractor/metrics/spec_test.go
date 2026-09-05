@@ -519,3 +519,22 @@ func TestExtractValue(t *testing.T) {
 		})
 	}
 }
+
+// labelsMatch runs per series per scrape tick; keep it allocation-free.
+func BenchmarkLabelsMatch(b *testing.B) {
+	spec := &Spec{
+		Name:   "vllm:lora_requests_info",
+		Labels: map[string]string{"engine": "0", "model_name": "m1"},
+	}
+	// A realistic series: the two matched labels plus unrelated ones.
+	metric := makeMetric(map[string]string{
+		"engine": "0", "model_name": "m1", "pod": "p0", "namespace": "ns", "gpu": "3",
+	}, 1.0, 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !spec.labelsMatch(metric.GetLabel()) {
+			b.Fatal("expected match")
+		}
+	}
+}

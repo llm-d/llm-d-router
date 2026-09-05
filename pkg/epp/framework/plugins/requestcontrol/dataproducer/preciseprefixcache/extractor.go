@@ -19,6 +19,8 @@ package preciseprefixcache
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -37,12 +39,12 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 		return nil
 	}
 	meta := event.Endpoint.GetMetadata()
-	if meta == nil || meta.NamespacedName.Name == "" {
+	if meta == nil || meta.ID.Name == "" {
 		return nil
 	}
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	endpointKey := meta.NamespacedName.String()
+	endpointKey := meta.ID.String()
 
 	switch event.Type {
 	case fwkdl.EventAddOrUpdate:
@@ -70,19 +72,25 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
-	endpointKey := meta.NamespacedName.String()
+	endpointKey := meta.ID.String()
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
-	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
+	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
+	replayEndpoint := ""
+	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
+	}
+	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
 	// down on request completion.
 	if err := p.subscribersManager.EnsureSubscriber(p.subscriberCtx, endpointKey,
-		zmqEndpoint, p.kvEventsConfig.TopicFilter, true); err != nil {
+		sourceEndpoint, zmqEndpoint, replayEndpoint, p.kvEventsConfig.TopicFilter, true); err != nil {
 		logger.Error(err, "Failed to ensure KV-events subscriber for endpoint",
 			"endpoint", endpointKey, "address", meta.Address)
 		return fmt.Errorf("ensure subscriber for %s: %w", endpointKey, err)
 	}
-	logger.V(logging.DEBUG).Info("Ensured KV-events subscriber", "endpoint", endpointKey, "zmq", zmqEndpoint)
+	logger.V(logging.DEBUG).Info("Ensured KV-events subscriber",
+		"endpoint", endpointKey, "zmq", zmqEndpoint, "replay", replayEndpoint)
 	return nil
 }

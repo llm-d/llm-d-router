@@ -245,7 +245,7 @@ func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBl
 	i := 0
 	for i < len(members) {
 		target := pickReplica(replicas, perReplica, k, load, matches, minColocateBlocks, maxShare, preferMatch)
-		name := target.GetMetadata().NamespacedName.String()
+		name := target.GetMetadata().ID.String()
 
 		run := len(members) - i
 		if k != unlimitedPerReplica {
@@ -280,7 +280,7 @@ func placeGroup(members []*entry, replicas []fwksched.Endpoint, k, minColocateBl
 
 	for _, m := range members {
 		if m.assigned != nil {
-			idx.add(hashes, m.assigned.GetMetadata().NamespacedName.String())
+			idx.add(hashes, m.assigned.GetMetadata().ID.String())
 		}
 	}
 }
@@ -297,7 +297,7 @@ func pickReplica(replicas []fwksched.Endpoint, perReplica map[string]int, k int,
 		var bestName string
 		bestMatch := 0
 		for _, r := range replicas {
-			name := r.GetMetadata().NamespacedName.String()
+			name := r.GetMetadata().ID.String()
 			if k != unlimitedPerReplica && perReplica[name] >= k {
 				continue
 			}
@@ -326,7 +326,7 @@ func pickLeastLoaded(replicas []fwksched.Endpoint, perReplica map[string]int, k 
 	var best fwksched.Endpoint
 	var bestName string
 	for _, r := range replicas {
-		name := r.GetMetadata().NamespacedName.String()
+		name := r.GetMetadata().ID.String()
 		if k != unlimitedPerReplica && perReplica[name] >= k {
 			continue
 		}
@@ -338,7 +338,7 @@ func pickLeastLoaded(replicas []fwksched.Endpoint, perReplica map[string]int, k 
 		return best
 	}
 	for _, r := range replicas {
-		name := r.GetMetadata().NamespacedName.String()
+		name := r.GetMetadata().ID.String()
 		if best == nil || less(r, name, load, best, bestName) {
 			best, bestName = r, name
 		}

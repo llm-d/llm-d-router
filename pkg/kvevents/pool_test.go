@@ -3,6 +3,7 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -37,6 +38,27 @@ func newTestPool(t *testing.T, blockSize int) (
 	return pool, idx, tp
 }
 
+type recordingIndex struct {
+	kvblock.Index
+	getRequestKeyCalls int
+	evictCalls         int
+}
+
+func (i *recordingIndex) GetRequestKey(ctx context.Context, engineKey kvblock.BlockHash) (kvblock.BlockHash, error) {
+	i.getRequestKeyCalls++
+	return i.Index.GetRequestKey(ctx, engineKey)
+}
+
+func (i *recordingIndex) Evict(
+	ctx context.Context,
+	key kvblock.BlockHash,
+	keyType kvblock.KeyType,
+	entries []kvblock.PodEntry,
+) error {
+	i.evictCalls++
+	return i.Index.Evict(ctx, key, keyType, entries)
+}
+
 // makeTokens creates a token slice [1, 2, ..., n].
 func makeTokens(n int) []uint32 {
 	tokens := make([]uint32, n)
@@ -53,6 +75,73 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 		keys[i] = base + uint64(i) // #nosec G115 -- test data, i is small
 	}
 	return keys
+}
+
+type sourceEndpointAdapter struct{}
+
+func (a *sourceEndpointAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
+	return "10.0.0.1:8000", "test-model", EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: []uint64{uint64(msg.Payload[0])},
+				Tokens:      makeTokens(16),
+			},
+		},
+	}, nil
+}
+
+func (a *sourceEndpointAdapter) ShardingKey(*RawMessage) string {
+	return "10.0.0.1:8000"
+}
+
+func TestProcessRawMessage_UsesSubscriberSourceEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+
+	for i, sourceEndpoint := range []string{"10.0.0.1:8000", "10.0.0.1:8003"} {
+		pool.processRawMessage(ctx, &RawMessage{
+			Topic:          "kv@10.0.0.1:8000@test-model",
+			Payload:        []byte{byte(i + 1)},
+			SourceEndpoint: sourceEndpoint,
+		})
+	}
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 2)
+
+	got := []string{
+		result[keys[0]][0].PodIdentifier,
+		result[keys[0]][1].PodIdentifier,
+	}
+	assert.ElementsMatch(t, []string{"10.0.0.1:8000", "10.0.0.1:8003"}, got)
+}
+
+func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+
+	pool.processRawMessage(ctx, &RawMessage{
+		Topic:   "kv@10.0.0.1:8000@test-model",
+		Payload: []byte{1},
+	})
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, result[keys[0]], 1)
+	assert.Equal(t, "10.0.0.1:8000", result[keys[0]][0].PodIdentifier)
 }
 
 // TestCanonicalWritePath_FallbackLegacy verifies that when BlockSize equals
@@ -666,7 +755,7 @@ func TestBlockStoredEvent_EvictionOrderGPUThenCPU(t *testing.T) {
 	assert.Error(t, err, "engine→request mapping should be removed after full eviction")
 }
 
-func TestHMAGroupMetadataAndEntryOnBlockStored(t *testing.T) {
+func TestHMAGroupMetadataLearnedForRejectedKind(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, tp := newTestPool(t, 16)
 
@@ -704,11 +793,111 @@ func TestHMAGroupMetadataAndEntryOnBlockStored(t *testing.T) {
 	result, err := idx.Lookup(ctx, canonicalKeys, nil)
 	require.NoError(t, err)
 	for _, ck := range canonicalKeys {
-		entries := result[ck]
-		require.Len(t, entries, 1, "each canonical key should have one entry")
-		assert.True(t, entries[0].HasGroup)
-		assert.Equal(t, kvblock.GroupID(0), entries[0].GroupIdx)
+		assert.Empty(t, result[ck], "rejected group kind must not be indexed")
 	}
+}
+
+func TestHMAGroupKindFilter(t *testing.T) {
+	tests := []struct {
+		name    string
+		kind    KVCacheSpecKind
+		allowed bool
+	}{
+		{name: "full attention", kind: KVCacheSpecKindFullAttention, allowed: true},
+		{name: "MLA attention", kind: KVCacheSpecKindMlaAttention, allowed: true},
+		{name: "sink full attention", kind: KVCacheSpecKindSinkFull, allowed: true},
+		{name: "sliding window", kind: KVCacheSpecKindSlidingWindow},
+		{name: "sliding window MLA", kind: KVCacheSpecKindSlidingWindowMla},
+		{name: "mamba", kind: KVCacheSpecKindMamba},
+		{name: "chunked local attention", kind: KVCacheSpecKindChunkedLocal},
+		{name: "encoder only attention", kind: KVCacheSpecKindEncoder},
+		{name: "cross attention", kind: KVCacheSpecKindCross},
+		{name: "unknown", kind: KVCacheSpecKindUnknown},
+		{name: "missing kind"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, tp := newTestPool(t, 16)
+			groupIdx := 0
+			tokens := makeTokens(64)
+			engineKeys := makeEngineKeys(4, 900)
+
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     engineKeys,
+					Tokens:          tokens,
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: tt.kind,
+					BlockSize:       16,
+				},
+			}}, "pod-hma", "test-model")
+
+			canonicalKeys, err := tp.TokensToKVBlockKeys(
+				kvblock.EmptyBlockHash, tokens, "test-model", nil)
+			require.NoError(t, err)
+			result, err := idx.Lookup(ctx, canonicalKeys, nil)
+			require.NoError(t, err)
+			for _, key := range canonicalKeys {
+				if tt.allowed {
+					require.Len(t, result[key], 1)
+					assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
+				} else {
+					assert.Empty(t, result[key])
+				}
+			}
+		})
+	}
+}
+
+func TestHMAGroupFilterRejectsSparseFullAttentionBeforeParentLookup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 950),
+			Tokens:          makeTokens(64),
+			ParentHash:      949,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindFullAttention,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.getRequestKeyCalls)
+	_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(950))
+	assert.Error(t, err)
+}
+
+func TestHMAGroupFilterIgnoresRejectedGroupRemoval(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 1
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 980),
+			Tokens:          makeTokens(64),
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindSlidingWindowMla,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockRemovedEvent{
+			BlockHashes: makeEngineKeys(1, 980),
+			GroupIdx:    &groupIdx,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.evictCalls)
 }
 
 // TestHMAGroupLevelEviction_BlockRemoved verifies that a BlockRemoved event with GroupIdx
@@ -1096,6 +1285,64 @@ func TestPool_DedupMetricsCountBlockHashes(t *testing.T) {
 		"second remove must forward all 4 constituent block hashes")
 }
 
+// stubAdapter is a minimal EngineAdapter that shards every message onto the
+// same key and decodes to an empty batch, so tasks flow through the pool
+// without exercising any engine-specific parsing.
+type stubAdapter struct{}
+
+//nolint:gocritic // unnamed results match the EngineAdapter implementations
+func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, error) {
+	return "pod-1", "model-1", EventBatch{}, nil
+}
+
+func (stubAdapter) ShardingKey(_ *RawMessage) string { return "pod-1" }
+
+// TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
+// enqueues and dequeues, and is reset once the pool shuts down.
+func TestPool_QueueDepthAccounting(t *testing.T) {
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+
+	tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+		BlockSizeTokens: 4, HashSeed: "test",
+	})
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Concurrency = 2
+	pool := NewPool(cfg, idx, tp, stubAdapter{})
+
+	const tasks = 3
+	for i := range uint64(tasks) {
+		pool.AddTask(&RawMessage{Topic: "kv@pod-1@model-1", Sequence: i})
+	}
+
+	assert.Equal(t, int64(tasks), pool.queueDepth.Load(), "every enqueued task must be counted")
+	assert.InDelta(t, float64(tasks), gaugeValue(t, metrics.PoolQueueDepth), 0.001)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	assert.Eventually(t, func() bool {
+		return pool.queueDepth.Load() == 0
+	}, 5*time.Second, 10*time.Millisecond, "workers must decrement the depth as tasks drain")
+
+	pool.Shutdown(ctx)
+	assert.Equal(t, int64(0), pool.queueDepth.Load())
+	assert.InDelta(t, 0.0, gaugeValue(t, metrics.PoolQueueDepth), 0.001)
+	assert.InDelta(t, float64(cfg.Concurrency), gaugeValue(t, metrics.PoolCapacity), 0.001)
+}
+
+// gaugeValue reads the current value of a prometheus.Gauge without touching the
+// global registry.
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, g.Write(&m))
+	return m.GetGauge().GetValue()
+}
+
 // counterValue reads the current value of a plain prometheus.Counter without
 // touching the global registry, using the same dto.Metric.Write pattern as
 // pkg/kvcache/metrics.logMetrics.
@@ -1104,4 +1351,26 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	var m dto.Metric
 	require.NoError(t, c.Write(&m))
 	return m.GetCounter().GetValue()
+}
+
+func TestEffectiveReplayPort(t *testing.T) {
+	tests := []struct {
+		name       string
+		socketPort int
+		replayPort int
+		want       int
+	}{
+		{"disabled by default", 5556, 0, -1},
+		{"explicit value", 5556, 6000, 6000},
+		{"negative disabled", 5556, -1, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &PodDiscoveryConfig{
+				SocketPort:       tt.socketPort,
+				ReplaySocketPort: tt.replayPort,
+			}
+			assert.Equal(t, tt.want, cfg.EffectiveReplayPort())
+		})
+	}
 }

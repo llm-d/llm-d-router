@@ -22,6 +22,8 @@ spec:
       labels:
         {{- include "llm-d-router.labels" . | nindent 8 }}
         {{- include "llm-d-router.proxySelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "llm-d-router.proxyConfigMapData" . | sha256sum }}
     spec:
       containers:
         - name: {{ $proxy.name }}

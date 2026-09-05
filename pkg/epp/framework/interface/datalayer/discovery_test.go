@@ -42,8 +42,8 @@ func TestNewDiscoveryNotifier_Upsert(t *testing.T) {
 	store := &fakeStore{}
 	notifier := NewDiscoveryNotifier(store)
 	meta := &EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "ep1", Namespace: "default"},
-		Address:        "10.0.0.1",
+		ID:      types.NamespacedName{Name: "ep1", Namespace: "default"},
+		Address: "10.0.0.1",
 	}
 
 	notifier.Upsert(meta)
@@ -70,7 +70,7 @@ func TestNewDiscoveryNotifier_UpsertThenDelete(t *testing.T) {
 	notifier := NewDiscoveryNotifier(store)
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
-	notifier.Upsert(&EndpointMetadata{NamespacedName: id})
+	notifier.Upsert(&EndpointMetadata{ID: id})
 	notifier.Delete(id)
 
 	assert.Len(t, store.upserted, 1)

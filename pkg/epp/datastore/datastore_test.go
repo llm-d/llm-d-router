@@ -514,7 +514,7 @@ func TestPods(t *testing.T) {
 				gotPods := make([]*corev1.Pod, len(podList))
 				for idx, pm := range podList {
 					gotPods[idx] = &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().PodName, Namespace: pm.GetMetadata().NamespacedName.Namespace},
+						ObjectMeta: metav1.ObjectMeta{Name: pm.GetMetadata().Name, Namespace: pm.GetMetadata().ID.Namespace},
 						Status: corev1.PodStatus{
 							PodIP:  pm.GetMetadata().GetIPAddress(),
 							HostIP: pm.GetMetadata().GetNodeAddress(),
@@ -631,7 +631,7 @@ func TestTargetPortsChange(t *testing.T) {
 				// Verify endpoint names
 				gotNames := make([]string, 0, len(finalEndpoints))
 				for _, ep := range finalEndpoints {
-					gotNames = append(gotNames, ep.GetMetadata().NamespacedName.Name)
+					gotNames = append(gotNames, ep.GetMetadata().ID.Name)
 				}
 				if diff := cmp.Diff(test.wantEndpointNames, gotNames, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 					t.Errorf("Endpoint names mismatch (-want +got):\n%s", diff)
@@ -654,12 +654,12 @@ func TestEndpointMetadata(t *testing.T) {
 			existingPods: []*corev1.Pod{},
 			wantEndpointMetas: []*fwkdl.EndpointMetadata{
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-0",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolTargetPort,
@@ -677,12 +677,12 @@ func TestEndpointMetadata(t *testing.T) {
 			existingPods: []*corev1.Pod{},
 			wantEndpointMetas: []*fwkdl.EndpointMetadata{
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-0",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
@@ -690,12 +690,12 @@ func TestEndpointMetadata(t *testing.T) {
 					Labels:      map[string]string{},
 				},
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-1",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
@@ -714,12 +714,12 @@ func TestEndpointMetadata(t *testing.T) {
 			existingPods: []*corev1.Pod{pod1},
 			wantEndpointMetas: []*fwkdl.EndpointMetadata{
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-0",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
@@ -727,12 +727,12 @@ func TestEndpointMetadata(t *testing.T) {
 					Labels:      map[string]string{},
 				},
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-1",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
@@ -741,12 +741,12 @@ func TestEndpointMetadata(t *testing.T) {
 					RankIndex:   1,
 				},
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod2.Name + "-rank-0",
 						Namespace: pod2.Namespace,
 					},
 
-					PodName:     pod2.Name,
+					Name:        pod2.Name,
 					Address:     pod2.Status.PodIP,
 					NodeAddress: pod2.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
@@ -754,12 +754,12 @@ func TestEndpointMetadata(t *testing.T) {
 					Labels:      map[string]string{},
 				},
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod2.Name + "-rank-1",
 						Namespace: pod2.Namespace,
 					},
 
-					PodName:     pod2.Name,
+					Name:        pod2.Name,
 					Address:     pod2.Status.PodIP,
 					NodeAddress: pod2.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
@@ -778,12 +778,12 @@ func TestEndpointMetadata(t *testing.T) {
 			existingPods: []*corev1.Pod{pod1, pod2},
 			wantEndpointMetas: []*fwkdl.EndpointMetadata{
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-0",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort0,
@@ -791,12 +791,12 @@ func TestEndpointMetadata(t *testing.T) {
 					Labels:      map[string]string{},
 				},
 				{
-					NamespacedName: types.NamespacedName{
+					ID: types.NamespacedName{
 						Name:      pod1.Name + "-rank-1",
 						Namespace: pod1.Namespace,
 					},
 
-					PodName:     pod1.Name,
+					Name:        pod1.Name,
 					Address:     pod1.Status.PodIP,
 					NodeAddress: pod1.Status.HostIP,
 					Port:        inferencePoolMultiTargetPort1,
@@ -835,7 +835,7 @@ func TestEndpointMetadata(t *testing.T) {
 				for idx, pm := range podList {
 					gotMetadata[idx] = pm.GetMetadata()
 				}
-				if diff := cmp.Diff(test.wantEndpointMetas, gotMetadata, cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.NamespacedName.Name < b.NamespacedName.Name })); diff != "" {
+				if diff := cmp.Diff(test.wantEndpointMetas, gotMetadata, cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.ID.Name < b.ID.Name })); diff != "" {
 					t.Errorf("ConvertTo() mismatch (-want +got):\n%s", diff)
 				}
 			})
@@ -998,7 +998,7 @@ func TestActivePortFiltering(t *testing.T) {
 				if test.wantEndpointNames != nil {
 					gotNames := make([]string, 0, len(finalEndpoints))
 					for _, ep := range finalEndpoints {
-						gotNames = append(gotNames, ep.GetMetadata().NamespacedName.Name)
+						gotNames = append(gotNames, ep.GetMetadata().ID.Name)
 					}
 					if diff := cmp.Diff(test.wantEndpointNames, gotNames, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 						t.Errorf("Endpoint names mismatch (-want +got):\n%s", diff)
@@ -1391,7 +1391,7 @@ func TestEndpointUpsert_NewEndpoint(t *testing.T) {
 	ds := NewDatastore(ctx, &mockEndpointFactory{})
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Port: port})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr, Port: port})
 
 	eps := ds.PodList(AllPodsPredicate)
 	assert.Len(t, eps, 1)
@@ -1404,8 +1404,8 @@ func TestEndpointUpsert_UpdateExisting(t *testing.T) {
 	ds := NewDatastore(ctx, &mockEndpointFactory{})
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr1})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr2})
 
 	eps := ds.PodList(AllPodsPredicate)
 	assert.Len(t, eps, 1)
@@ -1419,16 +1419,16 @@ func TestEndpointUpsert_UpdateExistingNotifiesEndpointFactory(t *testing.T) {
 	ds := NewDatastore(ctx, factory)
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr1})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr1})
 	assert.Empty(t, factory.updateEvents())
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr2})
 
 	updates := factory.updateEvents()
 	assert.Len(t, updates, 1)
 	assert.Equal(t, addr2, updates[0].GetMetadata().Address)
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr2})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr2})
 	assert.Len(t, factory.updateEvents(), 1)
 }
 
@@ -1439,8 +1439,8 @@ func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
 	ds := NewDatastore(ctx, factory)
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: nil})
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: addr, Labels: map[string]string{}})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr, Labels: nil})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id, Address: addr, Labels: map[string]string{}})
 
 	assert.Empty(t, factory.updateEvents())
 }
@@ -1448,7 +1448,7 @@ func TestEndpointUpsert_SemanticallyEqualMetadataDoesNotNotify(t *testing.T) {
 func TestEndpointUpsert_NewEndpointFactoryReturnsNil(t *testing.T) {
 	ctx := context.Background()
 	ds := NewDatastore(ctx, &mockEndpointFactory{returnNil: true})
-	meta := &fwkdl.EndpointMetadata{NamespacedName: types.NamespacedName{Name: "ep1", Namespace: "default"}}
+	meta := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "ep1", Namespace: "default"}}
 
 	assert.NotPanics(t, func() { ds.EndpointUpsert(ctx, meta) })
 	assert.Empty(t, ds.PodList(AllPodsPredicate))
@@ -1459,7 +1459,7 @@ func TestEndpointDelete_Existing(t *testing.T) {
 	ds := NewDatastore(ctx, &mockEndpointFactory{})
 	id := types.NamespacedName{Name: "ep1", Namespace: "default"}
 
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: id})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id})
 	assert.Len(t, ds.PodList(AllPodsPredicate), 1)
 
 	ds.EndpointDelete(id)
@@ -1534,14 +1534,14 @@ func TestUpsertEndpoint_ConcurrentStoreDuringNilAppliesMetadata(t *testing.T) {
 	var ds *datastore
 	factory := &datalayer.FakeEndpointFactory{
 		NewEndpointFn: func(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint {
-			staleMeta := &fwkdl.EndpointMetadata{NamespacedName: id, Address: "10.0.0.1"}
+			staleMeta := &fwkdl.EndpointMetadata{ID: id, Address: "10.0.0.1"}
 			ds.pods.Store(id, fwkdl.NewEndpoint(staleMeta, fwkdl.NewMetrics()))
 			return nil
 		},
 	}
 	ds = NewDatastore(ctx, factory).(*datastore)
 
-	created, err := ds.upsertEndpoint(ctx, &fwkdl.EndpointMetadata{NamespacedName: id, Address: "10.0.0.2"})
+	created, err := ds.upsertEndpoint(ctx, &fwkdl.EndpointMetadata{ID: id, Address: "10.0.0.2"})
 
 	require.NoError(t, err)
 	assert.False(t, created)
@@ -1565,17 +1565,17 @@ func TestDatastore_ConcurrentAddRemoveCompleteness(t *testing.T) {
 		NewEndpointFn: func(_ context.Context, meta *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 			mu.Lock()
 			defer mu.Unlock()
-			if registered[meta.NamespacedName] {
+			if registered[meta.ID] {
 				return nil
 			}
-			registered[meta.NamespacedName] = true
+			registered[meta.ID] = true
 			return fwkdl.NewEndpoint(meta, fwkdl.NewMetrics())
 		},
 		ReleaseEndpointFn: func(ep fwkdl.Endpoint) {
 			time.Sleep(50 * time.Microsecond)
 			mu.Lock()
 			defer mu.Unlock()
-			delete(registered, ep.GetMetadata().NamespacedName)
+			delete(registered, ep.GetMetadata().ID)
 		},
 	}
 	ds := NewDatastore(ctx, factory)
@@ -1610,12 +1610,12 @@ func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
 
 	// Populate one endpoint directly (simulates the K8s reconciler path).
 	directID := types.NamespacedName{Name: "direct-ep", Namespace: "default"}
-	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{NamespacedName: directID, Address: "10.0.0.1"})
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: directID, Address: "10.0.0.1"})
 
 	// Add a second endpoint via DiscoveryNotifier (the file-discovery path).
 	notifier := fwkdl.NewDiscoveryNotifier(ds)
 	notifID := types.NamespacedName{Name: "notif-ep", Namespace: "default"}
-	notifier.Upsert(&fwkdl.EndpointMetadata{NamespacedName: notifID, Address: "10.0.0.2"})
+	notifier.Upsert(&fwkdl.EndpointMetadata{ID: notifID, Address: "10.0.0.2"})
 
 	// Both endpoints must coexist.
 	assert.Len(t, ds.PodList(AllPodsPredicate), 2)

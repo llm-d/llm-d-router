@@ -18,7 +18,6 @@ package runner
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -63,21 +62,14 @@ featureGates:
 //     FlowControlConfig, and the flow registry is exposed as the priority band control plane;
 //   - gate off: the LegacyAdmissionController is wired and no flow control config is built.
 //
-// The "no featureGates stanza" case reads the gate's registered default from the parsed
-// feature-gate map instead of hardcoding it, so this test keeps passing unchanged when the gate
-// flips to enabled-by-default (#2104) and pins that the flip actually changes the default wiring.
+// The "no featureGates stanza" case pins the registered default: flow control is an explicit
+// opt-in, so changing the default is a deliberate act that must edit this test.
 func TestFlowControlFeatureGateAdmissionControlWiring(t *testing.T) {
-	// The deprecated ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var appends the gate to the config
-	// during phase two; clear it so only the featureGates stanza under test drives the outcome.
-	if v, ok := os.LookupEnv(enableExperimentalFlowControlLayer); ok {
-		require.NoError(t, os.Unsetenv(enableExperimentalFlowControlLayer))
-		t.Cleanup(func() { _ = os.Setenv(enableExperimentalFlowControlLayer, v) })
-	}
-
 	boolPtr := func(b bool) *bool { return &b }
 	testCases := []struct {
 		name       string
 		configText string
+		extraGates []string
 		// wantEnabled nil means "expect whatever default the runner registered for the gate",
 		// read programmatically from the feature gates parsed out of the stanza-less config.
 		wantEnabled *bool
@@ -107,6 +99,24 @@ featureGates:
 `,
 			wantEnabled: boolPtr(false),
 		},
+		{
+			name: "flowControl gate enabled via flag without a featureGates stanza",
+			configText: `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+`,
+			extraGates:  []string{flowcontrol.FeatureGate},
+			wantEnabled: boolPtr(true),
+		},
+		{
+			name: "flag overrides the config's featureGates stanza",
+			configText: `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl=false
+`,
+			extraGates:  []string{flowcontrol.FeatureGate + "=true"},
+			wantEnabled: boolPtr(true),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -116,6 +126,7 @@ featureGates:
 
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
+			opts.FeatureGates = tc.extraGates
 			opts.PoolName = "test-pool"
 
 			r := NewRunner()
@@ -127,6 +138,8 @@ featureGates:
 				wantEnabled = *tc.wantEnabled
 				require.Equal(t, wantEnabled, r.featureGates[flowcontrol.FeatureGate],
 					"the loader should honor the explicit featureGates stanza")
+			} else {
+				require.False(t, wantEnabled, "the flowControl gate is registered as disabled by default")
 			}
 
 			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
@@ -135,7 +148,7 @@ featureGates:
 
 			endpointCandidates := contracts.EndpointCandidates(
 				requestcontrol.NewDatastoreEndpointCandidates(ds))
-			_, admissionController, controlPlane :=
+			_, admissionController, controlPlane, _ :=
 				r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 			if wantEnabled {
@@ -153,4 +166,25 @@ featureGates:
 			}
 		})
 	}
+}
+
+// TestFeatureGatesFlagNotDuplicatedAcrossCalls pins the r.rawConfig cache against the flag path:
+// Run calls parseConfigurationPhaseOne to choose the K8s vs file-discovery route and setup calls it
+// again, so an uncached append would grow the gate list on every call.
+func TestFeatureGatesFlagNotDuplicatedAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+
+	opts := runserver.NewOptions()
+	opts.FeatureGates = []string{flowcontrol.FeatureGate}
+
+	r := NewRunner()
+	first, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.Contains(t, first.FeatureGates, flowcontrol.FeatureGate,
+		"the flag gate must land in rawConfig, not only in the returned map")
+
+	second, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.Same(t, first, second, "the cached config should be returned")
+	require.Len(t, second.FeatureGates, 1, "the flag gate must not be appended twice")
 }

@@ -21,11 +21,12 @@ import (
 )
 
 func ExtractMetadataValues(req *extProcPb.ProcessingRequest) map[string]any {
-	metadata := make(map[string]any)
-	if req != nil && req.MetadataContext != nil && req.MetadataContext.FilterMetadata != nil {
-		for key, val := range req.MetadataContext.FilterMetadata {
-			metadata[key] = val.AsMap()
-		}
+	if req == nil || req.MetadataContext == nil || len(req.MetadataContext.FilterMetadata) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any, len(req.MetadataContext.FilterMetadata))
+	for key, val := range req.MetadataContext.FilterMetadata {
+		metadata[key] = val.AsMap()
 	}
 	return metadata
 }

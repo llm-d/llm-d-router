@@ -62,6 +62,8 @@ type HTTPDataSource[T any] struct {
 	// useNodeAddress, when true, scrapes NodeAddress:portOverride instead
 	// of the pod IP. Used for node-level exporters (e.g. DCGM DaemonSet).
 	useNodeAddress bool
+	// interval is the desired scrape period; zero means every base tick.
+	interval time.Duration
 
 	client Client
 	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
@@ -92,6 +94,7 @@ type Option func(*options)
 type options struct {
 	portOverride   int
 	useNodeAddress bool
+	interval       time.Duration
 }
 
 // WithPortOverride makes the source scrape podIP:port instead of the
@@ -106,6 +109,27 @@ func WithPortOverride(port int) Option {
 // NodeAddress on the endpoint metadata.
 func WithUseNodeAddress() Option {
 	return func(o *options) { o.useNodeAddress = true }
+}
+
+// WithInterval sets the desired scrape period for this source. The datalayer
+// runtime converts it to base-tick multiples at configure time. Zero means
+// every base tick (the default).
+func WithInterval(d time.Duration) Option {
+	return func(o *options) { o.interval = d }
+}
+
+// ParseIntervalOption parses a duration string from plugin parameters and
+// returns a WithInterval Option. An empty string returns a no-op Option
+// so callers can always append the result.
+func ParseIntervalOption(raw string) (Option, error) {
+	if raw == "" {
+		return func(*options) {}, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid interval %q: %w", raw, err)
+	}
+	return WithInterval(d), nil
 }
 
 // NewHTTPDataSource constructs a typed polling dispatcher. For https, tlsOpts configures
@@ -123,6 +147,9 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	}
 	if cfg.useNodeAddress && cfg.portOverride == 0 {
 		return nil, errors.New("WithUseNodeAddress requires a non-zero WithPortOverride")
+	}
+	if cfg.interval < 0 {
+		return nil, fmt.Errorf("interval must be non-negative, got %s", cfg.interval)
 	}
 
 	cl := &client{
@@ -146,6 +173,7 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		path:           path,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
+		interval:       cfg.interval,
 		client:         cl,
 		parser:         parser,
 	}, nil
@@ -192,6 +220,7 @@ func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
+func (s *HTTPDataSource[T]) Interval() time.Duration        { return s.interval }
 
 // Poll fetches and parses one tick. Exposed for tests; runtime uses Dispatch.
 func (s *HTTPDataSource[T]) Poll(ctx context.Context, ep fwkdl.Endpoint) (T, error) {

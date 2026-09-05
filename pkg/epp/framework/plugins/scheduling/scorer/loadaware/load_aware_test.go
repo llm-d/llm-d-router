@@ -15,21 +15,21 @@ import (
 
 func TestLoadBasedScorer(t *testing.T) {
 	endpointA := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-a"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-a"}},
 		&fwkdl.Metrics{
 			WaitingQueueSize: 2,
 		},
 		nil,
 	)
 	endpointB := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-b"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-b"}},
 		&fwkdl.Metrics{
 			WaitingQueueSize: 0,
 		},
 		nil,
 	)
 	endpointC := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{NamespacedName: k8stypes.NamespacedName{Name: "pod-c"}},
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-c"}},
 		&fwkdl.Metrics{
 			WaitingQueueSize: 15,
 		},

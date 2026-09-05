@@ -24,9 +24,11 @@ import (
 	"strconv"
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	pb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -48,6 +50,15 @@ const (
 	poolPort   = int32(5678)
 	namespace  = "ns1"
 )
+
+func testMetadataContext(t *testing.T, phase string) *corev3.Metadata {
+	t.Helper()
+	value, err := structpb.NewStruct(map[string]any{"phase": phase})
+	require.NoError(t, err)
+	return &corev3.Metadata{
+		FilterMetadata: map[string]*structpb.Struct{"test": value},
+	}
+}
 
 func TestServer(t *testing.T) {
 	tests := []struct {
@@ -106,6 +117,89 @@ func TestServer(t *testing.T) {
 	}
 }
 
+func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
+	model := testutil.MakeInferenceObjective("v1").
+		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
+
+	director := &testDirector{}
+	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
+
+	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
+	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	defer conn.Close()
+
+	headers := testutils.BuildEnvoyGRPCHeaders(map[string]string{
+		":method":      "POST",
+		":path":        "/v1/audio/speech",
+		"x-request-id": "test-request-id",
+	}, true)
+	require.NoError(t, process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestHeaders{
+			RequestHeaders: headers,
+		},
+	}))
+
+	requestBody := []byte(`{
+		"model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+		"input": "Stream this response.",
+		"stream": false,
+		"stream_format": "audio",
+		"response_format": "pcm"
+	}`)
+	require.NoError(t, process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestBody{
+			RequestBody: &pb.HttpBody{
+				Body:        requestBody,
+				EndOfStream: true,
+			},
+		},
+	}))
+
+	response, err := process.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, response.GetRequestHeaders())
+	response, err = process.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, response.GetRequestBody())
+	require.NotNil(t, director.lastInferenceRequestBody)
+	require.True(t, director.lastInferenceRequestBody.Stream)
+
+	headers = testutils.BuildEnvoyGRPCHeaders(map[string]string{
+		"content-type": "audio/pcm",
+	}, true)
+	require.NoError(t, process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_ResponseHeaders{
+			ResponseHeaders: headers,
+		},
+	}))
+	response, err = process.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, response.GetResponseHeaders())
+
+	chunks := [][]byte{[]byte("first audio chunk"), []byte("second audio chunk")}
+	for i, chunk := range chunks {
+		endOfStream := i == len(chunks)-1
+		require.NoError(t, sendResponseBody(process, chunk, endOfStream))
+
+		response, err = process.Recv()
+		require.NoError(t, err)
+		bodyResponse := response.GetResponseBody()
+		require.NotNil(t, bodyResponse)
+		streamedResponse := bodyResponse.Response.BodyMutation.GetStreamedResponse()
+		require.NotNil(t, streamedResponse)
+		require.Equal(t, chunk, streamedResponse.Body)
+		require.Equal(t, endOfStream, streamedResponse.EndOfStream)
+	}
+
+	require.Equal(t, 1, director.handleResponseBodyEndStreamCount)
+
+	cancel()
+	<-errChan
+	testListener.Close()
+}
+
 func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool, hasTrailers bool) {
 	t.Helper()
 
@@ -152,6 +246,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 		Request: &pb.ProcessingRequest_RequestHeaders{
 			RequestHeaders: headers,
 		},
+		MetadataContext: testMetadataContext(t, "headers"),
 	}
 	err := process.Send(request)
 	if err != nil {
@@ -170,6 +265,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 				EndOfStream: true,
 			},
 		},
+		MetadataContext: testMetadataContext(t, "body"),
 	}
 	err = process.Send(request)
 	if err != nil {
@@ -218,6 +314,9 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 			t.Errorf("Incorrect value for header %s, want %s got %s", expectedKey, expectedValue, got)
 		}
 	}
+	require.Equal(t, map[string]any{
+		"test": map[string]any{"phase": "body"},
+	}, director.requestMetadata)
 
 	// Send response headers
 	if streamingResponse {
@@ -346,12 +445,14 @@ func recvResponseTrailers(stream pb.ExternalProcessor_ProcessClient) error {
 
 type testDirector struct {
 	requestHeaders                   map[string]string
+	requestMetadata                  map[string]any
 	handleResponseBodyEndStreamCount int
 	lastInferenceRequestBody         *fwkrh.InferenceRequestBody
 }
 
 func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
+	ts.requestMetadata = reqCtx.Request.Metadata
 	ts.lastInferenceRequestBody = inferenceRequestBody
 
 	bodyMap := make(map[string]any)
@@ -370,10 +471,7 @@ func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.Requ
 
 	// Populate SchedulingRequest for testing request-based streaming detection.
 	reqCtx.SchedulingRequest = &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{},
-	}
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		reqCtx.SchedulingRequest.Body.Stream = true
+		Body: inferenceRequestBody,
 	}
 
 	return reqCtx, nil
@@ -404,9 +502,7 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 	if m.skip {
 		return &fwkrh.ParseResult{
 			SkipResponseProcessing: true,
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
-			},
+			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
 		}, nil
 	}
 	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil

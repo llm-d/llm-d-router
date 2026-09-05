@@ -412,4 +412,5 @@ jobs:
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
           PULL_VLLM_RENDER_IMAGE: "false"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXISTS_TIMEOUT: 90s
         run: make test-e2e-run

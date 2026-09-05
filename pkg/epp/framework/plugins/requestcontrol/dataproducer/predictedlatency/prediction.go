@@ -61,7 +61,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		logger.V(logutil.TRACE).Info("Candidate pod for scheduling", "endpoint", endpoint.GetMetadata().String(), "metrics", endpoint.GetMetrics().String())
 
 		// Get prefix cache score for the pod
-		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().NamespacedName.Name]
+		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().ID.Name]
 
 		logger.V(logutil.DEBUG).Info("Prefix cache score for pod", "pod", endpoint.GetMetadata().String(), "prefixCacheScore", prefixCacheScore)
 
@@ -71,12 +71,12 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		generatedTokenCounts[i] = 1
 		prefixCacheScores[i] = prefixCacheScore
 		encoderInputSizes[i] = predictedLatencyCtx.encoderInputSize
-		encoderMatchedSizes[i] = predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().NamespacedName.Name]
+		encoderMatchedSizes[i] = predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().ID.Name]
 
 		// Reuse the in-flight load captured for this endpoint earlier in Produce,
 		// so the prediction features are identical to the dispatch-time training
 		// features and neither depends on PreRequest hook ordering.
-		snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().NamespacedName.String()]
+		snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().ID.String()]
 		if !ok {
 			snapshot = pl.readInFlightLoad(endpoint)
 		}
@@ -140,7 +140,7 @@ func (pl *PredictedLatency) updateRequestContextWithPredictions(predictedLatency
 	predMap := make(map[string]endpointPredictionResult, len(predictions))
 	for _, pred := range predictions {
 		if pred.Endpoint != nil && pred.Endpoint.GetMetadata() != nil {
-			predMap[pred.Endpoint.GetMetadata().NamespacedName.Name] = pred
+			predMap[pred.Endpoint.GetMetadata().ID.Name] = pred
 		}
 	}
 	predictedLatencyCtx.predictionsForScheduling = predMap

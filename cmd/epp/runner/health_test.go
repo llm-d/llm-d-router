@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -28,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -58,6 +60,31 @@ func (m *mockSupporter) Claims() fwkrh.Claims {
 	}
 }
 
+type mockReadinessChecker struct {
+	name string
+	err  error
+}
+
+func (m *mockReadinessChecker) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock", Name: m.name}
+}
+
+func (m *mockReadinessChecker) CheckReady() error { return m.err }
+
+type mockPlugin struct{}
+
+func (*mockPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock", Name: "ordinary"}
+}
+
+func TestPluginReadinessCheckers(t *testing.T) {
+	want := &mockReadinessChecker{name: "readiness"}
+	got := pluginReadinessCheckers([]fwkplugin.Plugin{&mockPlugin{}, want})
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("pluginReadinessCheckers() = %v, want [%v]", got, want)
+	}
+}
+
 func TestHealthServer_Check(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -68,6 +95,7 @@ func TestHealthServer_Check(t *testing.T) {
 		pool                  *datalayer.EndpointPool
 		poolErr               error
 		supporters            []appProtocolSupporter
+		readinessCheckers     []fwkplugin.ReadinessChecker
 		service               string
 		wantStatus            healthPb.HealthCheckResponse_ServingStatus
 	}{
@@ -104,10 +132,66 @@ func TestHealthServer_Check(t *testing.T) {
 			wantStatus:            healthPb.HealthCheckResponse_SERVING,
 		},
 		{
+			name:                  "LeaderElectionDisabled_PluginNotReady",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "unready", err: errors.New("initial sync pending")},
+			},
+			wantStatus: healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			name:                  "LeaderElectionDisabled_Liveness_IgnoresPluginReadiness",
+			leaderElectionEnabled: false,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "unready", err: errors.New("initial sync pending")},
+			},
+			service:    LivenessCheckService,
+			wantStatus: healthPb.HealthCheckResponse_SERVING,
+		},
+		{
 			name:                  "LeaderElectionEnabled_Liveness_AlwaysServing",
 			leaderElectionEnabled: true,
 			service:               LivenessCheckService,
 			wantStatus:            healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			name:                  "LeaderElectionEnabled_Readiness_AllPluginsReady",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "first"},
+				&mockReadinessChecker{name: "second"},
+			},
+			service:    ReadinessCheckService,
+			wantStatus: healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			name:                  "LeaderElectionEnabled_Readiness_OnePluginNotReady",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "ready"},
+				&mockReadinessChecker{name: "unready", err: errors.New("backend unavailable")},
+			},
+			service:    ReadinessCheckService,
+			wantStatus: healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			name:                  "LeaderElectionEnabled_Liveness_IgnoresPluginReadiness",
+			leaderElectionEnabled: true,
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "unready", err: errors.New("initial sync pending")},
+			},
+			service:    LivenessCheckService,
+			wantStatus: healthPb.HealthCheckResponse_SERVING,
 		},
 		{
 			name:                  "LeaderElectionEnabled_Readiness_Live_Leader_ProtocolMatches",
@@ -155,6 +239,18 @@ func TestHealthServer_Check(t *testing.T) {
 			wantStatus:            healthPb.HealthCheckResponse_SERVING,
 		},
 		{
+			name:                  "LeaderElectionEnabled_EmptyService_ReflectsPluginReadiness",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "unready", err: errors.New("initial sync pending")},
+			},
+			service:    "",
+			wantStatus: healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
 			name:                  "LeaderElectionEnabled_ExtProc_ReflectsReadiness_Serving",
 			leaderElectionEnabled: true,
 			isLeader:              true,
@@ -162,6 +258,18 @@ func TestHealthServer_Check(t *testing.T) {
 			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
 			service:               extProcPb.ExternalProcessor_ServiceDesc.ServiceName,
 			wantStatus:            healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			name:                  "LeaderElectionEnabled_ExtProc_ReflectsPluginReadiness",
+			leaderElectionEnabled: true,
+			isLeader:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			readinessCheckers: []fwkplugin.ReadinessChecker{
+				&mockReadinessChecker{name: "unready", err: errors.New("initial sync pending")},
+			},
+			service:    extProcPb.ExternalProcessor_ServiceDesc.ServiceName,
+			wantStatus: healthPb.HealthCheckResponse_NOT_SERVING,
 		},
 		{
 			name:                  "LeaderElectionEnabled_UnknownService",
@@ -267,6 +375,7 @@ func TestHealthServer_Check(t *testing.T) {
 				isLeader:              &isLeader,
 				leaderElectionEnabled: tt.leaderElectionEnabled,
 				supporters:            tt.supporters,
+				readinessCheckers:     tt.readinessCheckers,
 				draining:              &draining,
 			}
 

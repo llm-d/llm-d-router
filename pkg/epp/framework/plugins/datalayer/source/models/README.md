@@ -22,6 +22,9 @@ The Models Data Source polls inference server pods for model information and pas
 - `insecureSkipVerify` (bool, optional, default: `true`): Skip TLS certificate verification.
 - `caCertPath` (string, optional): PEM CA bundle to verify the target's server cert.
 - `clientCertPath` / `clientKeyPath` (string, optional): client certificate for mTLS. Set both together.
+- `interval` (string, optional): Scrape period (e.g. `"5s"`). Rounded to the nearest
+  multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
+  base tick.
 
 ```yaml
 - type: models-data-source
@@ -55,10 +58,11 @@ plugins:
   parameters:
     scheme: "https"
     insecureSkipVerify: false
+    interval: "5s"
 - type: models-data-extractor
   name: vllm-models-extractor
 # ... other plugins (filters, scorers, profile handler, picker) ...
-data:
+dataLayer:
   sources:
   - pluginRef: vllm-models-source
     extractors:

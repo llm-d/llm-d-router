@@ -19,6 +19,7 @@ package datalayer
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -122,6 +123,7 @@ func (m *multiVariantSource) TypedName() fwkplugin.TypedName                    
 func (m *multiVariantSource) GVK() schema.GroupVersionKind                       { return m.gvk }
 func (m *multiVariantSource) Dispatch(_ context.Context, _ fwkdl.Endpoint) error { return nil }
 func (m *multiVariantSource) AppendExtractor(_ fwkplugin.Plugin) error           { return nil }
+func (m *multiVariantSource) Interval() time.Duration                            { return 0 }
 func (m *multiVariantSource) Notify(_ context.Context, event fwkdl.NotificationEvent) (*fwkdl.NotificationEvent, error) {
 	// Body never runs in this test. Configure rejects the source for
 	// implementing multiple variants before any Notify call. Echo the
@@ -145,4 +147,88 @@ func TestRuntimeConfigure_SourceImplementingMultipleVariants_Rejected(t *testing
 	err := r.Configure(cfg, logger)
 	require.Error(t, err, "a source that implements multiple variant interfaces must be rejected")
 	assert.Contains(t, err.Error(), "multiple variant")
+}
+
+// intervalMockSource wraps MetricsDataSource with a configurable Interval.
+type intervalMockSource struct {
+	mocks.MetricsDataSource
+	interval time.Duration
+}
+
+func (s *intervalMockSource) Interval() time.Duration { return s.interval }
+
+func TestRuntimeConfigure_NonMultipleIntervalRounds(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(50 * time.Millisecond)
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{
+			Plugin: &intervalMockSource{interval: 75 * time.Millisecond},
+		}},
+	}
+
+	require.NoError(t, r.Configure(cfg, logger))
+	dispatchers := r.dispatchers.Dispatchers()
+	require.Len(t, dispatchers, 1)
+	for _, d := range dispatchers {
+		id, ok := d.(*intervalDispatcher)
+		require.True(t, ok, "expected intervalDispatcher wrapper")
+		assert.Equal(t, 2, id.period) // 75ms rounds to 100ms = 2 ticks
+	}
+}
+
+func TestRuntimeConfigure_SourceIntervalStoredAsPeriodTicks(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(50 * time.Millisecond)
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{{
+			Plugin: &intervalMockSource{interval: time.Second},
+		}},
+	}
+
+	require.NoError(t, r.Configure(cfg, logger))
+	dispatchers := r.dispatchers.Dispatchers()
+	require.Len(t, dispatchers, 1)
+	for _, d := range dispatchers {
+		id, ok := d.(*intervalDispatcher)
+		require.True(t, ok, "expected intervalDispatcher wrapper")
+		assert.Equal(t, 20, id.period) // 1s / 50ms = 20 ticks
+	}
+}
+
+func TestNewRuntime_ClampsPollingIntervalToMinimum(t *testing.T) {
+	r := NewRuntime(10 * time.Millisecond)
+	assert.Equal(t, defaultRefreshInterval, r.pollingInterval)
+}
+
+func TestRuntimeConfigure_LowersBaseTickToSmallestInterval(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(5 * time.Second)
+
+	fast := &intervalMockSource{
+		MetricsDataSource: *mocks.NewDataSource(fwkplugin.TypedName{Type: "test", Name: "fast-src"}),
+		interval:          time.Second,
+	}
+	slow := &intervalMockSource{
+		MetricsDataSource: *mocks.NewDataSource(fwkplugin.TypedName{Type: "test", Name: "slow-src"}),
+		interval:          5 * time.Second,
+	}
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{Plugin: fast},
+			{Plugin: slow},
+		},
+	}
+
+	require.NoError(t, r.Configure(cfg, logger))
+	assert.Equal(t, time.Second, r.pollingInterval)
+
+	dispatchers := r.dispatchers.Dispatchers()
+	d, ok := dispatchers["slow-src"]
+	require.True(t, ok)
+	id, ok := d.(*intervalDispatcher)
+	require.True(t, ok, "slow source should be wrapped")
+	assert.Equal(t, 5, id.period) // 5s / 1s base = 5 ticks
 }

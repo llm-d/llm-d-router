@@ -4,6 +4,12 @@ on:
   issues:
     types: [opened, edited, reopened]
 
+# Serializes runs on the same issue so a remove then add label sequence always
+# completes as a unit. Otherwise, cancelling a mid-flight run can leave labels wiped.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   kind-labels:
     runs-on: ubuntu-latest

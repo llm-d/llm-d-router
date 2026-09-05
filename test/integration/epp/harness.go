@@ -56,8 +56,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	integration "github.com/llm-d/llm-d-router/test/integration"
-	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 // Global State (Initialized in TestMain)
@@ -102,6 +102,9 @@ type HarnessConfig struct {
 
 	// Tracing indicates if tracing should be enabled for this test.
 	Tracing bool
+
+	// emitEndpointScores enables emitting per-endpoint scores in the request-path dynamic metadata.
+	emitEndpointScores bool
 }
 
 // HarnessOption is a functional option for configuring the TestHarness.
@@ -133,6 +136,13 @@ func WithConfigText(text string) HarnessOption {
 func WithTracing() HarnessOption {
 	return func(c *HarnessConfig) {
 		c.Tracing = true
+	}
+}
+
+// WithEmitEndpointScores starts the EPP with --emit-endpoint-scores enabled.
+func WithEmitEndpointScores() HarnessOption {
+	return func(c *HarnessConfig) {
+		c.emitEndpointScores = true
 	}
 }
 
@@ -218,12 +228,13 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 	// Reserve the ext_proc port once, up front: the server serves on this listener, so
 	// the port stays bound for the lifetime of the test and no other process can take
 	// it (issue #1066).
-	lis, err := testutils.ReserveListener()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err, "failed to reserve ext_proc port")
 	t.Cleanup(func() { _ = lis.Close() })
 	grpcPort := lis.Addr().(*net.TCPAddr).Port
 
 	eppOptions := defaultEppServerOptions(t, testNamespaceName, configText)
+	eppOptions.EmitEndpointScores = config.emitEndpointScores
 	if config.runMode == modeStandalone && config.standaloneStrategy == strategyNoCRD {
 		// Only standalone EPP without crd need to set the EndpointSelector.
 		eppOptions.EndpointSelector = labels.SelectorFromSet(labels.Set{"app": testPoolName})
@@ -314,6 +325,7 @@ func defaultEppServerOptions(t *testing.T, namespace, configText string) *eppSer
 	eppOptions.GRPCHealthPort = 0
 	eppOptions.EndpointTargetPorts = []int{8000}
 	eppOptions.SecureServing = false
+	eppOptions.AllowExperimentalPlugins = true
 	return eppOptions
 }
 

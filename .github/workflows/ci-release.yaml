@@ -18,6 +18,7 @@ jobs:
     outputs:
       epp_name: ${{ steps.version.outputs.epp_name }}
       sidecar_name: ${{ steps.version.outputs.sidecar_name }}
+      coordinator_name: ${{ steps.version.outputs.coordinator_name }}
       tag: ${{ steps.tag.outputs.tag }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
@@ -27,6 +28,7 @@ jobs:
           repo="${GITHUB_REPOSITORY##*/}"
           echo "epp_name=${repo}-endpoint-picker" >> "$GITHUB_OUTPUT"
           echo "sidecar_name=${repo}-disagg-sidecar" >> "$GITHUB_OUTPUT"
+          echo "coordinator_name=${repo}-coordinator" >> "$GITHUB_OUTPUT"
 
       - name: Determine tag name
         id: tag
@@ -48,6 +50,7 @@ jobs:
     with:
       epp-image-name: ${{ needs.set-params.outputs.epp_name }}
       sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
+      coordinator-image-name: ${{ needs.set-params.outputs.coordinator_name }}
       tag: ${{ needs.set-params.outputs.tag }}
       prerelease: ${{ fromJSON(needs.set-params.outputs.prerelease) }}
       chart-suffix: ""

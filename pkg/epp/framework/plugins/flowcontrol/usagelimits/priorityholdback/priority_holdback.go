@@ -56,13 +56,13 @@ type priorityHoldbackPolicy struct {
 	name      string
 	cMax      float64
 	cMin      float64
-	computeFn func(cMin, cMax float64, priorities []int) (ceilings []float64)
+	computeFn func(cMin, cMax float64, priorities []int, ceilings []float64)
 }
 
 var _ flowcontrol.UsageLimitPolicy = &priorityHoldbackPolicy{}
 
 func newPriorityHoldbackPolicy(cfg config) *priorityHoldbackPolicy {
-	var fn func(cMin, cMax float64, priorities []int) (ceilings []float64)
+	var fn func(cMin, cMax float64, priorities []int, ceilings []float64)
 	switch cfg.domain {
 	case domainRank:
 		fn = computeLimitStepwiseSpread
@@ -95,37 +95,36 @@ func (p *priorityHoldbackPolicy) TypedName() plugin.TypedName {
 	}
 }
 
-// ComputeLimit returns an admission ceiling for each priority. With a single active priority,
-// holdback is bypassed (ceiling = cMax) to preserve work-conserving behavior.
-func (p *priorityHoldbackPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int) (ceilings []float64) {
+// ComputeLimit writes an admission ceiling for each priority into the caller-provided buffer.
+// With a single active priority, holdback is bypassed (ceiling = cMax) to preserve
+// work-conserving behavior.
+func (p *priorityHoldbackPolicy) ComputeLimit(_ context.Context, _ float64, priorities []int, ceilings []float64) {
 	if len(priorities) == 0 {
-		return []float64{}
+		return
 	}
 	if len(priorities) == 1 {
-		return []float64{p.cMax}
+		ceilings[0] = p.cMax
+		return
 	}
 	// Ceilings are monotonically decreasing as priorities are ordered from highest to lowest per UsageLimitPolicy contract.
 	// New strategies (e.g. sigmoid/static definition) could require explicit monotizing sweep.
-	return p.computeFn(p.cMin, p.cMax, priorities)
+	p.computeFn(p.cMin, p.cMax, priorities, ceilings)
 }
 
 // computeLimitStepwiseSpread divides [cMin, cMax] into equal steps by rank.
 // c_i = cMax - i * (cMax - cMin) / (N - 1)
-func computeLimitStepwiseSpread(cMin, cMax float64, priorities []int) (ceilings []float64) {
-	ceilings = make([]float64, len(priorities))
+func computeLimitStepwiseSpread(cMin, cMax float64, priorities []int, ceilings []float64) {
 	spread := cMax - cMin
 	n := float64(len(priorities) - 1)
 	for i := range priorities {
 		ceilings[i] = cMax - float64(i)*spread/n
 	}
-	return ceilings
 }
 
 // computeLimitLinearProportional scales ceilings proportionally to numerical priority values.
 // r_i = (p_i - pMin) / (pMax - pMin)
 // c_i = cMin + r_i * (cMax - cMin)
-func computeLimitLinearProportional(cMin, cMax float64, priorities []int) (ceilings []float64) {
-	ceilings = make([]float64, len(priorities))
+func computeLimitLinearProportional(cMin, cMax float64, priorities []int, ceilings []float64) {
 	pMin := float64(priorities[len(priorities)-1])
 	pMax := float64(priorities[0])
 	pRange := pMax - pMin
@@ -135,12 +134,11 @@ func computeLimitLinearProportional(cMin, cMax float64, priorities []int) (ceili
 		for i := range priorities {
 			ceilings[i] = cMax
 		}
-		return ceilings
+		return
 	}
 	spread := cMax - cMin
 	for i := range priorities {
 		r := (float64(priorities[i]) - pMin) / pRange
 		ceilings[i] = cMin + r*spread
 	}
-	return ceilings
 }

@@ -109,7 +109,7 @@ func TestPluginState_EvictionCallback(t *testing.T) {
 	data.evictedID = ""
 	data.evictedKey = ""
 	state.Write(requestID, key, data)
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*stalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*DefaultStalenessThreshold))
 	state.cleanStaleRequests()
 	assert.Equal(t, requestID, data.evictedID)
 	assert.Equal(t, key, data.evictedKey)
@@ -128,7 +128,7 @@ func TestPluginState_Touch(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Set last access time to near-stale
-	nearStale := time.Now().Add(-stalenessThreshold + time.Second*10)
+	nearStale := time.Now().Add(-DefaultStalenessThreshold + time.Second*10)
 	state.requestToLastAccessTime.Store(requestID, nearStale)
 
 	// Touch it
@@ -220,7 +220,7 @@ func TestReadPluginStateKey(t *testing.T) {
 }
 
 // TestPluginState_Cleanup verifies the automatic cleanup of stale data.
-// It tests that data which hasn't been accessed for longer than stalenessThreshold
+// It tests that data which hasn't been accessed for longer than the staleness threshold
 // is properly removed from the storage.
 func TestPluginState_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
@@ -235,12 +235,130 @@ func TestPluginState_Cleanup(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Manually set last access time to far in the past
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*stalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*DefaultStalenessThreshold))
 	// Manually CleanUp
 	state.cleanStaleRequests()
 
 	_, err := state.Read(requestID, key)
 	assert.Equal(t, ErrNotFound, err)
+}
+
+// TestPluginState_CleanupSkipsLiveRequests verifies that the janitor does not
+// reap a request whose bound liveness ctx is still alive, and reaps it on the
+// normal schedule once the ctx is done.
+func TestPluginState_CleanupSkipsLiveRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	requestID := "req-live"
+	key := StateKey("foo")
+	data := &evictableTestData{pluginTestData: pluginTestData{value: "bar"}}
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	t.Cleanup(reqCancel)
+
+	state.Write(requestID, key, data)
+	state.BindLiveness(reqCtx, requestID)
+
+	// Stale by time but bound to a live ctx: the janitor must skip the request
+	// and refresh its last access time.
+	backdated := time.Now().Add(-2 * defaultStalenessThreshold)
+	state.requestToLastAccessTime.Store(requestID, backdated)
+	state.cleanStaleRequests()
+
+	lastAccess, ok := state.LastAccessTime(requestID)
+	assert.True(t, ok)
+	assert.True(t, lastAccess.After(backdated), "janitor should refresh last access time of a live request")
+	_, err := state.Read(requestID, key)
+	assert.NoError(t, err)
+	assert.Empty(t, data.evictedID, "OnEvicted must not fire for a live request")
+
+	// Once the ctx is done, the request reaps as any other stale request.
+	reqCancel()
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.cleanStaleRequests()
+
+	_, err = state.Read(requestID, key)
+	assert.Equal(t, ErrNotFound, err)
+	assert.Equal(t, requestID, data.evictedID)
+	assert.Equal(t, key, data.evictedKey)
+}
+
+// TestPluginState_DeleteClearsLiveness verifies that a liveness binding does not
+// survive Delete: entries written later under a reused request ID must not
+// inherit the previous request's liveness.
+func TestPluginState_DeleteClearsLiveness(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	requestID := "req-reused"
+	key := StateKey("foo")
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	t.Cleanup(reqCancel)
+
+	state.Write(requestID, key, &pluginTestData{value: "first"})
+	state.BindLiveness(reqCtx, requestID)
+	state.Delete(requestID)
+
+	// Second request under the same ID, no binding: reaped despite the first
+	// request's ctx still being alive.
+	state.Write(requestID, key, &pluginTestData{value: "second"})
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.cleanStaleRequests()
+
+	_, err := state.Read(requestID, key)
+	assert.Equal(t, ErrNotFound, err)
+}
+
+// TestPluginState_JanitorOptions verifies that the cleanup goroutine honors
+// injected staleness threshold and cleanup interval.
+func TestPluginState_JanitorOptions(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx,
+		WithStalenessThreshold(20*time.Millisecond),
+		WithCleanupInterval(5*time.Millisecond))
+
+	requestID := "req-fast"
+	state.Write(requestID, StateKey("foo"), &pluginTestData{value: "bar"})
+
+	// Poll via LastAccessTime: Read would refresh the access time and keep the
+	// request alive forever.
+	assert.Eventually(t, func() bool {
+		_, ok := state.LastAccessTime(requestID)
+		return !ok
+	}, 2*time.Second, 5*time.Millisecond, "janitor should reap on the injected schedule")
+}
+
+// TestSetDefaultStalenessThreshold verifies that the process-wide default is applied to new
+// PluginState instances, that a configured value drives reaping, and that non-positive values are
+// ignored.
+func TestSetDefaultStalenessThreshold(t *testing.T) {
+	orig := defaultStalenessThreshold
+	t.Cleanup(func() { defaultStalenessThreshold = orig })
+
+	SetDefaultStalenessThreshold(30 * time.Second)
+	assert.Equal(t, 30*time.Second, defaultStalenessThreshold)
+
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+	assert.Equal(t, 30*time.Second, state.stalenessThreshold, "new state should inherit the configured default")
+
+	// A one-minute-old request is stale under the 30s configured threshold (but would survive the 5m built-in default).
+	requestID := "req-configured-threshold"
+	key := StateKey("foo")
+	state.Write(requestID, key, &pluginTestData{value: "bar"})
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-time.Minute))
+	state.cleanStaleRequests()
+	_, err := state.Read(requestID, key)
+	assert.Equal(t, ErrNotFound, err, "request older than the configured threshold should be reaped")
+
+	SetDefaultStalenessThreshold(0)
+	assert.Equal(t, 30*time.Second, defaultStalenessThreshold, "non-positive value must be ignored")
 }
 
 // TestPluginState_DeleteKey verifies that DeleteKey correctly removes only the specified key for a request.

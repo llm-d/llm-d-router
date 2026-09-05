@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [Overview](#overview)
+- [Pod readiness in Kubernetes discovery](#pod-readiness-in-kubernetes-discovery)
 - [Architecture](#architecture)
 - [The EndpointDiscovery Interface](#the-endpointdiscovery-interface)
   - [EndpointDiscovery](#endpointdiscovery)
@@ -42,6 +43,48 @@ When a discovery plugin is configured:
   datastore via `DiscoveryNotifier`.
 - All scheduling, request control, and metrics collection behaviour is
   unchanged.
+
+---
+
+## Pod readiness in Kubernetes discovery
+
+In the default Kubernetes mode the EPP admits a pod into the routing pool only
+when the pod's aggregate **`Ready`** condition is `True` (see
+`pkg/epp/util/pod/pod.go`). A pod whose `Ready` condition is `False` or
+`Unknown`, or that has a deletion timestamp, is removed from the datastore and
+receives no traffic.
+
+Reading the aggregate `Ready` condition means custom
+[pod readiness gates](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-readiness-gate)
+are honoured without any additional EPP configuration. The kubelet computes
+`Ready` as `ContainersReady` **AND** every condition listed in
+`spec.readinessGates`, so an unsatisfied gate holds the pod out of the routing
+pool even when its container probes already pass:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: vllm          # selected by the InferencePool
+spec:
+  readinessGates:
+    - conditionType: "custom.orchestrator.io/serving"
+```
+
+Until an external controller patches `custom.orchestrator.io/serving` to
+`True` on the pod's status, the pod reports:
+
+```text
+Ready=False
+ContainersReady=True
+```
+
+and the EPP does not route to it. Once the condition flips to `True`, the
+kubelet sets `Ready=True` and the pod joins the pool on the next reconcile.
+
+Note that a gated pod still shows `1/1` in `kubectl get pods`: that column counts
+ready *containers*, while the EPP reads the `Ready` condition.
 
 ---
 
@@ -105,7 +148,7 @@ type EndpointDiscovery interface {
 type DiscoveryNotifier interface {
     // Upsert adds or updates an endpoint in the datastore.
     Upsert(endpoint *EndpointMetadata)
-    // Delete removes an endpoint by its namespaced name.
+    // Delete removes an endpoint by its ID.
     Delete(id types.NamespacedName)
 }
 ```
@@ -114,8 +157,8 @@ type DiscoveryNotifier interface {
 
 | Field | Type | Description |
 |---|---|---|
-| `NamespacedName` | `types.NamespacedName` | Unique identity of the endpoint. |
-| `PodName` | `string` | Logical name (used in metrics). |
+| `ID` | `types.NamespacedName` | Unique identity of the endpoint. Each discovery source must set it uniquely across the endpoints it reports. |
+| `Name` | `string` | Name of the workload behind the endpoint. |
 | `Address` | `string` | IP address of the inference server. |
 | `Port` | `string` | Port as a string (e.g. `"8000"`). |
 | `MetricsHost` | `string` | `host:port` for metrics scraping. Defaults to `address:port` if empty. |
@@ -161,11 +204,12 @@ plugins:
 
 dataLayer:
   discovery:
-    pluginRef: my-endpoints     # must match a name in plugins above
+    endpoints:
+      pluginRef: my-endpoints   # must match a name in plugins above
 ```
 
-When `dataLayer.discovery` is present the EPP skips the Kubernetes setup
-entirely.  When it is absent the EPP uses the default Kubernetes-based
+When `dataLayer.discovery.endpoints` is present the EPP skips the Kubernetes
+setup entirely.  When it is absent the EPP uses the default Kubernetes-based
 discovery (backwards compatible).
 
 ---
@@ -384,7 +428,8 @@ schedulingProfiles:
 
 dataLayer:
   discovery:
-    pluginRef: file-disc
+    endpoints:
+      pluginRef: file-disc
 ```
 
 ### 3. Start the EPP
@@ -555,9 +600,9 @@ func (d *MyDiscovery) TypedName() fwkplugin.TypedName { return d.typedName }
 func (d *MyDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotifier) error {
     // 1. Enumerate existing endpoints.
     notifier.Upsert(&fwkdl.EndpointMetadata{
-        NamespacedName: types.NamespacedName{Name: "ep0", Namespace: "default"},
-        Address:        "10.0.0.1",
-        Port:           "8000",
+        ID:      types.NamespacedName{Name: "ep0", Namespace: "default"},
+        Address: "10.0.0.1",
+        Port:    "8000",
         MetricsHost:    "10.0.0.1:8000",
     })
 
@@ -584,5 +629,6 @@ plugins:
 
 dataLayer:
   discovery:
-    pluginRef: my-disc
+    endpoints:
+      pluginRef: my-disc
 ```

@@ -445,3 +445,43 @@ func assertHeapProperty(t *testing.T, q *priorityQueue, msgAndArgs ...any) {
 		}
 	}
 }
+
+// TestPriorityQueue_ByteSize_BookedAtAdd verifies that byte accounting settles against the size
+// booked at Add time. A caller-implemented FlowControlRequest whose ByteSize() changes between Add
+// and removal must not be able to drift the queue's byte counter.
+func TestPriorityQueue_ByteSize_BookedAtAdd(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Remove", func(t *testing.T) {
+		t.Parallel()
+		q := newPriorityQueue(enqueueTimePolicy)
+		item := mocks.NewMockQueueItemAccessor(100, "req-unstable", testFlowKey)
+		q.Add(item)
+		require.Equal(t, uint64(100), q.ByteSize(), "Byte size must reflect the size booked at Add")
+
+		// The request misreports its size after admission; removal must debit the booked 100.
+		item.OriginalRequestV.(*mocks.MockFlowControlRequest).ByteSizeV = 5000
+		_, err := q.Remove(item.Handle())
+		require.NoError(t, err)
+		assert.Zero(t, q.ByteSize(), "Removal must debit the booked size, not the re-read size")
+		assert.Zero(t, q.Len())
+	})
+
+	t.Run("Cleanup", func(t *testing.T) {
+		t.Parallel()
+		q := newPriorityQueue(enqueueTimePolicy)
+		itemA := mocks.NewMockQueueItemAccessor(50, "req-a", testFlowKey)
+		itemB := mocks.NewMockQueueItemAccessor(75, "req-b", testFlowKey)
+		q.Add(itemA)
+		q.Add(itemB)
+		require.Equal(t, uint64(125), q.ByteSize())
+
+		itemA.OriginalRequestV.(*mocks.MockFlowControlRequest).ByteSizeV = 1
+		removed := q.Cleanup(func(i flowcontrol.QueueItemAccessor) bool {
+			return i.OriginalRequest().ID() == "req-a"
+		})
+		require.Len(t, removed, 1)
+		assert.Equal(t, uint64(75), q.ByteSize(), "Cleanup must debit the booked size, not the re-read size")
+		assert.Equal(t, 1, q.Len())
+	})
+}

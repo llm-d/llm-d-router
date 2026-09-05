@@ -235,7 +235,6 @@ By default, llm-d uses the label key `llm-d.ai/role` with values:
 - `"encode-decode"` → pods capable of both encode and decode (E/PD, rare)
 - `"prefill-decode"` → pods capable of both prefill and decode
 - `"encode-prefill-decode"` → pods capable of all three stages
-- `"both"` → **deprecated** (use `"prefill-decode"` instead)
 
 However, external systems may use alternative labels like:
 ```yaml
@@ -275,12 +274,13 @@ plugins:
         - key: "role"
           operator: In
           values: ["decode"]
-  - type: prefix-cache-scorer
+  - type: approx-prefix-cache-producer
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
+  - type: prefix-cache-scorer
   - type: max-score-picker
   - type: prefix-based-pd-decider
     parameters:
@@ -338,12 +338,13 @@ plugins:
         - key: "role"
           operator: In
           values: ["decode"]
-  - type: prefix-cache-scorer
+  - type: approx-prefix-cache-producer
     parameters:
       autoTune: false
       blockSizeTokens: 5
-      maxPrefixBlocksToMatch: 256
+      maxPrefixTokensToMatch: 1280
       lruCapacityPerServer: 31250
+  - type: prefix-cache-scorer
   - type: max-score-picker
   - type: always-disagg-multimodal-decider
   - type: prefix-based-pd-decider
@@ -394,7 +395,12 @@ PD deciders determine whether prefill should be offloaded to a separate worker, 
 
 #### Prefix-Based PD Decider
 
-The `prefix-based-pd-decider` plugin makes the disaggregation decision according to the length of the non-cached suffix of the prompt relative to tokens already cached on the selected decode pod.
+The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. Which role the plugin fills depends on the deployment topology:
+
+- **Sidecar-based P/D deployments** wire the plugin as a `disagg-profile-handler` decider — it routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)). Sidecar deployments do not emit `Prefer: if-available`, so the conditional-decode gate is dormant here.
+- **Coordinator-based deployments** use the default profile handler and declare the plugin at the top level. Only its `PreRequest` hook runs, enforcing the conditional-decode gate — `Prefer: if-available` requests are rejected with HTTP 412 when the same threshold would trigger remote prefill.
+
+Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declaring **two named instances** of this plugin in the same config (e.g., one wired as a decider, another as a standalone gate) with different parameters is not supported: the plugin memoizes its per-request decision keyed by plugin type, so the first instance to evaluate a given request populates the cache and the second reads that cached decision — its own parameters silently do not apply.
 
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
@@ -415,11 +421,39 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 
 **Parameter:**
 
-- `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
-  - If set to 0, disaggregation never occurs for any request
-- `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
-  - If set to 0, the prompt-length gate is disabled
-  - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
+- `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
+- `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
+- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads for both the disaggregation decision and the conditional-decode 412 gate. If unspecified, the `approx-prefix-cache-producer` is used.
+
+**Conditional-decode 412 gate**
+
+Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
+
+Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
+
+A minimal coordinator-topology configuration:
+
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+  - type: approx-prefix-cache-producer
+  - type: prefix-cache-scorer
+  - type: max-score-picker
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 8
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: "prefix-cache-scorer"
+      - pluginRef: "max-score-picker"
+```
+
+The plugin declares `PrefixCacheMatchInfo` and `TokenizedPrompt` as required dependencies, so a missing producer surfaces as a startup error rather than a silent per-request forward.
+
+Full P/D and E/P/D configurations that combine the decider and gate roles are in [Configuration Examples](#configuration-examples).
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
@@ -463,12 +497,15 @@ The `disagg-profile-handler` plugin is the entry point for all disaggregation to
 
 ### Parameters
 
+- `stageOrder` (optional, default: `decode-first`): order of execution for disaggregation stages.
+  - `decode-first`: Decode runs first, followed by Encode (optional) and Prefill (optional). The PD decider inspects the chosen decode pod's cache state to determine whether prefill should be disaggregated.
+  - `prefill-first`: Prefill runs first, followed by Encode (optional) and Decode. When the prefill profile is configured, prefill always runs, and the chosen prefill pod is published so the decode stage can apply topology affinity constraints (e.g., co-locating decode on the same rack).
 - `profiles` (optional): names of the scheduling profiles to use.
   - `decode` (default: `decode`)
   - `prefill` (default: `prefill`)
   - `encode` (default: `encode`)
 - `deciders` (optional): decider plugins that control whether each stage runs.
-  - `prefill`: enables P/D disaggregation when set.
+  - `prefill`: enables P/D disaggregation when set (used in `decode-first` mode).
   - `encode`: enables E disaggregation when set.
 
 ### Examples
@@ -481,7 +518,7 @@ No deciders are configured -- all requests are handled by the decode profile alo
 - type: disagg-profile-handler
 ```
 
-#### P/D (Prefill/Decode)
+#### P/D (Prefill/Decode, Decode-First)
 
 ```yaml
 - type: disagg-profile-handler
@@ -500,6 +537,16 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
       prefill: my-prefill
     deciders:
       prefill: prefix-based-pd-decider
+```
+
+#### P/D (Prefill/Decode, Prefill-First)
+
+In `prefill-first` mode, prefill runs first without requiring a PD decider, and publishes the selected prefill endpoint so subsequent decode scheduling can match against it (e.g., via topology affinity).
+
+```yaml
+- type: disagg-profile-handler
+  parameters:
+    stageOrder: prefill-first
 ```
 
 #### E/PD (Encode/Prefill-Decode)
@@ -578,10 +625,11 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
 }
 ```
 
-`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
+`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`) when each pod is a complete DP group; wide-EP worker pods instead set the compensated `P2P_BASE` (see the wide-EP paragraph below). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
 **Data parallelism:** the P2P tier supports `--data-parallel-size` N > 1 when
-each pod is a complete DP group (the per-pod DP deployment).
+each pod is a complete DP group (the per-pod DP deployment), or a multi-pod
+(wide-EP) group with compensated socket bases (below).
 
 - vLLM gives each DP replica its own P2P listener and offload region:
   replica `i` serves on `<p2p-connector-port>+i`, where `i` is the
@@ -595,13 +643,41 @@ each pod is a complete DP group (the per-pod DP deployment).
   `remote_port` = `--p2p-connector-port` + `r`; a port outside the rank
   range falls back to rank 0.
 - The endpoint port encodes the pod-local rank, which matches the global
-  index only when the pod is a whole DP group. In multi-pod DP groups (for
+  index only when the pod is a whole DP group. Multi-pod DP groups (for
   example LWS wide-EP, where pod `k`'s replicas hold global indices
-  `k*N..k*N+N-1` behind the same serving ports), the global index cannot
-  be read from the port and would have to be supplied with the request, so
-  those deployments are not covered.
+  `k*N..k*N+N-1` behind the same serving ports) must compensate the
+  configured socket base ports per pod; see the wide-EP example below.
 - Every replica maps its own offload region, so the pod's `/dev/shm` must
   exceed N x `cpu_bytes_to_use`.
+
+**Wide-EP (multi-pod DP groups):** vLLM adds the **global**
+`data_parallel_index` to the configured P2P and KV-events base ports, while
+the router addresses an engine by pod IP plus **pod-local** rank. Each pod
+must therefore subtract its global start rank from both configured bases so
+every pod binds the same pod-local ranges and the serving-port offset again
+names the target rank. In an LWS template with `DP_SIZE_LOCAL` ranks per
+pod:
+
+```bash
+START_RANK=$(( ${LWS_WORKER_INDEX:-0} * DP_SIZE_LOCAL ))
+P2P_BASE=$((7777 - START_RANK))
+KV_EVENTS_BASE=$((5557 - START_RANK))
+```
+
+`P2P_BASE` is the P2P secondary tier port:
+
+```json
+"secondary_tiers": [{"type": "p2p", "host": "${POD_IP}", "port": ${P2P_BASE}}]
+```
+
+`KV_EVENTS_BASE` is the KV-events publisher endpoint
+(`"endpoint": "tcp://*:${KV_EVENTS_BASE}"`), so the EPP's per-rank
+subscribers (`precise-prefix-cache-producer` dials
+`podDiscoveryConfig.socketPort` + rank index) reach each rank's socket.
+With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
+`5557-5564`, and serving `8000-8007`. Only the socket bases are
+compensated; `data_parallel_index` and the global rank carried in KV-event
+batches are unchanged.
 
 ### General Sidecar Flags
 

@@ -98,20 +98,24 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	detector := &mockSaturationDetector{
 		SaturationFunc: func(context.Context, []fwkdl.Endpoint) float64 { return opts.saturation },
 	}
+	candidates := &mocks.MockEndpointCandidates{Candidates: opts.candidates}
 	fc := fccontroller.NewFlowController(ctx, "test-pool", &fccontroller.Config{
-		DefaultRequestTTL:        requestTTL,
+		DefaultRequestTTL: requestTTL,
+		// Both unavailability regimes share one budget, as they do under the shipped defaults, so requestTTL
+		// bounds queue wait whether or not the pool has endpoints.
+		NoEndpointRequestTTL:     requestTTL,
 		ExpiryCleanupInterval:    10 * time.Millisecond,
 		EnqueueChannelBufferSize: 100,
 	}, fccontroller.Deps{
 		Registry:           reg,
 		SaturationDetector: detector,
-		EndpointCandidates: &mocks.MockEndpointCandidates{Candidates: opts.candidates},
+		EndpointCandidates: candidates,
 		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
 	})
 
 	return &realFlowControlHarness{
 		cancel: cancel,
-		ac:     NewFlowControlAdmissionController(fc, "test-pool"),
+		ac:     NewFlowControlAdmissionController(fc, "test-pool", candidates),
 		reg:    reg,
 	}
 }
@@ -195,7 +199,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
@@ -217,7 +221,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
@@ -227,11 +231,12 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
 	})
 
-	t.Run("evicted_ttl_returns_503_ttl_expired", func(t *testing.T) {
+	t.Run("evicted_ttl_returns_429_ttl_expired", func(t *testing.T) {
 		t.Parallel()
 		// The admission adapter always defers to the controller-default TTL
 		// (flowControlRequest.InitialEffectiveTTL() == 0), so a short DefaultRequestTTL plus a
-		// saturated detector forces a TTL eviction of the queued request.
+		// saturated detector forces a TTL eviction of the queued request. With a non-empty pool
+		// the eviction is backpressure, not unavailability.
 		h := newRealFlowControlHarness(t, realFlowControlOpts{
 			saturation: 1.0,
 			candidates: nonEmptyEndpoints(),
@@ -239,7 +244,21 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "ttl-req"))
-		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonTTLExpired)
+		requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonTTLExpired)
+	})
+
+	t.Run("evicted_ttl_empty_pool_returns_503_no_endpoints", func(t *testing.T) {
+		t.Parallel()
+		// Same TTL eviction, but against an EMPTY candidate pool the eviction signals genuine
+		// unavailability: 503 with the no-endpoints drop reason.
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation: 1.0,
+			candidates: nil,
+			requestTTL: 100 * time.Millisecond,
+		})
+
+		err := waitAdmit(t, admitAsync(ctx, h.ac, "ttl-empty-req"))
+		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonNoEndpoints)
 	})
 
 	t.Run("evicted_context_cancelled_returns_503_context_cancelled", func(t *testing.T) {
@@ -254,7 +273,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		admitCtx, admitCancel := context.WithCancel(ctx)
 		defer admitCancel()
 		result := admitAsync(admitCtx, h.ac, "cancel-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "request should be queued before cancelling")
 		admitCancel()
 

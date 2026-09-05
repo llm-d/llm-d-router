@@ -26,6 +26,9 @@ The plugin config supports:
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert.
 -   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+-   `interval` (string, optional): Scrape period (e.g. `"1s"`). Rounded to the nearest
+    multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
+    base tick.
 
 ### Example Configuration
 
@@ -35,4 +38,9 @@ parameters:
   scheme: "http"
   path: "/metrics"
   insecureSkipVerify: true
+  interval: "1s"
 ```
+
+## Multi-cluster support
+
+`multicluster-metrics-data-source` is the cluster-scoped variant. It scrapes a peer cluster's metrics like the pod source, and a distinct type lets a config pair it with `multicluster-metrics-extractor` independently of the pod pipeline. Because it crosses a cluster trust boundary it verifies the peer certificate by default, unlike the pod source. Set a `caCertPath` for a private cluster CA, or `insecureSkipVerify` to opt out. The response payload is size-capped. See the [wiring example](../../../README.md#example).

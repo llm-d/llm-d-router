@@ -7,7 +7,6 @@ For the architecture, request lifecycle, EPP integration, and plugin API, see [d
 ## Table of Contents
 
 - [LLM-D Coordinator](#llm-d-coordinator)
-  - [Table of Contents](#table-of-contents)
   - [Quick Start](#quick-start)
   - [Configuration](#configuration)
   - [API Endpoints](#api-endpoints)
@@ -87,6 +86,18 @@ This creates a temporary Kind cluster named `e2e-coordinator-tests`, runs the co
 
 `test-e2e-coordinator` is the local entry point: it builds the builder, coordinator, and epp images first. CI invokes `test-e2e-coordinator-run` instead, which expects those images to be already built and loaded into the container daemon (`image-pull` fetches only the simulator). Running `test-e2e-coordinator-run` directly without prebuilt images will use stale or missing ones.
 
+**EPP topologies**
+
+The same suite runs against two Endpoint Picker topologies, selected by `E2E_EPP_TOPOLOGY`:
+
+```bash
+make -f Makefile.coord.mk test-e2e-coordinator        # single-EPP (default)
+make -f Makefile.coord.mk test-e2e-coordinator-3epp   # 3-EPP
+```
+
+- **single** (default): one EPP running a profile-per-phase, and one InferencePool spanning the encode, prefill, and decode workers.
+- **3epp**: one role-scoped EPP and InferencePool per phase (encode, prefill, decode), with Envoy dispatching each `EPP-Profile` request to that role's EPP.
+
 **Keeping the cluster on failure**
 
 Set `E2E_KEEP_CLUSTER_ON_FAILURE=true` to preserve the cluster when any test fails. This is useful for inspecting pod logs, events, or cluster state after a failure.
@@ -132,3 +143,4 @@ kubectl --context kind-e2e-coordinator-tests get pods
 | `NAMESPACE` | `default` | Namespace to deploy test resources into |
 | `K8S_CONTEXT` | _(empty)_ | Use an existing cluster context instead of creating a Kind cluster |
 | `READY_TIMEOUT` | `10m` | How long to wait for resources to become ready |
+| `E2E_EPP_TOPOLOGY` | `single` | EPP topology: `single` (one EPP + one pool) or `3epp` (per-role EPP + pool). `test-e2e-coordinator-3epp` sets `3epp` |

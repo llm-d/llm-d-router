@@ -305,7 +305,7 @@ func TestLabelSelectorFilterFiltering(t *testing.T) {
 
 			actualEndpointNames := make([]string, len(filteredEndpoints))
 			for idx, endpoint := range filteredEndpoints {
-				actualEndpointNames[idx] = endpoint.GetMetadata().NamespacedName.Name
+				actualEndpointNames[idx] = endpoint.GetMetadata().ID.Name
 			}
 
 			assert.ElementsMatch(t, tt.expectedPods, actualEndpointNames,
@@ -424,9 +424,9 @@ func ExamplePrefillDecodeRolesInLWS() {
 func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[string]string) scheduling.Endpoint {
 	return scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
-			NamespacedName: nsn,
-			Address:        ipaddr,
-			Labels:         labels,
+			ID:      nsn,
+			Address: ipaddr,
+			Labels:  labels,
 		},
 		&fwkdl.Metrics{},
 		nil,
@@ -459,5 +459,5 @@ func TestDeprecatedSelectorFactoryBackwardCompat(t *testing.T) {
 
 	filtered := blf.Filter(ctx, nil, endpoints)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "nginx-1", filtered[0].GetMetadata().NamespacedName.Name)
+	assert.Equal(t, "nginx-1", filtered[0].GetMetadata().ID.Name)
 }

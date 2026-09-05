@@ -210,7 +210,7 @@ func newProducerAndDetector(ctx context.Context, t *testing.T, maxConcurrency in
 	det := detectorPlugin.(flowcontrol.SaturationDetector)
 
 	epMeta := &datalayer.EndpointMetadata{
-		NamespacedName: types.NamespacedName{Name: "pod-1", Namespace: "default"},
+		ID: types.NamespacedName{Name: "pod-1", Namespace: "default"},
 	}
 	ep := datalayer.NewEndpoint(epMeta, datalayer.NewMetrics())
 	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{
@@ -310,7 +310,10 @@ func newHarness(t *testing.T, opts harnessOpts) *integrationHarness {
 	controllerCfg := opts.controllerCfg
 	if controllerCfg == nil {
 		controllerCfg = &controller.Config{
-			DefaultRequestTTL:        5 * time.Minute,
+			DefaultRequestTTL: 5 * time.Minute,
+			// Matching the saturation budget leaves the two unavailability regimes indistinguishable, as they are
+			// under the shipped defaults. Tests that exercise the split configure the budgets apart.
+			NoEndpointRequestTTL:     5 * time.Minute,
 			ExpiryCleanupInterval:    10 * time.Millisecond,
 			EnqueueChannelBufferSize: 100,
 		}

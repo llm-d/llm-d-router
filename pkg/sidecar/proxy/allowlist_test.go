@@ -212,9 +212,9 @@ var _ = Describe("AllowlistValidator", func() {
 			// Just hostname (no port)
 			Expect(extractHost("valid-pod")).To(Equal("valid-pod"))
 			// IPv6 addresses (net.SplitHostPort handles these correctly
-			Expect(extractHost("[::1]:8000")).To(Equal("::1"))
+			Expect(extractHost("[::1]:8000")).To(Equal(testLoopbackIPv6))
 			// IPv6 without port
-			Expect(extractHost("::1")).To(Equal("::1"))
+			Expect(extractHost(testLoopbackIPv6)).To(Equal(testLoopbackIPv6))
 		})
 	})
 })

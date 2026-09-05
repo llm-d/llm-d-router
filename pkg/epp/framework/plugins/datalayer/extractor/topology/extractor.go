@@ -90,7 +90,7 @@ type TopologyExtractor struct {
 	// mu guards endpoints and hostnames.
 	mu sync.Mutex
 	// endpoints maps pod identity to all live Endpoints for that pod.
-	// Outer key: {PodName, Namespace}; inner key: endpoint NamespacedName.
+	// Outer key: {Name, Namespace}; inner key: endpoint NamespacedName.
 	// One pod may have N rank endpoints, each with a distinct inner key.
 	// Only endpoints whose hostname label was absent are tracked here.
 	endpoints map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint
@@ -139,6 +139,14 @@ func (e *TopologyExtractor) TypedName() fwkplugin.TypedName {
 	return e.typedName
 }
 
+var _ fwkplugin.ProducerPlugin = &TopologyExtractor{}
+
+// Produces declares the Topology attribute both of this extractor's handlers
+// publish.
+func (e *TopologyExtractor) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{e.dk: attrtopology.Topology{}}
+}
+
 // RegisterDependencies wires this extractor to both an endpoint source and a Pod
 // notification source. Both sources are auto-created if absent from user config.
 func (e *TopologyExtractor) RegisterDependencies(r fwkdl.Registrar) error {
@@ -168,7 +176,7 @@ func (e *TopologyExtractor) RegisterDependencies(r fwkdl.Registrar) error {
 // podKey returns the pod identity key from endpoint metadata.
 // One pod may produce multiple endpoints (one per rank), all sharing the same key.
 func podKey(meta *fwkdl.EndpointMetadata) types.NamespacedName {
-	return types.NamespacedName{Name: meta.PodName, Namespace: meta.NamespacedName.Namespace}
+	return types.NamespacedName{Name: meta.Name, Namespace: meta.ID.Namespace}
 }
 
 // endpointHandler handles endpoint lifecycle events.
@@ -205,7 +213,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" {
 		// Hostname label absent: track endpoint for spec.hostname fallback via pod notification.
 		key := podKey(meta)
-		epKey := meta.GetNamespacedName()
+		epKey := meta.GetID()
 		h.ext.mu.Lock()
 		if h.ext.endpoints[key] == nil {
 			h.ext.endpoints[key] = make(map[types.NamespacedName]fwkdl.Endpoint)
@@ -218,7 +226,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" && rack == "" && zone == "" && region == "" {
 		return nil
 	}
-	event.Endpoint.GetAttributes().Put(h.ext.dk.String(), &attrtopology.Topology{
+	event.Endpoint.GetAttributes().Put(h.ext.dk, &attrtopology.Topology{
 		Hostname: hn,
 		Rack:     rack,
 		Zone:     zone,
@@ -229,7 +237,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 
 func (h *endpointHandler) removeEndpoint(meta *fwkdl.EndpointMetadata, _ fwkdl.Endpoint) {
 	key := podKey(meta)
-	epKey := meta.GetNamespacedName()
+	epKey := meta.GetID()
 
 	h.ext.mu.Lock()
 	defer h.ext.mu.Unlock()
@@ -288,14 +296,14 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 	for _, ep := range eps {
 		// Preserve rack/zone/region already set from the endpoint event.
 		topo := &attrtopology.Topology{Hostname: hostname}
-		if raw, ok := ep.GetAttributes().Get(h.ext.dk.String()); ok {
+		if raw, ok := ep.GetAttributes().Get(h.ext.dk); ok {
 			if existing, ok := raw.(*attrtopology.Topology); ok {
 				topo.Rack = existing.Rack
 				topo.Zone = existing.Zone
 				topo.Region = existing.Region
 			}
 		}
-		ep.GetAttributes().Put(h.ext.dk.String(), topo)
+		ep.GetAttributes().Put(h.ext.dk, topo)
 	}
 	return nil
 }
