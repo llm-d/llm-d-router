@@ -352,7 +352,7 @@ type chatImageURL struct {
 
 // buildChatRenderRequest projects the kvcache RenderChatRequest into the
 // OpenAI-shaped wire body expected by vLLM's /v1/chat/completions/render.
-// Unknown content-block types are skipped (mirrors the UDS path's behavior).
+// Unknown content-block types are skipped.
 func buildChatRenderRequest(req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
 	msgs := make([]chatMessage, len(req.Conversation))
 	for idx, c := range req.Conversation {
