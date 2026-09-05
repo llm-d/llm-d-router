@@ -69,6 +69,39 @@ func TestEqualScoreDistribution(t *testing.T) {
 	}
 }
 
+func TestEqualScoreDistribution_WithLowerScoredCandidates(t *testing.T) {
+	numPods := 8
+	endpoints := make([]fwksched.Endpoint, numPods)
+	for i := 0; i < numPods; i++ {
+		endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID: k8stypes.NamespacedName{Name: fmt.Sprintf("pod%d", i)},
+		}, nil, nil)
+	}
+
+	picker := NewMaxScorePicker(1)
+	picks := make(map[string]int)
+
+	// Simulate 80 requests: pod0 and pod1 both have top score 50 (e.g. prefix cache hit).
+	// pod2 through pod7 have score 0 (cache miss).
+	for i := 0; i < 80; i++ {
+		scored := make([]*fwksched.ScoredEndpoint, numPods)
+		scored[0] = &fwksched.ScoredEndpoint{Endpoint: endpoints[0], Score: 50}
+		scored[1] = &fwksched.ScoredEndpoint{Endpoint: endpoints[1], Score: 50}
+		for j := 2; j < numPods; j++ {
+			scored[j] = &fwksched.ScoredEndpoint{Endpoint: endpoints[j], Score: 0}
+		}
+		result := picker.Pick(context.Background(), scored)
+		winner := result.TargetEndpoints[0].GetMetadata().ID.Name
+		picks[winner]++
+	}
+
+	// Both pod0 and pod1 have identical top scores; they must receive equal traffic (40 each).
+	if picks["pod0"] != 40 || picks["pod1"] != 40 {
+		t.Errorf("Routing imbalance between equal top-scoring endpoints: got pod0=%d, pod1=%d, want 40 each",
+			picks["pod0"], picks["pod1"])
+	}
+}
+
 func TestPickMaxScorePicker(t *testing.T) {
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
