@@ -354,9 +354,6 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	if request.Body.RenderRequest {
 		return nil
 	}
-	if _, raw := request.Body.Payload.(fwkrh.RawPayload); raw {
-		return nil
-	}
 	if request.Body.TokenizedRequest != nil {
 		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
 		// ensure cache-salt isolation still applies on the skip path.

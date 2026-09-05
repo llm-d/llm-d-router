@@ -203,6 +203,7 @@ func TestProduce_SetsCacheSaltOnSkipPath(t *testing.T) {
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			ChatCompletions:  &fwkrh.ChatCompletionsRequest{CacheSalt: "tenant-x"},
+			Payload:          fwkrh.RawPayload(`{"cache_salt":"tenant-x"}`),
 			TokenizedRequest: existing,
 		},
 	}
