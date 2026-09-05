@@ -38,9 +38,9 @@ func (m *instrumentedIndex) Add(ctx context.Context, engineKeys, requestKeys []B
 	return err
 }
 
-func (m *instrumentedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
-	err := m.next.Evict(ctx, key, keyType, entries)
-	metrics.Evictions.Add(float64(len(entries)))
+func (m *instrumentedIndex) Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error {
+	err := m.next.Evict(ctx, keyType, keys, entries)
+	metrics.Evictions.Add(float64(len(keys) * len(entries)))
 	return err
 }
 

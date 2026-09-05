@@ -225,43 +225,58 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	return nil
 }
 
-// Evict removes a key and its associated pod entries from the index backend.
-// keyType indicates whether the key is an EngineKey (requires engine→request lookup)
-// or a RequestKey (used directly for speculative entries without engineKey mapping).
-func (m *InMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
-	if len(entries) == 0 {
-		return fmt.Errorf("no entries provided for eviction from index")
+// Evict removes keys and their associated pod entries from the index backend.
+// keyType indicates whether the keys are EngineKeys (each resolved independently
+// via the engine→request mapping) or RequestKeys (used directly).
+// A non-nil error means the index is unchanged.
+func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error {
+	if len(keys) == 0 || len(entries) == 0 {
+		return fmt.Errorf("no keys or entries provided for eviction from index")
 	}
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Evict")
 
 	switch keyType {
 	case EngineKey:
-		rks, found := m.engineToRequestKeys.Get(key)
-		if !found {
-			traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
-			return nil
-		}
-
-		for _, rk := range rks {
-			m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
-		}
-
-		m.mu.Lock()
-		allEmpty := true
-		for _, rk := range rks {
-			if pc, found := m.data.Get(rk); found && pc != nil && pc.cache.Len() > 0 {
-				allEmpty = false
-				break
+		// Resolve each engine key's request keys and evict the pod entries
+		// without holding mu (engineToRequestKeys and data are thread-safe).
+		groups := make([][]BlockHash, len(keys))
+		for i, key := range keys {
+			rks, found := m.engineToRequestKeys.Get(key)
+			if !found {
+				traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
+				continue
+			}
+			groups[i] = rks
+			for _, rk := range rks {
+				m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
 			}
 		}
-		if allEmpty {
-			m.engineToRequestKeys.Remove(key)
+
+		// One lock hold covers every engine key's allEmpty check and mapping
+		// removal, keeping the Add-vs-Evict TOCTOU protection while batching.
+		m.mu.Lock()
+		for i, key := range keys {
+			if groups[i] == nil {
+				continue
+			}
+			allEmpty := true
+			for _, rk := range groups[i] {
+				if pc, found := m.data.Get(rk); found && pc != nil && pc.cache.Len() > 0 {
+					allEmpty = false
+					break
+				}
+			}
+			if allEmpty {
+				m.engineToRequestKeys.Remove(key)
+			}
 		}
 		m.mu.Unlock()
 		return nil
 	case RequestKey:
-		m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
+		for _, key := range keys {
+			m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown key type: %d", keyType)

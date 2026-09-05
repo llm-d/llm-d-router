@@ -58,7 +58,7 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 	return nil
 }
 
-func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
+func (t *tracedIndex) Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error {
 	tracer := tracing.Tracer(TracerScope)
 	ctx, span := tracer.Start(ctx, "index_evict",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -67,11 +67,12 @@ func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType,
 
 	span.SetAttributes(
 		attribute.String("llm_d.kv_cache.index.evict.key_type", keyTypeLabel(keyType)),
+		attribute.Int("llm_d.kv_cache.index.evict.key_count", len(keys)),
 		attribute.Int("llm_d.kv_cache.index.evict.pod_entry_count", len(entries)),
 		attribute.Int("llm_d.kv_cache.index.evict.device_tier_count", deviceTierCount(entries)),
 	)
 
-	err := t.next.Evict(ctx, key, keyType, entries)
+	err := t.next.Evict(ctx, keyType, keys, entries)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err

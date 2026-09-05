@@ -67,7 +67,7 @@ func TestTracedIndexBehavior(t *testing.T) {
 	require.Len(t, result[requestKey], 2)
 
 	// Test Evict operation
-	err = tracedIdx.Evict(ctx, engineKey, kvblock.EngineKey, []kvblock.PodEntry{entries[0]})
+	err = tracedIdx.Evict(ctx, kvblock.EngineKey, []kvblock.BlockHash{engineKey}, []kvblock.PodEntry{entries[0]})
 	require.NoError(t, err)
 
 	// Verify eviction worked (pod1 should be removed, pod2 should remain)
@@ -124,7 +124,7 @@ func TestTracedIndexAddAndEvictSpans(t *testing.T) {
 	err = tracedIdx.Add(ctx, []kvblock.BlockHash{engineKey}, []kvblock.BlockHash{requestKey}, entries)
 	require.NoError(t, err)
 
-	err = tracedIdx.Evict(ctx, engineKey, kvblock.EngineKey, []kvblock.PodEntry{entries[0]})
+	err = tracedIdx.Evict(ctx, kvblock.EngineKey, []kvblock.BlockHash{engineKey}, []kvblock.PodEntry{entries[0]})
 	require.NoError(t, err)
 
 	spans := spanRecorder.Ended()
@@ -138,6 +138,7 @@ func TestTracedIndexAddAndEvictSpans(t *testing.T) {
 	evictSpan := spanByName(t, spans, "index_evict")
 	evictAttrs := spanAttributes(evictSpan)
 	require.Equal(t, "engine", evictAttrs["llm_d.kv_cache.index.evict.key_type"].AsString())
+	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.key_count"].AsInt64())
 	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.pod_entry_count"].AsInt64())
 	require.Equal(t, int64(1), evictAttrs["llm_d.kv_cache.index.evict.device_tier_count"].AsInt64())
 }
@@ -224,7 +225,7 @@ func TestTracedIndexAddAndEvictSpansRecordErrors(t *testing.T) {
 		[]kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}})
 	require.ErrorIs(t, err, expectedErr)
 
-	err = tracedIdx.Evict(ctx, kvblock.BlockHash(1), kvblock.RequestKey,
+	err = tracedIdx.Evict(ctx, kvblock.RequestKey, []kvblock.BlockHash{1},
 		[]kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}})
 	require.ErrorIs(t, err, expectedErr)
 
@@ -291,7 +292,7 @@ func (f *failingIndex) Add(context.Context, []kvblock.BlockHash, []kvblock.Block
 	return f.err
 }
 
-func (f *failingIndex) Evict(context.Context, kvblock.BlockHash, kvblock.KeyType, []kvblock.PodEntry) error {
+func (f *failingIndex) Evict(context.Context, kvblock.KeyType, []kvblock.BlockHash, []kvblock.PodEntry) error {
 	return f.err
 }
 

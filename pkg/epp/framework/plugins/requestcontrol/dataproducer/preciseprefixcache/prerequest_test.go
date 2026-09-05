@@ -18,6 +18,7 @@ package preciseprefixcache
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,13 @@ import (
 
 // addCall captures one fakeKVBlockIndex.Add invocation.
 type addCall struct {
+	keys    []kvblock.BlockHash
+	entries []kvblock.PodEntry
+}
+
+// evictCall captures one fakeKVBlockIndex.Evict invocation.
+type evictCall struct {
+	keyType kvblock.KeyType
 	keys    []kvblock.BlockHash
 	entries []kvblock.PodEntry
 }
@@ -172,4 +180,46 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
+}
+
+// TTL expiry of a speculative entry evicts every key of every prompt in the
+// request, with RequestKey semantics and the seeded pod entries.
+func TestSpeculativeTTLExpiry_EvictsAllPromptKeys(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	var mu sync.Mutex
+	var evictions []evictCall
+	idx := &fakeKVBlockIndex{
+		evictFn: func(_ context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+			mu.Lock()
+			defer mu.Unlock()
+			evictions = append(evictions, evictCall{keyType: keyType, keys: keys, entries: entries})
+			return nil
+		},
+	}
+
+	cache, ttl, err := buildSpeculativeCache(ctx, PluginConfig{
+		SpeculativeIndexing: true,
+		SpeculativeTTL:      "20ms",
+	}, idx)
+	require.NoError(t, err)
+	require.Equal(t, 20*time.Millisecond, ttl)
+
+	perPrompt := [][]kvblock.BlockHash{{0xA1, 0xA2}, {0xB1}}
+	pods := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8080", Speculative: true}}
+	cache.Set("req-ttl", &speculativeEntries{perPromptKeys: perPrompt, podEntries: pods}, ttl)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(evictions) == 1
+	}, 2*time.Second, time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, evictions, 1)
+	assert.Equal(t, []kvblock.BlockHash{0xA1, 0xA2, 0xB1}, evictions[0].keys)
+	assert.Equal(t, kvblock.RequestKey, evictions[0].keyType)
+	assert.Equal(t, pods, evictions[0].entries)
 }

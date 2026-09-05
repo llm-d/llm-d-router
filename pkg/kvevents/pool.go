@@ -744,16 +744,18 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"received", len(ev.BlockHashes), "forwarded", len(hashesToEvict), "suppressed", suppressed)
 			}
 
-			// Iterate over the surviving hashes and evict each key.
-			// The Index handles engine->request key resolution internally for both
-			// 1:1 (legacy) and 1:many (canonical) mappings.
-			for _, hash := range hashesToEvict {
-				engineKey := kvblock.BlockHash(hash)
-				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
-					debugLogger.Error(err, "Failed to evict engine key from index",
-						"podIdentifier", podIdentifier, "engineKey", engineKey)
-					continue
-				}
+			if len(hashesToEvict) == 0 {
+				break
+			}
+			// The Index handles engine->request key resolution internally for
+			// both 1:1 (legacy) and 1:many (canonical) mappings.
+			engineKeys := make([]kvblock.BlockHash, len(hashesToEvict))
+			for i, hash := range hashesToEvict {
+				engineKeys[i] = kvblock.BlockHash(hash)
+			}
+			if err := p.index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
+				debugLogger.Error(err, "Failed to evict engine keys from index",
+					"podIdentifier", podIdentifier, "keyCount", len(engineKeys))
 			}
 
 		case *AllBlocksClearedEvent:
