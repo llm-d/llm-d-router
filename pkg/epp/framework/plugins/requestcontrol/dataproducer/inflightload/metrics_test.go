@@ -26,6 +26,7 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -79,12 +80,13 @@ llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default"
 		require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(expectedTokens), "llm_d_epp_inflight_tokens"))
 	}
 
-	// Admission: 4 input + 6 estimated output = 10 tokens, 1 request.
+	// Admission: 4 input + UnknownOutputTokens estimated output (no outlen-bucket
+	// attribute in this unit test) = 4+UnknownOutputTokens tokens, 1 request.
 	req := makeTokenRequest("req-gauge-lifecycle", 4)
 	res := makeSchedulingResult("ep1")
 	err := producer.PreRequest(ctx, req, res)
 	require.NoError(t, err)
-	expect(t, 1, 10)
+	expect(t, 1, 4+UnknownOutputTokens)
 
 	// Completion: series stay present at zero.
 	req.SchedulingResult = res
@@ -119,10 +121,11 @@ llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="custom-tenant",name
 `
 	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
 
+	// 1004 = 4 input tokens + UnknownOutputTokens (no outlen-bucket attribute set).
 	expectedTokens := `
 # HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
 # TYPE llm_d_epp_inflight_tokens gauge
-llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="custom-tenant",namespace="default",priority="3",producer_name="inflight-load-producer"} 10
+llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="custom-tenant",namespace="default",priority="3",producer_name="inflight-load-producer"} 1004
 `
 	require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(expectedTokens), "llm_d_epp_inflight_tokens"))
 
@@ -311,4 +314,33 @@ func TestAddedTokensEntry_Clone(t *testing.T) {
 	require.Equal(t, entry.priority, cloned.priority)
 	require.Equal(t, int64(15), cloned.tokens.Load())
 	require.Equal(t, int32(1), cloned.requests.Load())
+}
+
+// The plugin's fairness_id label shares the cardinality cap, so a flood of distinct client IDs
+// collapses to the bounded set plus one overflow series instead of one series per ID.
+func TestInflightGauges_FairnessIDCardinalityBounded(t *testing.T) {
+	const testCap = 3
+	inflightRequests.Reset()
+	inflightTokens.Reset()
+	metricsutil.SetFairnessIDLabelLimit(testCap)
+	t.Cleanup(func() {
+		metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit)
+		inflightRequests.Reset()
+		inflightTokens.Reset()
+	})
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	// All requests target the same endpoint, so fairness_id is the only varying label.
+	for i := 0; i < 100; i++ {
+		req := makeTokenRequest(fmt.Sprintf("req-%d", i), 4)
+		req.FairnessID = fmt.Sprintf("tenant-%d", i)
+		require.NoError(t, producer.PreRequest(ctx, req, makeSchedulingResult("ep1")))
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(inflightRequests),
+		"100 distinct fairness IDs must collapse to cap+overflow series")
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(inflightTokens),
+		"the tokens gauge must be bounded identically")
 }

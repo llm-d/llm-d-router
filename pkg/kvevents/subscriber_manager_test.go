@@ -41,7 +41,7 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	require.NoError(t, err)
 	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
 	var streamEvents []kvevents.StreamEvent
-	pool.SetStreamObserver(func(endpoint string, event kvevents.StreamEvent) {
+	pool.SetStreamObserver(func(endpoint string, event kvevents.StreamEvent, _ ...kvevents.StreamBlock) {
 		assert.Equal(t, "10.0.0.1:8000", endpoint)
 		streamEvents = append(streamEvents, event)
 	})

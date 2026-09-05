@@ -51,7 +51,7 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	batch := []any{
 		1234567890.0,
 		[]any{blockStoredEvent},
-		nil,
+		3,
 	}
 	payload, err := msgpack.Marshal(batch)
 	require.NoError(t, err)
@@ -66,6 +66,8 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pod-1", podID)
 	assert.Equal(t, "llama-2-7b", modelName)
+	require.NotNil(t, eventBatch.DataParallelRank)
+	assert.Equal(t, 3, *eventBatch.DataParallelRank)
 	assert.Len(t, eventBatch.Events, 1)
 
 	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
@@ -653,6 +655,20 @@ func TestVLLMParseMessage_MapEncodedBlockStored(t *testing.T) {
 	assert.Equal(t, "CPU", blockStored.DeviceTier)
 	require.NotNil(t, blockStored.GroupIdx)
 	assert.Equal(t, 0, *blockStored.GroupIdx)
+}
+
+func TestVLLMBlockStoredOrigin(t *testing.T) {
+	for _, origin := range []string{"NEW", "REUSED", "", "future-origin"} {
+		t.Run(origin, func(t *testing.T) {
+			event := map[string]any{"type": "BlockStored", "block_hashes": []uint64{42},
+				"token_ids": []uint32{1}, "block_size": 1, "origin": origin}
+			wire, err := msgpack.Marshal(event)
+			require.NoError(t, err)
+			got, err := NewVLLMAdapter().decodeVLLMEvent(wire)
+			require.NoError(t, err)
+			assert.Equal(t, origin, got.(*kvevents.BlockStoredEvent).Origin)
+		})
+	}
 }
 
 // TestVLLMParseMessage_MapEncodedBlockRemovedAndCleared covers the remaining

@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -428,6 +429,7 @@ func TestExecutePluginsAsDAG_EnforcesProducesDeclaration(t *testing.T) {
 	t.Run("declared write reaches the endpoint", func(t *testing.T) {
 		endpoint := newEndpoint()
 		producer := &writingProducer{name: "p", declares: map[fwkplugin.DataKey]any{declared: nil}, writes: declared}
+		datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{producer})
 
 		err := executePluginsAsDAG(context.Background(), []fwkrc.DataProducer{producer},
 			&fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
@@ -440,6 +442,7 @@ func TestExecutePluginsAsDAG_EnforcesProducesDeclaration(t *testing.T) {
 	t.Run("undeclared write fails the producer and leaves the endpoint untouched", func(t *testing.T) {
 		endpoint := newEndpoint()
 		producer := &writingProducer{name: "p", declares: map[fwkplugin.DataKey]any{declared: nil}, writes: undeclared}
+		datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{producer})
 
 		err := executePluginsAsDAG(context.Background(), []fwkrc.DataProducer{producer},
 			&fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})

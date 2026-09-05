@@ -19,9 +19,11 @@ package internal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -35,7 +37,7 @@ func TestFlowItem_New(t *testing.T) {
 	req := mocks.NewMockFlowControlRequest(100, "req-1", flowcontrol.FlowKey{})
 
 	enqueueTime := time.Now()
-	item := NewItem(req, time.Minute, enqueueTime)
+	item := NewItem(req, time.Minute, enqueueTime, logr.Discard())
 
 	require.NotNil(t, item, "NewItem should not return a nil item")
 	assert.Equal(t, enqueueTime, item.EnqueueTime(), "EnqueueTime should be populated")
@@ -82,31 +84,31 @@ func TestFlowItem_Finalize_Idempotency(t *testing.T) {
 			expectedErrIs:   types.ErrTTLExpired,
 		},
 		{
-			name: "Finalize then FinalizeWithOutcome",
+			name: "Finalize then FinalizeWithError",
 			firstCall: func(item *FlowItem) {
 				item.Finalize(types.ErrTTLExpired)
 			},
 			secondCall: func(item *FlowItem) {
-				item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+				item.FinalizeWithError(nil)
 			},
 			expectedOutcome: types.QueueOutcomeRejectedOther,
 			expectedErrIs:   types.ErrTTLExpired,
 		},
 		{
-			name: "FinalizeWithOutcome then FinalizeWithOutcome",
+			name: "FinalizeWithError then FinalizeWithError",
 			firstCall: func(item *FlowItem) {
-				item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+				item.FinalizeWithError(nil)
 			},
 			secondCall: func(item *FlowItem) {
-				item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, errors.New("rejected"))
+				item.FinalizeWithError(fmt.Errorf("%w: %w", types.ErrRejected, types.ErrQueueAtCapacity))
 			},
 			expectedOutcome: types.QueueOutcomeDispatched,
 			expectedErrIs:   nil,
 		},
 		{
-			name: "FinalizeWithOutcome then Finalize",
+			name: "FinalizeWithError then Finalize",
 			firstCall: func(item *FlowItem) {
-				item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+				item.FinalizeWithError(nil)
 			},
 			secondCall: func(item *FlowItem) {
 				item.Finalize(types.ErrTTLExpired)
@@ -119,7 +121,7 @@ func TestFlowItem_Finalize_Idempotency(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			item := NewItem(req, time.Minute, now)
+			item := NewItem(req, time.Minute, now, logr.Discard())
 
 			// First call
 			tc.firstCall(item)
@@ -154,7 +156,7 @@ func TestFlowItem_Finalize_Idempotency(t *testing.T) {
 	}
 }
 
-func TestFlowItem_Finalize_InferOutcome(t *testing.T) {
+func TestFlowItem_Finalize_OutcomeClassification(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 
@@ -168,6 +170,13 @@ func TestFlowItem_Finalize_InferOutcome(t *testing.T) {
 		{
 			name:          "queued TTL expired",
 			cause:         types.ErrTTLExpired,
+			isQueued:      true,
+			expectOutcome: types.QueueOutcomeEvictedTTL,
+			expectErrIs:   types.ErrTTLExpired,
+		},
+		{
+			name:          "queued deadline exceeded",
+			cause:         context.DeadlineExceeded,
 			isQueued:      true,
 			expectOutcome: types.QueueOutcomeEvictedTTL,
 			expectErrIs:   types.ErrTTLExpired,
@@ -220,7 +229,7 @@ func TestFlowItem_Finalize_InferOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			req := mocks.NewMockFlowControlRequest(100, "req-1", flowcontrol.FlowKey{})
-			item := NewItem(req, time.Minute, now)
+			item := NewItem(req, time.Minute, now, logr.Discard())
 			if tc.isQueued {
 				item.SetHandle(&mocks.MockQueueItemHandle{})
 			}

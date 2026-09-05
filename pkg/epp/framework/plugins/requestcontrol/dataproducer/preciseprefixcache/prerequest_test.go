@@ -19,6 +19,7 @@ package preciseprefixcache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -185,6 +186,7 @@ func TestPreRequest_FullReportRepairUsesPrefillAndMergesXArgs(t *testing.T) {
 		MinMissingBlocks:    32,
 	}, 0)
 	p.fullReportRepair.observe("10.0.0.2:8080", kvevents.StreamEventAttached)
+	p.fullReportRepair.observe("10.0.0.2:8080", kvevents.StreamEventReportSupported)
 
 	payload := fwkrh.PayloadMap{
 		"model":      "model",
@@ -239,6 +241,7 @@ func TestPreRequest_FullReportRepairMarksJSONProtocolsMutated(t *testing.T) {
 			}, 0)
 			const endpoint = "10.0.0.1:8080"
 			p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
+			p.fullReportRepair.observe(endpoint, kvevents.StreamEventReportSupported)
 			req := &scheduling.InferenceRequest{
 				RequestID: tt.name,
 				Body:      &fwkrh.InferenceRequestBody{Payload: tt.payload},
@@ -260,7 +263,7 @@ func TestPreRequest_FullReportRepairMarksJSONProtocolsMutated(t *testing.T) {
 	}
 }
 
-func TestPreRequest_FullReportRepairThresholdAndOneShotForce(t *testing.T) {
+func TestPreRequest_FullReportRepairThresholdAndIntegrity(t *testing.T) {
 	tests := []struct {
 		name      string
 		total     int
@@ -285,8 +288,9 @@ func TestPreRequest_FullReportRepairThresholdAndOneShotForce(t *testing.T) {
 			}, 0)
 			const endpoint = "10.0.0.1:8080"
 			p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
+			p.fullReportRepair.observe(endpoint, kvevents.StreamEventReportSupported)
 			if tt.signal != "" {
-				p.fullReportRepair.observe(endpoint, tt.signal)
+				p.fullReportRepair.observe(endpoint, tt.signal, kvevents.StreamBlock{Hash: 42})
 			}
 			payload := fwkrh.PayloadMap{"model": "model"}
 			req := &scheduling.InferenceRequest{
@@ -312,8 +316,8 @@ func TestPreRequest_FullReportRepairThresholdAndOneShotForce(t *testing.T) {
 				})
 				require.NoError(t, p.PreRequest(ctx, req2, primaryOnly(testEndpoints[0])))
 				xargs2, _ := payload2["vllm_xargs"].(map[string]any)
-				assert.NotEqual(t, "full", xargs2["kv_cache_report_mode"],
-					"the explicit bypass is consumed once")
+				assert.Equal(t, "full", xargs2["kv_cache_report_mode"],
+					"the missing lineage remains unresolved")
 			}
 		})
 	}
@@ -328,7 +332,8 @@ func TestPreRequest_FullReportRepairDoesNotOverwriteMalformedXArgs(t *testing.T)
 	}, 0)
 	const endpoint = "10.0.0.1:8080"
 	p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
-	p.fullReportRepair.observe(endpoint, kvevents.StreamEventMissingParent)
+	p.fullReportRepair.observe(endpoint, kvevents.StreamEventReportSupported)
+	p.fullReportRepair.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	payload := fwkrh.PayloadMap{"vllm_xargs": "invalid"}
 	req := &scheduling.InferenceRequest{
 		RequestID: "malformed-xargs",
@@ -351,21 +356,93 @@ func TestFullReportRepairLifecycle(t *testing.T) {
 	const endpoint = "10.0.0.1:8080"
 
 	r.observe(endpoint, kvevents.StreamEventAttached)
+
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	request, reason := r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
 	assert.True(t, request)
 	assert.Equal(t, "threshold", reason)
-	r.observe(endpoint, kvevents.StreamEventMissingParent)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	request, reason = r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
 	assert.True(t, request)
 	assert.Equal(t, "integrity", reason)
 	request, reason = r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
 	assert.True(t, request)
-	assert.Equal(t, "threshold", reason, "force is one shot but eligibility remains")
+	assert.Equal(t, "integrity", reason, "requesting a report cannot resolve a fault")
 
 	r.observe(endpoint, kvevents.StreamEventDetached)
 	request, _ = r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
 	assert.False(t, request)
-	r.observe(endpoint, kvevents.StreamEventMissingParent)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	request, _ = r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 100})
 	assert.False(t, request, "a late fault from a detached stream must not resurrect eligibility")
+}
+
+func TestPreRequest_FullReportRepairGenerateWireShape(t *testing.T) {
+	for _, typed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("typed=%t", typed), func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			p := newProducerForPreRequest(ctx, false, &fakeKVBlockIndex{})
+			p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
+				FullReportThreshold: 0.80, MinMissingBlocks: 32,
+			}, 0)
+			const endpoint = "10.0.0.1:8080"
+			p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
+			p.fullReportRepair.observe(endpoint, kvevents.StreamEventReportSupported)
+			var xargs any = map[string]any{"existing": "preserved"}
+			if typed {
+				xargs = fwkrh.PayloadMap{"existing": "preserved"}
+			}
+			payload := fwkrh.PayloadMap{
+				"token_ids":       []int{1, 2},
+				"sampling_params": map[string]any{"max_tokens": 16, "vllm_xargs": xargs},
+			}
+			req := &scheduling.InferenceRequest{RequestID: "generate-repair", Body: &fwkrh.InferenceRequestBody{
+				Payload: payload, Generate: &fwkrh.GenerateRequest{},
+			}}
+			p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+				repairMatches: map[string]repairMatch{endpoint: {total: 200, confirmed: 100}},
+			})
+			require.NoError(t, p.PreRequest(ctx, req, primaryOnly(testEndpoints[0])))
+			require.True(t, req.Body.Mutated)
+			wire, err := payload.Marshal()
+			require.NoError(t, err)
+			var decoded map[string]any
+			require.NoError(t, json.Unmarshal(wire, &decoded))
+			assert.NotContains(t, decoded, "vllm_xargs")
+			params := decoded["sampling_params"].(map[string]any)
+			args := params["vllm_xargs"].(map[string]any)
+			assert.Equal(t, "full", args["kv_cache_report_mode"])
+			assert.Equal(t, "preserved", args["existing"])
+			assert.Equal(t, float64(16), params["max_tokens"])
+		})
+	}
+}
+
+func TestPreRequest_FullReportRepairCustomPrefillProfile(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := newProducerForPreRequest(ctx, false, &fakeKVBlockIndex{})
+	var config FullReportRepairConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"prefillProfile":"custom-prefill"}`), &config))
+	config, cooldown, err := normalizeFullReportRepairConfig(config)
+	require.NoError(t, err)
+	p.fullReportRepair = newFullReportRepair(config, cooldown)
+	const endpoint = "10.0.0.2:8080"
+	p.fullReportRepair.observe(endpoint, kvevents.StreamEventAttached)
+	p.fullReportRepair.observe(endpoint, kvevents.StreamEventReportSupported)
+	payload := fwkrh.PayloadMap{"vllm_xargs": fwkrh.PayloadMap{"existing": "preserved"}}
+	req := &scheduling.InferenceRequest{RequestID: "custom-prefill", Body: &fwkrh.InferenceRequestBody{Payload: payload}}
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		repairMatches: map[string]repairMatch{endpoint: {total: 200, confirmed: 100}},
+	})
+	result := primaryOnly(testEndpoints[0])
+	result.ProfileResults["custom-prefill"] = &scheduling.ProfileRunResult{TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assert.True(t, req.Body.Mutated)
+	wire, err := payload.Marshal()
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(wire, &decoded))
+	args := decoded["vllm_xargs"].(map[string]any)
+	assert.Equal(t, "full", args["kv_cache_report_mode"])
+	assert.Equal(t, "preserved", args["existing"])
 }

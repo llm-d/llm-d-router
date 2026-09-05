@@ -149,3 +149,71 @@ To apply these values during deployment, run the Helm install or upgrade command
 ```bash
 helm install optimize-baseline ./config/charts/llm-d-router-standalone -f resource_overrides.yaml
 ```
+
+---
+
+## 4. High Availability (HA)
+
+The router supports multiple High Availability (HA) modes:
+
+1. **Fully Active-Active**: Multiple EPP replicas run concurrently and share load across all instances. Suitable when scheduling algorithms and plugins do not require unified state across pods or there is a synchronization mechanism in place.
+2. **Active-Passive**: Traffic routes to a single primary replica set while standby replicas remain available for failover.
+   - **Priority Routing**: Available only when proxy mode is set to service (`router.proxy.mode: service`). Uses Envoy Priority Routing and outlier detection to route traffic to Primary EPP replicas (Priority 0) and shift traffic to Standby EPP replicas (Priority 1) upon primary failure.
+   - **Leader Election with Fail-Open**: Uses Kubernetes `coordination.k8s.io/Lease` coordination so only the elected leader serves inference extension requests. Standby pods remain idle until acquiring the lease. If the active leader fails, the proxy operates in fail-open mode, routing traffic directly to model servers until a standby acquires leadership.
+
+### Priority Routing
+
+Priority Routing is only available in standalone service mode (`router.proxy.mode: service`). When priority routing is enabled (`router.proxy.priorityRouting.enabled: true`), the router uses [Envoy Priority Routing](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/priority) to organize EPP endpoints into distinct priority tiers:
+* **Priority 0 (Primary / Active)**: Handles 100% of steady-state scheduling traffic.
+* **Priority 1 (Standby / Passive)**: Warm standby pods ready to accept failover traffic upon primary pod failure.
+
+#### Architecture and Failover Mechanics
+
+1. **Deterministic Endpoint Discovery**: EPP pods run as a StatefulSet with a headless Service (`publishNotReadyAddresses: true`). Envoy targets individual pod DNS entries (`<release>-epp-0`, `<release>-epp-1`, etc.) mapped to distinct priority levels.
+2. **Active Health Probing**: Envoy actively probes EPP Port 9002 via gRPC health check (`grpc.health.v1.Health`).
+3. **Outlier Detection Failover**: When priority routing is enabled, if a primary pod fails or crashes, Envoy's Outlier Detection detects TCP connection failure and ejects the primary host, shifting traffic to Priority 1 standbys in sub-second time without lease expiration delays.
+4. **Graceful Pod Termination**: EPP pods include a `lifecycle.preStop` hook (`sleep 5`) during planned deletion or rollout. This gives Envoy active health checks time to detect pod shutdown and redirect new traffic to standby endpoints before SIGTERM, allowing in-flight gRPC streams to drain.
+5. **Safe Failback**: When a replacement primary pod is rescheduled, the health check `healthy_threshold` requires consecutive passing health probes before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
+
+#### Helm Configuration
+
+```yaml
+router:
+  proxy:
+    mode: service
+    priorityRouting:
+      enabled: true
+      primaryReplicas: 1
+      standbyReplicas: 1
+```
+
+#### Tuning Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `router.proxy.priorityRouting.healthyPanicThreshold` | `10.0` | Threshold percentage to prevent panic routing during primary ejection. |
+| `router.proxy.priorityRouting.dnsRefreshRate` | `5s` | DNS resolution refresh rate for headless EPP endpoints. |
+| `router.proxy.priorityRouting.connectTimeout` | `0.250s` | Connection timeout to detect unreachable primary pods. |
+| `router.proxy.healthCheckInterval` | `10s` | Active gRPC health check probe interval. |
+| `router.proxy.healthCheckTimeout` | `2s` | Health check probe timeout. |
+| `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
+| `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
+| `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
+
+### Leader Election and Fail-Open
+
+In multi-replica deployments without priority routing (`router.epp.replicas > 1`), the router coordinates active-passive replicas using Kubernetes lease-based leader election:
+
+- **Leader Coordination**: EPP replicas contend for a `coordination.k8s.io/Lease`. The `--ha-enable-leader-election` flag enables leader election in EPP (automatically injected by Helm when `router.epp.replicas > 1`). The elected leader responds to active gRPC extension requests on Port 9002, while standby replicas run idle. (To run multi-replica in Fully Active-Active mode instead, set `router.epp.flags.ha-enable-leader-election: false`).
+- **Fail-Open Resiliency**: With `router.proxy.failOpen: true` (the default in standalone mode) or `router.inferencePool.failureMode: FailOpen`, if the active leader crashes or restarts, the proxy passes requests directly to backend model servers without dropping traffic during the lease transition period.
+
+```yaml
+router:
+  epp:
+    replicas: 2
+    flags:
+      ha-enable-leader-election: true
+  proxy:
+    failOpen: true
+```
+

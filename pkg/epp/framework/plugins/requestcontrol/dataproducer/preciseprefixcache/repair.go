@@ -37,6 +37,7 @@ const (
 // FullReportRepairConfig enables bounded per-request full KV-cache reports
 // for endpoints whose event-derived index may be incomplete.
 type FullReportRepairConfig struct {
+	PrefillProfile      string  `json:"prefillProfile,omitempty"`
 	FullReportThreshold float64 `json:"fullReportThreshold,omitempty"`
 	MinMissingBlocks    int     `json:"minMissingBlocks,omitempty"`
 	// Cooldown is the minimum interval between full-report requests per
@@ -89,56 +90,70 @@ func validateFullReportRepairPrerequisites(config *kvevents.Config) error {
 }
 
 type endpointRepairState struct {
-	force       bool
-	lastRequest time.Time
+	missing         map[kvevents.StreamBlock]struct{}
+	reportSupported bool
+	lastRequest     time.Time
 }
 
-// fullReportRepair tracks, per endpoint, whether the event-derived index may
-// be missing state and a report request is warranted. The cooldown bounds
-// report frequency: a report lands only after the flagged request completes
-// and its events propagate, so every request in that window would otherwise
-// re-request the same report, and each re-announced store inflates the event
-// dedup filter's reference counts. A cooldown of zero disables the bound.
+// fullReportRepair retains missing block identities until a store, removal,
+// or cache reset resolves them. Report requests share an endpoint cooldown.
 type fullReportRepair struct {
-	mu         sync.Mutex
-	endpoints  map[string]endpointRepairState
-	threshold  float64
-	minMissing int
-	cooldown   time.Duration
-	clock      clock.PassiveClock
+	mu             sync.Mutex
+	endpoints      map[string]endpointRepairState
+	threshold      float64
+	minMissing     int
+	cooldown       time.Duration
+	prefillProfile string
+	clock          clock.PassiveClock
 }
 
 func newFullReportRepair(config FullReportRepairConfig, cooldown time.Duration) *fullReportRepair {
+	if config.PrefillProfile == "" {
+		config.PrefillProfile = experimentalPrefillProfile
+	}
 	return &fullReportRepair{
-		endpoints:  make(map[string]endpointRepairState),
-		threshold:  config.FullReportThreshold,
-		minMissing: config.MinMissingBlocks,
-		cooldown:   cooldown,
-		clock:      clock.RealClock{},
+		endpoints:      make(map[string]endpointRepairState),
+		threshold:      config.FullReportThreshold,
+		minMissing:     config.MinMissingBlocks,
+		cooldown:       cooldown,
+		prefillProfile: config.PrefillProfile,
+		clock:          clock.RealClock{},
 	}
 }
 
-func (r *fullReportRepair) observe(endpoint string, event kvevents.StreamEvent) {
+func (r *fullReportRepair) observe(endpoint string, event kvevents.StreamEvent, blocks ...kvevents.StreamBlock) {
 	if r == nil || endpoint == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	switch event {
-	case kvevents.StreamEventAttached:
-		if _, exists := r.endpoints[endpoint]; !exists {
-			r.endpoints[endpoint] = endpointRepairState{}
-		}
-	case kvevents.StreamEventMissingParent:
-		// Guarded on existence so a late event from a detached stream cannot
-		// resurrect a removed endpoint.
-		if state, exists := r.endpoints[endpoint]; exists {
-			state.force = true
-			r.endpoints[endpoint] = state
-		}
-	case kvevents.StreamEventDetached:
+	if event == kvevents.StreamEventDetached {
 		delete(r.endpoints, endpoint)
+		return
 	}
+	state, exists := r.endpoints[endpoint]
+	if !exists && event != kvevents.StreamEventAttached {
+		return
+	}
+	switch event {
+	case kvevents.StreamEventReportSupported:
+		state.reportSupported = true
+	case kvevents.StreamEventMissingParent:
+		if state.missing == nil {
+			state.missing = make(map[kvevents.StreamBlock]struct{})
+		}
+		for _, block := range blocks {
+			state.missing[block] = struct{}{}
+		}
+	case kvevents.StreamEventStored, kvevents.StreamEventRemoved:
+		for _, block := range blocks {
+			delete(state.missing, block)
+		}
+	case kvevents.StreamEventCleared:
+		state.missing = nil
+		state.reportSupported = false
+	}
+	r.endpoints[endpoint] = state
 }
 
 func (r *fullReportRepair) shouldRequest(endpoint string, match repairMatch) (bool, string) {
@@ -148,30 +163,21 @@ func (r *fullReportRepair) shouldRequest(endpoint string, match repairMatch) (bo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	state, eligible := r.endpoints[endpoint]
-	if !eligible {
+	if !eligible || !state.reportSupported || match.total <= 0 {
 		return false, ""
 	}
-	// Ignore small gaps before considering either repair path.
-	missing := match.total - match.confirmed
-	if missing < r.minMissing || match.total <= 0 {
-		return false, ""
-	}
-	// The cooldown check precedes the force check so a fault observed during
-	// the cooldown window is preserved for the next eligible request.
 	if r.cooldown > 0 && !state.lastRequest.IsZero() && r.clock.Since(state.lastRequest) < r.cooldown {
 		return false, ""
 	}
-	if state.force {
-		// Consume the fault only when it produces a report.
-		state.force = false
-		state.lastRequest = r.clock.Now()
-		r.endpoints[endpoint] = state
-		return true, "integrity"
+	reason := "integrity"
+	if len(state.missing) == 0 {
+		missing := match.total - match.confirmed
+		if missing < r.minMissing || float64(match.confirmed)/float64(match.total) >= r.threshold {
+			return false, ""
+		}
+		reason = "threshold"
 	}
-	if float64(match.confirmed)/float64(match.total) < r.threshold {
-		state.lastRequest = r.clock.Now()
-		r.endpoints[endpoint] = state
-		return true, "threshold"
-	}
-	return false, ""
+	state.lastRequest = r.clock.Now()
+	r.endpoints[endpoint] = state
+	return true, reason
 }

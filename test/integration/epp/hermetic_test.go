@@ -28,6 +28,7 @@ import (
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -222,7 +224,7 @@ dataLayer:
 					},
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - error unmarshaling request bodyMap: invalid character 'o' in literal null (expecting 'u')",
+						"inference error: BadRequest - error extracting request body: invalid character 'o' in literal null (expecting 'u')",
 					),
 				},
 				{
@@ -245,6 +247,36 @@ dataLayer:
 					wantMetrics: map[string]string{
 						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
 					},
+				},
+				{
+					name: "images edits: multipart body split across chunks, routed unchanged",
+					requests: integration.ReqRaw(
+						map[string]string{
+							":path":                      "/v1/images/edits",
+							"content-type":               "multipart/form-data; boundary=" + imagesEditsBoundary,
+							reqcommon.RequestIDHeaderKey: "test-request-id",
+						},
+						imagesEditsBody[:40],
+						imagesEditsBody[40:],
+					),
+					pods: []PodState{
+						P(0, 3, 0.2),
+						P(1, 0, 0.1), // Winner (Low Queue, Low KV)
+						P(2, 10, 0.2),
+					},
+					wantResponses: expectImagesEditsRouteTo("192.168.1.2:8000"),
+				},
+				{
+					name: "images edits: non-multipart content-type rejected",
+					requests: integration.ReqRaw(
+						map[string]string{
+							":path":        "/v1/images/edits",
+							"content-type": "application/json",
+						},
+						`{"model":"my-model","prompt":"edit"}`,
+					),
+					wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
+						"inference error: BadRequest - images edits request must have a multipart/form-data content-type"),
 				},
 				{
 					name:     "no backend pods available",
@@ -293,8 +325,9 @@ dataLayer:
 						P(0, 0, 0.2, "foo"),
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
-					wantResponses: ExpectReject(envoyTypePb.StatusCode_ServiceUnavailable,
-						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request"),
+					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
+						errcommon.RequestDroppedReasonNoEndpoints),
 				},
 
 				// --- Request Modification (Passthrough & Rewrite) ---
@@ -409,7 +442,7 @@ dataLayer:
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16384"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32778"} 1
+              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32768"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="65536"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="131072"} 1
               inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="262144"} 1
@@ -505,6 +538,45 @@ dataLayer:
 			}
 		})
 	}
+}
+
+const imagesEditsBoundary = "imagesEditsBoundary"
+
+// imagesEditsBody is a multipart /v1/images/edits request carrying form fields and a file part.
+var imagesEditsBody = strings.Join([]string{
+	"--" + imagesEditsBoundary,
+	`Content-Disposition: form-data; name="model"`,
+	"",
+	modelMyModel,
+	"--" + imagesEditsBoundary,
+	`Content-Disposition: form-data; name="prompt"`,
+	"",
+	"make the sky blue",
+	"--" + imagesEditsBoundary,
+	`Content-Disposition: form-data; name="image"; filename="cat.png"`,
+	"Content-Type: image/png",
+	"",
+	"raw-png-bytes",
+	"--" + imagesEditsBoundary + "--",
+	"",
+}, "\r\n")
+
+// expectImagesEditsRouteTo asserts the multipart request is routed to endpoint with its body
+// forwarded unchanged: multipart payloads are raw bytes, so no model rewrite is applied.
+func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
+	return integration.NewRequestBufferedResponse(
+		endpoint,
+		[]byte(imagesEditsBody),
+		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+			Key: ":path", RawValue: []byte("/v1/images/edits"),
+		}},
+		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+			Key: "content-type", RawValue: []byte("multipart/form-data; boundary=" + imagesEditsBoundary),
+		}},
+		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+			Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("test-request-id"),
+		}},
+	)
 }
 
 // loadBaseResources parses the YAML manifest once at startup.

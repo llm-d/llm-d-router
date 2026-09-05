@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,7 +59,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		return
 	}
 
-	bootstrapAddr := fmt.Sprintf("http://%s:%d", extractHost(prefillPodHostPort), s.config.MooncakeBootstrapPort)
+	bootstrapAddr := "http://" + net.JoinHostPort(extractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
 
 	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
 	if err != nil {
@@ -198,7 +200,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 
 	// Prefill runs in a goroutine: only populates KV cache, response is discarded.
 	// Decode runs on the main thread: writes the actual response back to the client via w.
-	ctx, prefillSpan := tracer.Start(ctx, "llm_d.pd_proxy.prefill",
+	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -240,7 +242,7 @@ func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http
 	}()
 
 	// Decode Stage
-	ctx, decodeSpan := tracer.Start(ctx, "llm_d.pd_proxy.decode",
+	ctx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()

@@ -53,15 +53,6 @@ var (
 	modelWithPriorityLabels = []string{"model_name", "target_model_name", "priority"}
 	poolLabels              = []string{"name"}
 	endpointLabels          = []string{"pod_name", "namespace", "port"}
-
-	// --- Common Buckets ---
-
-	// generalLatencyBuckets for long running inference from 5ms to 1 hour
-	generalLatencyBuckets = []float64{
-		0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3, 4, 5, 6,
-		8, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 360, 480, 600, 900, 1200,
-		1800, 2700, 3600,
-	}
 )
 
 // --- Inference Objective Metrics ---
@@ -95,7 +86,7 @@ var (
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_duration_seconds] Inference objective response latency distribution in seconds for each model and target model.", compbasemetrics.ALPHA),
-			Buckets:   generalLatencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		modelLabels,
 	)
@@ -107,12 +98,7 @@ var (
 			Subsystem: inferenceObjectiveComponent,
 			Name:      "request_sizes",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_size_bytes] Inference objective requests size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
-			// Use buckets ranging from 1000 bytes (1KB) to 10^9 bytes (1GB).
-			Buckets: []float64{
-				64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, // More fine-grained up to 64KB
-				131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, // Exponential up to 8MB
-				16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, // Exponential up to 1GB
-			},
+			Buckets:   metricsutil.RequestSizeBuckets,
 		},
 		modelLabels,
 	)
@@ -126,7 +112,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_response_size_bytes] Inference objective responses size distribution in bytes for each model and target model.", compbasemetrics.ALPHA),
 			// Most models have a response token < 8192 tokens. Each token, in average, has 4 characters.
 			// 8192 * 4 = 32768.
-			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536},
+			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
 		modelLabels,
 	)
@@ -139,7 +125,7 @@ var (
 			Name:      "input_tokens",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models have a input context window less than 1 million tokens.
-			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
+			Buckets: metricsutil.TokenCountBuckets,
 		},
 		modelLabels,
 	)
@@ -165,7 +151,7 @@ var (
 			Name:      "prompt_cached_tokens",
 			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_request_cached_tokens] Inference objective prompt cached token count distribution for requests in each model.", compbasemetrics.ALPHA),
 			// Most models have a input context window less than 1 million tokens.
-			Buckets: []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32778, 65536, 131072, 262144, 524288, 1048576},
+			Buckets: metricsutil.TokenCountBuckets,
 		},
 		modelLabels,
 	)
@@ -1049,7 +1035,7 @@ func RecordFlowControlRevocationConfirmationDuration(inferencePool string, durat
 func DeleteFlowControlFlowSeries(fairnessID, priority string) {
 	// The overflow value aggregates every capped-out fairness ID, so a flow whose client-chosen ID
 	// equals it must not delete the shared series.
-	if fairnessID == overflowValue {
+	if fairnessID == metricsutil.OverflowValue {
 		return
 	}
 	labels := prometheus.Labels{"fairness_id": fairnessID, "priority": priority}

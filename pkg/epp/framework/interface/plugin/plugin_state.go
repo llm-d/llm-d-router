@@ -28,13 +28,26 @@ import (
 )
 
 const (
-	// defaultStalenessThreshold defines the threshold for considering data as stale.
-	// if data of a request hasn't been read/write in the last "stalenessThreshold", it is considered as stale data
-	// and will be cleaned in the next cleanup cycle.
-	defaultStalenessThreshold = time.Minute * 5
-	// defaultCleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
+	// DefaultStalenessThreshold defines the built-in threshold for considering data as stale.
+	// If a request's data has not been read/written within this duration, it is reaped in the next
+	// cleanup cycle. It applies when no process-wide override is set via SetDefaultStalenessThreshold.
+	DefaultStalenessThreshold = time.Minute * 5
+	// defaultCleanupInterval defines the periodic interval that the cleanup goroutine uses to check for stale data.
 	defaultCleanupInterval = time.Minute
 )
+
+// defaultStalenessThreshold is the process-wide default staleness threshold applied to new
+// PluginState instances. It may be overridden once at startup via SetDefaultStalenessThreshold.
+var defaultStalenessThreshold = DefaultStalenessThreshold
+
+// SetDefaultStalenessThreshold overrides the process-wide default staleness threshold used by
+// PluginState instances created via NewPluginState. It is intended to be called once at startup,
+// before any plugin is instantiated. Non-positive values are ignored.
+func SetDefaultStalenessThreshold(d time.Duration) {
+	if d > 0 {
+		defaultStalenessThreshold = d
+	}
+}
 
 // PluginStateOption configures a PluginState created by NewPluginState.
 type PluginStateOption func(*PluginState)

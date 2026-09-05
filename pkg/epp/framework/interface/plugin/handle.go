@@ -36,6 +36,14 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
+
+	// CrossReplicaSyncer returns the configured cross-replica syncer plugin. It
+	// returns nil when cross-replica synchronization is not configured.
+	CrossReplicaSyncer() Plugin
+
+	// SetCrossReplicaSyncer makes the configured cross-replica syncer available
+	// to plugins through the handle.
+	SetCrossReplicaSyncer(Plugin)
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -60,8 +68,9 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList         PodListFunc
-	metricsRecorder MetricsRecorder
+	podList            PodListFunc
+	metricsRecorder    MetricsRecorder
+	crossReplicaSyncer Plugin
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -109,6 +118,16 @@ func (h *eppHandle) PodList() []types.NamespacedName {
 // Metrics returns the MetricsRecorder.
 func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
+}
+
+// CrossReplicaSyncer returns the configured cross-replica syncer plugin.
+func (h *eppHandle) CrossReplicaSyncer() Plugin {
+	return h.crossReplicaSyncer
+}
+
+// SetCrossReplicaSyncer sets the configured cross-replica syncer plugin.
+func (h *eppHandle) SetCrossReplicaSyncer(syncer Plugin) {
+	h.crossReplicaSyncer = syncer
 }
 
 // HandleOption configures an eppHandle constructed via NewEppHandle.

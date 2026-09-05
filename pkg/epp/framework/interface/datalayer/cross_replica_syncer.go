@@ -26,28 +26,38 @@ import (
 type StateKey string
 
 // CrossReplicaSyncer synchronizes shared state across EPP replicas.
-// Implementations own the sync mechanism (e.g., Redis pub/sub, gossip).
+// Implementations own the storage mechanism and must provide the atomic
+// consistency required by GetOrSet.
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
-	// Set writes a value for the given key and endpoint. The runtime calls
-	// this periodically, once per live endpoint, with a fresh local snapshot.
-	Set(ctx context.Context, key StateKey, endpointID string, value any) error
+	// Set writes a value for the given key and endpoint and prepares the
+	// aggregate returned by Get. The runtime calls this periodically, once per
+	// live endpoint, with a fresh local snapshot.
+	Set(ctx context.Context, key StateKey, endpointID string, value any, aggregate func([]any) any) error
 
-	// Get returns the aggregated value for the given key and endpoint across
-	// all replicas. The aggregate function folds per-replica values into a
-	// single result. Returns (value, true, nil) on hit, (nil, false, nil)
-	// on miss, or (nil, false, err) on failure.
-	Get(ctx context.Context, key StateKey, endpointID string, aggregate func([]any) any) (any, bool, error)
+	// Get returns the prepared aggregate for the given key and endpoint across
+	// all replicas. Returns (value, true, nil) on hit, (nil, false, nil) on
+	// miss, or (nil, false, err) on failure.
+	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
 
 	// Delete removes the value for the given key and endpoint.
 	Delete(ctx context.Context, key StateKey, endpointID string) error
+
+	// GetOrSet atomically returns the value already stored for key and id, or
+	// stores candidate and returns it. This is global request-level state shared
+	// across EPP replicas, not per-endpoint state. Use it only when exact
+	// coordination is required. Implementations own a fixed expiration period.
+	// The bool reports whether the returned value already existed. Implementations
+	// must provide linearizable behavior across every EPP replica sharing the syncer.
+	GetOrSet(ctx context.Context, key StateKey, id string, candidate any) (actual any, existed bool, err error)
 }
 
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface
-// and wires the store transparently.
+// and wires the store transparently. Prefer it for per-endpoint state that can
+// tolerate periodic synchronization.
 type CrossReplicaContributor interface {
 	CrossReplicaState() CrossReplicaSpec
 }
@@ -67,7 +77,7 @@ type CrossReplicaSpec struct {
 	Supply func(endpointID string) func() Cloneable
 
 	// Aggregate combines per-replica values into a single aggregate.
-	// Called by the store's Get to fold values from all replicas.
+	// Called by the store's Set to fold values from all replicas.
 	Aggregate func(values []any) any
 
 	// SyncDisabled opts this contributor out of cross-replica synchronization

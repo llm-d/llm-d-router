@@ -27,8 +27,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -202,6 +206,10 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
 	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
 	step, _ := NewConditionalDecodeStep(gwClient, nil)
 
@@ -214,8 +222,12 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	}
 
 	err := step.Execute(context.Background(), reqCtx)
-	if !errors.Is(err, pipeline.ErrPipelineDone) {
-		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	var streamed *pipeline.UpstreamStreamedError
+	if !errors.As(err, &streamed) {
+		t.Fatalf("expected *pipeline.UpstreamStreamedError, got %T (%v)", err, err)
+	}
+	if streamed.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected StatusCode=500 on the streamed error, got %d", streamed.StatusCode)
 	}
 
 	result := recorder.Result()
@@ -227,4 +239,126 @@ func TestConditionalDecodeStep_ServerError(t *testing.T) {
 	if !strings.Contains(string(respBody), "internal error") {
 		t.Fatalf("expected error body forwarded, got: %s", string(respBody))
 	}
+
+	// A 5xx worker response must attribute to error, not served: the response
+	// was forwarded, but the outcome is not a hit.
+	require.InDelta(t, 1.0,
+		probeCount(t, reg, coordmetrics.ProbeResultError), 1e-9,
+		"probe counter must record the 5xx under result=error",
+	)
+	require.InDelta(t, 0.0,
+		probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9,
+		"served label must not be incremented for a 5xx worker response",
+	)
+}
+
+// TestConditionalDecodeStep_TransportError checks that a round-trip failure
+// (no response received) lands on the probe counter under
+// result="transport_error" and not under any of the response-based buckets.
+// The upstream gateway URL points at a listener that was closed before the
+// step runs, so the round trip fails at TCP connect and never reaches
+// ModifyResponse.
+func TestConditionalDecodeStep_TransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srvURL := srv.URL
+	srv.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srvURL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	var streamed *pipeline.UpstreamStreamedError
+	if !errors.As(err, &streamed) {
+		t.Fatalf("expected *pipeline.UpstreamStreamedError, got %T (%v)", err, err)
+	}
+	if streamed.Cause == nil {
+		t.Fatalf("expected Cause set on the streamed error, got nil")
+	}
+	if got := recorder.Result().StatusCode; got != http.StatusBadGateway {
+		t.Fatalf("expected 502 forwarded, got %d", got)
+	}
+
+	require.InDelta(t, 1.0,
+		probeCount(t, reg, coordmetrics.ProbeResultTransportError), 1e-9,
+		"transport_error must count round-trip failures",
+	)
+	for _, other := range []string{
+		coordmetrics.ProbeResultServed,
+		coordmetrics.ProbeResultDeferred,
+		coordmetrics.ProbeResultError,
+	} {
+		require.InDelta(t, 0.0,
+			probeCount(t, reg, other), 1e-9,
+			"response-based bucket %q must not increment on transport failure", other,
+		)
+	}
+}
+
+// TestConditionalDecodeStep_NilClientTransport builds a step around a
+// gateway.Client whose Transport() returns nil. gateway.NewWithTransport
+// documents that as valid and leaves the default-transport fallback to
+// http.Client; the timedRoundTripper wrapper must reproduce the same fallback
+// so the step does not panic.
+func TestConditionalDecodeStep_NilClientTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	gwClient := gateway.NewWithTransport(nil, srv.URL)
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone on cache hit, got %v", err)
+	}
+	if got := recorder.Result().StatusCode; got != http.StatusOK {
+		t.Fatalf("expected 200, got %d", got)
+	}
+}
+
+// probeCount reads conditional_decode_probes_total for the given result label.
+// Absent series is 0.
+func probeCount(t *testing.T, reg *prometheus.Registry, result string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_conditional_decode_probes_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "result" && l.GetValue() == result {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }

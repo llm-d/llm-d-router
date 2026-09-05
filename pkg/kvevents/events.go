@@ -14,6 +14,10 @@
 
 package kvevents
 
+import (
+	"go.opentelemetry.io/otel/trace"
+)
+
 // KVCacheSpecKind identifies vLLM KV cache group semantics.
 type KVCacheSpecKind string
 
@@ -50,8 +54,9 @@ type GenericEvent interface {
 
 // EventBatch represents a batch of generic events from an inference engine.
 type EventBatch struct {
-	Timestamp float64
-	Events    []GenericEvent
+	Timestamp        float64
+	Events           []GenericEvent
+	DataParallelRank *int
 }
 
 // RawMessage holds the raw transport-level data from a received pub/sub message.
@@ -66,7 +71,16 @@ type RawMessage struct {
 	// SourceEndpoint is the serving endpoint associated with the subscriber.
 	SourceEndpoint string
 	// reset clears the message's pod before later messages on the same queue.
-	reset bool
+	reset  bool
+	stream *eventStream
+	// SpanContext links processing back to the span that received the message,
+	// bridging the worker-queue boundary. Only the span identity crosses, never
+	// the subscriber's context: a subscriber reconnect cancels that context, and
+	// a queued task must not inherit the cancellation.
+	//
+	// A pointer keeps the 64-byte span context off messages the default
+	// configuration never traces. Nil when Config.Tracing is unset.
+	SpanContext *trace.SpanContext
 }
 
 // StreamEvent describes an endpoint KV-event stream transition relevant to
@@ -74,14 +88,26 @@ type RawMessage struct {
 type StreamEvent string
 
 const (
-	StreamEventAttached      StreamEvent = "attached"
-	StreamEventDetached      StreamEvent = "detached"
-	StreamEventMissingParent StreamEvent = "missing_parent"
+	StreamEventAttached        StreamEvent = "attached"
+	StreamEventDetached        StreamEvent = "detached"
+	StreamEventMissingParent   StreamEvent = "missing_parent"
+	StreamEventReportSupported StreamEvent = "report_supported"
+	StreamEventStored          StreamEvent = "stored"
+	StreamEventRemoved         StreamEvent = "removed"
+	StreamEventCleared         StreamEvent = "cleared"
 )
 
 // StreamObserver receives stream transitions keyed by the serving endpoint
 // address used by the scheduler (address:port).
-type StreamObserver func(sourceEndpoint string, event StreamEvent)
+type StreamObserver func(sourceEndpoint string, event StreamEvent, blocks ...StreamBlock)
+
+// StreamBlock identifies a block within an endpoint's index eviction scope.
+type StreamBlock struct {
+	Hash       uint64
+	DeviceTier string
+	// GroupIdx is -1 for events without a cache group.
+	GroupIdx int
+}
 
 // EngineAdapter defines the interface for engine-specific message parsers.
 // Each inference engine has its own adapter implementation that handles
@@ -99,6 +125,8 @@ type EngineAdapter interface {
 
 // BlockStoredEvent represents blocks being added to the cache.
 type BlockStoredEvent struct {
+	// Origin distinguishes newly cached blocks from reused-block reports.
+	Origin      string
 	BlockHashes []uint64
 	Tokens      []uint32
 	ParentHash  uint64

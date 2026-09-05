@@ -67,7 +67,7 @@ If absent, the value is taken from the `approximate-prefix` plugin's `BlockSizeT
 | Model server | Metric | Label |
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `block_size` |
-| SGLang | `sglang:cache_config_info` | `page_size` |
+| SGLang | `sglang:page_size` | — |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}` | — |
 | trtllm-serve | `trtllm_kv_cache_tokens_per_block` | — |
 
@@ -82,7 +82,7 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 | Model server | Metric | Label |
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `num_gpu_blocks` |
-| SGLang | `sglang:cache_config_info` | `num_pages` |
+| SGLang | `sglang:num_pages` | — |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | — |
 | trtllm-serve | `trtllm_kv_cache_max_blocks` | — |
 

@@ -69,17 +69,18 @@ func TestValidateFullReportRepairPrerequisites(t *testing.T) {
 	assert.ErrorContains(t, validateFullReportRepairPrerequisites(withReplay), "replaySocketPort")
 }
 
-func TestFullReportRepairForceWaitsForMinimumDeficit(t *testing.T) {
+func TestFullReportRepairForceBypassesMinimumDeficit(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
 	const endpoint = "10.0.0.1:8000"
 	r.observe(endpoint, kvevents.StreamEventAttached)
-	r.observe(endpoint, kvevents.StreamEventMissingParent)
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 
 	request, _ := r.shouldRequest(endpoint, repairMatch{total: 100, confirmed: 70})
-	assert.False(t, request, "30 missing blocks are below the floor")
+	assert.True(t, request, "an integrity fault bypasses the ordinary gap floor")
 	request, reason := r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 168})
 	assert.True(t, request)
-	assert.Equal(t, "integrity", reason, "the short request must not consume the force bit")
+	assert.Equal(t, "integrity", reason, "a request cannot consume an unresolved fault")
 }
 
 func TestFullReportRepairCooldown(t *testing.T) {
@@ -88,6 +89,7 @@ func TestFullReportRepairCooldown(t *testing.T) {
 	r.clock = clk
 	const endpoint = "10.0.0.1:8000"
 	r.observe(endpoint, kvevents.StreamEventAttached)
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	match := repairMatch{total: 200, confirmed: 100}
 
 	request, reason := r.shouldRequest(endpoint, match)
@@ -97,12 +99,87 @@ func TestFullReportRepairCooldown(t *testing.T) {
 	assert.False(t, request, "a second request within the cooldown is suppressed")
 
 	// A fault observed during the cooldown survives until the window closes.
-	r.observe(endpoint, kvevents.StreamEventMissingParent)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	request, _ = r.shouldRequest(endpoint, match)
 	assert.False(t, request)
 
 	clk.SetTime(clk.Now().Add(11 * time.Second))
 	request, reason = r.shouldRequest(endpoint, match)
 	assert.True(t, request)
-	assert.Equal(t, "integrity", reason, "the preserved fault is consumed after the cooldown")
+	assert.Equal(t, "integrity", reason, "the preserved fault is retried after the cooldown")
+}
+
+func TestFullReportRepairIntegritySurvivesUnrelatedRequest(t *testing.T) {
+	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
+	const endpoint = "10.0.0.1:8000"
+	r.observe(endpoint, kvevents.StreamEventAttached)
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
+	requested, _ := r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 168})
+	require.True(t, requested)
+	requested, reason := r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 168})
+	assert.True(t, requested, "requesting a report does not prove the missing lineage was repaired")
+	assert.Equal(t, "integrity", reason)
+}
+
+func TestFullReportRepairIntegrityAllowsShortPrompt(t *testing.T) {
+	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
+	const endpoint = "10.0.0.1:8000"
+	r.observe(endpoint, kvevents.StreamEventAttached)
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
+	requested, reason := r.shouldRequest(endpoint, repairMatch{total: 8, confirmed: 7})
+	assert.True(t, requested)
+	assert.Equal(t, "integrity", reason)
+}
+
+func TestFullReportRepairRequiresOriginSupport(t *testing.T) {
+	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.8, MinMissingBlocks: 1}, 0)
+	const endpoint = "pod"
+	r.observe(endpoint, kvevents.StreamEventAttached)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
+	requested, _ := r.shouldRequest(endpoint, repairMatch{total: 8})
+	assert.False(t, requested, "untagged reports cannot be safely reference-counted")
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
+	requested, _ = r.shouldRequest(endpoint, repairMatch{total: 8})
+	assert.True(t, requested)
+	r.observe(endpoint, kvevents.StreamEventDetached)
+	r.observe(endpoint, kvevents.StreamEventAttached)
+	requested, _ = r.shouldRequest(endpoint, repairMatch{total: 8})
+	assert.False(t, requested, "a replacement must advertise its own support")
+}
+
+func TestFullReportRepairResolvesOnlyAffectedBlocks(t *testing.T) {
+	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.8, MinMissingBlocks: 32}, 0)
+	const endpoint = "pod"
+	r.observe(endpoint, kvevents.StreamEventAttached)
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
+	a := kvevents.StreamBlock{Hash: 42, DeviceTier: "gpu", GroupIdx: 0}
+	b := kvevents.StreamBlock{Hash: 43, DeviceTier: "gpu", GroupIdx: 0}
+	r.observe(endpoint, kvevents.StreamEventMissingParent, a, b)
+	match := repairMatch{total: 200, confirmed: 168}
+	for _, unrelated := range []kvevents.StreamBlock{
+		{Hash: 99, DeviceTier: "gpu", GroupIdx: 0},
+		{Hash: 42, DeviceTier: "cpu", GroupIdx: 0},
+		{Hash: 42, DeviceTier: "gpu", GroupIdx: 1},
+	} {
+		r.observe(endpoint, kvevents.StreamEventStored, unrelated)
+		r.observe(endpoint, kvevents.StreamEventRemoved, unrelated)
+		requested, _ := r.shouldRequest(endpoint, match)
+		assert.True(t, requested)
+	}
+	r.observe(endpoint, kvevents.StreamEventStored, a)
+	requested, _ := r.shouldRequest(endpoint, match)
+	assert.True(t, requested, "the other missing block remains unresolved")
+	r.observe(endpoint, kvevents.StreamEventRemoved, b)
+	requested, _ = r.shouldRequest(endpoint, match)
+	assert.False(t, requested)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, a)
+	r.observe(endpoint, kvevents.StreamEventCleared)
+	requested, _ = r.shouldRequest(endpoint, match)
+	assert.False(t, requested)
+	r.observe(endpoint, kvevents.StreamEventMissingParent, b)
+	r.observe(endpoint, kvevents.StreamEventReportSupported)
+	requested, _ = r.shouldRequest(endpoint, match)
+	assert.True(t, requested, "cache reset must preserve eligibility for later faults")
 }

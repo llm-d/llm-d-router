@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package datalayer
+package local
 
 import (
 	"context"
@@ -30,12 +30,12 @@ const LocalSyncerType = "local-syncer"
 
 var _ fwkdl.CrossReplicaSyncer = (*LocalSyncer)(nil)
 
-// LocalSyncer is an in-memory mock CrossReplicaSyncer for single-replica
-// deployments and testing. No cross-replica sync is performed.
+// LocalSyncer is an in-memory CrossReplicaSyncer for single-replica
+// deployments and testing. No cross-replica synchronization is performed.
 type LocalSyncer struct {
 	typedName fwkplugin.TypedName
 	replicaID string
-	data      sync.Map // key: "replicaID:StateKey:endpointID", value: any
+	data      sync.Map
 }
 
 func NewLocalSyncer(name, replicaID string) *LocalSyncer {
@@ -57,21 +57,26 @@ func (s *LocalSyncer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *LocalSyncer) syncKey(key fwkdl.StateKey, endpointID string) string {
-	return s.replicaID + ":" + string(key) + ":" + endpointID
+func (s *LocalSyncer) syncKey(key fwkdl.StateKey, id string) string {
+	return s.replicaID + ":" + string(key) + ":" + id
 }
 
-func (s *LocalSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID string, value any) error {
-	s.data.Store(s.syncKey(key, endpointID), value)
+func (s *LocalSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
+	s.data.Store(s.syncKey(key, endpointID), aggregate([]any{value}))
 	return nil
 }
 
-func (s *LocalSyncer) Get(_ context.Context, key fwkdl.StateKey, endpointID string, _ func([]any) any) (any, bool, error) {
-	v, ok := s.data.Load(s.syncKey(key, endpointID))
-	return v, ok, nil
+func (s *LocalSyncer) Get(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
+	value, ok := s.data.Load(s.syncKey(key, endpointID))
+	return value, ok, nil
 }
 
 func (s *LocalSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID string) error {
 	s.data.Delete(s.syncKey(key, endpointID))
 	return nil
+}
+
+func (s *LocalSyncer) GetOrSet(_ context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
+	actual, loaded := s.data.LoadOrStore(s.syncKey(key, id), candidate)
+	return actual, loaded, nil
 }

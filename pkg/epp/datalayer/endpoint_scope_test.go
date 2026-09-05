@@ -42,14 +42,21 @@ var (
 )
 
 // testPlugin implements Plugin plus whichever of Produces/Consumes the test
-// populates, mirroring how real plugins opt into each role.
+// populates, mirroring how real plugins opt into each role. The scope registry
+// is keyed by typed name, so tests that must not see another test's spec set a
+// distinct name.
 type testPlugin struct {
+	name     string
 	produces map[fwkplugin.DataKey]any
 	consumes *fwkplugin.DataDependencies
 }
 
 func (p *testPlugin) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: "testPlugin", Name: "mock"}
+	name := p.name
+	if name == "" {
+		name = "mock"
+	}
+	return fwkplugin.TypedName{Type: "testPlugin", Name: name}
 }
 
 type producerPlugin struct{ testPlugin }
@@ -79,6 +86,7 @@ func scopeProducerConsumer(t *testing.T, endpoint fwksched.Endpoint) (fwksched.E
 	plug := &producerConsumerPlugin{}
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
 	plug.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
+	RegisterScopeSpecs([]fwkplugin.Plugin{plug})
 	scoped, violation := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
 	require.Len(t, scoped, 1)
 	return scoped[0], violation
@@ -115,6 +123,7 @@ func TestScope_ViolationsAreSharedAndReportTheFirstWrite(t *testing.T) {
 
 	plug := &producerPlugin{}
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	RegisterScopeSpecs([]fwkplugin.Plugin{plug})
 	scoped, violations := Scope(testLogger(), "test-extension-point", plug, endpoints)
 
 	first := fwkplugin.NewDataKey("first-undeclared", "otherPlugin")
@@ -162,7 +171,9 @@ func TestScope_GetHonoursConsumesAndProduces(t *testing.T) {
 // the case that previously fell through to unrestricted reads.
 func TestScope_PluginDeclaringNothingReachesNothing(t *testing.T) {
 	endpoint := newEndpoint(t)
-	scoped, violation := Scope(testLogger(), "test-extension-point", &testPlugin{}, []fwksched.Endpoint{endpoint})
+	plug := &testPlugin{}
+	RegisterScopeSpecs([]fwkplugin.Plugin{plug})
+	scoped, violation := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
 	require.Len(t, scoped, 1)
 
 	_, ok := scoped[0].Get(consumedKey)
@@ -180,6 +191,7 @@ func TestScope_ProducerWithoutConsumesReadsOnlyItsOwnOutput(t *testing.T) {
 	endpoint := newEndpoint(t)
 	plug := &producerPlugin{}
 	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	RegisterScopeSpecs([]fwkplugin.Plugin{plug})
 
 	scoped, _ := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
 
@@ -246,4 +258,44 @@ func TestUnscope_RestoresEndpointIdentity(t *testing.T) {
 func TestUnscope_LeavesUnwrappedEndpointsAlone(t *testing.T) {
 	endpoints := []fwksched.Endpoint{newEndpoint(t)}
 	assert.Equal(t, endpoints, Unscope(endpoints))
+}
+
+// Declarations grant nothing on their own: the allowed sets come from the
+// registry, and a plugin nobody registered is confined like one that declares
+// nothing.
+func TestScope_UnregisteredPluginIsConfinedToNothing(t *testing.T) {
+	plug := &producerConsumerPlugin{}
+	plug.name = "never-registered"
+	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	plug.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
+
+	endpoint := newEndpoint(t)
+	scoped, violations := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
+	require.Len(t, scoped, 1)
+
+	_, ok := scoped[0].Get(consumedKey)
+	assert.False(t, ok, "a declared read must not resolve without registration")
+	scoped[0].Put(producedKey, cloneableStr("nope"))
+	_, ok = endpoint.Get(producedKey)
+	assert.False(t, ok, "a declared write must not reach the endpoint without registration")
+	assert.Error(t, violations.Write())
+}
+
+// The registry is keyed by typed name; registering a name again replaces its
+// spec rather than accumulating.
+func TestRegisterScopeSpecs_ReregistrationReplacesTheSpec(t *testing.T) {
+	declaring := &producerConsumerPlugin{}
+	declaring.name = "replaced"
+	declaring.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	declaring.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
+	RegisterScopeSpecs([]fwkplugin.Plugin{declaring})
+
+	silent := &testPlugin{name: "replaced"}
+	RegisterScopeSpecs([]fwkplugin.Plugin{silent})
+
+	endpoint := newEndpoint(t)
+	scoped, _ := Scope(testLogger(), "test-extension-point", declaring, []fwksched.Endpoint{endpoint})
+	require.Len(t, scoped, 1)
+	_, ok := scoped[0].Get(consumedKey)
+	assert.False(t, ok, "the registry must serve the last spec registered for a typed name")
 }

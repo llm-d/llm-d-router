@@ -45,7 +45,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			if r.URL != nil {
 				path = r.URL.Path
 			}
-			return "llm_d.pd_proxy." + r.Method + " " + path
+			return r.Method + " " + path
 		}),
 	)
 

@@ -438,6 +438,27 @@ requestHandler:
   - pluginRef: secondParser
 `
 
+// successExplicitPassthroughConfigText configures a fallback explicitly under a
+// custom name, alongside a claimed-path parser.
+const successExplicitPassthroughConfigText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- type: openai-parser
+- name: myFallback
+  type: passthrough-parser
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+  - pluginRef: myFallback
+`
+
 // successDataLayerAutoDefaultText has the datalayer enabled without data config.
 // The loader should auto-populate default datalayer plugins.
 // successDataLayerAutoDefaultText has NO featureGates — datalayer is enabled by default.
@@ -910,6 +931,25 @@ schedulingProfiles:
   - pluginRef: scorer-Y
     weight: 20
   - pluginRef: maxScorePicker
+`
+
+// successDeprecatedDiscoveryPluginRefText tests that the deprecated bare
+// discovery.pluginRef is migrated to discovery.endpoints.pluginRef.
+const successDeprecatedDiscoveryPluginRefText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- name: my-disc
+  type: file-discovery
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+dataLayer:
+  discovery:
+    pluginRef: my-disc
 `
 
 // successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,

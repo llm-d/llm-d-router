@@ -512,6 +512,59 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, "content-length")
 }
 
+func TestGenerateResponseHeaders_FlowQueueDuration(t *testing.T) {
+	server := &StreamingServer{}
+
+	tests := []struct {
+		name      string
+		admitted  bool
+		duration  time.Duration
+		wantValue string
+		wantEmit  bool
+	}{
+		{
+			name:     "not admitted omits header",
+			admitted: false,
+			wantEmit: false,
+		},
+		{
+			name:      "admitted with zero wait emits 0",
+			admitted:  true,
+			duration:  500 * time.Microsecond,
+			wantValue: "0",
+			wantEmit:  true,
+		},
+		{
+			name:      "admitted with measurable wait emits milliseconds",
+			admitted:  true,
+			duration:  1500 * time.Millisecond,
+			wantValue: "1500",
+			wantEmit:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &RequestContext{
+				FlowControlAdmitted:      tc.admitted,
+				FlowControlQueueDuration: tc.duration,
+				Response:                 &Response{Headers: map[string]string{}},
+			}
+
+			gotHeaders := make(map[string]string)
+			for _, h := range server.generateResponseHeaders(reqCtx) {
+				gotHeaders[h.Header.Key] = string(h.Header.RawValue)
+			}
+
+			if tc.wantEmit {
+				assert.Equal(t, tc.wantValue, gotHeaders[metadata.FlowQueueDurationHeaderKey])
+			} else {
+				assert.NotContains(t, gotHeaders, metadata.FlowQueueDurationHeaderKey)
+			}
+		})
+	}
+}
+
 func TestRewriteModelName(t *testing.T) {
 	tests := []struct {
 		name          string

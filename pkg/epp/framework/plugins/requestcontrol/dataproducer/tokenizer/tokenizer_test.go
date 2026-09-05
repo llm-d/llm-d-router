@@ -50,8 +50,9 @@ func (m *mockTokenizer) RenderChat(_ context.Context, payload fwkrh.RequestPaylo
 
 func newTestPlugin(tok tokenizer) *Plugin {
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PluginType, Name: "test"},
-		backend:   renderBackend{tk: tok},
+		typedName:   plugin.TypedName{Type: PluginType, Name: "test"},
+		backend:     renderBackend{tk: tok},
+		backendName: backendVLLM,
 	}
 }
 
@@ -73,7 +74,7 @@ func TestProduceTimeout(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, ep.ProduceTimeout())
 
-	// A render backend whose tokenizer manages no timeout (e.g. UDS) keeps the default.
+	// A render backend whose tokenizer manages no timeout keeps the default.
 	assert.Zero(t, newTestPlugin(&mockTokenizer{}).ProduceTimeout())
 }
 
@@ -216,10 +217,26 @@ func TestRenderBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 		},
 	}
 	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
-		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: []uint32{5, 6, 7}}},
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{5, 6, 7}}}},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []uint32{5, 6, 7}, tp.Prompts[0].TokenIDs)
+}
+
+func TestRenderBackend_CompletionsNestedTokenIDsPassthrough(t *testing.T) {
+	tok := &mockTokenizer{
+		renderFunc: func(fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			t.Fatal("render must not run when nested token IDs are provided")
+			return nil, nil, nil
+		},
+	}
+	tp, err := renderBackend{tk: tok}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{5, 6}, {7, 8, 9}}}},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 2)
+	assert.Equal(t, []uint32{5, 6}, tp.Prompts[0].TokenIDs)
+	assert.Equal(t, []uint32{7, 8, 9}, tp.Prompts[1].TokenIDs)
 }
 
 func TestRenderBackend_CompletionsArrayPassesArrayPayload(t *testing.T) {

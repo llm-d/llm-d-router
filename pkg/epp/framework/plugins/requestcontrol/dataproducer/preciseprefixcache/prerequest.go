@@ -225,7 +225,7 @@ func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *sched
 	}
 	// A disaggregated prefill endpoint owns the cache state being repaired.
 	selected := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if prefill, ok := schedulingResult.ProfileResults[experimentalPrefillProfile]; ok &&
+	if prefill, ok := schedulingResult.ProfileResults[p.fullReportRepair.prefillProfile]; ok &&
 		prefill != nil && len(prefill.TargetEndpoints) > 0 {
 		selected = prefill
 	}
@@ -245,18 +245,15 @@ func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *sched
 	if !ok {
 		return
 	}
-	// Preserve any caller-supplied vLLM arguments.
-	var xargs map[string]any
-	setXArgs := false
-	switch existing := payload["vllm_xargs"].(type) {
-	case nil:
-		xargs = map[string]any{}
-		setXArgs = true
-	case map[string]any:
-		xargs = existing
-	case fwkrh.PayloadMap:
-		xargs = map[string]any(existing)
-	default:
+	argsParent := map[string]any(payload)
+	if request.Body.Generate != nil {
+		argsParent, ok = repairPayloadMap(payload["sampling_params"])
+		if !ok {
+			return
+		}
+	}
+	xargs, ok := repairPayloadMap(argsParent["vllm_xargs"])
+	if !ok {
 		log.FromContext(ctx).V(logging.DEBUG).Info("Skipping full report repair for malformed vllm_xargs",
 			"requestID", request.RequestID, "endpoint", endpoint)
 		return
@@ -267,13 +264,32 @@ func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *sched
 	}
 	// Use the body mutator so every protocol serializer sees the new argument.
 	request.Body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
-		if setXArgs {
-			payload["vllm_xargs"] = xargs
+		if request.Body.Generate != nil {
+			payload["sampling_params"] = argsParent
 		}
+		argsParent["vllm_xargs"] = xargs
 		xargs["kv_cache_report_mode"] = "full"
 	})
 	metrics.FullReportRequests.WithLabelValues(reason).Inc()
 	log.FromContext(ctx).V(logging.DEBUG).Info("Requested full KV-cache report",
 		"requestID", request.RequestID, "endpoint", endpoint, "reason", reason,
 		"totalBlocks", match.total, "confirmedBlocks", match.confirmed)
+}
+
+// repairPayloadMap preserves existing JSON objects and rejects non-object values.
+func repairPayloadMap(value any) (map[string]any, bool) {
+	var result map[string]any
+	switch value := value.(type) {
+	case nil:
+	case map[string]any:
+		result = value
+	case fwkrh.PayloadMap:
+		result = map[string]any(value)
+	default:
+		return nil, false
+	}
+	if result == nil {
+		result = make(map[string]any)
+	}
+	return result, true
 }

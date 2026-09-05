@@ -43,6 +43,21 @@ type subscriberEntry struct {
 	done chan struct{}
 }
 
+// eventStream serializes detachment with work already dequeued by the pool.
+type eventStream struct {
+	mu       sync.RWMutex
+	detached bool
+}
+
+func (sm *SubscriberManager) detach(podIdentifier string, entry *subscriberEntry) {
+	stream := entry.subscriber.stream
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	stream.detached = true
+	entry.cancel()
+	sm.pool.notifyStreamEvent(streamIdentity(podIdentifier, entry.sourceEndpoint), StreamEventDetached)
+}
+
 // NewSubscriberManager creates a new subscriber manager.
 func NewSubscriberManager(pool *Pool) *SubscriberManager {
 	return &SubscriberManager{
@@ -82,9 +97,7 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"newSourceEndpoint", sourceEndpoint,
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
-		// Detach first so late messages from the old stream cannot restore eligibility.
-		sm.pool.notifyStreamEvent(streamIdentity(podIdentifier, entry.sourceEndpoint), StreamEventDetached)
-		entry.cancel()
+		sm.detach(podIdentifier, entry)
 		delete(sm.subscribers, podIdentifier)
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
@@ -94,6 +107,7 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	debugLogger.Info("Creating new subscriber", "podIdentifier", podIdentifier, "endpoint", endpoint)
 	subscriber := newZMQSubscriber(
 		sm.pool, podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter, remoteSocket)
+	subscriber.stream = &eventStream{}
 
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
@@ -134,8 +148,7 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	}
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
-	sm.pool.notifyStreamEvent(streamIdentity(podIdentifier, entry.sourceEndpoint), StreamEventDetached)
-	entry.cancel()
+	sm.detach(podIdentifier, entry)
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
@@ -161,8 +174,7 @@ func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 
 	for podIdentifier, entry := range sm.subscribers {
 		debugLogger.Info("Shutting down subscriber", "podIdentifier", podIdentifier)
-		sm.pool.notifyStreamEvent(streamIdentity(podIdentifier, entry.sourceEndpoint), StreamEventDetached)
-		entry.cancel()
+		sm.detach(podIdentifier, entry)
 		cleanupSubscriberMetrics(podIdentifier, entry.done)
 	}
 

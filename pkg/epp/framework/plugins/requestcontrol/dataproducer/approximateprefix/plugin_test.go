@@ -213,6 +213,10 @@ func TestDataProducerValidation(t *testing.T) {
 	}, {
 		AutoTune:        false,
 		BlockSizeTokens: 0,
+	}, {
+		AutoTune:               false,
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: -1,
 	}}
 
 	for _, config := range validConfigs {
@@ -514,6 +518,22 @@ func TestGetBlockSize_AutotuneAboveMinimumPassesThrough(t *testing.T) {
 
 	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
 	assert.Equal(t, 128, got, "autotuned block size at or above minimum should not be clamped")
+}
+
+func TestGetBlockSize_AutotunePrefersPrefixMatchUnitOverBlockSize(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 4096, CachePrefixMatchUnit: 128},
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, 128, got,
+		"prefix_match_unit should be preferred over block_size when both are present")
 }
 
 // TestGetBlockSize_ManualConfigClampedBelowMinimum verifies that the floor

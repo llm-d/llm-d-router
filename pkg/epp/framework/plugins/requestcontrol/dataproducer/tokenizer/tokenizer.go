@@ -29,16 +29,22 @@ import (
 	"strings"
 	"time"
 
-	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
+	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 type tokenizer interface {
@@ -78,24 +84,28 @@ const (
 	blockTypeToolResult       = "tool_result"
 )
 
+// Backend identifiers reported on the tokenize span.
+const (
+	backendVLLM     = "vllm"
+	backendEstimate = "estimate"
+)
+
+// resultSkippedNoTokens marks a tokenize span whose backend returned no tokens,
+// distinguishing it from a span missing attributes for any other reason.
+const resultSkippedNoTokens = "skipped_no_tokens"
+
 var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
 //
 // Backend selection: `vllm` or `modelName` selects the vLLM HTTP /render
-// backend; `udsTokenizerConfig` selects the deprecated gRPC-over-UDS backend;
-// `estimate` selects the tokenizer-free byte-packing backend, which is also the
-// zero-config default when no backend is set.
+// backend; `estimate` selects the tokenizer-free byte-packing backend, which is
+// also the zero-config default when no backend is set.
 type tokenizerPluginConfig struct {
-	// TokenizerConfig configures the deprecated gRPC-over-UDS backend.
-	//
-	// Deprecated: the UDS tokenizer backend is deprecated and will be removed
-	// in a future release. Migrate to the `vllm` HTTP /render backend.
-	TokenizerConfig kvctok.UdsTokenizerConfig `json:"udsTokenizerConfig,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
 	// Estimate selects the tokenizer-free byte-packing backend; mutually
-	// exclusive with 'vllm'/'udsTokenizerConfig' and needs no 'modelName'.
+	// exclusive with 'vllm' and needs no 'modelName'.
 	Estimate *estimateConfig `json:"estimate,omitempty"`
 	// ModelName is the name of the model whose tokenizer should be loaded.
 	ModelName string `json:"modelName"`
@@ -230,14 +240,13 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	}
 
 	estimate := config.Estimate != nil
-	uds := config.TokenizerConfig.IsEnabled()
 	vllm := config.VLLM != nil || config.ModelName != ""
-	if (estimate && (uds || vllm)) || (uds && vllm) {
-		return nil, fmt.Errorf("invalid configuration for '%s' plugin: only one of 'estimate', 'vllm', or 'udsTokenizerConfig' may be set", PluginType)
+	if estimate && vllm {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: only one of 'estimate' or 'vllm' may be set", PluginType)
 	}
-	// modelName is required only by the real-tokenizer backends; the zero-config
+	// modelName is required only by the real-tokenizer backend; the zero-config
 	// path selects the estimate backend, which needs none.
-	if (uds || vllm) && config.ModelName == "" {
+	if vllm && config.ModelName == "" {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' must be specified", PluginType)
 	}
 	if config.Estimate != nil && config.Estimate.Image != nil {
@@ -280,22 +289,13 @@ func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin
 	return PluginFactory(name, rawParameters, handle)
 }
 
-// NewPlugin constructs the configured backend: udsTokenizerConfig (deprecated),
-// vllm /render (selected by 'vllm' or 'modelName'), or estimate byte-packing
-// (the default when no backend is set).
+// NewPlugin constructs the configured backend: vllm /render (selected by
+// 'vllm' or 'modelName'), or estimate byte-packing (the default when no
+// backend is set).
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var backend tokenInputProducer
+	var backendName string
 	switch {
-	case config.TokenizerConfig.IsEnabled():
-		log.FromContext(ctx).Info(
-			"DEPRECATION: the 'udsTokenizerConfig' parameter is deprecated and will be removed in a future release; set the 'vllm' parameter instead (see plugin README)",
-			"pluginType", PluginType,
-		)
-		uds, err := newUDSTokenizer(ctx, &config.TokenizerConfig, config.ModelName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize UDS tokenizer for '%s' plugin - %w", PluginType, err)
-		}
-		backend = renderBackend{tk: uds}
 	case config.VLLM != nil || config.ModelName != "":
 		cfg := config.VLLM
 		if cfg == nil {
@@ -306,14 +306,17 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
 		}
 		backend = renderBackend{tk: renderer}
+		backendName = backendVLLM
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
+		backendName = backendEstimate
 	}
 
 	p := &Plugin{
-		typedName: plugin.TypedName{Type: PluginType, Name: name},
-		backend:   backend,
-		dk:        TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+		typedName:   plugin.TypedName{Type: PluginType, Name: name},
+		backend:     backend,
+		backendName: backendName,
+		dk:          TokenizedPromptDataKey.WithNonEmptyProducerName(name),
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -326,7 +329,9 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
-	dk        plugin.DataKey
+	// backendName identifies the configured backend on the tokenize span.
+	backendName string
+	dk          plugin.DataKey
 }
 
 // compile-time assertions.
@@ -358,6 +363,9 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 // Produce derives the request's TokenizedRequest via the configured backend and
 // stores it on the body. Skips when one is already present; errors propagate to
 // the Director, which logs and continues.
+//
+// The tokenize span opens below the already-tokenized skip path, so it is
+// emitted only when the backend is actually invoked.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
@@ -372,15 +380,49 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
+	if auth, ok := metadata.GetLowerCaseHeaderValue(request.Headers, "authorization"); ok {
+		ctx = withAuthHeader(ctx, auth)
+	}
+
+	ctx, span := tracing.Tracer(rcplugins.TracerScope).Start(ctx, "tokenize",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	// On the default (tracing-disabled) path Start returns a non-recording span;
+	// skip attribute construction, which walks the request's multimodal features.
+	tracingActive := span.IsRecording()
+	if tracingActive {
+		attrs := []attribute.KeyValue{
+			attribute.String("llm_d.epp.token_producer.backend", p.backendName),
+		}
+		if request.TargetModel != "" {
+			attrs = append(attrs, attribute.String("gen_ai.request.model", request.TargetModel))
+		}
+		if request.RequestID != "" {
+			attrs = append(attrs, attribute.String("gen_ai.request.id", request.RequestID))
+		}
+		span.SetAttributes(attrs...)
+	}
+
 	tp, err := p.backend.produce(ctx, request.Body)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	if tp == nil || tp.TokenCount() == 0 {
+		if tracingActive {
+			span.SetAttributes(attribute.String("llm_d.epp.token_producer.result", resultSkippedNoTokens))
+		}
 		return nil
 	}
 	tp.CacheSalt = CacheSaltFromBody(request.Body)
 	request.Body.TokenizedRequest = tp
+
+	if tracingActive {
+		span.SetAttributes(append(mmobs.SpanAttributes(request),
+			attribute.Int("llm_d.epp.token_producer.token_count", tp.TokenCount()),
+		)...)
+	}
 	return nil
 }
 

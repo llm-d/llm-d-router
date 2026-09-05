@@ -441,16 +441,20 @@ func NewResponseStreamChunk(body string, endOfStream bool) *extProcPb.Processing
 	}
 }
 
-// NewImmediateErrorResponse creates a response that immediately terminates the request with a specific HTTP status code
-// and body.
+// NewImmediateErrorResponse creates a response that immediately terminates the request with a specific HTTP status code,
+// body, and optional response headers.
 // Use this for testing Load Shedding (503), Rate Limiting (429), or Bad Request (400) logic.
-func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string) []*extProcPb.ProcessingResponse {
+func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers ...*envoyCorev3.HeaderValueOption) []*extProcPb.ProcessingResponse {
+	immediateResponse := &extProcPb.ImmediateResponse{
+		Status: &envoyTypePb.HttpStatus{Code: code},
+		Body:   []byte(body),
+	}
+	if len(headers) > 0 {
+		immediateResponse.Headers = &extProcPb.HeaderMutation{SetHeaders: headers}
+	}
 	return []*extProcPb.ProcessingResponse{{
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status: &envoyTypePb.HttpStatus{Code: code},
-				Body:   []byte(body),
-			},
+			ImmediateResponse: immediateResponse,
 		},
 	}}
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -42,6 +43,7 @@ var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
+	stream         *eventStream
 	pool           *Pool
 	podIdentifier  string
 	sourceEndpoint string
@@ -175,7 +177,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" {
-			z.addTask(topic, seq, payload)
+			z.addTask(ctx, topic, seq, payload)
 			continue
 		}
 
@@ -184,7 +186,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			logger.Info("Detected event sequence reset, rebuilding index",
 				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
-			z.pool.resetForSource(topic, z.sourceEndpoint)
+			z.resetForSource(topic)
 			z.lastSeq = 0
 			z.hasLastSeq = false
 			z.lastReplayFailure = time.Time{}
@@ -238,19 +240,53 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 
 		debugLogger.V(logging.TRACE).Info("Received message from zmq subscriber",
 			"topic", topic, "seq", seq, "payloadSize", len(payload))
-		z.addTask(topic, seq, payload)
+		z.addTask(ctx, topic, seq, payload)
 		z.lastSeq = seq
 		z.hasLastSeq = true
 	}
 }
 
-func (z *zmqSubscriber) addTask(topic string, seq uint64, payload []byte) {
-	z.pool.AddTask(&RawMessage{
+// addTask hands a received message to the pool, carrying the receive span's
+// identity so processing rejoins this trace across the worker queue. The span
+// starts after Recv returns so it measures handoff work rather than the idle
+// wait for the next message.
+func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, payload []byte) {
+	// Spans route through the pool so a single Config.Tracing decision governs
+	// every stage of the pipeline.
+	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
+	defer span.End()
+	if span.IsRecording() {
+		attrs := []attribute.KeyValue{
+			attribute.String("llm_d.kv_cache.events.topic", topic),
+			attribute.Int64("llm_d.kv_cache.events.sequence", int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
+			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(payload)),
+		}
+		// Empty unless the subscriber was created by pod discovery.
+		if z.sourceEndpoint != "" {
+			attrs = append(attrs, attribute.String("llm_d.kv_cache.events.source_endpoint", z.sourceEndpoint))
+		}
+		span.SetAttributes(attrs...)
+	}
+
+	msg := &RawMessage{
 		Topic:          topic,
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
-	})
+		stream:         z.stream,
+	}
+	// carried is bound inside the branch on purpose. Taking &sc directly makes
+	// sc escape, so it heap-allocates on every message including the ones the
+	// disabled path never traces.
+	if sc := span.SpanContext(); sc.IsValid() {
+		carried := sc
+		msg.SpanContext = &carried
+	}
+	z.pool.AddTask(msg)
+}
+
+func (z *zmqSubscriber) resetForSource(topic string) {
+	z.pool.AddTask(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true, stream: z.stream})
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {
@@ -258,7 +294,7 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
-	z.pool.resetForSource(topic, z.sourceEndpoint)
+	z.resetForSource(topic)
 	z.lastSeq = 0
 	z.hasLastSeq = false
 	z.lastReplayFailure = time.Now()
@@ -363,7 +399,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				break
 			}
 
-			z.addTask(topic, seq, payload)
+			z.addTask(ctx, topic, seq, payload)
 			z.lastSeq = seq
 			z.hasLastSeq = true
 			replayed++

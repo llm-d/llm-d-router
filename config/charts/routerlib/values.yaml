@@ -5,6 +5,22 @@ clusterDomain: cluster.local
 
 epp:
   replicas: 1
+
+  # Overrides the EPP Deployment's spec.strategy. Unset means `type: Recreate`,
+  # which is the recommended default for the stateful single-active-replica pattern.
+  #
+  # With replicas > 1 the chart enables leader election, and standby replicas stay
+  # NotReady by design, so a `Recreate` Deployment never reports Available=True and
+  # `helm --wait` blocks until it times out. Setting a RollingUpdate strategy whose
+  # maxUnavailable covers the standbys lets Helm consider the release ready while
+  # keeping standbys out of the Service (they are still NotReady, so they are not
+  # Endpoints). See "Multi-replica EPP and Helm --wait" in the chart README.
+  #
+  # deploymentStrategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 1
+  #     maxSurge: 0
   image:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker

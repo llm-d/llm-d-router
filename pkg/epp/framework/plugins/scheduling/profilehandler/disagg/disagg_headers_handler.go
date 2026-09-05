@@ -8,9 +8,9 @@ import (
 	"net"
 	"strings"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -97,25 +97,25 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 
 	if request == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.disagg.reason", "request_is_nil"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPDisaggReason("request_is_nil"),
 		)
 		return nil
 	}
 	if schedulingResult == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.disagg.reason", "scheduling_result_is_nil"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPDisaggReason("scheduling_result_is_nil"),
 		)
 		return nil
 	}
 
 	if request.TargetModel != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header
@@ -124,22 +124,22 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 	switch {
 	case prefillProfileRunResult == nil:
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_result"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPPDReason("no_prefill_profile_result"),
 		)
 	case len(prefillProfileRunResult.TargetEndpoints) == 0:
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_target_endpoints"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPPDReason("no_prefill_profile_target_endpoints"),
 		)
 	default:
 		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
 		request.Headers[routing.PrefillEndpointHeader] = prefillHostPort // in the form of <ip:port>
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", true),
-			attribute.String("llm_d.epp.pd.prefill_pod_address", targetPod.Address),
-			attribute.String("llm_d.epp.pd.prefill_pod_port", targetPod.Port),
+			semconv.LLMDEPPPDDisaggregationUsed(true),
+			semconv.LLMDEPPPDPrefillPodAddress(targetPod.Address),
+			semconv.LLMDEPPPDPrefillPodPort(targetPod.Port),
 		)
 	}
 
@@ -148,8 +148,8 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 	encodeProfileRunResult := schedulingResult.ProfileResults[p.encodeProfile]
 	if encodeProfileRunResult == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_result"),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeReason("no_encode_profile_result"),
 		)
 		return nil // encode profile failed to run or we chose not to run it, no-op in this case
 	}
@@ -163,16 +163,16 @@ func (p *HeadersHandler) PreRequest(ctx context.Context, request *scheduling.Inf
 	}
 	if len(encodeHostPorts) == 0 {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_target_endpoints"),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeReason("no_encode_profile_target_endpoints"),
 		)
 		return nil // no target endpoints, no-op in this case
 	}
 
 	request.Headers[routing.EncoderEndpointsHeader] = strings.Join(encodeHostPorts, ",")
 	span.SetAttributes(
-		attribute.Bool("llm_d.epp.encode.disaggregation_used", true),
-		attribute.String("llm_d.epp.encode.endpoints", strings.Join(encodeHostPorts, ",")),
+		semconv.LLMDEPPEncodeDisaggregationUsed(true),
+		semconv.LLMDEPPEncodeEndpoints(strings.Join(encodeHostPorts, ",")),
 	)
 	return nil
 }

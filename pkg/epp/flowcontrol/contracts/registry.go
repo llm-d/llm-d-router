@@ -42,7 +42,6 @@ import (
 //  4. Garbage Collection: The implementation MUST automatically garbage collect a flow after it has remained
 //     continuously Idle for a configurable duration.
 type FlowRegistry interface {
-	FlowRegistryObserver
 	FlowRegistryDataPlane
 	PriorityBandControlPlane
 	FlowRegistryBackground
@@ -61,12 +60,6 @@ type FlowRegistryBackground interface {
 	FlowGCTimeout() time.Duration
 	ApplyDesiredPriorities(desired map[int]struct{})
 	ExecuteGCCycle()
-}
-
-// FlowRegistryObserver defines the read-only, observation interface for the registry.
-type FlowRegistryObserver interface {
-	// Stats returns a near-consistent snapshot globally aggregated statistics for the entire `FlowRegistry`.
-	Stats() AggregateStats
 }
 
 // FlowRegistryDataPlane defines the high-throughput, request-path interface for the registry.
@@ -120,6 +113,36 @@ type FlowRegistryDataPlane interface {
 	// Contract: the returned slice is a shared, immutable snapshot. Callers MUST NOT mutate it.
 	// Implementations may publish it copy-on-write, so reads are lock-free and allocation-free.
 	AllOrderedPriorityLevels() []int
+
+	// CapacitySnapshot returns the current occupancy and configured capacity for the given priority band, together
+	// with the registry-wide totals. It backs the admission-path capacity check, so implementations MUST keep it
+	// cheap: no locks and no per-call aggregate snapshots. The snapshot is near-consistent: counters are read
+	// individually and may not reflect a single instant.
+	//
+	// Returns an error wrapping ErrPriorityBandNotFound if the priority level is not configured.
+	CapacitySnapshot(priority int) (CapacitySnapshot, error)
+}
+
+// CapacityDimension pairs current occupancy with its configured limits for one aggregation scope (a priority band or
+// the registry-wide totals). A zero capacity means no limit is enforced on that dimension.
+type CapacityDimension struct {
+	// Len is the number of items currently queued in this scope.
+	Len uint64
+	// ByteSize is the total byte size of items currently queued in this scope.
+	ByteSize uint64
+	// CapacityRequests is the configured maximum total request count for this scope.
+	CapacityRequests uint64
+	// CapacityBytes is the configured maximum total byte size for this scope.
+	CapacityBytes uint64
+}
+
+// CapacitySnapshot is a near-consistent view of queue occupancy against configured limits, for one priority band and
+// the registry-wide aggregate.
+type CapacitySnapshot struct {
+	// Band holds the occupancy and limits of the priority band the snapshot was taken for.
+	Band CapacityDimension
+	// Global holds the registry-wide occupancy and limits.
+	Global CapacityDimension
 }
 
 // ActiveFlowConnection represents a handle to a scoped, leased session on a flow.
@@ -159,37 +182,4 @@ type ManagedQueue interface {
 	// FlowQueueAccessor returns a read-only, flow-aware accessor for this queue, used by policy plugins.
 	// Conformance: This method MUST NOT return nil.
 	FlowQueueAccessor() flowcontrol.FlowQueueAccessor
-}
-
-// AggregateStats holds globally aggregated statistics for the entire `FlowRegistry`.
-// It is a read-only data object representing a near-consistent snapshot of the registry's state.
-type AggregateStats struct {
-	// TotalCapacityBytes is the globally configured maximum total byte size limit across all priority bands.
-	TotalCapacityBytes uint64
-	// TotalCapacityRequests is the globally configured maximum total request count limit across all priority bands.
-	TotalCapacityRequests uint64
-	// TotalByteSize is the total byte size of all items currently queued across the entire system.
-	TotalByteSize uint64
-	// TotalLen is the total number of items currently queued across the entire system.
-	TotalLen uint64
-	// PerPriorityBandStats maps each configured priority level to its globally aggregated statistics.
-	PerPriorityBandStats map[int]PriorityBandStats
-}
-
-// PriorityBandStats holds aggregated statistics for a single priority band.
-// It is a read-only data object representing a near-consistent snapshot of the priority band's state.
-type PriorityBandStats struct {
-	// Priority is the numerical priority level this struct describes.
-	Priority int
-	// CapacityBytes is the configured maximum total byte size for this priority band.
-	// When viewed via `AggregateStats`, this is the global limit.
-	// The `controller.FlowController` enforces this limit.
-	// A default non-zero value is guaranteed if not configured.
-	CapacityBytes uint64
-	// CapacityRequests is the configured maximum total request count for this priority band.
-	CapacityRequests uint64
-	// ByteSize is the total byte size of items currently queued in this priority band.
-	ByteSize uint64
-	// Len is the total number of items currently queued in this priority band.
-	Len uint64
 }

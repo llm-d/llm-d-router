@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -244,10 +245,10 @@ func TestRunFilterPluginsSingleSpan(t *testing.T) {
 	if got := attrs["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 2 {
 		t.Errorf("filtered_endpoints = %d, want 2", got)
 	}
-	if got := attrs["gen_ai.request.model"].AsString(); got != "m1" {
+	if got := attrs[semconv.GenAIRequestModelKey].AsString(); got != "m1" {
 		t.Errorf("gen_ai.request.model = %q, want %q", got, "m1")
 	}
-	if got := attrs["gen_ai.request.id"].AsString(); got != "r1" {
+	if got := attrs[semconv.GenAIRequestIDKey].AsString(); got != "r1" {
 		t.Errorf("gen_ai.request.id = %q, want %q", got, "r1")
 	}
 }
@@ -374,10 +375,10 @@ func TestRunFilterPluginsOmitsEmptyGenAI(t *testing.T) {
 		t.Fatalf("got %d filter_endpoints spans, want 1", len(spans))
 	}
 	attrs := spanAttributes(spans[0])
-	if _, ok := attrs["gen_ai.request.model"]; ok {
+	if _, ok := attrs[semconv.GenAIRequestModelKey]; ok {
 		t.Error("gen_ai.request.model set for empty TargetModel")
 	}
-	if _, ok := attrs["gen_ai.request.id"]; ok {
+	if _, ok := attrs[semconv.GenAIRequestIDKey]; ok {
 		t.Error("gen_ai.request.id set for empty RequestID")
 	}
 }

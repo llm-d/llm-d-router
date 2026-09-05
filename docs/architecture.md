@@ -193,6 +193,10 @@ If the configuration is in a file, the EPP command line argument `--config-file`
  to specify the full path of the file in question. If the configuration is passed as in-line
  text the EPP command line argument `--config-text` should be used.
 
+Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
+ comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
+ entries are applied after the configuration's own `featureGates` list, so they override it.
+
 ### Default plugins
 
 The EPP injects these plugins when they are absent, so a configuration does not need to list them. Some
@@ -211,7 +215,8 @@ RequestHandler:
 
 FlowControl:
 - The flow control admission layer itself is off by default; enable it with
-  `featureGates: ["flowControl"]`.
+  `featureGates: ["flowControl"]` in the configuration, or with
+  `--feature-gates=flowControl=true` on the command line.
 - `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
 

@@ -61,8 +61,16 @@ func New(cfg config.GatewayConfig) *Client {
 // NewWithTransport creates a Client using the provided transport and base URL.
 // A nil transport is valid; http.Client will fall back to http.DefaultTransport.
 func NewWithTransport(transport *http.Transport, baseURL string) *Client {
+	// A typed-nil *http.Transport assigned to the RoundTripper interface field
+	// yields a non-nil interface, which would defeat http.Client's own
+	// c.Transport != nil check and the wrapper's nil-guard below. Normalize
+	// to a plain nil interface so both paths pick up http.DefaultTransport.
+	var rt http.RoundTripper
+	if transport != nil {
+		rt = transport
+	}
 	return &Client{
-		httpClient: &http.Client{Transport: transport},
+		httpClient: &http.Client{Transport: rt},
 		baseURL:    baseURL,
 	}
 }

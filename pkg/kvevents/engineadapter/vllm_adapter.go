@@ -64,7 +64,7 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
 	podID, modelName := parseTopic(msg.Topic)
 
-	var vllmBatch msgpackVLLMEventBatch
+	var vllmBatch msgpackEventBatch
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}
@@ -79,20 +79,12 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 	}
 
 	batch := kvevents.EventBatch{
-		Timestamp: vllmBatch.TS,
-		Events:    genericEvents,
+		Timestamp:        vllmBatch.TS,
+		Events:           genericEvents,
+		DataParallelRank: vllmBatch.DataParallelRank,
 	}
 
 	return podID, modelName, batch, nil
-}
-
-// vLLM msgpack event batch structure.
-// This struct uses array encoding to match vLLM's msgspec array_like=True format.
-type msgpackVLLMEventBatch struct {
-	_                struct{} `msgpack:",array"`
-	TS               float64
-	Events           []msgpack.RawMessage
-	DataParallelRank *int `msgpack:",omitempty"`
 }
 
 // decodeVLLMEvent decodes a single vLLM event from msgpack bytes and dispatches
@@ -105,10 +97,18 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 	}
 
 	var fields []any
+	var origin string
 	switch ev := decoded.(type) {
 	case []any:
 		fields = ev
 	case map[string]any:
+		if raw := ev["origin"]; raw != nil {
+			var ok bool
+			origin, ok = raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("event origin is not a string: %T", raw)
+			}
+		}
 		var err error
 		if fields, err = mapEventToFields(ev); err != nil {
 			return nil, err
@@ -131,7 +131,11 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 		return nil, fmt.Errorf("unknown vLLM event tag: %s", tag)
 	}
 
-	return converter(fields)
+	event, err := converter(fields)
+	if stored, ok := event.(*kvevents.BlockStoredEvent); ok {
+		stored.Origin = origin
+	}
+	return event, err
 }
 
 // Field-name order of map-encoded events, mirroring the converters' positional

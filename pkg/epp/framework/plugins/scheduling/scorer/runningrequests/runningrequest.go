@@ -31,7 +31,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &RunningRequestsSizeScorer{}
+var (
+	_ fwksched.Scorer          = &RunningRequestsSizeScorer{}
+	_ fwkplugin.ConsumerPlugin = &RunningRequestsSizeScorer{}
+)
 
 // RunningRequestsSizeScorerFactory defines the factory function for RunningRequestsSizeScorer.
 func RunningRequestsSizeScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -61,10 +64,13 @@ func (s *RunningRequestsSizeScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (s *RunningRequestsSizeScorer) Consumes() map[string]any {
-	return map[string]any{
-		metrics.RunningRequestsSizeKey: int(0),
+// Consumes declares the scorer reads the running requests size from the
+// endpoint's Metrics struct, published by the core-metrics-extractor.
+func (s *RunningRequestsSizeScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(metrics.RunningRequestsSizeKey, metrics.MetricsExtractorType): int(0),
+		},
 	}
 }
 

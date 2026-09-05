@@ -30,6 +30,52 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
+var benchmarkSGLangParseResult *fwkrh.ParseResult
+
+func makeSGLangTokenArrayBody(tokenCount int) []byte {
+	tokens := strings.Repeat("12345,", tokenCount-1) + "12345"
+	return []byte(`{"input_ids":[` + tokens + `],"sampling_params":{"max_new_tokens":1}}`)
+}
+
+func BenchmarkSGLangHTTPParser_ParseRequest(b *testing.B) {
+	parser := NewSGLangHTTPParser()
+	headers := map[string]string{":path": "/generate"}
+	for _, tc := range []struct {
+		name  string
+		count int
+	}{
+		{"4K", 4 * 1024},
+		{"32K", 32 * 1024},
+		{"256K", 256 * 1024},
+		{"1M", 1_000_000},
+	} {
+		body := makeSGLangTokenArrayBody(tc.count)
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				result, err := parser.ParseRequest(context.Background(), body, headers)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkSGLangParseResult = result
+			}
+		})
+	}
+}
+
+func BenchmarkSGLangHTTPParser_ParseRequestFallback1M(b *testing.B) {
+	parser := NewSGLangHTTPParser()
+	headers := map[string]string{":path": "/generate"}
+	tokens := strings.Repeat("12345,", 1_000_000-1) + "12345.0"
+	body := []byte(`{"input_ids":[` + tokens + `],"sampling_params":{"max_new_tokens":1}}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		_, _ = parser.ParseRequest(context.Background(), body, headers)
+	}
+}
+
 func TestNewSGLangHTTPParser(t *testing.T) {
 	parser := NewSGLangHTTPParser()
 	want := fwkplugin.TypedName{Type: SGLangHTTPParserType, Name: SGLangHTTPParserType}

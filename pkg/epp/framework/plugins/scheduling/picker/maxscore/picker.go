@@ -88,8 +88,9 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
 		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
 
-	// Shuffle in-place - needed for random tie break when scores are equal
-	picker.ShuffleScoredEndpoints(scoredEndpoints)
+	// RotateScoredEndpoints provides deterministic round-robin
+	// tie-breaking instead of random shuffle (see picker/common.go)
+	picker.RotateScoredEndpoints(scoredEndpoints)
 
 	slices.SortStableFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first
 		if i.Score > j.Score {

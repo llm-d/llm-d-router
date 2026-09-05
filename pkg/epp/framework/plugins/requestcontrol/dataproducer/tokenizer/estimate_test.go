@@ -66,10 +66,24 @@ func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
 func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 	in := []uint32{11, 22, 33}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
-		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: in}},
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{in}}},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, in, tp.Prompts[0].TokenIDs, "token IDs must pass through, not be byte-estimated")
+}
+
+// TestEstimateBackend_CompletionsNestedTokenIDsPassthrough asserts nested
+// token-ID arrays are passed through with one PromptTokens entry per sub-array.
+func TestEstimateBackend_CompletionsNestedTokenIDsPassthrough(t *testing.T) {
+	in := [][]uint32{{11, 22}, {33, 44, 55}}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: in}},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 2)
+	assert.Equal(t, []uint32{11, 22}, tp.Prompts[0].TokenIDs)
+	assert.Equal(t, []uint32{33, 44, 55}, tp.Prompts[1].TokenIDs)
+	assert.Equal(t, 5, tp.TokenCount())
 }
 
 // TestEstimateBackend_EmbeddingsTokenIDsPassthrough asserts token-ID embeddings
@@ -77,10 +91,24 @@ func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
 func TestEstimateBackend_EmbeddingsTokenIDsPassthrough(t *testing.T) {
 	in := []uint32{4, 5}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
-		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: in}},
+		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: [][]uint32{in}}},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, in, tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_EmbeddingsNestedTokenIDsPassthrough asserts nested
+// token-ID arrays are passed through with one PromptTokens entry per sub-array.
+func TestEstimateBackend_EmbeddingsNestedTokenIDsPassthrough(t *testing.T) {
+	in := [][]uint32{{4, 5}, {6, 7, 8}}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: in}},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 2)
+	assert.Equal(t, []uint32{4, 5}, tp.Prompts[0].TokenIDs)
+	assert.Equal(t, []uint32{6, 7, 8}, tp.Prompts[1].TokenIDs)
+	assert.Equal(t, 5, tp.TokenCount())
 }
 
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces

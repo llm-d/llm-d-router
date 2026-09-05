@@ -91,7 +91,7 @@ plugins:
     matchExpressions:
     - key: llm-d.ai/role
       operator: In
-      values: ["decode", "prefill-decode", "both", "encode-prefill-decode"]
+      values: ["decode", "prefill-decode", "encode-prefill-decode"]
 - type: queue-scorer
 - type: max-score-picker
 - type: header-profile-handler

@@ -189,6 +189,88 @@ func (e *ScopedEndpoint) Clone() fwkdl.AttributeMap {
 	return clone
 }
 
+// scopeSpec holds the allowed-key sets derived from a plugin's declarations.
+// The maps are shared read-only by every ScopedEndpoint wrapper across all
+// invocations.
+type scopeSpec struct {
+	allowedPut map[fwkplugin.DataKey]struct{}
+	allowedGet map[fwkplugin.DataKey]struct{}
+}
+
+// denyAllSpec confines an unregistered plugin the same way as one that
+// declares nothing.
+var denyAllSpec = &scopeSpec{}
+
+// scopeSpecs maps a plugin's TypedName().String() to the spec derived from its
+// declarations. RegisterScopeSpecs writes it during startup; Scope only reads.
+// ValidateAndOrderDataDependencies keys plugins the same way, so within the
+// datalayer contract the typed name identifies the plugin.
+var (
+	scopeSpecsMu sync.RWMutex
+	scopeSpecs   = map[string]*scopeSpec{}
+
+	// unregisteredReported dedups the error log for plugins missing from
+	// scopeSpecs, which Scope would otherwise emit on every invocation.
+	unregisteredReported sync.Map // string -> struct{}
+)
+
+// RegisterScopeSpecs derives the allowed-key sets from each plugin's
+// Produces() and Consumes() declarations and stores them for Scope to look up.
+// Declarations are fixed at plugin construction, so the sets are derived once
+// here rather than on every Scope invocation. Call it after all plugins are
+// instantiated; registering a typed name again replaces its spec.
+func RegisterScopeSpecs(plugins []fwkplugin.Plugin) {
+	scopeSpecsMu.Lock()
+	defer scopeSpecsMu.Unlock()
+	for _, plugin := range plugins {
+		scopeSpecs[plugin.TypedName().String()] = buildScopeSpec(plugin)
+	}
+}
+
+func buildScopeSpec(plugin fwkplugin.Plugin) *scopeSpec {
+	produces := map[fwkplugin.DataKey]any{}
+	if producer, ok := plugin.(fwkplugin.ProducerPlugin); ok {
+		produces = producer.Produces()
+	}
+	spec := &scopeSpec{
+		allowedPut: make(map[fwkplugin.DataKey]struct{}, len(produces)),
+		allowedGet: make(map[fwkplugin.DataKey]struct{}, len(produces)),
+	}
+	for key := range produces {
+		spec.allowedPut[key] = struct{}{}
+		// A producer may read back its own output.
+		spec.allowedGet[key] = struct{}{}
+	}
+	if consumer, ok := plugin.(fwkplugin.ConsumerPlugin); ok {
+		deps := consumer.Consumes()
+		for key := range deps.Required {
+			spec.allowedGet[key] = struct{}{}
+		}
+		for key := range deps.Optional {
+			spec.allowedGet[key] = struct{}{}
+		}
+	}
+	return spec
+}
+
+// scopeSpecFor returns the registered spec for a plugin's typed name, or the
+// deny-all spec when none was registered. The miss is logged once per typed
+// name: it indicates a wiring bug, and the resulting confinement also shows up
+// through the violation counter as soon as the plugin touches an attribute.
+func scopeSpecFor(logger logr.Logger, name string) *scopeSpec {
+	scopeSpecsMu.RLock()
+	spec, ok := scopeSpecs[name]
+	scopeSpecsMu.RUnlock()
+	if ok {
+		return spec
+	}
+	if _, reported := unregisteredReported.LoadOrStore(name, struct{}{}); !reported {
+		logger.Error(fmt.Errorf("plugin %q has no registered scope spec; pass it to RegisterScopeSpecs", name),
+			"Confining an unregistered plugin to nothing")
+	}
+	return denyAllSpec
+}
+
 // Scope confines endpoints to what plugin declares. extensionPoint labels the
 // violation counter, so a misdeclared plugin is attributable to the point that
 // ran it. The returned Violations accumulates what the plugin did outside its
@@ -196,31 +278,15 @@ func (e *ScopedEndpoint) Clone() fwkdl.AttributeMap {
 //
 // A plugin that declares nothing reaches nothing: an absent declaration is a
 // statement that the plugin exchanges no data, not a request to be exempt.
+//
+// The allowed-key sets come from the registry populated by RegisterScopeSpecs
+// at startup, treating Produces() and Consumes() as immutable after
+// construction. A plugin that was never registered is confined to nothing.
 func Scope(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, endpoints []fwksched.Endpoint) ([]fwksched.Endpoint, *Violations) {
-	produces := map[fwkplugin.DataKey]any{}
-	if producer, ok := plugin.(fwkplugin.ProducerPlugin); ok {
-		produces = producer.Produces()
-	}
-
-	allowedPut := make(map[fwkplugin.DataKey]struct{}, len(produces))
-	allowedGet := make(map[fwkplugin.DataKey]struct{}, len(produces))
-	for key := range produces {
-		allowedPut[key] = struct{}{}
-		// A producer may read back its own output.
-		allowedGet[key] = struct{}{}
-	}
-	if consumer, ok := plugin.(fwkplugin.ConsumerPlugin); ok {
-		deps := consumer.Consumes()
-		for key := range deps.Required {
-			allowedGet[key] = struct{}{}
-		}
-		for key := range deps.Optional {
-			allowedGet[key] = struct{}{}
-		}
-	}
+	typedName := plugin.TypedName()
+	spec := scopeSpecFor(logger, typedName.String())
 
 	violations := &Violations{}
-	typedName := plugin.TypedName()
 	// One backing array rather than an allocation per endpoint: this runs for
 	// every filter and scorer on every request, over the whole candidate set.
 	wrappers := make([]ScopedEndpoint, len(endpoints))
@@ -228,8 +294,8 @@ func Scope(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, e
 	for i, endpoint := range endpoints {
 		wrappers[i] = ScopedEndpoint{
 			inner:          endpoint,
-			allowedPut:     allowedPut,
-			allowedGet:     allowedGet,
+			allowedPut:     spec.allowedPut,
+			allowedGet:     spec.allowedGet,
 			typedName:      typedName,
 			extensionPoint: extensionPoint,
 			logger:         logger,

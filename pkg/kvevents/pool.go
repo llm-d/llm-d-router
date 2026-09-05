@@ -22,10 +22,15 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
@@ -92,6 +97,13 @@ type Config struct {
 	// EngineType selects the inference engine adapter ("vllm" or "sglang").
 	// Default: "vllm".
 	EngineType string `json:"engineType,omitempty"`
+	// Tracing enables the receive, process and decode spans this package emits.
+	// KV events arrive at many times the inference request rate, so those spans
+	// are opt-in: with a shared head sampler, always-on event spans would crowd
+	// request traces out of the exported volume. Index spans reached from the
+	// event path are emitted by the traced Index wrapper and are not gated
+	// here, so an exporter still receives those with this unset.
+	Tracing bool `json:"tracing,omitempty"`
 	// DiscoverPods enables the Kubernetes pod reconciler for automatic
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
@@ -161,7 +173,12 @@ type Pool struct {
 	// tier, KV-cache group, DP rank) and a store must be counted only after
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
-	wg    sync.WaitGroup
+	// tracer is resolved once: tracing.Tracer rebuilds its instrumentation
+	// options on every call, which is not free on the per-message event path.
+	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
+	// span construction on the default path.
+	tracer trace.Tracer
+	wg     sync.WaitGroup
 	// queueDepth mirrors the number of tasks queued across all shards. It is
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
@@ -192,6 +209,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		adapter:        adapter,
 		groupCatalog:   kvblock.NewGroupCatalog(),
 		dedup:          newEventDedupFilter(),
+		tracer:         newEventTracer(cfg.Tracing),
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -221,6 +239,53 @@ func (p *Pool) notifyStreamEvent(sourceEndpoint string, event StreamEvent) {
 	if observer != nil {
 		observer(sourceEndpoint, event)
 	}
+}
+
+func (p *Pool) notifyBlockEvent(scope blockScope, event StreamEvent, hashes []uint64) {
+	p.observerMu.RLock()
+	observer := p.observer
+	p.observerMu.RUnlock()
+	if observer == nil {
+		return
+	}
+	blocks := make([]StreamBlock, len(hashes))
+	for i, hash := range hashes {
+		blocks[i] = StreamBlock{Hash: hash, DeviceTier: scope.deviceTier, GroupIdx: scope.groupIdx}
+	}
+	observer(scope.podIdentifier, event, blocks...)
+}
+
+// Span start options are built once. Passing them variadically at each call
+// site allocates a fresh slice per message.
+var (
+	consumerSpanOptions = []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindConsumer)}
+	internalSpanOptions = []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindInternal)}
+)
+
+// disabledSpan stands in for a real span when event tracing is off. A single
+// package-level value keeps the default path free of allocation while call
+// sites use the span unconditionally.
+var disabledSpan trace.Span = tracenoop.Span{}
+
+// newEventTracer returns the event-pipeline tracer, or nil when event tracing
+// is disabled. Resolving it once keeps the per-message path clear of
+// tracing.Tracer's per-call option building.
+func newEventTracer(enabled bool) trace.Tracer {
+	if !enabled {
+		return nil
+	}
+	return tracing.Tracer(TracerScope)
+}
+
+// startSpan opens a pipeline span, or leaves ctx untouched and returns a span
+// that records nothing when event tracing is disabled. The default path skips
+// Start rather than relying on a no-op tracer, which still builds an option
+// slice and a context per call. See Config.Tracing.
+func (p *Pool) startSpan(ctx context.Context, name string, opts []trace.SpanStartOption) (context.Context, trace.Span) {
+	if p.tracer == nil {
+		return ctx, disabledSpan
+	}
+	return p.tracer.Start(ctx, name, opts...)
 }
 
 // addQueueDepth adjusts the tracked queue depth by delta and publishes the new
@@ -289,11 +354,6 @@ func (p *Pool) AddTask(task *RawMessage) {
 	p.addQueueDepth(1)
 }
 
-// resetForSource queues a pod reset on the same shard as its event stream.
-func (p *Pool) resetForSource(topic, sourceEndpoint string) {
-	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
-}
-
 // worker is the main processing loop for a single worker goroutine.
 // It processes messages from its dedicated queue using the workqueue pattern.
 func (p *Pool) worker(ctx context.Context, workerIndex int) {
@@ -325,6 +385,13 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 
 // processRawMessage decodes the raw message payload using the adapter and processes the resulting event batch.
 func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
+	if msg.stream != nil {
+		msg.stream.mu.RLock()
+		defer msg.stream.mu.RUnlock()
+		if msg.stream.detached {
+			return
+		}
+	}
 	logger := log.FromContext(ctx)
 	if msg.reset {
 		podID := msg.SourceEndpoint
@@ -335,16 +402,71 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		return
 	}
 
-	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
+	// Parent to the receive span while keeping the worker's context for
+	// cancellation, so index operations below land in the message's trace.
+	// The queue handoff stays inside one process, so the parent is local: a
+	// remote parent selects a different ParentBased sampler branch.
+	if msg.SpanContext != nil {
+		ctx = trace.ContextWithSpanContext(ctx, *msg.SpanContext)
+	}
+
+	ctx, span := p.startSpan(ctx, "events_process", consumerSpanOptions)
+	defer span.End()
+	// Guards every attribute block in this package: a span the sampler dropped
+	// reports IsRecording false, so those messages skip attribute construction
+	// too, not just the ones with tracing off.
+	tracingActive := span.IsRecording()
+	if tracingActive {
+		span.SetAttributes(
+			attribute.String("llm_d.kv_cache.events.topic", msg.Topic),
+			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(msg.Payload)),
+		)
+	}
+
+	podID, modelName, batch, err := p.decode(ctx, msg)
 	if err != nil {
+		if tracingActive {
+			span.SetStatus(codes.Error, err.Error())
+		}
 		logger.Error(err, "Failed to parse message")
 		return
 	}
+
 	if msg.SourceEndpoint != "" {
 		podID = msg.SourceEndpoint
 	}
+	if tracingActive {
+		span.SetAttributes(
+			attribute.String("llm_d.kv_cache.events.pod_id", podID),
+			attribute.Int("llm_d.kv_cache.events.event_count", len(batch.Events)),
+		)
+	}
 
 	p.processEventBatch(ctx, &batch, podID, modelName)
+}
+
+// decode spans the adapter's payload decode. It wraps the call rather than the
+// EngineAdapter itself so out-of-tree adapters need no signature change.
+//
+//nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
+func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, EventBatch, error) {
+	_, span := p.startSpan(ctx, "events_decode", internalSpanOptions)
+	defer span.End()
+
+	podID, modelName, batch, err := p.adapter.ParseMessage(msg)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return podID, modelName, batch, err
+	}
+
+	// pod_id and event_count live on events_process, which holds the effective
+	// pod after the SourceEndpoint override. Repeating the pre-override pod
+	// under the same key would give one attribute two meanings in one trace.
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("gen_ai.request.model", modelName))
+	}
+
+	return podID, modelName, batch, nil
 }
 
 func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
@@ -352,8 +474,10 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
+		return
 	}
 	p.dedup.clear(podIdentifier)
+	p.notifyStreamEvent(podIdentifier, StreamEventCleared)
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -461,6 +585,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			if ev.Origin == "NEW" || ev.Origin == "REUSED" {
+				p.notifyStreamEvent(podIdentifier, StreamEventReportSupported)
+			}
 
 			// Scope for reference-counting this store against duplicate removes.
 			// Mirrors the index eviction identity (pod, tier, group); DP rank is
@@ -529,7 +656,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)
 					// The child is dropped, so the endpoint needs a repair report.
-					p.notifyStreamEvent(podIdentifier, StreamEventMissingParent)
+					p.notifyBlockEvent(storeScope, StreamEventMissingParent, ev.BlockHashes)
 					continue
 				}
 				parentRequestKey = key
@@ -596,7 +723,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			if len(requestKeys) == 0 {
 				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
-					p.dedup.trackStore(storeScope, ev.BlockHashes)
+					if ev.Origin == "REUSED" {
+						p.dedup.trackReport(storeScope, ev.BlockHashes)
+					} else {
+						p.dedup.trackStore(storeScope, ev.BlockHashes)
+					}
 				}
 				continue
 			}
@@ -608,7 +739,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
 			}
-			p.dedup.trackStore(storeScope, ev.BlockHashes)
+			if ev.Origin == "REUSED" {
+				p.dedup.trackReport(storeScope, ev.BlockHashes)
+			} else {
+				p.dedup.trackStore(storeScope, ev.BlockHashes)
+			}
+			p.notifyBlockEvent(storeScope, StreamEventStored, ev.BlockHashes)
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
@@ -672,6 +808,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"podIdentifier", podIdentifier, "engineKey", engineKey)
 					continue
 				}
+				p.notifyBlockEvent(removeScope, StreamEventRemoved, []uint64{hash})
 			}
 
 		case *AllBlocksClearedEvent:

@@ -85,10 +85,11 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // two sibling chunks list the same constituent block hash, so the same hash is
 // stored and removed more than once on the wire.
 //
-// The filter mirrors the wire event stream rather than the index state: every
-// BlockStored increments the count for its hashes unconditionally (duplicates
-// included), and a BlockRemoved only forwards a hash to the index once its
-// count returns to zero. Removes for never-seen hashes pass through defensively
+// The filter mirrors the wire event stream rather than the index state. New
+// stores increment reference counts, including duplicates. Reused-block reports
+// only establish a reference when none is tracked. A BlockRemoved forwards a hash
+// to the index once its count returns to zero. Untracked removes pass through
+// defensively
 // (the index treats an unknown evict as a no-op), and a count never goes
 // negative. The index may independently evict an entry (LRU/cost) without a
 // wire remove; that only makes the filter's count an over-estimate, which stays
@@ -101,15 +102,10 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // pops on eviction and emits BlockRemoved), so the map tracks the engine's
 // offload-pool capacity and drains in steady state; an entry is also reclaimed
 // the moment its count returns to zero, and clear() drops a whole pod on
-// AllBlocksCleared. The growth paths are lost ZMQ removes or an
+// AllBlocksCleared. The only growth paths are lost ZMQ removes or an
 // index-internal eviction with no matching wire remove, both of which leave a
-// harmless over-estimate (see above) rather than a correctness error, and a
-// full KV-cache report (the preciseprefixcache producer's fullReportRepair)
-// re-announcing a block whose original store was already counted, which
-// suppresses the block's final wire remove and keeps the index row until the
-// index's own eviction; the report path is rate-bounded by the producer's
-// per-endpoint cooldown. This mirrors the bounded-by-the-wire behavior of
-// Dynamo's EventDedupFilter.
+// harmless over-estimate (see above) rather than a correctness error. This
+// mirrors the bounded-by-the-wire behavior of Dynamo's EventDedupFilter.
 //
 // It is safe for concurrent use: the single mutex guards the whole cross-pod
 // map. The Pool additionally shards work by pod identifier (see Pool.AddTask),
@@ -196,4 +192,24 @@ func (f *eventDedupFilter) clear(podIdentifier string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.refs, podIdentifier)
+}
+
+// trackReport restores an untracked residency without adding a physical copy.
+func (f *eventDedupFilter) trackReport(scope blockScope, hashes []uint64) {
+	if f == nil || len(hashes) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	bucket := f.refs[scope.podIdentifier]
+	if bucket == nil {
+		bucket = make(map[dedupKey]int)
+		f.refs[scope.podIdentifier] = bucket
+	}
+	for _, hash := range hashes {
+		key := scope.key(hash)
+		if bucket[key] == 0 {
+			bucket[key] = 1
+		}
+	}
 }

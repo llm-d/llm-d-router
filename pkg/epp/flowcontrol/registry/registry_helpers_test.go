@@ -48,7 +48,6 @@ const (
 type testHarness struct {
 	t                *testing.T
 	registry         *FlowRegistry
-	statsPropagator  *mockStatsPropagator
 	highPriorityKey1 flowcontrol.FlowKey
 	highPriorityKey2 flowcontrol.FlowKey
 	lowPriorityKey   flowcontrol.FlowKey
@@ -65,7 +64,6 @@ func newTestHarness(t *testing.T) *testHarness {
 	)
 	require.NoError(t, err, "Test setup: validating and defaulting config should not fail")
 
-	statsPropagator := &mockStatsPropagator{}
 	fakeClock := testclock.NewFakeClock(time.Now())
 	registryOpts := []RegistryOption{withClock(fakeClock)}
 	registry := NewFlowRegistry(globalConfig, logr.Discard(), registryOpts...)
@@ -73,7 +71,6 @@ func newTestHarness(t *testing.T) *testHarness {
 	h := &testHarness{
 		t:                t,
 		registry:         registry,
-		statsPropagator:  statsPropagator,
 		highPriorityKey1: flowcontrol.FlowKey{ID: "hp-flow-1", Priority: highPriority},
 		highPriorityKey2: flowcontrol.FlowKey{ID: "hp-flow-2", Priority: highPriority},
 		lowPriorityKey:   flowcontrol.FlowKey{ID: "lp-flow-1", Priority: lowPriority},
@@ -140,10 +137,10 @@ func TestRegistry_Stats(t *testing.T) {
 
 	stats := h.registry.Stats()
 
-	assert.Equal(t, uint64(2), stats.TotalLen, "Total length must aggregate counts from all bands")
-	assert.Equal(t, uint64(150), stats.TotalByteSize, "Total byte size must aggregate sizes from all bands")
+	assert.Equal(t, uint64(2), stats.Global.Len, "Total length must aggregate counts from all bands")
+	assert.Equal(t, uint64(150), stats.Global.ByteSize, "Total byte size must aggregate sizes from all bands")
 
-	bandHighStats, ok := stats.PerPriorityBandStats[highPriority]
+	bandHighStats, ok := stats.PerPriorityBand[highPriority]
 	require.True(t, ok, "Stats snapshot must include entries for all configured priority bands (e.g., %d)", highPriority)
 	assert.Equal(t, uint64(2), bandHighStats.Len, "Priority band length must reflect the items queued at that level")
 	assert.Equal(t, uint64(150), bandHighStats.ByteSize,
@@ -524,17 +521,17 @@ func TestRegistry_DeleteFlow_StaleHandleStats(t *testing.T) {
 			h.registry.mu.Unlock()
 
 			stats := h.registry.Stats()
-			assert.Zero(t, stats.TotalLen, "deleteFlow must deduct the unswept items from the total length")
-			assert.Zero(t, stats.TotalByteSize, "deleteFlow must deduct the unswept items from the total byte size")
+			assert.Zero(t, stats.Global.Len, "deleteFlow must deduct the unswept items from the total length")
+			assert.Zero(t, stats.Global.ByteSize, "deleteFlow must deduct the unswept items from the total byte size")
 
 			tc.staleOp(t, mq, item)
 
 			stats = h.registry.Stats()
-			assert.Zero(t, stats.TotalLen,
+			assert.Zero(t, stats.Global.Len,
 				"A stale-handle mutation after deleteFlow must not deduct the same items again (uint64 underflow)")
-			assert.Zero(t, stats.TotalByteSize,
+			assert.Zero(t, stats.Global.ByteSize,
 				"A stale-handle mutation after deleteFlow must not deduct the same items again (uint64 underflow)")
-			bandStats := stats.PerPriorityBandStats[highPriority]
+			bandStats := stats.PerPriorityBand[highPriority]
 			assert.Zero(t, bandStats.Len, "Per-band length must not underflow after a stale-handle mutation")
 			assert.Zero(t, bandStats.ByteSize, "Per-band byte size must not underflow after a stale-handle mutation")
 		})
@@ -666,8 +663,8 @@ func TestRegistry_Concurrency_MixedWorkload(t *testing.T) {
 	// The primary assertion is that this test completes without the race detector firing; however, we can make some final
 	// assertions on state consistency.
 	finalStats := h.registry.Stats()
-	assert.Zero(t, finalStats.TotalLen, "After all paired add/remove operations, the total length should be zero")
-	assert.Zero(t, finalStats.TotalByteSize, "After all paired add/remove operations, the total byte size should be zero")
+	assert.Zero(t, finalStats.Global.Len, "After all paired add/remove operations, the total length should be zero")
+	assert.Zero(t, finalStats.Global.ByteSize, "After all paired add/remove operations, the total byte size should be zero")
 }
 
 // TestRegistry_Concurrency_AllOrderedPriorityLevels_RaceSafety verifies that AllOrderedPriorityLevels() is safe to call
