@@ -185,7 +185,7 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	reqCtx.MultimodalEntries = entries
 
-	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "images", len(entries))
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "mm_entries", len(entries))
 	return nil
 }
 
@@ -270,33 +270,57 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 		return err
 	}
 
-	imageHashes := renderResp.Features.MMHashes[ModalityImage]
-	imagePlaceholders := renderResp.Features.MMPlaceholders[ModalityImage]
-	imageKwargs := renderResp.Features.KwargsData[ModalityImage]
-
+	// Length check: sum of per-modality slice lengths must match len(entries).
+	totalHashes, totalPlaceholders, totalKwargs := 0, 0, 0
+	for _, s := range renderResp.Features.MMHashes {
+		totalHashes += len(s)
+	}
+	for _, s := range renderResp.Features.MMPlaceholders {
+		totalPlaceholders += len(s)
+	}
+	for _, s := range renderResp.Features.KwargsData {
+		totalKwargs += len(s)
+	}
 	expected := len(reqCtx.MultimodalEntries)
-	if len(imageHashes) != expected {
-		return fmt.Errorf("render returned %d mm_hashes but expected %d", len(imageHashes), expected)
+	if totalHashes != expected {
+		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
-	if len(imagePlaceholders) != expected {
-		return fmt.Errorf("render returned %d mm_placeholders but expected %d", len(imagePlaceholders), expected)
+	if totalPlaceholders != expected {
+		return fmt.Errorf("render returned %d mm_placeholders but expected %d", totalPlaceholders, expected)
 	}
-	if len(imageKwargs) != expected {
-		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
+	if totalKwargs != expected {
+		return fmt.Errorf("render returned %d kwargs_data but expected %d", totalKwargs, expected)
 	}
 
+	// Walk entries in order and pull their hash/placeholder/kwargs from the
+	// response using a per-modality position counter. For an image-only
+	// request against an image-only response, modIndex[image] counts 0, 1,
+	// 2... and each entry pairs with the response slot at that position.
+	modIndex := make(map[string]int)
 	for i := range reqCtx.MultimodalEntries {
-		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
-		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
-		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
+		mod := entryModality(reqCtx.MultimodalEntries[i])
+		idx := modIndex[mod]
+		modIndex[mod]++
+		hashes := renderResp.Features.MMHashes[mod]
+		placeholders := renderResp.Features.MMPlaceholders[mod]
+		kwargs := renderResp.Features.KwargsData[mod]
+		if idx >= len(hashes) || idx >= len(placeholders) || idx >= len(kwargs) {
+			return fmt.Errorf("render response missing slot %d for modality %s", idx, mod)
+		}
+		reqCtx.MultimodalEntries[i].Hash = hashes[idx]
+		reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		reqCtx.MultimodalEntries[i].Placeholder = placeholders[idx]
 	}
 
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
 
-	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
-	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
+	logger.V(logutil.DEBUG).Info("response",
+		"mm_hashes", renderResp.Features.MMHashes,
+		"mm_placeholders", renderResp.Features.MMPlaceholders,
+		"kwargs_data_len", totalKwargs)
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "mm_entries", totalHashes)
 	return nil
 }
 

@@ -134,13 +134,29 @@ func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
 	reqCtx.Body["tokens"] = tokens
 }
 
+// injectUUIDs tags each media content part with the uuid the decode
+// backend uses for prefix-cache keying. Each part is paired with the
+// MultimodalEntry that shares its modality and local index, the same
+// invariant the encode fanout uses. Non-media parts (text, tool_use,
+// unknown types) are skipped.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 	messages, ok := reqCtx.Body["messages"].([]any)
 	if !ok {
 		return
 	}
 
-	hashIdx := 0
+	// Group hashes by modality, preserving entry order. Later, the walker
+	// indexes into hashesByMod[modality] at the per-modality position for
+	// O(1) lookup per part. Build is O(n).
+	hashesByMod := make(map[string][]string)
+	for _, entry := range reqCtx.MultimodalEntries {
+		mod := entryModality(entry)
+		hashesByMod[mod] = append(hashesByMod[mod], entry.Hash)
+	}
+
+	// Walk parts, incrementing a per-modality counter so each media part
+	// gets the hash of the entry at the matching (modality, localIndex).
+	modCounter := make(map[string]int)
 	for _, msg := range messages {
 		msgMap, ok := msg.(map[string]any)
 		if !ok {
@@ -155,12 +171,21 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" {
+			partType, _ := partMap["type"].(string)
+			modality, isMedia := partTypeModality[partType]
+			if !isMedia {
 				continue
 			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
-				hashIdx++
+			// Same predicate replace_media_urls uses; a malformed part
+			// it silently dropped must not shift the per-modality
+			// counter here or the wrong entry's Hash would be attached.
+			if !mediaPartIsWellFormed(partMap, partType) {
+				continue
+			}
+			localIdx := modCounter[modality]
+			modCounter[modality]++
+			if hashes := hashesByMod[modality]; localIdx < len(hashes) {
+				partMap["uuid"] = hashes[localIdx]
 			}
 		}
 	}

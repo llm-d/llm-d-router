@@ -677,7 +677,7 @@ func TestReplaceMediaURLsStep_DownloadInvalidURL(t *testing.T) {
 
 	// 0x7f (DEL) is an invalid control character in a URL; NewRequestWithContext
 	// fails before any network call.
-	_, _, err := rmu.download(context.Background(), "http://\x7f/control-char")
+	_, _, err := rmu.download(context.Background(), "http://\x7f/control-char", ModalityImage)
 	if err == nil {
 		t.Fatal("expected error building request for URL with control character")
 	}
@@ -732,7 +732,7 @@ func TestReplaceMediaURLsStep_RejectsOversizedContentLength(t *testing.T) {
 
 	rmu := newLoopbackStep(t, map[string]any{"max_download_size": 1})
 
-	_, _, err := rmu.download(context.Background(), imageServer.URL+"/big.png")
+	_, _, err := rmu.download(context.Background(), imageServer.URL+"/big.png", ModalityImage)
 	if err == nil {
 		t.Fatal("expected error for oversized Content-Length")
 	}
@@ -845,7 +845,7 @@ func TestReplaceMediaURLsStep_DownloadTruncatedBody(t *testing.T) {
 
 	rmu := newLoopbackStep(t, map[string]any{})
 
-	_, _, err := rmu.download(context.Background(), imageServer.URL+"/truncated")
+	_, _, err := rmu.download(context.Background(), imageServer.URL+"/truncated", ModalityImage)
 	if err == nil {
 		t.Fatal("expected error reading truncated response body")
 	}
@@ -927,7 +927,7 @@ func TestAddressGuard_HostAllowed(t *testing.T) {
 func TestReplaceMediaURLsStep_RejectsScheme(t *testing.T) {
 	rmu := newLoopbackStep(t, map[string]any{})
 	for _, raw := range []string{"file:///etc/passwd", "gopher://host/1", "ftp://host/x"} {
-		_, _, err := rmu.download(context.Background(), raw)
+		_, _, err := rmu.download(context.Background(), raw, ModalityImage)
 		if err == nil {
 			t.Fatalf("expected scheme %q to be rejected", raw)
 		}
@@ -941,7 +941,7 @@ func TestReplaceMediaURLsStep_RejectsScheme(t *testing.T) {
 // generic gateway fault, so the handler maps it to a 4xx.
 func TestReplaceMediaURLsStep_BlocksMetadataIP(t *testing.T) {
 	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
-	_, _, err := rmu.download(context.Background(), "http://169.254.169.254/latest/meta-data/")
+	_, _, err := rmu.download(context.Background(), "http://169.254.169.254/latest/meta-data/", ModalityImage)
 	if err == nil {
 		t.Fatal("expected metadata IP fetch to be blocked")
 	}
@@ -961,7 +961,7 @@ func TestReplaceMediaURLsStep_BlocksRedirectToPrivate(t *testing.T) {
 	// Loopback allowed so the first hop (the httptest server) connects; the
 	// metadata redirect target is link-local and stays blocked regardless.
 	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
-	_, _, err := rmu.download(context.Background(), redirector.URL+"/start")
+	_, _, err := rmu.download(context.Background(), redirector.URL+"/start", ModalityImage)
 	if err == nil {
 		t.Fatal("expected redirect to metadata IP to be blocked")
 	}
@@ -989,7 +989,7 @@ func TestReplaceMediaURLsStep_BlocksHostnameResolvingToPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	step := built.(*ReplaceMediaURLsStep)
-	_, _, err = step.download(context.Background(), "http://localhost:"+port+"/x")
+	_, _, err = step.download(context.Background(), "http://localhost:"+port+"/x", ModalityImage)
 	if err == nil {
 		t.Fatal("expected hostname resolving to loopback to be blocked")
 	}
@@ -1014,12 +1014,12 @@ func TestReplaceMediaURLsStep_DomainAllowlist(t *testing.T) {
 	}
 
 	allowed := newLoopbackStep(t, map[string]any{"allowed_domains": []any{hostname}})
-	if _, _, err := allowed.download(context.Background(), server.URL+"/ok.png"); err != nil {
+	if _, _, err := allowed.download(context.Background(), server.URL+"/ok.png", ModalityImage); err != nil {
 		t.Fatalf("listed host must be fetchable: %v", err)
 	}
 
 	denied := newLoopbackStep(t, map[string]any{"allowed_domains": []any{"images.example.com"}})
-	_, _, err = denied.download(context.Background(), server.URL+"/ok.png")
+	_, _, err = denied.download(context.Background(), server.URL+"/ok.png", ModalityImage)
 	if err == nil {
 		t.Fatal("unlisted host must be rejected")
 	}
@@ -1135,5 +1135,871 @@ func TestReplaceMediaURLsStep_CancelledContextSkipsDataURIParse(t *testing.T) {
 	err := step.Execute(ctx, reqCtx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+// ---- Audio / video ingestion -----------------------------------------------
+
+// TestReplaceMediaURLsStep_AudioURL_Downloads asserts that an audio_url
+// is fetched, size-capped, MIME-checked, inlined as a data URI, and
+// added to MultimodalEntries as one audio entry.
+func TestReplaceMediaURLsStep_AudioURL_Downloads(t *testing.T) {
+	audioServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write([]byte("wav-bytes"))
+	}))
+	defer audioServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "audio_url",
+							"audio_url": map[string]any{"url": audioServer.URL + "/clip.wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 audio entry in MultimodalEntries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if reqCtx.MultimodalEntries[0].Modality != ModalityAudio {
+		t.Fatalf("expected Modality=%q, got %q", ModalityAudio, reqCtx.MultimodalEntries[0].Modality)
+	}
+	if reqCtx.MultimodalEntries[0].ContentType != "audio/wav" {
+		t.Fatalf("expected content type audio/wav, got %s", reqCtx.MultimodalEntries[0].ContentType)
+	}
+	msgs := reqCtx.Body["messages"].([]any)
+	inner := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)["audio_url"].(map[string]any)
+	url := inner["url"].(string)
+	if !strings.HasPrefix(url, "data:audio/wav;base64,") {
+		t.Fatalf("expected inlined data URI, got %s", url)
+	}
+}
+
+// TestReplaceMediaURLsStep_AudioURL_RejectsUnexpectedContentType asserts an
+// audio_url whose origin serves a non-audio Content-Type (e.g. text/html)
+// is rejected as ErrBadRequest. This closes an SSRF-style widening where
+// a caller could exploit an audio_url slot to smuggle text or HTML.
+func TestReplaceMediaURLsStep_AudioURL_RejectsUnexpectedContentType(t *testing.T) {
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html></html>"))
+	}))
+	defer badServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "audio_url",
+							"audio_url": map[string]any{"url": badServer.URL + "/clip.wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for audio_url served as text/html")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_VideoURL_RejectsUnexpectedContentType mirrors the
+// audio case for video_url served with a non-video Content-Type.
+func TestReplaceMediaURLsStep_VideoURL_RejectsUnexpectedContentType(t *testing.T) {
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html></html>"))
+	}))
+	defer badServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "video_url",
+							"video_url": map[string]any{"url": badServer.URL + "/clip.mp4"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for video_url served as text/html")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_ImageURL_PermissiveContentType documents that
+// image_url downloads intentionally keep their pre-existing permissive
+// behavior, an unexpected Content-Type is accepted. Audio and video are
+// stricter; image is not tightened here to avoid breaking traffic that
+// relies on the current behavior.
+func TestReplaceMediaURLsStep_ImageURL_PermissiveContentType(t *testing.T) {
+	oddServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("not-really-an-image"))
+	}))
+	defer oddServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": oddServer.URL + "/thing.jpg"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected permissive behavior for image_url, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_VideoURL_Downloads mirrors the audio case for
+// video_url with a video/mp4 payload.
+func TestReplaceMediaURLsStep_VideoURL_Downloads(t *testing.T) {
+	videoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("mp4-bytes"))
+	}))
+	defer videoServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "video_url",
+							"video_url": map[string]any{"url": videoServer.URL + "/clip.mp4"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 video entry in MultimodalEntries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if reqCtx.MultimodalEntries[0].Modality != ModalityVideo {
+		t.Fatalf("expected Modality=%q, got %q", ModalityVideo, reqCtx.MultimodalEntries[0].Modality)
+	}
+	msgs := reqCtx.Body["messages"].([]any)
+	inner := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)["video_url"].(map[string]any)
+	url := inner["url"].(string)
+	if !strings.HasPrefix(url, "data:video/mp4;base64,") {
+		t.Fatalf("expected inlined data URI, got %s", url)
+	}
+}
+
+// TestReplaceMediaURLsStep_AudioDataURI asserts a valid audio data URI
+// under audio_url is accepted (kept in place) and added to
+// MultimodalEntries as one audio entry.
+func TestReplaceMediaURLsStep_AudioDataURI(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	const dataURI = "data:audio/wav;base64,UklGRg=="
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "audio_url",
+							"audio_url": map[string]any{"url": dataURI},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 audio entry in MultimodalEntries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if reqCtx.MultimodalEntries[0].Modality != ModalityAudio {
+		t.Fatalf("expected Modality=%q, got %q", ModalityAudio, reqCtx.MultimodalEntries[0].Modality)
+	}
+	msgs := reqCtx.Body["messages"].([]any)
+	inner := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)["audio_url"].(map[string]any)
+	if inner["url"].(string) != dataURI {
+		t.Fatalf("expected data URI unchanged, got %v", inner["url"])
+	}
+}
+
+// TestReplaceMediaURLsStep_VideoDataURI mirrors the audio data URI case.
+func TestReplaceMediaURLsStep_VideoDataURI(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	const dataURI = "data:video/mp4;base64,AAAAHGZ0eXA="
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "video_url",
+							"video_url": map[string]any{"url": dataURI},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 video entry in MultimodalEntries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if reqCtx.MultimodalEntries[0].Modality != ModalityVideo {
+		t.Fatalf("expected Modality=%q, got %q", ModalityVideo, reqCtx.MultimodalEntries[0].Modality)
+	}
+}
+
+// TestReplaceMediaURLsStep_InputAudio_Valid asserts a well-formed input_audio
+// part (base64 payload, known format) passes validation and leaves the body
+// unchanged.
+func TestReplaceMediaURLsStep_InputAudio_Valid(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":        "input_audio",
+							"input_audio": map[string]any{"data": "UklGRg==", "format": "wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 audio entry in MultimodalEntries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	entry := reqCtx.MultimodalEntries[0]
+	if entry.Modality != ModalityAudio {
+		t.Fatalf("expected Modality=%q, got %q", ModalityAudio, entry.Modality)
+	}
+	if entry.ContentType != "audio/wav" {
+		t.Fatalf("expected content type audio/wav, got %s", entry.ContentType)
+	}
+	if entry.Base64Data != "UklGRg==" {
+		t.Fatalf("expected Base64Data == payload, got %q", entry.Base64Data)
+	}
+	msgs := reqCtx.Body["messages"].([]any)
+	inner := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)["input_audio"].(map[string]any)
+	if inner["data"].(string) != "UklGRg==" || inner["format"].(string) != "wav" {
+		t.Fatalf("expected input_audio body unchanged, got %+v", inner)
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsAudioDataURIUnderImageURL asserts a
+// data:audio/wav URI supplied in an image_url slot is rejected.
+func TestReplaceMediaURLsStep_RejectsAudioDataURIUnderImageURL(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": "data:audio/wav;base64,UklGRg=="},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for audio data URI in image_url slot")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsImageDataURIUnderAudioURL asserts the
+// symmetric case: an image data URI in an audio_url slot is rejected.
+func TestReplaceMediaURLsStep_RejectsImageDataURIUnderAudioURL(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "audio_url",
+							"audio_url": map[string]any{"url": "data:image/jpeg;base64,/9j/4AAQ"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for image data URI in audio_url slot")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_InputAudio_UnknownFormat asserts an unknown
+// format string (e.g. "aiff") is rejected before validation.
+func TestReplaceMediaURLsStep_InputAudio_UnknownFormat(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":        "input_audio",
+							"input_audio": map[string]any{"data": "UklGRg==", "format": "aiff"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for unknown input_audio format")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_InputAudio_ExactlyAtCap encodes exactly cap bytes
+// and asserts the step accepts the payload. The base64 length of cap bytes
+// equals the size-check bound; a strictly-greater comparison must not
+// reject the boundary.
+func TestReplaceMediaURLsStep_InputAudio_ExactlyAtCap(t *testing.T) {
+	const capMB = 1
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{"max_download_size": capMB})
+	payload := base64.StdEncoding.EncodeToString(make([]byte, capMB*1024*1024))
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":        "input_audio",
+							"input_audio": map[string]any{"data": payload, "format": "wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected exactly-at-cap payload to be accepted, got %v", err)
+	}
+	if got := len(reqCtx.MultimodalEntries); got != 1 {
+		t.Fatalf("expected 1 entry, got %d", got)
+	}
+}
+
+// TestReplaceMediaURLsStep_InputAudio_OversizedPayload builds an input_audio
+// item whose base64 payload alone exceeds 4/3 * max_download_size and asserts
+// the step rejects it without attempting to decode.
+func TestReplaceMediaURLsStep_InputAudio_OversizedPayload(t *testing.T) {
+	// max_download_size in the constructor is given in megabytes.
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{"max_download_size": 1})
+	// 1 MB * 4/3 ~= 1_398_101 base64 chars. Build a slightly larger string.
+	oversized := strings.Repeat("A", 2*1024*1024)
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":        "input_audio",
+							"input_audio": map[string]any{"data": oversized, "format": "wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for oversized input_audio payload")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_MixedImageAudioVideo runs one request with
+// one image URL, one audio URL, and one video URL. All three are
+// inlined as data URIs and added to MultimodalEntries in walker order,
+// and all three count against max_multimodal_entries.
+func TestReplaceMediaURLsStep_MixedImageAudioVideo(t *testing.T) {
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".jpg"):
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("jpg-bytes"))
+		case strings.HasSuffix(r.URL.Path, ".wav"):
+			w.Header().Set("Content-Type", "audio/wav")
+			_, _ = w.Write([]byte("wav-bytes"))
+		case strings.HasSuffix(r.URL.Path, ".mp4"):
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("mp4-bytes"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mediaServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{
+		"download_timeout":       "5s",
+		"max_multimodal_entries": 3,
+	})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": mediaServer.URL + "/photo.jpg"}},
+						map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": mediaServer.URL + "/clip.wav"}},
+						map[string]any{"type": "video_url", "video_url": map[string]any{"url": mediaServer.URL + "/clip.mp4"}},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// All three media parts feed into MultimodalEntries. Entries appear
+	// in walker order: URL refs first (image, audio, video), then any
+	// inline refs (none here).
+	if len(reqCtx.MultimodalEntries) != 3 {
+		t.Fatalf("expected 3 entries (1 image + 1 audio + 1 video), got %d", len(reqCtx.MultimodalEntries))
+	}
+	wantModalities := []string{ModalityImage, ModalityAudio, ModalityVideo}
+	for i, want := range wantModalities {
+		if got := reqCtx.MultimodalEntries[i].Modality; got != want {
+			t.Errorf("MultimodalEntries[%d].Modality = %q, want %q", i, got, want)
+		}
+	}
+	// Verify audio and video URLs were rewritten in place.
+	content := reqCtx.Body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	audioURL := content[1].(map[string]any)["audio_url"].(map[string]any)["url"].(string)
+	videoURL := content[2].(map[string]any)["video_url"].(map[string]any)["url"].(string)
+	if !strings.HasPrefix(audioURL, "data:audio/wav;base64,") {
+		t.Errorf("audio not inlined: %s", audioURL)
+	}
+	if !strings.HasPrefix(videoURL, "data:video/mp4;base64,") {
+		t.Errorf("video not inlined: %s", videoURL)
+	}
+}
+
+// TestReplaceMediaURLsStep_MixedAudio_WalkerOrder locks in the walker-order
+// invariant for the audio modality, which is the only modality that
+// carries both a URL-based variant (audio_url) and an inline variant
+// (input_audio). The request has input_audio A first and audio_url B
+// second. MultimodalEntries must reflect that order: entries[0] carries
+// A's inline payload and entries[1] carries B's downloaded payload. A
+// split append (URLs first, inline second) would swap them, and the
+// encode / decode steps -- which walk parts in request order -- would
+// then pair each audio entry with the wrong content part.
+func TestReplaceMediaURLsStep_MixedAudio_WalkerOrder(t *testing.T) {
+	audioServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write([]byte("bytes-of-B"))
+	}))
+	defer audioServer.Close()
+
+	const inlineData = "SU5MSU5FLUE=" // "INLINE-A" base64
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":        "input_audio",
+							"input_audio": map[string]any{"data": inlineData, "format": "wav"},
+						},
+						map[string]any{
+							"type":      "audio_url",
+							"audio_url": map[string]any{"url": audioServer.URL + "/clip.wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := len(reqCtx.MultimodalEntries); got != 2 {
+		t.Fatalf("expected 2 audio entries, got %d", got)
+	}
+	// Entry 0 must be the inline part, entry 1 must be the URL part.
+	if reqCtx.MultimodalEntries[0].Base64Data != inlineData {
+		t.Errorf("entries[0].Base64Data = %q, want the inline payload %q",
+			reqCtx.MultimodalEntries[0].Base64Data, inlineData)
+	}
+	if reqCtx.MultimodalEntries[0].ContentType != "audio/wav" {
+		t.Errorf("entries[0].ContentType = %q, want audio/wav (from input_audio format)",
+			reqCtx.MultimodalEntries[0].ContentType)
+	}
+	if reqCtx.MultimodalEntries[1].Base64Data == inlineData {
+		t.Errorf("entries[1].Base64Data still equals A's payload; walker order was not preserved")
+	}
+	// The URL slot must have been overwritten in place with the downloaded
+	// data URI (empty original url replaced by "data:...").
+	msgs := reqCtx.Body["messages"].([]any)
+	urlPart := msgs[0].(map[string]any)["content"].([]any)[1].(map[string]any)["audio_url"].(map[string]any)
+	if got, _ := urlPart["url"].(string); !strings.HasPrefix(got, "data:audio/wav;base64,") {
+		t.Errorf("audio_url url = %q, want inlined data URI", got)
+	}
+
+	// Downstream alignment: collectMediaParts walks the SAME body in
+	// request order. entries[0] (inline) must pair with partsByMod[audio][0]
+	// (the input_audio part) and entries[1] (URL) with partsByMod[audio][1]
+	// (the audio_url part). Any regression that swaps entries here would
+	// break this pairing silently.
+	partsByMod := collectMediaParts(reqCtx.Body)
+	audioParts := partsByMod[ModalityAudio]
+	if got := len(audioParts); got != 2 {
+		t.Fatalf("partsByMod[audio] len = %d, want 2", got)
+	}
+	if _, ok := audioParts[0]["input_audio"].(map[string]any); !ok {
+		t.Errorf("audio parts[0] = %+v, want the input_audio part first", audioParts[0])
+	}
+	if _, ok := audioParts[1]["audio_url"].(map[string]any); !ok {
+		t.Errorf("audio parts[1] = %+v, want the audio_url part second", audioParts[1])
+	}
+}
+
+// TestReplaceMediaURLsStep_MaxEntriesCountsAllModalities pushes max entries
+// past the configured cap by combining one image, one audio, and one video.
+// three total against a cap of 2. Expected: rejected.
+func TestReplaceMediaURLsStep_MaxEntriesCountsAllModalities(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{"max_multimodal_entries": 2})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,/9j/4AAQ"}},
+						map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,UklGRg=="}},
+						map[string]any{"type": "video_url", "video_url": map[string]any{"url": "data:video/mp4;base64,AAAA"}},
+					},
+				},
+			},
+		},
+	}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error when total media parts exceed max_multimodal_entries")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// ---- Per-modality caps and allowlists --------------------------------------
+
+// TestReplaceMediaURLsStep_MaxVideoDownloadSize_OverridesGlobal shows a
+// video payload accepted with max_video_download_size high enough while the
+// same body under max_download_size alone is rejected, exercising the
+// per-modality override path.
+func TestReplaceMediaURLsStep_MaxVideoDownloadSize_OverridesGlobal(t *testing.T) {
+	// 2 MB video payload.
+	payload := make([]byte, 2*1024*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	body := func() *pipeline.RequestContext {
+		return &pipeline.RequestContext{Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "video_url", "video_url": map[string]any{"url": server.URL + "/clip.mp4"}},
+					},
+				},
+			},
+		}}
+	}
+
+	// Rejected under a 1 MB global cap.
+	tight := newLoopbackStep(t, map[string]any{"max_download_size": 1})
+	err := tight.Execute(context.Background(), body())
+	if err == nil || !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest under 1 MB global cap, got %v", err)
+	}
+
+	// Accepted when max_video_download_size raises the video-only cap.
+	loose := newLoopbackStep(t, map[string]any{
+		"max_download_size":       1,
+		"max_video_download_size": 5,
+	})
+	if err := loose.Execute(context.Background(), body()); err != nil {
+		t.Fatalf("expected acceptance under 5 MB video-specific cap, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_MaxAudioDownloadSize_FallsBackToGlobal confirms
+// that when no per-modality override is set, audio downloads honor the
+// global max_download_size.
+func TestReplaceMediaURLsStep_MaxAudioDownloadSize_FallsBackToGlobal(t *testing.T) {
+	payload := make([]byte, 2*1024*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	step := newLoopbackStep(t, map[string]any{"max_download_size": 1})
+	reqCtx := &pipeline.RequestContext{Body: map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": server.URL + "/clip.wav"}},
+				},
+			},
+		},
+	}}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil || !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest when audio has no override and exceeds global cap, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_InputAudio_UsesAudioCap asserts inline input_audio
+// size validation respects max_audio_download_size, not the global cap.
+func TestReplaceMediaURLsStep_InputAudio_UsesAudioCap(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{
+		"max_download_size":       10, // global 10 MB (would allow)
+		"max_audio_download_size": 1,  // audio 1 MB (rejects)
+	})
+	// Base64 length > (4/3) * 1 MB triggers rejection.
+	oversized := strings.Repeat("A", 2*1024*1024)
+	reqCtx := &pipeline.RequestContext{Body: map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": oversized, "format": "wav"}},
+				},
+			},
+		},
+	}}
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil || !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest from audio-cap check, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsInvalidPerModalityCap covers the three
+// per-modality caps' validation: non-positive and megabyte-overflow values
+// must fail step construction rather than silently disabling the cap.
+func TestReplaceMediaURLsStep_RejectsInvalidPerModalityCap(t *testing.T) {
+	tooLarge := (math.MaxInt-1)/config.BytesPerMB + 1
+	for _, tc := range []struct {
+		name  string
+		param map[string]any
+	}{
+		{"max_image_download_size zero", map[string]any{"max_image_download_size": 0}},
+		{"max_audio_download_size negative", map[string]any{"max_audio_download_size": -1}},
+		{"max_video_download_size overflow", map[string]any{"max_video_download_size": tooLarge}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewReplaceMediaURLsStep(nil, tc.param); err == nil {
+				t.Fatalf("expected construction error for %s", tc.name)
+			}
+		})
+	}
+}
+
+// TestReplaceMediaURLsStep_AllowedAudioContentTypes_Overrides swaps in a
+// narrower audio allowlist ({audio/wav}) and asserts (a) audio/wav still
+// passes and (b) audio/mpeg, allowed by the default set, is now rejected.
+func TestReplaceMediaURLsStep_AllowedAudioContentTypes_Overrides(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{
+		"allowed_audio_content_types": []any{"audio/wav"},
+	})
+
+	accept := &pipeline.RequestContext{Body: map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,UklGRg=="}},
+			}},
+		},
+	}}
+	if err := step.Execute(context.Background(), accept); err != nil {
+		t.Fatalf("expected audio/wav accepted under override, got %v", err)
+	}
+
+	reject := &pipeline.RequestContext{Body: map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/mpeg;base64,AAAA"}},
+			}},
+		},
+	}}
+	err := step.Execute(context.Background(), reject)
+	if err == nil || !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected audio/mpeg rejected under audio/wav-only override, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_AllowedImageContentTypes_Overrides mirrors the
+// audio case for the image allowlist: narrowing to {image/png} rejects the
+// default-allowed image/jpeg.
+func TestReplaceMediaURLsStep_AllowedImageContentTypes_Overrides(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{
+		"allowed_image_content_types": []any{"image/png"},
+	})
+	reject := &pipeline.RequestContext{Body: map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,/9j/4AAQ"}},
+			}},
+		},
+	}}
+	err := step.Execute(context.Background(), reject)
+	if err == nil || !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected image/jpeg rejected under image/png-only override, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_AllowedContentTypes_DefaultsWhenUnset confirms
+// that when no per-modality allowlist is configured, the built-in defaults
+// apply, audio/mpeg (a default entry) is accepted.
+func TestReplaceMediaURLsStep_AllowedContentTypes_DefaultsWhenUnset(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{Body: map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/mpeg;base64,AAAA"}},
+			}},
+		},
+	}}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected default audio allowlist to accept audio/mpeg, got %v", err)
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsNonStringAllowedContentType fails
+// construction when a per-modality allowlist entry is not a string. The
+// alternative (silently dropping the bad entry) would be a security
+// downgrade, an operator's intent to lock down the allowlist is lost.
+func TestReplaceMediaURLsStep_RejectsNonStringAllowedContentType(t *testing.T) {
+	_, err := NewReplaceMediaURLsStep(nil, map[string]any{
+		"allowed_audio_content_types": []any{"audio/wav", 42},
+	})
+	if err == nil {
+		t.Fatal("expected construction error for non-string allowlist entry")
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsNonListAllowedContentTypes fails
+// construction when a per-modality allowlist is set to a non-list value.
+func TestReplaceMediaURLsStep_RejectsNonListAllowedContentTypes(t *testing.T) {
+	_, err := NewReplaceMediaURLsStep(nil, map[string]any{
+		"allowed_video_content_types": "video/mp4",
+	})
+	if err == nil {
+		t.Fatal("expected construction error for non-list allowlist value")
+	}
+}
+
+// TestParsePerModalityContentTypes_DoesNotAliasDefaults confirms that a
+// caller mutating the returned per-modality set cannot reach into the
+// package-level defaultAllowedContentTypesByModality: adding an entry to
+// the returned image set must not appear in a fresh call. This protects
+// every subsequent ReplaceMediaURLsStep from picking up leaked overrides.
+func TestParsePerModalityContentTypes_DoesNotAliasDefaults(t *testing.T) {
+	first, err := parsePerModalityContentTypes(nil)
+	if err != nil {
+		t.Fatalf("parsePerModalityContentTypes returned error: %v", err)
+	}
+	const poison = "application/x-poison"
+	first[ModalityImage][poison] = struct{}{}
+
+	second, err := parsePerModalityContentTypes(nil)
+	if err != nil {
+		t.Fatalf("parsePerModalityContentTypes returned error: %v", err)
+	}
+	if _, leaked := second[ModalityImage][poison]; leaked {
+		t.Fatal("mutation of first result reached defaults and leaked into second result")
+	}
+	if _, leaked := defaultAllowedContentTypesByModality[ModalityImage][poison]; leaked {
+		t.Fatal("mutation of first result reached package-level defaults")
 	}
 }

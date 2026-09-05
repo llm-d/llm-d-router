@@ -121,7 +121,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 0, Modality: ModalityImage, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -300,7 +300,7 @@ func TestDecodeStep_Streaming(t *testing.T) {
 		Model:        "test",
 		Stream:       true,
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Index: 0, Modality: ModalityImage, Hash: "h1"},
 		},
 		KVTransferParams: map[string]any{},
 		Body:             map[string]any{"model": "test", "stream": true},
@@ -345,7 +345,7 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 		Model:        "test",
 		Stream:       false,
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Index: 0, Modality: ModalityImage, Hash: "h1"},
 		},
 		KVTransferParams: map[string]any{},
 		Body:             map[string]any{"model": "test", "stream": false},
@@ -444,5 +444,123 @@ func TestDecodeStep_TransportError(t *testing.T) {
 	result := recorder.Result()
 	if result.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected ErrorHandler-written 502, got %d", result.StatusCode)
+	}
+}
+
+// ---- injectUUIDs across audio, video, and input_audio ---------------------
+
+// TestInjectUUIDs_TagsAllMediaParts asserts every recognized media
+// content-part type receives a uuid tag matching its (modality, local index)
+// entry in MultimodalEntries. Non-media parts (text, unknown types) are
+// left alone.
+func TestInjectUUIDs_TagsAllMediaParts(t *testing.T) {
+	step := &DecodeStep{}
+	imagePart := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	audioURLPart := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u-aud"}}
+	inputAudioPart := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "d", "format": "wav"}}
+	videoPart := map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u-vid"}}
+	textPart := map[string]any{"type": "text", "text": "hi"}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": []any{textPart, imagePart, audioURLPart, videoPart, inputAudioPart},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Modality: ModalityImage, Hash: "H-img"},
+			{Index: 1, Modality: ModalityAudio, Hash: "H-aud-url"},
+			{Index: 2, Modality: ModalityVideo, Hash: "H-vid"},
+			{Index: 3, Modality: ModalityAudio, Hash: "H-input-audio"},
+		},
+	}
+	step.injectUUIDs(reqCtx)
+
+	if got := imagePart["uuid"]; got != "H-img" {
+		t.Errorf("image uuid = %v, want H-img", got)
+	}
+	if got := audioURLPart["uuid"]; got != "H-aud-url" {
+		t.Errorf("audio_url uuid = %v, want H-aud-url", got)
+	}
+	if got := inputAudioPart["uuid"]; got != "H-input-audio" {
+		t.Errorf("input_audio uuid = %v, want H-input-audio", got)
+	}
+	if got := videoPart["uuid"]; got != "H-vid" {
+		t.Errorf("video uuid = %v, want H-vid", got)
+	}
+	if _, ok := textPart["uuid"]; ok {
+		t.Errorf("text part must not be tagged: %+v", textPart)
+	}
+}
+
+// TestInjectUUIDs_TagsRepeatedModalityInOrder asserts that two audio parts
+// in the same request receive the hashes of the two audio entries, in
+// walker order.
+func TestInjectUUIDs_TagsRepeatedModalityInOrder(t *testing.T) {
+	step := &DecodeStep{}
+	aud0 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u0"}}
+	aud1 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u1"}}
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{aud0, aud1}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Modality: ModalityAudio, Hash: "H0"},
+			{Index: 1, Modality: ModalityAudio, Hash: "H1"},
+		},
+	}
+	step.injectUUIDs(reqCtx)
+	if got := aud0["uuid"]; got != "H0" {
+		t.Errorf("audio[0] uuid = %v, want H0", got)
+	}
+	if got := aud1["uuid"]; got != "H1" {
+		t.Errorf("audio[1] uuid = %v, want H1", got)
+	}
+}
+
+// TestInjectUUIDs_SkipsMalformedParts asserts that content parts
+// replace_media_urls silently drops (missing/null inner map, non-string
+// url, empty input_audio data) also do not consume a slot here. The one
+// well-formed part of each modality must receive its entry's hash even
+// when a malformed part appears earlier in the same message.
+func TestInjectUUIDs_SkipsMalformedParts(t *testing.T) {
+	step := &DecodeStep{}
+	malformedImg := map[string]any{"type": "image_url", "image_url": map[string]any{"url": nil}}
+	goodImg := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	malformedInputAudio := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "", "format": "wav"}}
+	goodInputAudio := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "AA==", "format": "wav"}}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": []any{malformedImg, goodImg, malformedInputAudio, goodInputAudio},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Modality: ModalityImage, Hash: "H-img"},
+			{Index: 1, Modality: ModalityAudio, Hash: "H-aud"},
+		},
+	}
+	step.injectUUIDs(reqCtx)
+
+	if _, tagged := malformedImg["uuid"]; tagged {
+		t.Errorf("malformed image_url must not be tagged: %+v", malformedImg)
+	}
+	if got := goodImg["uuid"]; got != "H-img" {
+		t.Errorf("good image_url uuid = %v, want H-img", got)
+	}
+	if _, tagged := malformedInputAudio["uuid"]; tagged {
+		t.Errorf("malformed input_audio must not be tagged: %+v", malformedInputAudio)
+	}
+	if got := goodInputAudio["uuid"]; got != "H-aud" {
+		t.Errorf("good input_audio uuid = %v, want H-aud", got)
 	}
 }

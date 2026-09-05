@@ -29,7 +29,15 @@ const (
 	ParamECConnector = "ec_connector"
 )
 
-const ModalityImage = "image"
+// Modality* identify the kind of multimodal payload carried by a
+// MultimodalEntry and are used as the key into per-modality feature maps
+// (mm_hashes, mm_placeholders, kwargs_data). Values mirror EPP's canonical
+// modality enum at pkg/epp/framework/interface/requesthandling/types.go.
+const (
+	ModalityImage = "image"
+	ModalityAudio = "audio"
+	ModalityVideo = "video"
+)
 
 // paramInt reads an integer step parameter. The config decoder may hand a number
 // back as int, int64, float64, or json.Number depending on its source and YAML

@@ -541,8 +541,8 @@ func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
 		t.Fatalf("expected 2 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
 	}
 	want := []pipeline.MultimodalEntry{
-		{Index: 0, Hash: "abc123", KwargsData: "dGVuc29yMA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
-		{Index: 1, Hash: "def456", KwargsData: "dGVuc29yMQ==", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},
+		{Index: 0, Modality: ModalityImage, Hash: "abc123", KwargsData: "dGVuc29yMA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		{Index: 1, Modality: ModalityImage, Hash: "def456", KwargsData: "dGVuc29yMQ==", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},
 	}
 	for i, w := range want {
 		if reqCtx.MultimodalEntries[i] != w {

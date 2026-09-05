@@ -19,9 +19,11 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -617,5 +619,269 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	}
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
+	}
+}
+
+// ---- multimodal encoder fanout ---------------------------------------------
+
+// TestCollectMediaParts_MixedModalities asserts the walker returns per-modality
+// lists of parts in walker order. Order within each modality is the original
+// request's discovery order for that modality.
+func TestCollectMediaParts_MixedModalities(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "describe"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u1"}},
+					map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u2"}},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u3"}},
+					map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u4"}},
+					map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "d5", "format": "wav"}},
+				},
+			},
+		},
+	}
+	partsByMod := collectMediaParts(body)
+	if got := len(partsByMod[ModalityImage]); got != 2 {
+		t.Errorf("image parts = %d, want 2", got)
+	}
+	if got := len(partsByMod[ModalityAudio]); got != 2 {
+		t.Errorf("audio parts = %d, want 2 (audio_url + input_audio)", got)
+	}
+	if got := len(partsByMod[ModalityVideo]); got != 1 {
+		t.Errorf("video parts = %d, want 1", got)
+	}
+	// audio_url comes before input_audio (walker order in request).
+	if url, _ := partsByMod[ModalityAudio][0]["audio_url"].(map[string]any); url["url"] != "u2" {
+		t.Errorf("audio[0] not the audio_url part: %+v", partsByMod[ModalityAudio][0])
+	}
+	if data, _ := partsByMod[ModalityAudio][1]["input_audio"].(map[string]any); data["data"] != "d5" {
+		t.Errorf("audio[1] not the input_audio part: %+v", partsByMod[ModalityAudio][1])
+	}
+}
+
+// TestCollectMediaParts_SkipsMalformedParts asserts that content parts
+// replace_media_urls silently skips (missing/null inner map, non-string
+// url, empty input_audio data) are also skipped here, so per-modality
+// indexing stays aligned with MultimodalEntries. Without this alignment,
+// a valid entry would pair with a malformed part in encode fanout.
+func TestCollectMediaParts_SkipsMalformedParts(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					// malformed: inner map missing -> replace_media_urls skips
+					map[string]any{"type": "image_url"},
+					// malformed: url is nil -> replace_media_urls skips
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": nil}},
+					// well-formed
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-good"}},
+					// malformed audio_url: url is a number
+					map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": 42}},
+					// well-formed audio_url
+					map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "au-good"}},
+					// malformed input_audio: empty data
+					map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "", "format": "wav"}},
+					// malformed input_audio: no inner map
+					map[string]any{"type": "input_audio"},
+					// well-formed input_audio
+					map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "AA==", "format": "wav"}},
+				},
+			},
+		},
+	}
+	partsByMod := collectMediaParts(body)
+	if got := len(partsByMod[ModalityImage]); got != 1 {
+		t.Fatalf("image parts = %d, want 1 (malformed skipped)", got)
+	}
+	if got := len(partsByMod[ModalityAudio]); got != 2 {
+		t.Fatalf("audio parts = %d, want 2 (audio_url + input_audio, malformed skipped)", got)
+	}
+	if url, _ := partsByMod[ModalityImage][0]["image_url"].(map[string]any); url["url"] != "u-good" {
+		t.Errorf("image[0] = %+v, want the well-formed part", partsByMod[ModalityImage][0])
+	}
+	if url, _ := partsByMod[ModalityAudio][0]["audio_url"].(map[string]any); url["url"] != "au-good" {
+		t.Errorf("audio[0] = %+v, want the well-formed audio_url", partsByMod[ModalityAudio][0])
+	}
+	if data, _ := partsByMod[ModalityAudio][1]["input_audio"].(map[string]any); data["data"] != "AA==" {
+		t.Errorf("audio[1] = %+v, want the well-formed input_audio", partsByMod[ModalityAudio][1])
+	}
+}
+
+// TestBuildSingleMediaContent_PerModality asserts each modality's content
+// part is emitted in its native OpenAI shape.
+func TestBuildSingleMediaContent_PerModality(t *testing.T) {
+	partsByMod := map[string][]map[string]any{
+		ModalityImage: {
+			{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,IMG"}},
+		},
+		ModalityAudio: {
+			{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,AUD"}},
+			{"type": "input_audio", "input_audio": map[string]any{"data": "IA==", "format": "wav"}},
+		},
+		ModalityVideo: {
+			{"type": "video_url", "video_url": map[string]any{"url": "data:video/mp4;base64,VID"}},
+		},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		modality string
+		localIdx int
+		wantType string
+		wantKey  string
+	}{
+		{"image", ModalityImage, 0, "image_url", "image_url"},
+		{"audio_url", ModalityAudio, 0, "audio_url", "audio_url"},
+		{"input_audio", ModalityAudio, 1, "input_audio", "input_audio"},
+		{"video_url", ModalityVideo, 0, "video_url", "video_url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildSingleMediaContent(partsByMod, tc.modality, tc.localIdx)
+			if got["type"] != tc.wantType {
+				t.Errorf("type = %v, want %q", got["type"], tc.wantType)
+			}
+			if _, ok := got[tc.wantKey]; !ok {
+				t.Errorf("inner key %q missing: %+v", tc.wantKey, got)
+			}
+		})
+	}
+}
+
+// TestBuildSingleMediaContent_OutOfRangeFallback asserts a bug-safe empty
+// URL part of the matching modality is returned when localIdx is out of
+// range. The path is not expected to run under correct entry<->part
+// pairing; the fallback must at least keep the emitted sub-request
+// self-consistent (audio entry -> audio part shape).
+func TestBuildSingleMediaContent_OutOfRangeFallback(t *testing.T) {
+	partsByMod := map[string][]map[string]any{
+		ModalityImage: {
+			{"type": "image_url", "image_url": map[string]any{"url": "u0"}},
+		},
+	}
+	for _, tc := range []struct {
+		name     string
+		modality string
+		wantType string
+	}{
+		{"image", ModalityImage, imageURLPartType},
+		{"audio", ModalityAudio, audioURLPartType},
+		{"video", ModalityVideo, videoURLPartType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 99 is out of range for every modality in partsByMod, so the
+			// fallback path runs regardless of which modality is under test.
+			got := buildSingleMediaContent(partsByMod, tc.modality, 99)
+			if got["type"] != tc.wantType {
+				t.Errorf("type = %v, want %q", got["type"], tc.wantType)
+			}
+			inner, ok := got[tc.wantType].(map[string]any)
+			if !ok {
+				t.Fatalf("inner key %q missing or wrong type: %+v", tc.wantType, got)
+			}
+			if inner["url"] != "" {
+				t.Errorf("fallback url = %v, want empty", inner["url"])
+			}
+		})
+	}
+}
+
+// TestEncodeStep_MixedModalityFanout drives the full encode step with a
+// mixed-modality request. Each entry produces one fanout sub-request; each
+// sub-request carries the correct modality-keyed feature map and the
+// matching content part in messages[0].content.
+func TestEncodeStep_MixedModalityFanout(t *testing.T) {
+	var seq atomic.Int32
+	captured := make(map[string]map[string]any) // request-body seq -> parsed body
+	var mu sync.Mutex
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read encoder body: %v", err)
+		}
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		i := int(seq.Add(1) - 1)
+		mu.Lock()
+		captured[fmt.Sprintf("req-%d", i)] = parsed
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}]}`))
+	}))
+	defer encoderBackend.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: encoderBackend.URL})
+	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
+		"use_openai_format": true,
+	})
+	if err != nil {
+		t.Fatalf("NewEncodeStep: %v", err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "mixed-fanout",
+		Model:        "llama-3",
+		OriginalPath: gateway.PathChatCompletions,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":  "llama-3",
+			"stream": false,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,IMG"}},
+						map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,AUD"}},
+						map[string]any{"type": "video_url", "video_url": map[string]any{"url": "data:video/mp4;base64,VID"}},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Modality: ModalityImage, Hash: "img-hash", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Modality: ModalityAudio, Hash: "aud-hash", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Index: 2, Modality: ModalityVideo, Hash: "vid-hash", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	if seq.Load() != 3 {
+		t.Fatalf("expected 3 fanout requests, got %d", seq.Load())
+	}
+	// Collect the modality keys we saw across the three requests, one per
+	// entry, keyed by its modality.
+	sawKeys := map[string]bool{}
+	sawTypes := map[string]bool{}
+	for _, body := range captured {
+		tokens, _ := body["tokens"].(map[string]any)
+		features, _ := tokens["features"].(map[string]any)
+		hashes, _ := features["mm_hashes"].(map[string]any)
+		for k := range hashes {
+			sawKeys[k] = true
+		}
+		msgs, _ := body["messages"].([]any)
+		content, _ := msgs[0].(map[string]any)["content"].([]any)
+		if part, ok := content[0].(map[string]any); ok {
+			if pt, ok := part["type"].(string); ok {
+				sawTypes[pt] = true
+			}
+		}
+	}
+	for _, m := range []string{ModalityImage, ModalityAudio, ModalityVideo} {
+		if !sawKeys[m] {
+			t.Errorf("no fanout request carried mm_hashes[%q]", m)
+		}
+	}
+	for _, pt := range []string{"image_url", "audio_url", "video_url"} {
+		if !sawTypes[pt] {
+			t.Errorf("no fanout content used type=%q", pt)
+		}
 	}
 }

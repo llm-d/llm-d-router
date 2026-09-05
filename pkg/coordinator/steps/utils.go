@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 
 	"github.com/go-logr/logr"
 
@@ -110,46 +111,65 @@ func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
 // and optionally kwargs_data) from the request's multimodal entries. It returns
-// nil when there are no entries.
+// nil when there are no entries. Entries are grouped by Modality so a
+// mixed-modality request produces one key per modality in each feature map.
 func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map[string]any {
 	if len(entries) == 0 {
 		return nil
 	}
-	hashes := make([]string, len(entries))
-	placeholders := make([]any, len(entries))
-	kwargs := make([]string, len(entries))
-	for i, entry := range entries {
-		hashes[i] = entry.Hash
-		placeholders[i] = map[string]any{
+	hashesByMod := make(map[string][]string)
+	placeholdersByMod := make(map[string][]any)
+	kwargsByMod := make(map[string][]any)
+	for _, entry := range entries {
+		mod := entryModality(entry)
+		hashesByMod[mod] = append(hashesByMod[mod], entry.Hash)
+		placeholdersByMod[mod] = append(placeholdersByMod[mod], map[string]any{
 			"offset": entry.Placeholder.Offset,
 			"length": entry.Placeholder.Length,
-		}
-		kwargs[i] = entry.KwargsData
+		})
+		kwargsByMod[mod] = append(kwargsByMod[mod], kwargsSentinel(entry.KwargsData))
 	}
 	features := map[string]any{
-		"mm_hashes":       map[string][]string{ModalityImage: hashes},
-		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
+		"mm_hashes":       hashesByMod,
+		"mm_placeholders": placeholdersByMod,
 	}
 	if includeKwargs {
-		features["kwargs_data"] = mmKwargsField(kwargs)
+		features["kwargs_data"] = kwargsByMod
 	}
 	return features
 }
 
-// mmKwargsField builds the kwargs_data feature value from per-entry KwargsData
-// strings. The empty string is our internal "resolve from cache" sentinel and
-// MUST serialize as JSON null, not "": vLLM treats null (or an absent field) as
-// a cache-hit item to fetch from the encoder cache by hash, whereas "" is decoded
-// as an inline tensor and fails with "Input data was truncated". Non-empty entries
-// are the base64 tensor blobs and are forwarded verbatim.
-func mmKwargsField(kwargs []string) map[string][]any {
-	items := make([]any, len(kwargs))
-	for i, k := range kwargs {
-		if k != "" {
-			items[i] = k
-		}
+// entryModality returns the entry's Modality with an empty-string fallback
+// to ModalityImage. All production entry producers (replace_media_urls,
+// extractMultimodalEntries) set Modality explicitly; the fallback exists so
+// callers constructing entries directly (mostly test fixtures predating the
+// Modality field) do not silently produce a "" modality key.
+func entryModality(entry pipeline.MultimodalEntry) string {
+	if entry.Modality == "" {
+		return ModalityImage
 	}
-	return map[string][]any{ModalityImage: items}
+	return entry.Modality
+}
+
+// kwargsSentinel implements the JSON-null "resolve from cache" convention for
+// a single kwargs_data slot. The empty string is our internal "resolve from
+// cache" sentinel and MUST serialize as JSON null, not "": vLLM treats null
+// (or an absent field) as a cache-hit item to fetch from the encoder cache by
+// hash, whereas "" is decoded as an inline tensor and fails with "Input data
+// was truncated". Non-empty entries are the base64 tensor blobs and are
+// forwarded verbatim.
+func kwargsSentinel(k string) any {
+	if k == "" {
+		return nil
+	}
+	return k
+}
+
+// singleEntryKwargs builds a kwargs_data feature value for a single-entry
+// encode fanout request. Used by encode.buildEncodeBody where each fanout
+// sub-request carries exactly one entry's kwargs under its modality key.
+func singleEntryKwargs(modality, kwargs string) map[string][]any {
+	return map[string][]any{modality: {kwargsSentinel(kwargs)}}
 }
 
 // setGenerateTransferParams nests the kv/ec transfer params under
@@ -250,12 +270,13 @@ func extractTokenIDs(raw any) ([]int, error) {
 	return toIntSlice(arr)
 }
 
-// mmImageArray reads features[field][ModalityImage] as a JSON array. present is
-// false when field or its image entry is absent or null, a valid "no such
-// modality" state rather than an error. A present value of the wrong type
-// (field not an object, or the image entry not an array) is ErrBadRequest, so a
-// malformed request fails loudly instead of being silently coerced to absent.
-func mmImageArray(features map[string]any, field string) (arr []any, present bool, err error) {
+// mmModalityArray reads features[field][modality] as a JSON array. present is
+// false when field or its per-modality entry is absent or null, a valid
+// "no such modality" state rather than an error. A present value of the wrong
+// type (field not an object, or the modality entry not an array) is
+// ErrBadRequest, so a malformed request fails loudly instead of being silently
+// coerced to absent.
+func mmModalityArray(features map[string]any, field, modality string) (arr []any, present bool, err error) {
 	rawField, ok := features[field]
 	if !ok || rawField == nil {
 		return nil, false, nil
@@ -264,117 +285,156 @@ func mmImageArray(features map[string]any, field string) (arr []any, present boo
 	if !ok {
 		return nil, false, fmt.Errorf("%s must be an object: %w", field, pipeline.ErrBadRequest)
 	}
-	rawImage, ok := m[ModalityImage]
-	if !ok || rawImage == nil {
+	raw, ok := m[modality]
+	if !ok || raw == nil {
 		return nil, false, nil
 	}
-	arr, ok = rawImage.([]any)
+	arr, ok = raw.([]any)
 	if !ok {
-		return nil, false, fmt.Errorf("%s[%s] must be an array: %w", field, ModalityImage, pipeline.ErrBadRequest)
+		return nil, false, fmt.Errorf("%s[%s] must be an array: %w", field, modality, pipeline.ErrBadRequest)
 	}
 	return arr, true, nil
 }
 
+// modalitiesInFeatures returns the sorted set of modality keys present in
+// features[field]. Sorting keeps entry ordering deterministic across map
+// iteration for tests and for downstream consumers that rely on a stable
+// order. Returns (nil, nil) when features[field] is absent or an empty
+// object, (nil, ErrBadRequest) when features[field] is present but not an
+// object (fail-loud on malformed responses).
+func modalitiesInFeatures(features map[string]any, field string) ([]string, error) {
+	raw, ok := features[field]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an object: %w", field, pipeline.ErrBadRequest)
+	}
+	var out []string
+	for k, v := range m {
+		if v == nil {
+			continue
+		}
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // extractMultimodalEntries builds []pipeline.MultimodalEntry from the parallel
-// slices in a generate-format features map. Returns nil when features is nil or
-// mm_hashes.image is absent or empty (text-only request).
+// slices in a generate-format features map. Every modality key present under
+// mm_hashes produces a run of entries in the returned slice; modalities are
+// visited in sorted order for determinism. Returns nil when features is nil or
+// mm_hashes carries no items (text-only request).
 //
-// mm_hashes and mm_placeholders are required and must be the same length.
-// kwargs_data is optional: an absent field means every item resolves from the
-// encoder cache by hash (a cache-hit request), so each entry's KwargsData is "".
-// When present, kwargs_data must be parallel to mm_hashes, but an individual
-// item may be null (a cache hit within a mixed batch), which maps to "".
+// Per-modality invariants:
+//   - mm_hashes and mm_placeholders are required and must be the same length.
+//   - kwargs_data is optional: an absent field means every item resolves from
+//     the encoder cache by hash, so each entry's KwargsData is "". When
+//     present, kwargs_data must be parallel to mm_hashes, but an individual
+//     item may be null (a cache hit within a mixed batch), which maps to "".
 //
-// Returns ErrBadRequest when a present field has the wrong type, required slices
-// have different lengths, or any element has an unexpected type.
+// Returns ErrBadRequest when a present field has the wrong type, the
+// per-modality slices have different lengths, or any element has an unexpected
+// type.
 func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEntry, error) {
 	if features == nil {
 		return nil, nil
 	}
-	rawHashes, _, err := mmImageArray(features, "mm_hashes")
+	modalities, err := modalitiesInFeatures(features, "mm_hashes")
 	if err != nil {
 		return nil, err
 	}
-	// mmImageArray returns a nil slice whenever the field is absent, so the
-	// length check subsumes the presence check here.
-	if len(rawHashes) == 0 {
+	if len(modalities) == 0 {
 		return nil, nil
 	}
 
-	rawPlaceholders, present, err := mmImageArray(features, "mm_placeholders")
-	if err != nil {
-		return nil, err
-	}
-	if !present {
-		return nil, fmt.Errorf("mm_placeholders[%s] is required when mm_hashes[%s] is set: %w",
-			ModalityImage, ModalityImage, pipeline.ErrBadRequest)
-	}
-
-	rawKwargs, hasKwargs, err := mmImageArray(features, "kwargs_data")
-	if err != nil {
-		return nil, err
-	}
-
-	n := len(rawHashes)
-	if len(rawPlaceholders) != n {
-		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_placeholders has %d: %w",
-			n, len(rawPlaceholders), pipeline.ErrBadRequest)
-	}
-	// When present, kwargs_data is parallel to mm_hashes: full length with null
-	// placeholders for cached items, never a shortened list. The whole field is
-	// absent for metadata-only (cache-hit) requests.
-	if hasKwargs && len(rawKwargs) != n {
-		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, kwargs_data has %d: %w",
-			n, len(rawKwargs), pipeline.ErrBadRequest)
-	}
-
-	entries := make([]pipeline.MultimodalEntry, n)
-	for i := range entries {
-		hash, ok := rawHashes[i].(string)
-		if !ok {
-			return nil, fmt.Errorf("mm_hashes[%d] must be a string: %w", i, pipeline.ErrBadRequest)
-		}
-
-		pMap, ok := rawPlaceholders[i].(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("mm_placeholders[%d] must be an object: %w", i, pipeline.ErrBadRequest)
-		}
-		// The non-negative guarantee here is load-bearing, not just input
-		// hygiene. EncodeStep.buildEncodeTokenIDs indexes fullTokenIDs[offset]
-		// (guarded only on the upper bound) and allocates make([]int, 1+length);
-		// a negative offset or length panics there. vLLM's own schema declares
-		// these as plain ints and accepts negatives, so this stays stricter
-		// deliberately. Do not relax it to a plain int parse.
-		offset, err := anyToNonNegativeInt(pMap["offset"])
+	var entries []pipeline.MultimodalEntry
+	for _, mod := range modalities {
+		rawHashes, _, err := mmModalityArray(features, "mm_hashes", mod)
 		if err != nil {
-			return nil, fmt.Errorf("mm_placeholders[%d].offset: %v: %w", i, err, pipeline.ErrBadRequest)
+			return nil, err
 		}
-		length, err := anyToNonNegativeInt(pMap["length"])
-		if err != nil {
-			return nil, fmt.Errorf("mm_placeholders[%d].length: %v: %w", i, err, pipeline.ErrBadRequest)
+		if len(rawHashes) == 0 {
+			continue
 		}
 
-		// Empty KwargsData is the sentinel for "resolve from cache": either the
-		// whole kwargs_data field is absent or this item is null.
-		var kwarg string
-		if hasKwargs {
-			switch k := rawKwargs[i].(type) {
-			case string:
-				kwarg = k
-			case nil:
-			default:
-				return nil, fmt.Errorf("kwargs_data[%d] must be a string or null: %w", i, pipeline.ErrBadRequest)
+		rawPlaceholders, present, err := mmModalityArray(features, "mm_placeholders", mod)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, fmt.Errorf("mm_placeholders[%s] is required when mm_hashes[%s] is set: %w",
+				mod, mod, pipeline.ErrBadRequest)
+		}
+
+		rawKwargs, hasKwargs, err := mmModalityArray(features, "kwargs_data", mod)
+		if err != nil {
+			return nil, err
+		}
+
+		n := len(rawHashes)
+		if len(rawPlaceholders) != n {
+			return nil, fmt.Errorf("features length mismatch for %s: mm_hashes has %d, mm_placeholders has %d: %w",
+				mod, n, len(rawPlaceholders), pipeline.ErrBadRequest)
+		}
+		// When present, kwargs_data is parallel to mm_hashes: full length with null
+		// placeholders for cached items, never a shortened list. The whole field is
+		// absent for metadata-only (cache-hit) requests.
+		if hasKwargs && len(rawKwargs) != n {
+			return nil, fmt.Errorf("features length mismatch for %s: mm_hashes has %d, kwargs_data has %d: %w",
+				mod, n, len(rawKwargs), pipeline.ErrBadRequest)
+		}
+
+		for i := 0; i < n; i++ {
+			hash, ok := rawHashes[i].(string)
+			if !ok {
+				return nil, fmt.Errorf("mm_hashes[%s][%d] must be a string: %w", mod, i, pipeline.ErrBadRequest)
 			}
-		}
 
-		entries[i] = pipeline.MultimodalEntry{
-			Index:      i,
-			Hash:       hash,
-			KwargsData: kwarg,
-			Placeholder: pipeline.PlaceholderRange{
-				Offset: offset,
-				Length: length,
-			},
+			pMap, ok := rawPlaceholders[i].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("mm_placeholders[%s][%d] must be an object: %w", mod, i, pipeline.ErrBadRequest)
+			}
+			// The non-negative guarantee here is load-bearing, not just input
+			// hygiene. EncodeStep.buildEncodeTokenIDs indexes fullTokenIDs[offset]
+			// (guarded only on the upper bound) and allocates make([]int, 1+length);
+			// a negative offset or length panics there. vLLM's own schema declares
+			// these as plain ints and accepts negatives, so this stays stricter
+			// deliberately. Do not relax it to a plain int parse.
+			offset, err := anyToNonNegativeInt(pMap["offset"])
+			if err != nil {
+				return nil, fmt.Errorf("mm_placeholders[%s][%d].offset: %v: %w", mod, i, err, pipeline.ErrBadRequest)
+			}
+			length, err := anyToNonNegativeInt(pMap["length"])
+			if err != nil {
+				return nil, fmt.Errorf("mm_placeholders[%s][%d].length: %v: %w", mod, i, err, pipeline.ErrBadRequest)
+			}
+
+			// Empty KwargsData is the sentinel for "resolve from cache": either the
+			// whole kwargs_data field is absent or this item is null.
+			var kwarg string
+			if hasKwargs {
+				switch k := rawKwargs[i].(type) {
+				case string:
+					kwarg = k
+				case nil:
+				default:
+					return nil, fmt.Errorf("kwargs_data[%s][%d] must be a string or null: %w", mod, i, pipeline.ErrBadRequest)
+				}
+			}
+
+			entries = append(entries, pipeline.MultimodalEntry{
+				Index:      len(entries),
+				Modality:   mod,
+				Hash:       hash,
+				KwargsData: kwarg,
+				Placeholder: pipeline.PlaceholderRange{
+					Offset: offset,
+					Length: length,
+				},
+			})
 		}
 	}
 	return entries, nil
