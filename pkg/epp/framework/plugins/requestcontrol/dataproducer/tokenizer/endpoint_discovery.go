@@ -49,6 +49,8 @@ type endpointPortRule struct {
 
 type endpointDiscoveryConfig struct {
 	LoadBalancer *loadBalancerConfig `json:"loadBalancer,omitempty"`
+	// AttemptTimeout optionally caps each HTTP attempt within the request timeout.
+	AttemptTimeout string `json:"attemptTimeout,omitempty"`
 	// PortRules resolve render ports as BasePort + RankIndex. An empty list uses
 	// the inference port published by discovery.
 	PortRules []endpointPortRule `json:"portRules,omitempty"`
@@ -71,7 +73,6 @@ type renderEndpointPicker interface {
 type retryingRenderEndpointPicker interface {
 	renderEndpointPicker
 	PickExcluding(excluded map[string]struct{}) (string, error)
-	HasAlternative(endpoint string) bool
 }
 
 // fixedEndpointPicker always returns the statically configured render URL.
@@ -82,9 +83,9 @@ func (p fixedEndpointPicker) Pick() (string, error) {
 	return string(p), nil
 }
 
-// endpointLoadBalancer selects from the current discovered endpoint snapshot.
+// endpointLoadBalancer selects a non-excluded URL from the full endpoint snapshot.
 type endpointLoadBalancer interface {
-	Pick(endpoints []string) (string, error)
+	Pick(endpoints []string, excluded map[string]struct{}) (string, error)
 }
 
 type endpointLoadBalancerFactory func() endpointLoadBalancer
@@ -110,7 +111,7 @@ type roundRobinLoadBalancer struct {
 }
 
 // Pick returns the next endpoint and advances the concurrency-safe cursor.
-func (b *roundRobinLoadBalancer) Pick(endpoints []string) (string, error) {
+func (b *roundRobinLoadBalancer) Pick(endpoints []string, excluded map[string]struct{}) (string, error) {
 	if len(endpoints) == 0 {
 		return "", errNoRenderEndpoints
 	}
@@ -120,9 +121,15 @@ func (b *roundRobinLoadBalancer) Pick(endpoints []string) (string, error) {
 	if b.next >= len(endpoints) {
 		b.next = 0
 	}
-	endpoint := endpoints[b.next]
-	b.next = (b.next + 1) % len(endpoints)
-	return endpoint, nil
+	// Advance across the full snapshot so retry exclusions cannot shift the cursor.
+	for range endpoints {
+		endpoint := endpoints[b.next]
+		b.next = (b.next + 1) % len(endpoints)
+		if _, skip := excluded[endpoint]; !skip {
+			return endpoint, nil
+		}
+	}
+	return "", errNoRenderEndpoints
 }
 
 // compiledEndpointPortRule holds a validated selector and base port.
@@ -168,31 +175,10 @@ func (p *discoveredEndpointPicker) PickExcluding(excluded map[string]struct{}) (
 	endpoints := append([]string(nil), p.ordered...)
 	p.mu.RUnlock()
 
-	if len(excluded) > 0 {
-		available := endpoints[:0]
-		for _, endpoint := range endpoints {
-			if _, found := excluded[endpoint]; !found {
-				available = append(available, endpoint)
-			}
-		}
-		endpoints = available
-	}
 	if len(endpoints) == 0 {
 		return "", errNoRenderEndpoints
 	}
-	return p.loadBalancer.Pick(endpoints)
-}
-
-// HasAlternative reports whether reserving time for a retry can reach another URL.
-func (p *discoveredEndpointPicker) HasAlternative(endpoint string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, candidate := range p.ordered {
-		if candidate != endpoint {
-			return true
-		}
-	}
-	return false
+	return p.loadBalancer.Pick(endpoints, excluded)
 }
 
 // Upsert validates endpoint metadata and stores its HTTP render URL by identity.
