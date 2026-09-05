@@ -426,8 +426,13 @@ func TestPriorityQueue_InternalProperty(t *testing.T) {
 	}
 }
 
-// assertHeapProperty checks that the slice satisfies the (max-by-policy) heap property: no child may
+// assertHeapProperty checks that the slice satisfies the (max-by-comparator) heap property: no child may
 // outrank its parent, and every item's tracked index must match its slice position.
+//
+// The check goes through the heap's own comparator rather than the policy's Less. In static mode the two are
+// equivalent, since itemHeap.Less delegates straight to the policy. In scoring mode they are not: the heap
+// compares cached scores while the policy compares live ones, so a score mutated without a generation bump
+// makes them disagree by design, and the cached ordering is the invariant under test.
 func assertHeapProperty(t *testing.T, q *priorityQueue, msgAndArgs ...any) {
 	t.Helper()
 	items := q.heap.items
@@ -438,9 +443,9 @@ func assertHeapProperty(t *testing.T, q *priorityQueue, msgAndArgs ...any) {
 			if child >= len(items) {
 				continue
 			}
-			// policy.Less(a, b) == true means 'a' has higher priority than 'b'. A child must never
-			// outrank its parent.
-			require.False(t, q.heap.policy.Less(items[child].item, items[i].item),
+			// Less(a, b) == true means 'a' has higher priority than 'b'. A child must never outrank its
+			// parent.
+			require.False(t, q.heap.Less(child, i),
 				"child %d must not outrank parent %d. %v", child, i, msgAndArgs)
 		}
 	}
