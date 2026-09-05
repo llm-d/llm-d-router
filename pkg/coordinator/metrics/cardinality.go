@@ -40,3 +40,35 @@ func boundModel(modelName string) string {
 	}
 	return modelLabelLimiter.Bound(modelName)
 }
+
+// boundRoute maps a coordinator route name onto the closed set used as the
+// orchestration_overhead_seconds route label. Anything else becomes
+// RouteUnknown so a raw path cannot expand the time series set.
+func boundRoute(route string) string {
+	switch route {
+	case RouteChatCompletions, RouteCompletions, RouteGenerate:
+		return route
+	default:
+		return RouteUnknown
+	}
+}
+
+// boundMediaType maps a media-type name onto the closed set used as the
+// media_items label. Unknown values collapse to MediaTypeOther.
+func boundMediaType(mediaType string) string {
+	if mediaType == MediaTypeImage {
+		return MediaTypeImage
+	}
+	return MediaTypeOther
+}
+
+// boundDownloadResult maps a download outcome onto the closed set used as
+// the media_download_duration_seconds result label.
+func boundDownloadResult(result string) string {
+	switch result {
+	case DownloadResultSuccess, DownloadResultError, DownloadResultCancelled:
+		return result
+	default:
+		return DownloadResultError
+	}
+}

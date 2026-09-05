@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -97,4 +98,17 @@ func TestClassifyErrorCode_NilOptionsSafe(t *testing.T) {
 	// A caller who forgets to wire options gets "internal" for every error
 	// rather than a nil-pointer panic.
 	require.Equal(t, ErrorCodeInternal, ClassifyErrorCode(errors.New("boom"), ClassifyOptions{}))
+}
+
+func TestClassifyDownloadResult(t *testing.T) {
+	ctx := context.Background()
+	require.Equal(t, DownloadResultSuccess, ClassifyDownloadResult(ctx, nil))
+	require.Equal(t, DownloadResultError, ClassifyDownloadResult(ctx, errors.New("500")))
+	require.Equal(t, DownloadResultError, ClassifyDownloadResult(ctx, context.DeadlineExceeded))
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Equal(t, DownloadResultCancelled, ClassifyDownloadResult(canceled, context.Canceled))
+	require.Equal(t, DownloadResultCancelled, ClassifyDownloadResult(ctx, context.Canceled))
+	require.Equal(t, DownloadResultCancelled, ClassifyDownloadResult(canceled, errors.New("dial")))
 }
