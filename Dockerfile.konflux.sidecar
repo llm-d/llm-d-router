@@ -1,0 +1,45 @@
+FROM registry.access.redhat.com/ubi9/go-toolset:1.26.5@sha256:91d07f2b7f402fe2379fd62eb2fff975c814a595e2ff2988fd7c580568f5f90c AS builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG COMMIT_SHA=unknown
+ARG BUILD_REF
+
+USER root
+WORKDIR /workspace
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# Download dependencies - this layer is cached as long as go.mod/go.sum are unchanged
+RUN go mod download
+
+# Copy the go source
+COPY cmd/pd-sidecar/main.go cmd/cmd.go
+COPY pkg/sidecar pkg/sidecar
+COPY pkg/common pkg/common
+COPY version version
+
+# Build
+# the GOARCH has not a default value to allow the binary be built according to the host where the command
+# was called. For example, if we call make image-build in a local env which has the Apple Silicon M1 SO
+# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
+# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+ENV CGO_ENABLED=1
+ENV GOOS=${TARGETOS:-linux}
+ENV GOARCH=${TARGETARCH}
+RUN go build -a -tags strictfipsruntime -o bin/pd-sidecar \
+       -ldflags="-X github.com/llm-d/llm-d-router/pkg/sidecar/version.CommitSHA=${COMMIT_SHA} -X github.com/llm-d/llm-d-router/pkg/sidecar/version.BuildRef=${BUILD_REF}" \
+       cmd/cmd.go
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.7@sha256:d91be7cea9f03a757d69ad7fcdfcd7849dba820110e7980d5e2a1f46ed06ea3b
+WORKDIR /
+COPY --from=builder /workspace/bin/pd-sidecar /app/pd-sidecar
+USER 65532:65532
+
+ENTRYPOINT ["/app/pd-sidecar"]
+
+LABEL com.redhat.component="odh-llm-d-routing-sidecar" \
+      name="odh-llm-d-routing-sidecar" \
+      description="odh-llm-d-routing-sidecar" \
+      summary="odh-llm-d-routing-sidecar" \
+      io.k8s.display-name="odh-llm-d-routing-sidecar" \
+      io.k8s.description="odh-llm-d-routing-sidecar"

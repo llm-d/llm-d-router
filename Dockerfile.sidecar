@@ -5,7 +5,7 @@
 #   COPY --from=builder /etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/ca-bundle.crt
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 
-# Build Stage: using Go 1.26.6 image
+# Build Stage: using Go 1.26.7 image
 FROM --platform=${BUILDPLATFORM} golang:1.26.7 AS builder
 ARG TARGETOS
 ARG TARGETARCH

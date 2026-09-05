@@ -40,47 +40,62 @@ func TestCustomLevelEncoder(t *testing.T) {
 		{
 			name:     "Standard Info (0)",
 			level:    zapcore.InfoLevel, // 0
-			expected: "info",
+			expected: "INFO",
 		},
 		{
 			name:     "Standard Warn (1)",
 			level:    zapcore.WarnLevel, // 1
-			expected: "warn",
+			expected: "WARN",
 		},
 		{
 			name:     "Standard Error (2)",
 			level:    zapcore.ErrorLevel, // 2
-			expected: "error",
+			expected: "ERROR",
+		},
+		{
+			name:     "DPanic (3)",
+			level:    zapcore.DPanicLevel,
+			expected: "DPANIC",
+		},
+		{
+			name:     "Panic (4)",
+			level:    zapcore.PanicLevel,
+			expected: "PANIC",
+		},
+		{
+			name:     "Fatal (5)",
+			level:    zapcore.FatalLevel,
+			expected: "FATAL",
 		},
 		{
 			name:     "V(1) (-1)",
 			level:    zapcore.Level(-1),
-			expected: "info",
+			expected: "INFO",
 		},
 		{
 			name:     "V(2) Default (-2)",
 			level:    zapcore.Level(-2),
-			expected: "info",
+			expected: "INFO",
 		},
 		{
 			name:     "Verbose (-3)",
 			level:    zapcore.Level(-3),
-			expected: "info",
+			expected: "INFO",
 		},
 		{
 			name:     "Debug (-4)",
 			level:    zapcore.Level(-4),
-			expected: "debug",
+			expected: "DEBUG",
 		},
 		{
 			name:     "Trace (-5)",
 			level:    zapcore.Level(-5),
-			expected: "trace",
+			expected: "TRACE",
 		},
 		{
 			name:     "Extremely Verbose (-6)",
 			level:    zapcore.Level(-6),
-			expected: "trace",
+			expected: "TRACE",
 		},
 	}
 

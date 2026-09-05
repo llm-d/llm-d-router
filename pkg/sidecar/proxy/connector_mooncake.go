@@ -106,7 +106,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", "body", string(prefillBody))
+		trace.Info("Prefill request", "http_body", string(prefillBody))
 	}
 
 	// Build decode request body
@@ -131,7 +131,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	}
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Decode request", "body", string(decodeBody))
+		trace.Info("Decode request", "http_body", string(decodeBody))
 	}
 
 	s.handleMooncakeConcurrentRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, dpRank)
