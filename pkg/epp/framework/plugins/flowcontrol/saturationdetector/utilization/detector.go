@@ -64,7 +64,14 @@ func UtilizationDetectorFactory(
 	if err != nil {
 		return nil, err
 	}
-	return NewDetector(name, *cfg, log.FromContext(handle.Context())), nil
+	logger := log.FromContext(handle.Context())
+	if refresh := handle.RefreshMetricsInterval(); refresh > cfg.MetricsStalenessThreshold {
+		logger.Info("Warning: refresh-metrics-interval exceeds metricsStalenessThreshold; "+
+			"metrics will be stale between polls",
+			"refreshMetricsInterval", refresh.String(),
+			"metricsStalenessThreshold", cfg.MetricsStalenessThreshold.String())
+	}
+	return NewDetector(name, *cfg, logger), nil
 }
 
 var (
