@@ -1,0 +1,23 @@
+# EPP configuration for multimodal inference pools.
+#
+# Adds the modality-filter plugin, which reads the request path and drops
+# endpoints whose llm-d.ai/model-arch label is incompatible with the
+# requested modality (see pkg/common/multimodal.go for the path-to-arch
+# mapping). Requests to paths not in the mapping pass all endpoints through
+# unchanged, so text-only pools sharing this config are unaffected.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: modality-filter
+- type: prefix-cache-scorer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: modality-filter
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
