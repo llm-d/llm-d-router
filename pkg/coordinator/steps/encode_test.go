@@ -144,6 +144,56 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	}
 }
 
+func TestEncodeStep_ResponseHeadersConstrainRemainingFanOut(t *testing.T) {
+	const expectedRevision = "revision-b"
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requestCount.Add(1)
+		if requestNumber == 1 {
+			if got := r.Header.Get("X-LLM-D-Disagg-Revision"); got != "" {
+				t.Errorf("first encode revision = %q, want empty", got)
+			}
+			w.Header().Set("X-LLM-D-Disagg-Revision", expectedRevision)
+		} else {
+			if got := r.Header.Get("X-LLM-D-Disagg-Revision"); got != expectedRevision {
+				t.Errorf("encode request %d revision = %q, want %q", requestNumber, got, expectedRevision)
+			}
+			w.Header().Set("X-LLM-D-Disagg-Revision", expectedRevision)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-revision",
+		Model:     testModelName,
+		TokenIDs:  []int{1, 32000, 32000, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Index: 2, Hash: "h3", KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+		},
+	}
+
+	p, err := pipeline.NewWithForwardResponseHeaders([]pipeline.Step{step}, []string{"X-LLM-D-Disagg-Revision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	if got := reqCtx.ForwardedHeaders()["x-llm-d-disagg-revision"]; got != expectedRevision {
+		t.Fatalf("forwarded revision = %q, want %q", got, expectedRevision)
+	}
+}
+
 // TestEncodeStep_SkipsInvalidECTransferParams verifies that an encoder
 // response whose ec_transfer_params is present but unusable (non-object,
 // explicit null, or empty object) is skipped rather than failing the encode,

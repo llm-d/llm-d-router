@@ -99,6 +99,15 @@ pipeline:
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
 
+  # Carries selected response headers from each upstream phase into every
+  # later phase. Only listed headers are forwarded. This allows EPP-stamped
+  # scheduling metadata to constrain all roles in a disaggregated pipeline.
+  # Client-supplied values for listed headers are discarded until an upstream
+  # phase returns a replacement value.
+  # forward_response_headers:
+  #   - x-llm-d-disagg-revision
+  #   - x-disagg-slice
+
   steps:
     # -------------------------------------------------------------------
     # replace-media-urls: first step. Downloads any http(s) image_url

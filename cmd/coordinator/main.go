@@ -109,7 +109,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := pipeline.New(steps)
+	p, err := pipeline.NewWithForwardResponseHeaders(steps, cfg.Pipeline.ForwardResponseHeaders)
+	if err != nil {
+		log.Error(err, "failed to configure pipeline response header forwarding")
+		os.Exit(1)
+	}
 	srv, err := server.New(cfg.Server, p, gwClient)
 	if err != nil {
 		log.Error(err, "failed to create server")

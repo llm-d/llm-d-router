@@ -66,6 +66,52 @@ func TestPipeline_ExecutesStepsInOrder(t *testing.T) {
 	}
 }
 
+func TestPipeline_ForwardsConfiguredResponseHeadersBetweenArbitrarySteps(t *testing.T) {
+	steps := []Step{
+		&mockStep{name: "producer", fn: func(_ context.Context, rc *RequestContext) error {
+			if got := rc.ForwardedHeaders()["x-llm-d-disagg-revision"]; got != "" {
+				t.Fatalf("client supplied relay header reached first step: %q", got)
+			}
+			responseHeaders := make(http.Header)
+			responseHeaders.Set("X-LLM-D-Disagg-Revision", "revision-b")
+			responseHeaders.Set("X-Worker-Only", "worker-value")
+			rc.CaptureResponseHeaders(responseHeaders)
+			return nil
+		}},
+		&mockStep{name: "consumer", fn: func(_ context.Context, rc *RequestContext) error {
+			headers := rc.ForwardedHeaders()
+			if got := headers["x-llm-d-disagg-revision"]; got != "revision-b" {
+				t.Fatalf("relayed revision = %q, want %q", got, "revision-b")
+			}
+			if got := headers["x-worker-only"]; got != "" {
+				t.Fatalf("unconfigured response header was relayed: %q", got)
+			}
+			return nil
+		}},
+	}
+
+	p, err := NewWithForwardResponseHeaders(steps, []string{" X-LLM-D-Disagg-Revision "})
+	if err != nil {
+		t.Fatalf("NewWithForwardResponseHeaders() error = %v", err)
+	}
+	reqCtx := &RequestContext{OriginalHeaders: http.Header{"X-LLM-D-Disagg-Revision": {"client-revision"}}}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestNewWithForwardResponseHeaders_RejectsInvalidNames(t *testing.T) {
+	for _, headers := range [][]string{
+		{""},
+		{"x-llm-d-disagg-revision", "X-LLM-D-Disagg-Revision"},
+		{"Content-Type"},
+	} {
+		if _, err := NewWithForwardResponseHeaders(nil, headers); err == nil {
+			t.Fatalf("NewWithForwardResponseHeaders(%v) expected error", headers)
+		}
+	}
+}
+
 func TestPipeline_AbortsOnError(t *testing.T) {
 	executed := map[string]bool{}
 	steps := []Step{

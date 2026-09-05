@@ -265,11 +265,15 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`.
+it as the base header set, then stamp the request ID and `EPP-Profile`. The pipeline can
+allowlist response headers with `forward_response_headers`; values returned by any
+response-producing step are stored on the request context for later requests. Configured
+names are reserved for this relay, so client-provided values are not sent upstream.
 
 ### EPP-Profile routing
 
@@ -312,6 +316,25 @@ selection swaps in `header-profile-handler` for that one plugin.
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
+
+### Cross-phase scheduling headers
+
+An EPP plugin can stamp scheduling metadata from a selected endpoint onto its
+response. Configure the pipeline once to carry selected headers through every
+later phase:
+
+```yaml
+pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
+```
+
+Only listed response headers are carried, and client-provided values for those
+names are discarded. In E/P/D, the first encode request
+establishes the revision for the remaining encode requests, prefill, and decode.
+Each later response can update the carried values, so decode can prefer the
+prefill slice without forwarding unrelated worker response headers.
 
 ### Decode disaggregation deciders
 
