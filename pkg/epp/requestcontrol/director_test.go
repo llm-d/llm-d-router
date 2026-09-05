@@ -67,6 +67,11 @@ var (
 	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
 
+func newOpenAIParserWithPriorityPropagation(t *testing.T) *openai.OpenAIParser {
+	t.Helper()
+	return openai.NewOpenAIParser()
+}
+
 // --- Mocks ---
 
 type mockAdmissionController struct {
@@ -423,16 +428,50 @@ func TestDirector_HandleRequest(t *testing.T) {
 		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
-		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
+		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
-			name: "successful completions request",
+			name: "successful completions request with priority propagation",
 			reqBodyMap: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			parser:                 newOpenAIParserWithPriorityPropagation(t),
+			propagatePriority:      true,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(2),
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "successful completions request leaves client priority untouched when propagation disabled",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			schedulerMockSetup: func(m *mockScheduler) {
@@ -449,10 +488,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
-			},
-			wantMutatedBody: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
 			},
 			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
@@ -1127,6 +1162,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					config = config.WithRequestHeaderPlugins(test.requestHeaderPlugin)
 				}
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
+				if test.propagatePriority {
+					config = config.WithPropagatePriority(true)
+				}
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
@@ -1169,7 +1207,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
 				}
 
-				reqCtx.Parser = openai.NewOpenAIParser()
+				reqCtx.Parser = test.parser
+				if reqCtx.Parser == nil {
+					reqCtx.Parser = openai.NewOpenAIParser()
+				}
 				parseResult, parseErr := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				var returnedReqCtx *handlers.RequestContext
 				if parseErr != nil {

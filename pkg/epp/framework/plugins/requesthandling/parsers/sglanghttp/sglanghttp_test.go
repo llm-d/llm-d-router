@@ -30,6 +30,35 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
+func TestSGLangHTTPParser_RewritePriority(t *testing.T) {
+	t.Run("strips client priority and writes resolved priority", func(t *testing.T) {
+		parser := NewSGLangHTTPParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"input_ids": []any{1, 2, 3}, "priority": 100}, 2)
+		if err != nil {
+			t.Fatalf("RewritePriority() error = %v", err)
+		}
+		if !mutated {
+			t.Errorf("mutated = false, want true")
+		}
+		if got.(fwkrh.PayloadMap)["priority"] != 2 {
+			t.Errorf("priority = %v, want 2", got.(fwkrh.PayloadMap)["priority"])
+		}
+	})
+	t.Run("writes priority when none supplied", func(t *testing.T) {
+		parser := NewSGLangHTTPParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"input_ids": []any{1, 2, 3}}, 2)
+		if err != nil {
+			t.Fatalf("RewritePriority() error = %v", err)
+		}
+		if !mutated {
+			t.Errorf("mutated = false, want true")
+		}
+		if got.(fwkrh.PayloadMap)["priority"] != 2 {
+			t.Errorf("priority = %v, want 2", got.(fwkrh.PayloadMap)["priority"])
+		}
+	})
+}
+
 var benchmarkSGLangParseResult *fwkrh.ParseResult
 
 func makeSGLangTokenArrayBody(tokenCount int) []byte {
@@ -192,7 +221,11 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			tt.want.Payload = fwkrh.RawPayload(bodyBytes)
+			var wantMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &wantMap); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			tt.want.Payload = fwkrh.PayloadMap(wantMap)
 			if got.SkipResponseProcessing {
 				t.Errorf("SkipResponseProcessing = true, want false")
 			}

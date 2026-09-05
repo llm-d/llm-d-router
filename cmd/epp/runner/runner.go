@@ -835,6 +835,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	datalayer.RegisterScopeSpecs(handle.GetAllPlugins())
 
 	r.parserRegistry = cfg.ParserRegistry
+	r.requestControlConfig.WithPropagatePriority(cfg.PropagatePriority)
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
