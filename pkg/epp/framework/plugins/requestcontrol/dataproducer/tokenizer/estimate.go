@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -35,6 +36,78 @@ import (
 // bytesPerToken matches the scorer's averageCharactersPerToken, so a block of N
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
+
+// Content-block types read by the estimate backend.
+const (
+	blockTypeText       = "text"
+	blockTypeImage      = "image"
+	blockTypeImageURL   = "image_url"
+	blockTypeThinking   = "thinking"
+	blockTypeToolUse    = "tool_use"
+	blockTypeToolResult = "tool_result"
+)
+
+const (
+	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
+	defaultImageMediaType        = "image/jpeg"
+)
+
+func anthropicSystemText(ac fwkrh.AnthropicContent) string {
+	if ac.Raw != "" {
+		return ac.Raw
+	}
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == blockTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String()
+}
+
+func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.AnthropicImageSource) []tokenizerTypes.ContentBlock {
+	if url := anthropicImageToURL(src); url != "" {
+		blocks = append(blocks, tokenizerTypes.ContentBlock{
+			Type:     blockTypeImageURL,
+			ImageURL: tokenizerTypes.ImageBlock{URL: url},
+		})
+	}
+	return blocks
+}
+
+func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
+	if b.Content.Raw != "" {
+		return b.Content.Raw, nil
+	}
+	var parts []string
+	var imageBlocks []tokenizerTypes.ContentBlock
+	for _, item := range b.Content.Structured {
+		switch item.Type {
+		case blockTypeText:
+			parts = append(parts, item.Text)
+		case blockTypeImage:
+			imageBlocks = appendImageBlock(imageBlocks, item.Source)
+		}
+	}
+	return strings.Join(parts, "\n"), imageBlocks
+}
+
+func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
+	if src == nil {
+		return ""
+	}
+	if src.Type == "url" || src.URL != "" {
+		return src.URL
+	}
+	if src.Data == "" {
+		return ""
+	}
+	mediaType := src.MediaType
+	if mediaType == "" {
+		mediaType = defaultImageMediaType
+	}
+	return "data:" + mediaType + ";base64," + src.Data
+}
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,

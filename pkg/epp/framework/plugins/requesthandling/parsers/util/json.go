@@ -22,9 +22,54 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 var ErrTrailingData = errors.New("unexpected trailing data after JSON value")
+
+// ParseRenderRequest reads only the envelope required for model routing.
+func ParseRenderRequest(data []byte) (*fwkrh.ParseResult, error) {
+	payload, err := UnmarshalEnvelope(data, "prompt", "system")
+	if err != nil {
+		return nil, err
+	}
+	model, _ := payload["model"].(string)
+	return &fwkrh.ParseResult{
+		Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap(payload), RawBody: data, Model: model, RenderRequest: true},
+		SkipResponseProcessing: true,
+	}, nil
+}
+
+// UnmarshalEnvelope keeps objects, arrays, and rawFields opaque so routing
+// metadata edits cannot round-trip content through Go values.
+func UnmarshalEnvelope(data []byte, rawFields ...string) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		if fallbackErr := Unmarshal(data, &fields); fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		return nil, err
+	}
+	result := make(map[string]any, len(fields))
+	for key, raw := range fields {
+		if slices.Contains(rawFields, key) || raw[0] == '{' || raw[0] == '[' {
+			result[key] = raw
+			continue
+		}
+		var value any
+		decode := Unmarshal
+		if raw[0] == '"' {
+			decode = json.Unmarshal
+		}
+		if err := decode(raw, &value); err != nil {
+			return nil, err
+		}
+		result[key] = value
+	}
+	return result, nil
+}
 
 // Unmarshal decodes one JSON value, preserves numbers as json.Number, and rejects trailing data.
 func Unmarshal(data []byte, v any) error {

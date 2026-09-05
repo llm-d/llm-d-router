@@ -18,7 +18,6 @@ package tokenizer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -70,9 +69,9 @@ type warmer interface {
 func (b renderBackend) warmup(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	for i := 0; i < warmupAttempts; i++ {
-		_, err := b.produce(ctx, warmupChat())
+		_, err := b.produce(ctx, warmupChat(b.modelName))
 		if err == nil {
-			_, _ = b.produce(ctx, warmupChat(warmupImage))
+			_, _ = b.produce(ctx, warmupChat(b.modelName, warmupImage))
 			logger.V(logutil.DEBUG).Info("token-producer backend warmed up", "attempts", i+1)
 			return
 		}
@@ -93,35 +92,33 @@ func (b renderBackend) warmup(ctx context.Context) {
 	logger.V(logutil.DEBUG).Info("token-producer backend warmup did not complete")
 }
 
-// warmupChat builds a single-message chat body carrying the given image URLs.
-func warmupChat(imageURLs ...string) *fwkrh.InferenceRequestBody {
-	blocks := make([]fwkrh.ContentBlock, 0, 1+len(imageURLs))
-	blocks = append(blocks, fwkrh.ContentBlock{Type: "text", Text: "warmup"})
+// warmupChat constructs a probe, not an inference request.
+func warmupChat(model string, imageURLs ...string) *fwkrh.InferenceRequestBody {
+	parts := make([]any, 0, 1+len(imageURLs))
+	parts = append(parts, map[string]any{"type": "text", "text": "warmup"})
 	for _, url := range imageURLs {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: url}})
+		parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
 	}
 	return &fwkrh.InferenceRequestBody{
-		ChatCompletions: &fwkrh.ChatCompletionsRequest{
-			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
-		},
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{},
+		Payload:         fwkrh.PayloadMap{"model": model, "messages": []any{map[string]any{"role": "user", "content": parts}}},
 	}
 }
 
 // renderBackend produces real token IDs and owns protocol dispatch, including
 // the pre-tokenized (Generate) passthrough.
 type renderBackend struct {
-	tk tokenizer
+	tk             tokenizer
+	modelName      string
+	legacyMessages bool
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	switch {
 	case body.Completions != nil:
-		if ids := body.Completions.Prompt.TokenIDs; len(ids) > 0 {
-			return fwkrh.NewTokenizedRequest(ids), nil
-		}
 		return b.renderCompletions(ctx, body)
 	case body.ChatCompletions != nil:
-		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, chatPayload(body))
+		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, body.WirePayload())
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
@@ -130,7 +127,10 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
 	case body.Messages != nil:
-		tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, messagesPayload(body))
+		if b.legacyMessages {
+			return b.renderLegacyMessages(ctx, body.Messages)
+		}
+		tokenIDs, mmFeatures, err := b.tk.RenderMessages(ctx, body.WirePayload())
 		if err != nil {
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
@@ -146,60 +146,6 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}
-}
-
-// completionsPayload returns the payload for a completions request. Falls back
-// to a minimal PayloadMap when the body carries a non-map payload (gRPC, nil).
-// Multi-string prompts are passed as an array so the renderer sees the full
-// prompt shape.
-func completionsPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	if body.Payload != nil {
-		if _, ok := body.Payload.AsMap(); ok {
-			return body.Payload
-		}
-	}
-	prompt := body.Completions.Prompt
-	if len(prompt.Strings) > 1 {
-		return fwkrh.PayloadMap{"prompt": prompt.Strings}
-	}
-	return fwkrh.PayloadMap{"prompt": prompt.PlainText()}
-}
-
-// chatPayload returns the payload for a chat completions request. Falls back
-// to an OpenAI-shaped PayloadMap constructed from the typed struct when the body
-// carries a non-map payload (gRPC, warmup).
-func chatPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	if body.Payload != nil {
-		if _, ok := body.Payload.AsMap(); ok {
-			return body.Payload
-		}
-	}
-	data, _ := json.Marshal(buildChatRenderRequest(ChatCompletionsToRenderChatRequest(body.ChatCompletions)))
-	var pm fwkrh.PayloadMap
-	_ = json.Unmarshal(data, &pm)
-	return pm
-}
-
-// messagesPayload returns the payload for an Anthropic Messages request. The raw
-// body uses the Anthropic Messages schema (top-level system, source-based image
-// blocks), which vLLM /render does not accept, so the payload is always rebuilt
-// from the typed struct into the /render chat schema regardless of body.Payload.
-// Messages and tools are embedded as raw JSON rather than decoded maps: Go maps
-// re-serialize with sorted keys, which would reorder tool schemas and break
-// token parity with what vLLM renders server-side.
-func messagesPayload(body *fwkrh.InferenceRequestBody) fwkrh.RequestPayload {
-	rr := buildChatRenderRequest(MessagesToRenderChatRequest(body.Messages))
-	msgs := make([]any, len(rr.Messages))
-	for i, m := range rr.Messages {
-		data, _ := json.Marshal(m)
-		msgs[i] = json.RawMessage(data)
-	}
-	pm := fwkrh.PayloadMap{"messages": msgs}
-	if len(rr.Tools) > 0 {
-		data, _ := json.Marshal(rr.Tools)
-		pm["tools"] = json.RawMessage(data)
-	}
-	return pm
 }
 
 // CacheSaltFromBody returns the cache salt from whichever protocol is populated.
@@ -226,11 +172,15 @@ func CacheSaltFromBody(body *fwkrh.InferenceRequestBody) string {
 	}
 }
 
-// renderCompletions tokenizes a completions prompt via a single Render call.
-// completionsPayload builds the appropriate payload shape (single string or
-// string array), and the renderer returns the tokenized result.
+// renderCompletions delegates every prompt shape, including token IDs, to vLLM.
 func (b renderBackend) renderCompletions(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
-	allTokenIDs, _, err := b.tk.Render(ctx, completionsPayload(body))
+	payload := body.WirePayload()
+	// Native gRPC text has no HTTP envelope. Keep its compatibility path
+	// separate from native HTTP rendering; tokenized gRPC bypasses Produce.
+	if _, ok := payload.(fwkrh.PayloadProto); ok {
+		payload = fwkrh.PayloadMap{"model": b.modelName, "prompt": body.Completions.Prompt.PlainText()}
+	}
+	allTokenIDs, _, err := b.tk.Render(ctx, payload)
 	if err != nil {
 		return nil, fmt.Errorf("tokenization failed: %w", err)
 	}
