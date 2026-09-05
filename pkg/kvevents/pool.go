@@ -183,6 +183,8 @@ type Pool struct {
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
 	queueDepth atomic.Int64
+	observerMu sync.RWMutex
+	observer   StreamObserver
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -217,6 +219,40 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	metrics.Register()
 
 	return p
+}
+
+// SetStreamObserver installs the observer for endpoint stream state. It is
+// normally called before Start.
+func (p *Pool) SetStreamObserver(observer StreamObserver) {
+	p.observerMu.Lock()
+	defer p.observerMu.Unlock()
+	p.observer = observer
+}
+
+func (p *Pool) notifyStreamEvent(sourceEndpoint string, event StreamEvent) {
+	if sourceEndpoint == "" || event == "" {
+		return
+	}
+	p.observerMu.RLock()
+	observer := p.observer
+	p.observerMu.RUnlock()
+	if observer != nil {
+		observer(sourceEndpoint, event)
+	}
+}
+
+func (p *Pool) notifyBlockEvent(scope blockScope, event StreamEvent, hashes []uint64) {
+	p.observerMu.RLock()
+	observer := p.observer
+	p.observerMu.RUnlock()
+	if observer == nil {
+		return
+	}
+	blocks := make([]StreamBlock, len(hashes))
+	for i, hash := range hashes {
+		blocks[i] = StreamBlock{Hash: hash, DeviceTier: scope.deviceTier, GroupIdx: scope.groupIdx}
+	}
+	observer(scope.podIdentifier, event, blocks...)
 }
 
 // Span start options are built once. Passing them variadically at each call
@@ -318,11 +354,6 @@ func (p *Pool) AddTask(task *RawMessage) {
 	p.addQueueDepth(1)
 }
 
-// resetForSource queues a pod reset on the same shard as its event stream.
-func (p *Pool) resetForSource(topic, sourceEndpoint string) {
-	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
-}
-
 // worker is the main processing loop for a single worker goroutine.
 // It processes messages from its dedicated queue using the workqueue pattern.
 func (p *Pool) worker(ctx context.Context, workerIndex int) {
@@ -354,6 +385,13 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 
 // processRawMessage decodes the raw message payload using the adapter and processes the resulting event batch.
 func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
+	if msg.stream != nil {
+		msg.stream.mu.RLock()
+		defer msg.stream.mu.RUnlock()
+		if msg.stream.detached {
+			return
+		}
+	}
 	logger := log.FromContext(ctx)
 	if msg.reset {
 		podID := msg.SourceEndpoint
@@ -436,8 +474,10 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
+		return
 	}
 	p.dedup.clear(podIdentifier)
+	p.notifyStreamEvent(podIdentifier, StreamEventCleared)
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -545,6 +585,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			if ev.Origin == "NEW" || ev.Origin == "REUSED" {
+				p.notifyStreamEvent(podIdentifier, StreamEventReportSupported)
+			}
 
 			// Scope for reference-counting this store against duplicate removes.
 			// Mirrors the index eviction identity (pod, tier, group); DP rank is
@@ -612,6 +655,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"numTokens", len(ev.Tokens),
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)
+					// The child is dropped, so the endpoint needs a repair report.
+					p.notifyBlockEvent(storeScope, StreamEventMissingParent, ev.BlockHashes)
 					continue
 				}
 				parentRequestKey = key
@@ -678,7 +723,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			if len(requestKeys) == 0 {
 				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
-					p.dedup.trackStore(storeScope, ev.BlockHashes)
+					if ev.Origin == "REUSED" {
+						p.dedup.trackReport(storeScope, ev.BlockHashes)
+					} else {
+						p.dedup.trackStore(storeScope, ev.BlockHashes)
+					}
 				}
 				continue
 			}
@@ -690,7 +739,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
 			}
-			p.dedup.trackStore(storeScope, ev.BlockHashes)
+			if ev.Origin == "REUSED" {
+				p.dedup.trackReport(storeScope, ev.BlockHashes)
+			} else {
+				p.dedup.trackStore(storeScope, ev.BlockHashes)
+			}
+			p.notifyBlockEvent(storeScope, StreamEventStored, ev.BlockHashes)
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
@@ -754,6 +808,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"podIdentifier", podIdentifier, "engineKey", engineKey)
 					continue
 				}
+				p.notifyBlockEvent(removeScope, StreamEventRemoved, []uint64{hash})
 			}
 
 		case *AllBlocksClearedEvent:

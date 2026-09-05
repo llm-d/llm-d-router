@@ -172,6 +172,22 @@ func TestMatchBlockKeysEmptyKeys(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestMatchBlockKeysConfirmedPrefix(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	indexer, idx := newMatcher(t, nil)
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "a", DeviceTier: "gpu"}, {PodIdentifier: "a", Speculative: true}, {PodIdentifier: "b", Speculative: true}},
+		20: {{PodIdentifier: "a", DeviceTier: "cpu"}, {PodIdentifier: "b", DeviceTier: "gpu"}},
+		30: {{PodIdentifier: "a", Speculative: true}, {PodIdentifier: "b", DeviceTier: "gpu"}},
+		40: {{PodIdentifier: "a", DeviceTier: "gpu"}},
+	})
+	got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30, 40}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 4, got["a"].MatchedBlocks)
+	assert.Equal(t, 2, got["a"].ConfirmedBlocks)
+	assert.Zero(t, got["b"].ConfirmedBlocks, "confirmation cannot bridge a speculative-only block")
+}
+
 func TestMatchBlockKeysCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(logging.NewTestLoggerIntoContext(t.Context()))
 	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
