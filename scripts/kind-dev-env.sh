@@ -67,6 +67,7 @@ export SIDECAR_IMAGE
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
 export VLLM_RENDER_PORT="${VLLM_RENDER_PORT:-8082}"
 export VLLM_RENDER_URL="${VLLM_RENDER_URL:-http://vllm-render:${VLLM_RENDER_PORT}}"
+export VLLM_RENDER_MAX_MODEL_LEN="${VLLM_RENDER_MAX_MODEL_LEN:-131072}"
 
 # Set the inference pool name for the deployment
 export POOL_NAME="${POOL_NAME:-${MODEL_NAME_SAFE}-inference-pool}"
@@ -400,7 +401,7 @@ TEMP_FILE=$(mktemp)
 trap "rm -f \"${TEMP_FILE}\"" EXIT
 
 kubectl --context ${KUBE_CONTEXT} delete configmap epp-config --ignore-not-found
-envsubst '$MODEL_NAME' < ${EPP_CONFIG} > ${TEMP_FILE}
+envsubst '$MODEL_NAME $VLLM_RENDER_URL' < ${EPP_CONFIG} > ${TEMP_FILE}
 kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-config.yaml=${TEMP_FILE}
 
 # The replica count is changed in some end to end tests
@@ -411,7 +412,7 @@ export ENABLE_LEADER_ELECTION=false
 # Deploy Istio base (shared infrastructure)
 kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
+  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${VLLM_RENDER_MAX_MODEL_LEN} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
   ${EPP_REPLICA_COUNT} ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} \
   ${VLLM_DATA_PARALLEL_SIZE} ${ENABLE_LEADER_ELECTION}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -

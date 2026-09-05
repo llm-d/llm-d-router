@@ -5,9 +5,9 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
   parameters:
-    modelName: TinyLlama/TinyLlama-1.1B-Chat-v1.0  # replace to use a different model
+    modelName: ${MODEL_NAME}
     vllm:
-      url: http://localhost:8000
+      url: ${VLLM_RENDER_URL}
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:

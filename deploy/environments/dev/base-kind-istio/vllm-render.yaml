@@ -19,9 +19,12 @@ spec:
         image: ${VLLM_RENDER_IMAGE}
         imagePullPolicy: IfNotPresent
         command: ["vllm", "launch", "render"]
-        args: ["${MODEL_NAME}", "--port=${VLLM_RENDER_PORT}"]
-        # For gated models, inject HF_TOKEN via a Secret reference:
-        # env:
+        args: ["${MODEL_NAME}", "--port=${VLLM_RENDER_PORT}", "--max-model-len=${VLLM_RENDER_MAX_MODEL_LEN}"]
+        env:
+        # This service only tokenizes requests. It does not execute model positions.
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: "1"
+        # For gated models, inject HF_TOKEN via a Secret reference.
         # - name: HF_TOKEN
         #   valueFrom:
         #     secretKeyRef:
