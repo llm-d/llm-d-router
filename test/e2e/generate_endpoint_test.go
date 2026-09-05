@@ -21,27 +21,36 @@ const (
 	requestTimeout = 60 * time.Second
 )
 
-// imageSpec describes one multimodal image entry as it appears in encode
-// and prefill request bodies. Hash, Offset and Length come from the
-// (mocked) render stage; tests pick fixed values so the bodies are
-// deterministic.
-type imageSpec struct {
+// mmSpec describes one multimodal entry as it appears in encode and
+// prefill request bodies. Hash, Offset and Length come from the (mocked)
+// render stage; tests pick fixed values so the bodies are deterministic.
+// The modality (image/video/audio) is passed alongside at the call site
+// — the spec itself is modality-neutral.
+type mmSpec struct {
 	Hash   string
 	Offset int
 	Length int
 }
 
-// singleImage is the canonical one-image spec the basic encode/prefill
+// singleImage is the canonical one-item spec the basic encode/prefill
 // tests share. Offset is always 1 in encode requests (right after BOS),
-// length matches the placeholder span.
-var singleImage = imageSpec{Hash: "e2e-image-hash", Offset: 1, Length: 3}
+// length matches the placeholder span. Reused across image/video/audio
+// modalities — the hash is an opaque token the simulator does not validate.
+var singleImage = mmSpec{Hash: "e2e-image-hash", Offset: 1, Length: 3}
 
-// twoImages is the canonical two-image spec for fan-out coverage.
+// twoImages is the canonical two-item spec for fan-out coverage.
 // Distinct lengths so the two placeholder spans aren't accidentally identical.
-var twoImages = []imageSpec{
+var twoImages = []mmSpec{
 	{Hash: "e2e-image-hash-0", Offset: 1, Length: 3},
 	{Hash: "e2e-image-hash-1", Offset: 4, Length: 5},
 }
+
+// mmModalities lists the modality labels each /inference/v1/generate
+// encode and prefill test iterates over. These are the coarser bucket
+// names vLLM uses inside mm_hashes / mm_placeholders — distinct from
+// the OpenAI content-type strings (image_url, audio_url, video_url,
+// input_audio) that mmTypes in connector_ec_common.go keys on.
+var mmModalities = []string{"image", "video", "audio"}
 
 var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against encode-only", ginkgo.Ordered, testWrapper(func() {
 	// Uses single-profile-handler (generateEncodeConfig) so the EPP routes
@@ -57,18 +66,20 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against en
 		encodePods := getPodNames(encodeSelector, nsName)
 		gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 
-		ginkgo.By("Encode_Generate: single-image encode body returns ec_transfer_params")
-		{
-			resp, raw := doGenerate(encodeBody(singleImage))
-			parsed := expectGenerateOK(resp, raw)
-			expectECTransferParams(parsed, raw)
-		}
+		for _, modality := range mmModalities {
+			ginkgo.By(fmt.Sprintf("SingleItem_Encode(%s): encode body returns ec_transfer_params", modality))
+			{
+				resp, raw := doGenerate(encodeBody(modality, singleImage))
+				parsed := expectGenerateOK(resp, raw)
+				expectECTransferParams(parsed, raw)
+			}
 
-		ginkgo.By("TwoImages_Encode: per-image fan-out, every encode body returns ec_transfer_params")
-		for _, img := range twoImages {
-			resp, raw := doGenerate(encodeBody(img))
-			parsed := expectGenerateOK(resp, raw)
-			expectECTransferParams(parsed, raw)
+			ginkgo.By(fmt.Sprintf("TwoItems_Encode(%s): per-item fan-out, every encode body returns ec_transfer_params", modality))
+			for _, item := range twoImages {
+				resp, raw := doGenerate(encodeBody(modality, item))
+				parsed := expectGenerateOK(resp, raw)
+				expectECTransferParams(parsed, raw)
+			}
 		}
 
 		testutils.DeleteObjects(testConfig, epp, nsName)
@@ -91,10 +102,10 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against p
 		prefillPods := getPodNames(prefillSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 
-		ginkgo.By("TwoImages_Prefill: combined two-image prefill body returns kv_transfer_params")
-		{
-			tokenIDs := []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789}
-			resp, raw := doGenerate(prefillBody(tokenIDs, twoImages))
+		tokenIDs := []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789}
+		for _, modality := range mmModalities {
+			ginkgo.By(fmt.Sprintf("TwoItems_Prefill(%s): combined two-item prefill body returns kv_transfer_params", modality))
+			resp, raw := doGenerate(prefillBody(modality, tokenIDs, twoImages))
 			parsed := expectGenerateOK(resp, raw)
 			expectKVTransferParams(parsed, raw)
 		}
@@ -105,31 +116,31 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against p
 	})
 }))
 
-// imageFeatures builds the features map that encode and prefill share:
+// mmFeatures builds the features map that encode and prefill share:
 // mm_hashes, mm_placeholders, kwargs_data, all keyed by modality
-// ("image"). kwargs_data is a placeholder "AA==" per entry; the
-// simulator does not validate it.
-func imageFeatures(images []imageSpec) map[string]any {
-	hashes := make([]string, len(images))
-	placeholders := make([]map[string]any, len(images))
-	kwargs := make([]string, len(images))
-	for i, img := range images {
-		hashes[i] = img.Hash
-		placeholders[i] = map[string]any{"offset": img.Offset, "length": img.Length}
+// (image/video/audio). kwargs_data is a placeholder "AA==" per entry;
+// the simulator does not validate it.
+func mmFeatures(modality string, items []mmSpec) map[string]any {
+	hashes := make([]string, len(items))
+	placeholders := make([]map[string]any, len(items))
+	kwargs := make([]string, len(items))
+	for i, it := range items {
+		hashes[i] = it.Hash
+		placeholders[i] = map[string]any{"offset": it.Offset, "length": it.Length}
 		kwargs[i] = "AA=="
 	}
 	return map[string]any{
-		"mm_hashes":       map[string]any{"image": hashes},
-		"mm_placeholders": map[string]any{"image": placeholders},
-		"kwargs_data":     map[string]any{"image": kwargs},
+		"mm_hashes":       map[string]any{modality: hashes},
+		"mm_placeholders": map[string]any{modality: placeholders},
+		"kwargs_data":     map[string]any{modality: kwargs},
 	}
 }
 
-// encodeBody builds a single-image encode request.
+// encodeBody builds a single-item encode request for the given modality.
 // token_ids = [BOS, placeholder*length]; offset is always 1 since each
-// encode carries exactly one image.
-func encodeBody(image imageSpec) []byte {
-	tokenIDs := make([]int, 1+image.Length)
+// encode carries exactly one item.
+func encodeBody(modality string, item mmSpec) []byte {
+	tokenIDs := make([]int, 1+item.Length)
 	tokenIDs[0] = 1
 	for i := 1; i < len(tokenIDs); i++ {
 		tokenIDs[i] = 32000
@@ -137,21 +148,21 @@ func encodeBody(image imageSpec) []byte {
 	body := map[string]any{
 		"model":           simModelName,
 		"token_ids":       tokenIDs,
-		"features":        imageFeatures([]imageSpec{{Hash: image.Hash, Offset: 1, Length: image.Length}}),
+		"features":        mmFeatures(modality, []mmSpec{{Hash: item.Hash, Offset: 1, Length: item.Length}}),
 		"sampling_params": map[string]any{"max_tokens": 1},
 	}
 	return mustMarshal(body)
 }
 
-// ecTransferEntries builds the per-image entries of
-// prefill.ec_transfer_params.image, one map per image keyed by mm_hash.
-// Values are dummy NIXL transfer params; the simulator does not
-// validate.
-func ecTransferEntries(images []imageSpec) []map[string]any {
-	entries := make([]map[string]any, len(images))
-	for i, img := range images {
+// ecTransferEntries builds the per-item entries of
+// prefill.ec_transfer_params.<modality>, one map per item keyed by
+// mm_hash. Values are dummy NIXL transfer params; the simulator does
+// not validate.
+func ecTransferEntries(items []mmSpec) []map[string]any {
+	entries := make([]map[string]any, len(items))
+	for i, it := range items {
 		entries[i] = map[string]any{
-			img.Hash: map[string]any{
+			it.Hash: map[string]any{
 				"peer_host":               "10.0.0.1",
 				"peer_port":               5501 + i,
 				"size_bytes":              0,
@@ -162,14 +173,15 @@ func ecTransferEntries(images []imageSpec) []map[string]any {
 	return entries
 }
 
-// prefillBody builds a prefill request covering every image in one body.
-func prefillBody(tokenIDs []int, images []imageSpec) []byte {
+// prefillBody builds a prefill request covering every item in one body
+// for the given modality.
+func prefillBody(modality string, tokenIDs []int, items []mmSpec) []byte {
 	body := map[string]any{
 		"request_id":         "e2e-prefill-" + uuid.NewString(),
 		"model":              simModelName,
 		"token_ids":          tokenIDs,
-		"features":           imageFeatures(images),
-		"ec_transfer_params": map[string]any{"image": ecTransferEntries(images)},
+		"features":           mmFeatures(modality, items),
+		"ec_transfer_params": map[string]any{modality: ecTransferEntries(items)},
 		"sampling_params": map[string]any{
 			"max_tokens": 1,
 			"extra_args": map[string]any{
