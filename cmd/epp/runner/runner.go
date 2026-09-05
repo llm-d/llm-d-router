@@ -476,28 +476,8 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		director.SetRequestEvictor(requestEvictor)
 	}
 
-	serverRunner := &runserver.ExtProcServerRunner{
-		GrpcPort:                         opts.GRPCPort,
-		GKNN:                             *gknn,
-		Datastore:                        ds,
-		ControllerCfg:                    controllerCfg,
-		SecureServing:                    opts.SecureServing,
-		HealthChecking:                   opts.HealthChecking,
-		CertPath:                         opts.CertPath,
-		EnableCertReload:                 opts.EnableCertReload,
-		TLSMinVersion:                    opts.TLSMinVersionValue(),
-		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
-		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
-		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
-		Director:                         director,
-		ParserRegistry:                   r.parserRegistry,
-		SaturationDetector:               eppConfig.SaturationDetector,
-		PriorityBandControlPlane:         priorityBandControlPlane,
-		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
-		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
-		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
-		EmitEndpointScores:               opts.EmitEndpointScores,
-	}
+	serverRunner := runserver.NewExtProcServerRunner(opts, *gknn, controllerCfg, ds, director,
+		r.parserRegistry, eppConfig.SaturationDetector, priorityBandControlPlane)
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
@@ -1137,27 +1117,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	gknn := common.GKNN{
 		NamespacedName: types.NamespacedName{Name: poolName, Namespace: namespace},
 	}
-	serverRunner := &runserver.ExtProcServerRunner{
-		GrpcPort:                         opts.GRPCPort,
-		GKNN:                             gknn,
-		Datastore:                        ds,
-		ControllerCfg:                    runserver.NewControllerConfig(false),
-		SecureServing:                    opts.SecureServing,
-		HealthChecking:                   opts.HealthChecking,
-		CertPath:                         opts.CertPath,
-		EnableCertReload:                 opts.EnableCertReload,
-		TLSMinVersion:                    opts.TLSMinVersionValue(),
-		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
-		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
-		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
-		Director:                         director,
-		ParserRegistry:                   r.parserRegistry,
-		SaturationDetector:               eppConfig.SaturationDetector,
-		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
-		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
-		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
-		EmitEndpointScores:               opts.EmitEndpointScores,
-	}
+	// nil control plane: file-discovery mode has no InferenceObjective reconciler to drive one.
+	serverRunner := runserver.NewExtProcServerRunner(opts, gknn, runserver.NewControllerConfig(false),
+		ds, director, r.parserRegistry, eppConfig.SaturationDetector, nil)
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
