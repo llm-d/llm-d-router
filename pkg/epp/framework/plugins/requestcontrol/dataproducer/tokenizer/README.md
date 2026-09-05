@@ -30,7 +30,8 @@ Backend selection:
   scheme (`https://`). For in-cluster endpoints using self-signed or private CA
   certificates, configure `vllm.caCertPath` to trust the CA, and optionally
   `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS. Future protocol fields
-  (e.g. `grpc`) can be added alongside `url` under the same `vllm` block.
+  (e.g. `grpc`) can be added under the same `vllm` block. The HTTP renderer uses
+  either one configured URL or endpoints supplied by data-layer discovery.
 
 > [!WARNING]
 > The `estimate` backend approximates token boundaries (≈4 bytes/token); its
@@ -44,7 +45,11 @@ Backend selection:
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
 | `modelName`                | – (required for `vllm`) | Model whose tokenizer should be loaded / sent in render requests.            |
-| `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
+| `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
+| `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
+| `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
+| `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm; `round-robin` is the only built-in algorithm. |
+| `vllm.endpointDiscovery.attemptTimeout` | unset         | Optional positive duration limiting each render attempt, e.g. `1s`. |
 | `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
 | `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
@@ -166,6 +171,81 @@ containers:
     - "--ssl-certfile=/path/to/tls.crt"
     - "--ssl-keyfile=/path/to/tls.key"
 ```
+
+### Endpoint discovery
+
+Set `vllm.endpointDiscovery: {}` to use discovered inference addresses and
+ports with round-robin balancing. Omitted or empty `portRules` keeps each
+endpoint's inference port. Use this when `/v1/*/render` is served on the same
+listener as inference.
+
+When render uses a different listener, configure ordered `portRules`. The
+first matching Kubernetes label selector resolves the port as
+`basePort + RankIndex`. `RankIndex` is the endpoint's zero-based position in
+the `InferencePool`'s `targetPorts`, not a port-number difference. For example,
+a decode endpoint at index 3 uses render port `8203` with `basePort: 8200`,
+even when its inference port is `8003`.
+
+This configuration maps prefill and decode endpoints to separate render port
+ranges:
+
+```yaml
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      endpointDiscovery:
+        portRules:
+          - selector:
+              matchLabels:
+                llm-d.ai/role: prefill
+            basePort: 8000
+          - selector:
+              matchLabels:
+                llm-d.ai/role: decode
+            basePort: 8200
+        loadBalancer:
+          type: round-robin
+```
+
+The Kubernetes discovery path supplies Ready `InferencePool` endpoints and
+removes endpoints when their pods become unready or leave the pool. Port rules
+map these endpoints; they do not discover extra pods or ranks. Other discovery
+plugins feed the same renderer path; `file-discovery`, for example, can supply
+explicit render addresses and ports. All selected endpoints must serve the
+configured model and expose the render routes. Discovered URLs use HTTP;
+use `vllm.url` for an HTTPS endpoint.
+
+Each rule's `basePort` is required and must be between 1 and 65535. An empty or
+omitted `selector` matches all endpoints, so a final catch-all rule can provide
+a default base port. Nonempty rule lists have no inference-port fallback:
+unmatched endpoints and endpoints whose resolved ports are out of range are
+excluded, and the data layer logs the error. Invalid selectors and base ports
+reject plugin configuration at startup.
+
+Transport failures, attempt timeouts, HTTP 408, HTTP 429, and HTTP 5xx permit
+one retry on a different discovered URL. Other HTTP errors return immediately.
+Both attempts share `vllm.timeout` or `vllm.mmTimeout`, capped by the caller's
+deadline. By default, each attempt can use the full remaining request budget.
+Set `vllm.endpointDiscovery.attemptTimeout` to opt into a shorter deadline on
+each attempt, including retries. For example, `attemptTimeout: 1s` with
+`timeout: 5s` permits retrying a slow endpoint after one second; the alternate
+also has at most one second. Choose an attempt timeout that accommodates normal
+render latency, including multimodal processing. Without an attempt timeout,
+a slow endpoint can consume the request budget and leave no time for a retry.
+
+With no discovered endpoints, rendering returns an error. Failed URLs remain
+eligible for subsequent requests until discovery removes them; there is no
+circuit breaker or separate render health probe. Retry exclusions preserve
+round-robin cursor progression across the full endpoint list.
+
+Each named token producer maintains its own endpoint set and balancing state.
+Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
+global idle-connection cap; idle connections expire after 90 seconds.
+Alternative algorithms can be implemented in the tokenizer package through
+`endpointLoadBalancer` and registered in `endpointLoadBalancerFactories`.
+The picker supplies an independent snapshot without holding its endpoint lock;
+algorithms must support concurrent calls to `Pick` and skip excluded URLs.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
