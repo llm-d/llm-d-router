@@ -32,6 +32,79 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
+var (
+	benchmarkVllmParseResult *fwkrh.ParseResult
+	benchmarkVllmPayload     []byte
+)
+
+func makeVllmTokenArrayBody(tokenCount int) []byte {
+	tokens := strings.Repeat("12345,", tokenCount-1) + "12345"
+	return []byte(`{"model":"test","token_ids":[` + tokens + `],"sampling_params":{"max_tokens":1}}`)
+}
+
+func benchmarkVllmRequestParsing(b *testing.B, rewrite bool) {
+	parser := NewVllmHTTPParser()
+	headers := map[string]string{":path": "/inference/v1/generate"}
+	for _, tc := range []struct {
+		name  string
+		count int
+	}{
+		{"4K", 4 * 1024},
+		{"32K", 32 * 1024},
+		{"256K", 256 * 1024},
+		{"1M", 1_000_000},
+	} {
+		body := makeVllmTokenArrayBody(tc.count)
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				result, err := parser.ParseRequest(context.Background(), body, headers)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if !rewrite {
+					benchmarkVllmParseResult = result
+					continue
+				}
+				payload := result.Body.Payload.(fwkrh.MarshalablePayload)
+				rewritten, err := parser.RewriteModelName(payload, "backend-model")
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkVllmPayload, err = rewritten.Marshal()
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkVllmHTTPParser_ParseRequest(b *testing.B) {
+	benchmarkVllmRequestParsing(b, false)
+}
+
+func BenchmarkVllmHTTPParser_ParseRequestAndRewrite(b *testing.B) {
+	benchmarkVllmRequestParsing(b, true)
+}
+
+func BenchmarkVllmHTTPParser_ParseRequestFallback1M(b *testing.B) {
+	parser := NewVllmHTTPParser()
+	headers := map[string]string{":path": "/inference/v1/generate"}
+	tokens := strings.Repeat("12345,", 1_000_000-1) + "12345.0"
+	body := []byte(`{"model":"test","token_ids":[` + tokens + `],"sampling_params":{"max_tokens":1}}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		result, err := parser.ParseRequest(context.Background(), body, headers)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkVllmParseResult = result
+	}
+}
+
 func TestNewVllmHTTPParser(t *testing.T) {
 	parser := NewVllmHTTPParser()
 	want := fwkplugin.TypedName{Type: VllmHTTPParserType, Name: VllmHTTPParserType}
@@ -61,7 +134,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{1, 2, 3},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{json.Number("1"), json.Number("2"), json.Number("3")},
+					"token_ids": json.RawMessage(`[1,2,3]`),
 				},
 			},
 		},
@@ -78,7 +151,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					CacheSalt: "abc123",
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids":  []any{json.Number("10"), json.Number("20"), json.Number("30")},
+					"token_ids":  json.RawMessage(`[10,20,30]`),
 					"cache_salt": "abc123",
 				},
 			},
@@ -99,7 +172,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{1, 2, 3},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{json.Number("1"), json.Number("2"), json.Number("3")},
+					"token_ids": json.RawMessage(`[1,2,3]`),
 					"sampling_params": map[string]any{
 						"temperature": json.Number("0.8"),
 						"max_tokens":  json.Number("128"),
@@ -137,7 +210,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{5, 6, 7},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{json.Number("5"), json.Number("6"), json.Number("7")},
+					"token_ids": json.RawMessage(`[5,6,7]`),
 				},
 			},
 		},
@@ -174,11 +247,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{
-						json.Number("151644"), json.Number("872"), json.Number("198"), json.Number("3838"), json.Number("374"), json.Number("279"),
-						json.Number("6722"), json.Number("315"), json.Number("9625"), json.Number("30"), json.Number("151645"), json.Number("198"),
-						json.Number("151644"), json.Number("77091"), json.Number("198"),
-					},
+					"token_ids": json.RawMessage(`[151644,872,198,3838,374,279,6722,315,9625,30,151645,198,151644,77091,198]`),
 					"features": map[string]any{
 						"mm_hashes": map[string]any{
 							"image": []any{"abc123hash", "def456hash"},

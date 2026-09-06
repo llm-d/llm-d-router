@@ -60,18 +60,15 @@ func u64ToBlockKeys(keys []uint64) []kvblock.BlockHash {
 	return out
 }
 
-// newTestIndexer creates an Indexer backed by an in-memory index and a
-// LongestPrefixScorer using the project's default backend weights.
+// newTestIndexer creates an Indexer backed by an in-memory index, weighted
+// by the project's default backend configuration.
 func newTestIndexer(t *testing.T, tp kvblock.TokenProcessor) *kvcache.Indexer {
 	t.Helper()
 
 	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
 	require.NoError(t, err)
 
-	scorer, err := kvcache.NewKVBlockScorer(kvcache.DefaultKVBlockScorerConfig())
-	require.NoError(t, err)
-
-	return kvcache.NewIndexerForTest(tp, idx, scorer)
+	return kvcache.NewIndexerForTest(tp, idx, kvcache.DefaultKVCacheBackendConfig())
 }
 
 // populateIndex inserts block-key -> pod entries into the index.

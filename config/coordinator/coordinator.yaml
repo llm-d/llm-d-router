@@ -24,6 +24,12 @@ server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
 
+  # metrics_port is the port for the Prometheus /metrics endpoint. Default 9090.
+  # Non-positive disables the endpoint entirely. The --metrics-port CLI flag
+  # overrides this.
+  # env: COORDINATOR_SERVER_METRICS_PORT
+  # metrics_port: 9090
+
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
   read_timeout: 30s
@@ -170,9 +176,12 @@ pipeline:
         # max_total_placeholder_tokens: 4096
 
     # -------------------------------------------------------------------
-    # conditional-decode: optional shortcut. When the request has no
-    # multimodal entries, runs decode directly and skips encode/prefill
-    # (saves a round-trip for text-only chats). Uncomment to enable.
+    # conditional-decode: optional shortcut for text-only chats. When
+    # the request has no multimodal entries, the coordinator probes the
+    # decode worker first. If the worker has the prompt cached, it
+    # answers inline and encode/prefill are skipped. If not, the worker
+    # returns HTTP 412 and the pipeline continues through encode/prefill/
+    # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
     #   params:

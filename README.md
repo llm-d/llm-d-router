@@ -72,7 +72,7 @@ To ensure clarity across the project, we use the following standard terminology:
 
 ## Contributing
 
-Start with the [llm-d organization contributing guide][org-contributing] for project-wide guidelines, code of conduct, and community resources.
+Start with the [llm-d organization contributing guide][org-contributing] for project-wide guidelines, code of conduct, and community resources, then see [CONTRIBUTING.md](CONTRIBUTING.md) for what is specific to this repository, including how to claim an issue.
 
 Our community meeting is bi-weekly at Wednesday 10AM PDT ([Google Meet], [Meeting Notes]).
 

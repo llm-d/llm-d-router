@@ -29,6 +29,7 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 |-----------|------|----------|---------|-------------|
 | `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
+| `prefixMatchInfoProducerName` | `string` | No | _(none)_ | Optional `prefix-cache producer` name to read to find cached prefix discount. Unset defaults to approximate-prefix producer. |
 
 When `addEstimatedOutputTokens` is true, the estimated output per request is a flat
 value determined by the output-length bucket published by the `outlen-bucket` plugin:

@@ -4,3 +4,4 @@ kind: Kustomization
 resources:
 - epp-service-monitor.yaml
 - vllm-sim-pod-monitor.yaml
+- coordinator-service-monitor.yaml

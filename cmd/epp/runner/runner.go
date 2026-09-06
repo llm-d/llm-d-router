@@ -47,6 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/internal/runnable"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/profiling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
@@ -61,7 +62,6 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -386,7 +386,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
 
 	// --- Setup Metrics Server ---
-	cardinality.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)
@@ -827,7 +827,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	}
 
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
-	r.requestControlConfig.OrderDataProducerPlugins(dag)
+	r.requestControlConfig.OrderPlugins(dag)
 
 	// Derive the endpoint-scope allowed-key sets while the full plugin set,
 	// including auto-created producers, is known. A plugin missing here is
@@ -1078,9 +1078,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	// File mode runs without a controller manager, so several Kubernetes-only
 	// features are inactive: the InferenceModelRewrite and InferenceObjective
-	// reconcilers never start, and any "k8s-notification-source" plugin in the
-	// data layer config silently fails to bind (Runtime.Start, which wires
-	// notification sources into the manager, is intentionally skipped below).
+	// reconcilers never start, and any "k8s-notification-source" plugin cannot
+	// bind without a controller manager. Cross-replica syncing remains active.
 	// Surface this once at startup so operators porting a K8s config see why
 	// related behavior differs.
 	//
@@ -1194,6 +1193,11 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	g := newRunnableGroup()
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
+	})
+	g.Add("cross-replica-sync", func(ctx context.Context) error {
+		r.dlRuntime.StartCrossReplicaSync(ctx)
+		<-ctx.Done()
+		return nil
 	})
 	// epp-server and health wait for the discovery plugin's initial sync before
 	// going live, so requests and probes never observe an empty datastore. See

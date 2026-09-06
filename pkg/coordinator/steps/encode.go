@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"golang.org/x/sync/errgroup"
 )
@@ -134,7 +135,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 			}
 
+			call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamEncode)
 			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, headers)
+			call.Done()
 			if err != nil {
 				err = fmt.Errorf("encode[%d]: request: %w", i, err)
 				logger.Error(err, "encode fanout request", "index", i, "path", path)

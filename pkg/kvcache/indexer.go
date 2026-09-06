@@ -26,8 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	kvctok "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
@@ -39,14 +39,6 @@ type Config struct {
 	KVBlockIndexConfig  *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
 	KVBlockScorerConfig *KVBlockScorerConfig    // not exported
 	BackendConfigs      []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
-
-	// TokenizersPoolConfig configured the deprecated in-process tokenization
-	// pool. The pool itself lives in llm-d-kv-cache; the indexer no longer
-	// consumes it, but the field is retained so existing configurations keep
-	// parsing. The precise-prefix-cache legacy producer reads it.
-	//
-	// Deprecated: tokenize externally and call Indexer.ScoreTokens.
-	TokenizersPoolConfig *kvctok.Config `json:"tokenizersPoolConfig,omitempty"`
 }
 
 // NewDefaultConfig returns a default configuration for the Indexer module.
@@ -64,7 +56,7 @@ type Indexer struct {
 
 	tokenProcessor kvblock.TokenProcessor // turns tokens to kv block keys
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
-	kvBlockScorer  KVBlockScorer          // scores pods based on block hits
+	tierWeights    map[string]float64     // device tier -> weight for the prefix matcher
 }
 
 // NewKVCacheIndexer creates a KVCacheIndex given a Config. Callers tokenize
@@ -88,20 +80,15 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 
 	// override backend configs with the ones from the config, if the defaults are not used.
 	config.KVBlockScorerConfig.BackendConfigs = config.BackendConfigs
-	scorer, err := NewKVBlockScorer(config.KVBlockScorerConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KVBlockScorer: %w", err)
+	if strategy := config.KVBlockScorerConfig.ScoringStrategy; strategy != LongestPrefixMatch {
+		return nil, fmt.Errorf("unsupported scoring strategy: %s", strategy)
 	}
-
-	// Wrap scorer with tracing instrumentation.
-	// When tracing is not configured, the tracer is a no-op implementation.
-	scorer = NewTracedScorer(scorer)
 
 	indexer := &Indexer{
 		config:         config,
 		tokenProcessor: tokenProcessor,
 		kvBlockIndex:   kvBlockIndex,
-		kvBlockScorer:  scorer,
+		tierWeights:    tierWeightsFromBackends(config.BackendConfigs),
 	}
 
 	return indexer, nil
@@ -139,9 +126,9 @@ func (k *Indexer) ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint3
 	return blockKeys, nil
 }
 
-// ScoreTokens computes pod scores for the given tokens and model.
-// It converts tokens into KV block keys, looks up which pods hold
-// matching blocks in the index, and scores each pod based on cache hits.
+// ScoreTokens computes pod scores for the given tokens and model: the
+// weighted prefix match (PodMatch.WeightedScore) of each pod holding the
+// first block key.
 //
 // extraFeatures provides per-block multimodal data that taints the hash;
 // nil means text-only. podIdentifiers limits scoring to the given pod addresses.
@@ -171,10 +158,10 @@ func (k *Indexer) ScoreTokens(
 	}
 
 	span.SetAttributes(
-		attribute.String("gen_ai.request.model", modelName),
-		attribute.Int("llm_d.kv_cache.pod_count", len(podIdentifiers)),
-		attribute.Int("llm_d.kv_cache.token_count", len(tokens)),
-		attribute.Int("llm_d.kv_cache.block_keys.count", len(blockKeys)),
+		semconv.GenAIRequestModel(modelName),
+		semconv.LLMDKVCachePodCount(len(podIdentifiers)),
+		semconv.LLMDKVCacheTokenCount(len(tokens)),
+		semconv.LLMDKVCacheBlockKeysCount(len(blockKeys)),
 	)
 
 	if len(blockKeys) == 0 {
@@ -184,49 +171,23 @@ func (k *Indexer) ScoreTokens(
 	}
 	traceLogger.Info("found tokens", "tokens", tokens, "block-keys", blockKeys)
 
-	keyToPods, err := k.kvBlockIndex.Lookup(ctx, blockKeys, sets.New(podIdentifiers...))
+	matches, keysFound, err := k.matchBlockKeys(ctx, blockKeys, sets.New(podIdentifiers...))
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("failed to query kvblock indexer: %w", err)
+		return nil, fmt.Errorf("failed to match block keys: %w", err)
 	}
-	traceLogger.Info("found block keys", "block-keys", blockKeys,
-		"pods", podsPerKeyPrintHelper(keyToPods))
+	traceLogger.Info("matched block keys", "block-keys", blockKeys, "matches", matches)
 
-	// Calculate block-level hit ratio (blocks found / blocks requested).
-	blocksFound := 0
-	for _, pods := range keyToPods {
-		if len(pods) > 0 {
-			blocksFound++
-		}
+	podScores := make(map[string]float64, len(matches))
+	for pod, m := range matches {
+		podScores[pod] = m.WeightedScore
 	}
-	blockHitRatio := 0.0
-	if len(blockKeys) > 0 {
-		blockHitRatio = float64(blocksFound) / float64(len(blockKeys))
-	}
+	// Block-level hit telemetry: requested keys held by any candidate pod,
+	// regardless of chains. The longest chain is on the matcher's span.
 	span.SetAttributes(
-		attribute.Float64("llm_d.kv_cache.block_hit_ratio", blockHitRatio),
-		attribute.Int("llm_d.kv_cache.blocks_found", blocksFound),
+		attribute.Float64("llm_d.kv_cache.block_hit_ratio", float64(keysFound)/float64(len(blockKeys))),
+		attribute.Int("llm_d.kv_cache.blocks_found", keysFound),
 	)
 
-	podScores, err := k.kvBlockScorer.Score(ctx, blockKeys, keyToPods)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("failed to query kvblock scorer: %w", err)
-	}
-
 	return podScores, nil
-}
-
-// podsPerKeyPrintHelper formats a map of keys to pod entries for printing.
-func podsPerKeyPrintHelper(ks map[kvblock.BlockHash][]kvblock.PodEntry) string {
-	flattened := ""
-	for k, v := range ks {
-		entries := make([]string, len(v))
-		for i, entry := range v {
-			entries[i] = entry.String()
-		}
-		flattened += fmt.Sprintf("%s: %v\n", k.String(), entries)
-	}
-
-	return flattened
 }

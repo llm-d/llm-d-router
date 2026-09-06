@@ -20,29 +20,44 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/require"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 type stubStep struct {
 	name string
 	err  error
+	// fn, when non-nil, takes precedence over err. Tests use it to observe
+	// state (e.g. gauge labels) at pipeline-execution time.
+	fn func(context.Context, *pipeline.RequestContext) error
 }
 
 func (s stubStep) Name() string { return s.name }
 
-func (s stubStep) Execute(context.Context, *pipeline.RequestContext) error { return s.err }
+func (s stubStep) Execute(ctx context.Context, rc *pipeline.RequestContext) error {
+	if s.fn != nil {
+		return s.fn(ctx, rc)
+	}
+	return s.err
+}
 
 // stubGatewayURL is a placeholder used by tests that never actually issue a
 // passthrough request. A real value only matters in passthrough_test.go.
@@ -297,6 +312,422 @@ func TestRoutesRegistered(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newMetricsRegistry wires the coordinator's metric vectors onto a fresh
+// registry so a test can inspect their state end-to-end via the same package-
+// level vectors the handler mutates. Reset clears the vectors' state so
+// concurrent tests do not see each other's increments.
+func newMetricsRegistry(t *testing.T) *prometheus.Registry {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	return reg
+}
+
+func TestHandleInference_SuccessRecordsRequestFamily(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	rec := postInference(t, newTestServer(nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"), "no errors expected on the success path")
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_duration_seconds", map[string]string{"model_name": "m"}); hc != 1 {
+		t.Fatalf("expected 1 request_duration_seconds observation, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": "m"}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation, got %d", hc)
+	}
+}
+
+func TestHandleInference_UpstreamErrorRecordsErrorCode(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	stepErr := fmt.Errorf("wrapped: %w", &pipeline.UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable, Body: "down"})
+	rec := postInference(t, newTestServer(stepErr))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeUpstream5xx})),
+		1e-9,
+	)
+}
+
+func TestHandleInference_StreamedUpstreamErrorClassifiedAndNotOverwritten(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	// stubStep writes a streamed response body first, then returns an
+	// UpstreamStreamedError. The handler must classify it for
+	// request_error_total but must not call http.Error on top of the bytes
+	// already on the wire.
+	const streamedBody = "streamed 500 body from decode worker"
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusInternalServerError)
+		_, _ = rc.ResponseWriter.Write([]byte(streamedBody))
+		return &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "streamed status must survive: no http.Error overwrite")
+	require.Equal(t, streamedBody, rec.Body.String(), "streamed body must survive: no http.Error overwrite")
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeUpstream5xx})),
+		1e-9, "streamed upstream 5xx must classify as upstream_5xx in request_error_total",
+	)
+}
+
+func TestHandleInference_PipelinePanicRecordsErrorAndPropagates(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	panicky := stubStep{name: "prefill", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+		panic("boom")
+	}}
+	p := pipeline.New([]pipeline.Step{panicky})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "pipeline panic must propagate out of handleInference so chi Recoverer at the server edge can answer 500")
+
+		require.InDelta(t, 1.0,
+			promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeInternal})),
+			1e-9, "request_error_total must record the panic under error_code=internal",
+		)
+		require.InDelta(t, 1.0,
+			promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+			1e-9, "request_total must still fire on panic so error-rate ratios stay meaningful",
+		)
+		require.InDelta(t, 0.0,
+			promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+			1e-9, "request_running must be balanced back to 0 after a panic",
+		)
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+}
+
+func TestHandleInference_MalformedBodyRecordsBadRequestWithUnknownModel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not-json"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed body, got %d", rec.Code)
+	}
+
+	// Malformed pre-parse: model attributes to "unknown".
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9,
+	)
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": coordmetrics.ModelUnknown, "error_code": coordmetrics.ErrorCodeBadRequest})),
+		1e-9,
+	)
+	// request_size_bytes covers the malformed branch under the unknown label.
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on invalid-JSON path, got %d", hc)
+	}
+}
+
+func TestHandleInference_NullBodyRecordsRequestSize(t *testing.T) {
+	// JSON null returns nil parsed; the size histogram must still be observed
+	// under the unknown label so the family is consistent across early returns.
+	reg := newMetricsRegistry(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("null"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on null-body path, got %d", hc)
+	}
+}
+
+// erroringReader returns some bytes and then fails, so a test can drive the
+// io.ReadAll error branch without racing on connection resets.
+type erroringReader struct {
+	prefix []byte
+	pos    int
+}
+
+func (e *erroringReader) Read(p []byte) (int, error) {
+	if e.pos < len(e.prefix) {
+		n := copy(p, e.prefix[e.pos:])
+		e.pos += n
+		return n, nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestHandleInference_ReadErrorRecordsPartialRequestSize(t *testing.T) {
+	// A partial-read failure must still observe the size histogram; the value
+	// recorded is what was read before the error, not the promised size.
+	reg := newMetricsRegistry(t)
+
+	partial := []byte(`{"mod`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", &erroringReader{prefix: partial})
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on read-error path, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hs != float64(len(partial)) {
+		t.Fatalf("expected partial-read length %d recorded on read-error path, got %v", len(partial), hs)
+	}
+}
+
+// blockingReader gates the first Read call on unblock, so a test can catch
+// the handler mid-io.ReadAll and inspect the in-flight gauge before the JSON
+// parse has run.
+type blockingReader struct {
+	once    sync.Once
+	started chan struct{}
+	unblock chan struct{}
+	body    io.Reader
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	b.once.Do(func() {
+		close(b.started)
+		<-b.unblock
+	})
+	return b.body.Read(p)
+}
+
+func TestHandleInference_PreparseWorkIsCountedAsInflight(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	br := &blockingReader{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+		body:    strings.NewReader(`{"model":"m"}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", br)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		newTestServer(nil).handleInference(rec, req)
+		close(done)
+	}()
+
+	// Wait until the handler is inside io.ReadAll before observing. The gauge
+	// must already reflect the request under the "unknown" label; the JSON
+	// has not been parsed yet, so no other label is possible.
+	<-br.started
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "gauge must be 1 during pre-parse under the unknown label",
+	)
+
+	close(br.unblock)
+	<-done
+
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "unknown label must balance to 0 after the label was swapped and the handler returned",
+	)
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+		1e-9, "parsed model label must balance to 0 after the handler returned",
+	)
+}
+
+func TestHandleInference_OversizeBodyBalancesGauge(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	oversize := strings.Repeat("x", config.BytesPerMB+1)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(oversize))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+
+	// The 413 path must touch request_running: mustRequestRunningGauge fails
+	// if the series is absent, so an omitted Inc on the pre-parse path is
+	// caught as a hard failure and cannot be read as a legitimate 0.
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "gauge must be back at 0 for the unknown label after 413",
+	)
+	// request_size_bytes covers the 413 branch under the unknown label.
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on 413 path, got %d", hc)
+	}
+}
+
+func TestHandleInference_ParsedModelSwapsLabel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	var (
+		unknownDuring float64
+		parsedDuring  float64
+	)
+	observer := stubStep{
+		name: "observe",
+		fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+			unknownDuring = promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown}))
+			parsedDuring = promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"}))
+			return nil
+		},
+	}
+	p := pipeline.New([]pipeline.Step{observer})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.InDelta(t, 0.0, unknownDuring, 1e-9, "unknown must be 0 during pipeline: the entry Inc was swapped out on parse")
+	require.InDelta(t, 1.0, parsedDuring, 1e-9, "parsed model must be 1 during pipeline: the entry Inc was swapped to this label on parse")
+
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9,
+	)
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+}
+
+// mustRequestRunningGauge finds the request_running gauge series matching all
+// of labels in reg. A missing series fails the test, so an untouched series
+// cannot be mistaken for a legitimate 0 by promtestutil.ToFloat64.
+func mustRequestRunningGauge(t *testing.T, reg *prometheus.Registry, labels map[string]string) prometheus.Gauge {
+	t.Helper()
+	const name = "llm_d_coordinator_request_running"
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "shadow"})
+				g.Set(m.GetGauge().GetValue())
+				return g
+			}
+		}
+	}
+	t.Fatalf("gauge %s%v not present", name, labels)
+	return nil
+}
+
+// mustCounter looks up the counter series matching all of labels from reg. The
+// series must exist; a missing series is a test failure so promtestutil.ToFloat64
+// cannot silently see zero from an absent series.
+func mustCounter(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) prometheus.Counter {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if !labelsMatch(m.GetLabel(), labels) {
+				continue
+			}
+			c := prometheus.NewCounter(prometheus.CounterOpts{Name: "shadow"})
+			c.Add(m.GetCounter().GetValue())
+			return c
+		}
+	}
+	t.Fatalf("counter %s%v not present", name, labels)
+	return nil
+}
+
+func histogramCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	t.Fatalf("histogram %s%v not present", name, labels)
+	return 0
+}
+
+func histogramSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				return m.GetHistogram().GetSampleSum()
+			}
+		}
+	}
+	t.Fatalf("histogram %s%v not present", name, labels)
+	return 0
+}
+
+// seriesCount returns the number of series (label-set combinations) that the
+// metric family with the given name currently carries. Zero means the vector
+// has never been observed under any label combination.
+func seriesCount(t *testing.T, reg *prometheus.Registry, name string) int {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == name {
+			return len(mf.GetMetric())
+		}
+	}
+	return 0
+}
+
+func labelsMatch(actual []*dto.LabelPair, want map[string]string) bool {
+	if want == nil {
+		return true
+	}
+	got := map[string]string{}
+	for _, l := range actual {
+		got[l.GetName()] = l.GetValue()
+	}
+	for k, v := range want {
+		if got[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {

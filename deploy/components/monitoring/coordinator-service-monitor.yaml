@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: coordinator-metrics
+  labels:
+    app: coordinator-metrics
+spec:
+  selector:
+    matchLabels:
+      app: llm-d-coordinator
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics

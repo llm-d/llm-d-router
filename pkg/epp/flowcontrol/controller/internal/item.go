@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -54,12 +56,13 @@ type FlowItem struct {
 	enqueueTime     time.Time
 	effectiveTTL    time.Duration
 	originalRequest flowcontrol.FlowControlRequest
+	logger          logr.Logger
 
 	// --- Synchronized State ---
 
 	// handle stores the types.QueueItemHandle atomically.
 	// Written by the Processor (SetHandle) when admitted.
-	// Read by inferOutcome (called by Finalize) to infer the outcome (Rejected vs. Evicted).
+	// Read by Finalize to select the error family (Rejected vs. Evicted).
 	// Distinguishing between pre-admission (Rejection) and post-admission (Eviction) during asynchronous finalization
 	// relies on whether this handle is nil or non-nil.
 	handle atomic.Pointer[flowcontrol.QueueItemHandle]
@@ -81,11 +84,17 @@ type FlowItem struct {
 var _ flowcontrol.QueueItemAccessor = &FlowItem{}
 
 // NewItem allocates and initializes a new FlowItem for a request lifecycle.
-func NewItem(req flowcontrol.FlowControlRequest, effectiveTTL time.Duration, enqueueTime time.Time) *FlowItem {
+func NewItem(
+	req flowcontrol.FlowControlRequest,
+	effectiveTTL time.Duration,
+	enqueueTime time.Time,
+	logger logr.Logger,
+) *FlowItem {
 	return &FlowItem{
 		enqueueTime:     enqueueTime,
 		effectiveTTL:    effectiveTTL,
 		originalRequest: req,
+		logger:          logger,
 		done:            make(chan *FinalState, 1),
 	}
 }
@@ -128,27 +137,33 @@ func (fi *FlowItem) SetHandle(handle flowcontrol.QueueItemHandle) { fi.handle.St
 func (fi *FlowItem) Finalize(cause error) {
 	fi.onceFinalize.Do(func() {
 		// Atomically load the handle to determine if the item was admitted to a queue.
-		// This synchronization is critical for correctly inferring the outcome across goroutines.
+		// This synchronization is critical for correctly classifying the outcome across goroutines.
 		isQueued := fi.Handle() != nil
-		outcome, finalErr := inferOutcome(cause, isQueued)
-		fi.finalizeInternal(outcome, finalErr)
+		fi.finalizeInternal(wrapCause(cause, isQueued))
 	})
 }
 
-// FinalizeWithOutcome sets the item's terminal state explicitly.
+// FinalizeWithError sets the item's terminal state from a pre-wrapped finalization error: nil for dispatch, otherwise
+// an error wrapping `types.ErrRejected` or `types.ErrEvicted`. The outcome is derived from the error.
 //
 // This method is intended for synchronous finalization by the Processor (Dispatch, Reject) or the Controller
 // (Distribution failure).
 // It is idempotent.
-func (fi *FlowItem) FinalizeWithOutcome(outcome types.QueueOutcome, err error) {
+func (fi *FlowItem) FinalizeWithError(err error) {
 	fi.onceFinalize.Do(func() {
-		fi.finalizeInternal(outcome, err)
+		fi.finalizeInternal(err)
 	})
 }
 
 // finalizeInternal is the core finalization logic. It must be called within the sync.Once.Do block.
-// It captures the state, stores it atomically, and signals the Done channel.
-func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
+// It derives the outcome from the error, captures the state, stores it atomically, and signals the Done channel.
+func (fi *FlowItem) finalizeInternal(err error) {
+	outcome, ok := types.OutcomeFromError(err)
+	if !ok {
+		fi.logger.Error(err, "Invariant violation: finalization error wraps neither ErrRejected nor ErrEvicted",
+			"requestID", fi.originalRequest.ID(), "flowKey", fi.originalRequest.FlowKey())
+	}
+
 	finalState := &FinalState{
 		Outcome: outcome,
 		Err:     err,
@@ -169,30 +184,28 @@ func (fi *FlowItem) finalizeInternal(outcome types.QueueOutcome, err error) {
 	close(fi.done)
 }
 
-// inferOutcome determines the correct QueueOutcome and Error based on the cause of finalization and whether the item
-// was already admitted to a queue.
-func inferOutcome(cause error, isQueued bool) (types.QueueOutcome, error) {
+// wrapCause normalizes a finalization cause (e.g., a Context error) into the canonical sentinel chain and wraps it
+// with the family sentinel that matches the item's admission status.
+func wrapCause(cause error, isQueued bool) error {
 	var specificErr error
-	var outcomeIfEvicted types.QueueOutcome
 	switch {
-	case errors.Is(cause, types.ErrTTLExpired) || errors.Is(cause, context.DeadlineExceeded):
-		specificErr = types.ErrTTLExpired
-		outcomeIfEvicted = types.QueueOutcomeEvictedTTL
+	case errors.Is(cause, types.ErrTTLExpired):
+		specificErr = cause
+	case errors.Is(cause, context.DeadlineExceeded):
+		specificErr = fmt.Errorf("%w: %w", types.ErrTTLExpired, cause)
 	case errors.Is(cause, context.Canceled):
 		specificErr = fmt.Errorf("%w: %w", types.ErrContextCancelled, cause)
-		outcomeIfEvicted = types.QueueOutcomeEvictedContextCancelled
 	default:
 		// Handle other potential causes (e.g., custom context errors).
 		specificErr = cause
-		outcomeIfEvicted = types.QueueOutcomeEvictedOther
 	}
 
 	if isQueued {
 		// The item was in the queue when it expired/cancelled.
-		return outcomeIfEvicted, fmt.Errorf("%w: %w", types.ErrEvicted, specificErr)
+		return fmt.Errorf("%w: %w", types.ErrEvicted, specificErr)
 	}
 
 	// The item was not yet in the queue (e.g., buffered in enqueueChan).
 	// We treat this as a rejection, as it never formally consumed queue capacity.
-	return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, specificErr)
+	return fmt.Errorf("%w: %w", types.ErrRejected, specificErr)
 }

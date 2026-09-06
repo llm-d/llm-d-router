@@ -124,7 +124,7 @@ func (h *ProfileHandler) ProcessResults(_ context.Context, request *scheduling.I
 	for _, target := range profileResult.TargetEndpoints {
 		newMetadata := target.GetMetadata().Clone()
 		newMetadata.Port = h.primaryPort
-		targetEndpoint := scheduling.NewEndpoint(newMetadata, target.GetMetrics().Clone(), nil)
+		targetEndpoint := scheduling.NewEndpoint(newMetadata, target.GetMetrics(), target.Clone())
 		newResult.TargetEndpoints = append(newResult.TargetEndpoints, targetEndpoint)
 	}
 	modifiedResults := map[string]*scheduling.ProfileRunResult{singleProfileName: &newResult}

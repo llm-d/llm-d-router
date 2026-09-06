@@ -13,7 +13,7 @@ by the [`kvevents`](../kvevents/README.md) subscriber), and produces a per-pod
 score. The precise-prefix-cache scheduling scorer consumes these scores.
 
 Tokenization happens externally: callers pass tokens in via `ScoreTokens`. The
-indexer owns block-key computation, index lookup, and scoring.
+indexer owns block-key computation, index lookup, and prefix matching.
 
 ## How It Works
 
@@ -22,27 +22,29 @@ indexer owns block-key computation, index lookup, and scoring.
   fixed-size blocks and hash each block (chaining the previous block's hash so a
   key encodes its whole prefix). `extraFeatures` taints the hash with per-block
   multimodal metadata when present.
-- **Lookup.** `ScoreTokens` queries the [`kvblock.Index`](kvblock/README.md)
-  for the pods that hold each block key, optionally restricted to a caller-
-  supplied pod set.
-- **Scoring.** A `KVBlockScorer` reduces the lookup result to per-pod scores.
-  The default `LongestPrefixScorer` credits each pod for its longest run of
-  consecutive block hits starting from block 0, weighted per device tier
-  (`BackendConfigs`), so a pod that holds a longer contiguous prefix ranks
-  higher.
-- **Tracing.** The index and scorer are wrapped with OpenTelemetry
-  instrumentation that is a no-op when tracing is not configured.
+- **Matching.** `MatchBlockKeys` queries the
+  [`kvblock.Index`](kvblock/README.md) for the pods that hold each block key,
+  optionally restricted to a caller-supplied pod set, and folds the result
+  into one `PodMatch` per pod holding the first key: the pod's longest run of
+  consecutive block hits starting from block 0, its weighted score (per
+  device tier, `BackendConfigs`), and the run length per tier. The matching
+  rules live in one accumulator, so every caller sees the same semantics.
+- **Scoring.** `ScoreTokens` reports each pod's weighted score, so a pod that
+  holds a longer contiguous prefix ranks higher.
+- **Tracing.** Index operations and the matcher emit OpenTelemetry spans,
+  no-ops when tracing is not configured.
 
 ## Key Types
 
 | Symbol | Role |
 |--------|------|
 | `Indexer` | Entry point; constructed with `NewKVCacheIndexer(ctx, config, tokenProcessor)`. |
-| `ScoreTokens` | Tokens-in scoring: tokens -> block keys -> lookup -> per-pod scores. |
-| `ComputeBlockKeysFromTokens` | Tokens -> block keys, without scoring. |
+| `ScoreTokens` | Tokens-in scoring: tokens -> block keys -> match -> per-pod scores. |
+| `MatchBlockKeys` / `PodMatch` | Block keys -> per-pod prefix match: weighted score, matched blocks, blocks per tier. |
+| `ComputeBlockKeysFromTokens` | Tokens -> block keys, without matching. |
 | `KVBlockIndex` | Accessor for the underlying `kvblock.Index`. |
-| `KVBlockScorer` / `LongestPrefixScorer` | Scoring strategy over block-hit results. |
-| `Config` | Wires the block-index backend, scorer, and per-tier backend weights. |
+| `LongestPrefixScorer` | Deprecated `KVBlockScorer`; projects the matcher over a materialized lookup result. |
+| `Config` | Wires the block-index backend, scoring strategy, and per-tier backend weights. |
 
 ## Related Documentation
 

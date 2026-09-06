@@ -494,6 +494,12 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 	if iv := rawDataConfig.CrossReplicaSyncInterval; iv != nil {
 		cfg.SyncInterval = iv.Duration
 	}
+	if timeout := rawDataConfig.CrossReplicaPublishTimeout; timeout != nil {
+		if timeout.Duration <= 0 {
+			return nil, fmt.Errorf("crossReplicaPublishTimeout must be positive, got %s", timeout.Duration)
+		}
+		cfg.PublishTimeout = timeout.Duration
+	}
 
 	for _, source := range rawDataConfig.Sources {
 		if sourcePlugin, ok := handle.Plugin(source.PluginRef).(fwkdl.DataSource); ok {
@@ -513,5 +519,6 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 			return nil, fmt.Errorf("the plugin %s is not a fwkdl.DataSource", source.PluginRef)
 		}
 	}
+	handle.SetCrossReplicaSyncer(cfg.Syncer)
 	return &cfg, nil
 }

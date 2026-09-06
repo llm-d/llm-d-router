@@ -364,27 +364,20 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now())
+			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 
-			result := make(chan struct {
-				outcome types.QueueOutcome
-				err     error
-			}, 1)
+			result := make(chan error, 1)
 			go func() {
-				outcome, err := h.fc.awaitFinalization(context.Background(), item)
-				result <- struct {
-					outcome types.QueueOutcome
-					err     error
-				}{outcome: outcome, err: err}
+				result <- h.fc.awaitFinalization(context.Background(), item)
 			}()
 
 			cancel()
 			select {
-			case r := <-result:
-				require.Error(t, r.err, "awaitFinalization must fail when controller shuts down")
-				assert.ErrorIs(t, r.err, types.ErrFlowControllerNotRunning,
+			case err := <-result:
+				require.Error(t, err, "awaitFinalization must fail when controller shuts down")
+				assert.ErrorIs(t, err, types.ErrFlowControllerNotRunning,
 					"error should wrap ErrFlowControllerNotRunning")
-				assert.Equal(t, types.QueueOutcomeRejectedOther, r.outcome,
+				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 					"outcome should be QueueOutcomeRejectedOther on shutdown")
 			case <-time.After(time.Second):
 				t.Fatal("awaitFinalization did not return after controller shutdown")
@@ -395,34 +388,34 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
 			reqCtx, reqCancel := context.WithCancel(context.Background())
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now())
+			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 
 			reqCancel()
 			cancel()
 
-			outcome, err := h.fc.awaitFinalization(reqCtx, item)
+			err := h.fc.awaitFinalization(reqCtx, item)
 			require.Error(t, err, "awaitFinalization must fail when controller shuts down")
 			assert.ErrorIs(t, err, types.ErrFlowControllerNotRunning,
 				"controller shutdown should take precedence over request cancellation")
-			assert.Equal(t, types.QueueOutcomeRejectedOther, outcome,
+			assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 				"shutdown should return the rejected outcome")
 		})
 		t.Run("OnControllerShutdownPreservesQueuedOutcome", func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now())
+			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 			item.SetHandle(&fwkfcmocks.MockQueueItemHandle{})
 
 			cancel()
 
-			outcome, err := h.fc.awaitFinalization(context.Background(), item)
+			err := h.fc.awaitFinalization(context.Background(), item)
 			require.Error(t, err, "awaitFinalization must fail when controller shuts down")
 			assert.ErrorIs(t, err, types.ErrEvicted,
 				"a queued item should be evicted, not rejected, during shutdown")
 			assert.ErrorIs(t, err, types.ErrFlowControllerNotRunning,
 				"queued shutdown should preserve the shutdown cause")
-			assert.Equal(t, types.QueueOutcomeEvictedOther, outcome,
+			assert.Equal(t, types.QueueOutcomeEvictedOther, item.FinalState().Outcome,
 				"a queued item should return the evicted outcome")
 		})
 
@@ -512,7 +505,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					return &mockProcessor{
 						SubmitFunc: func(item *internal.FlowItem) error {
 							// Simulate asynchronous processing and successful dispatch.
-							go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+							go item.FinalizeWithError(nil)
 							return nil
 						},
 					}
@@ -874,7 +867,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					// Block until the test allows us to proceed.
 					select {
 					case <-unblockProcessor:
-						item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+						item.FinalizeWithError(nil)
 						return nil
 					case <-ctx.Done():
 						return ctx.Err()
@@ -1154,7 +1147,7 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 	processor := &mockProcessor{
 		SubmitFunc: func(item *internal.FlowItem) error {
 			capturedKey = item.OriginalRequest().FlowKey()
-			go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+			go item.FinalizeWithError(nil)
 			return nil
 		},
 	}

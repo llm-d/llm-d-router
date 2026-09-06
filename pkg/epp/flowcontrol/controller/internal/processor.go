@@ -56,7 +56,7 @@ var ErrProcessorBusy = errors.New("processor is busy")
 // The Processor takes ownership of a FlowItem only after it has been successfully sent to its internal enqueueChan
 // via Submit or SubmitOrBlock (i.e., when these methods return nil).
 // Once the Processor takes ownership, it is solely responsible for ensuring that item.Finalize() or
-// item.FinalizeWithOutcome() is called exactly once for that item, under all circumstances (dispatch, rejection, sweep,
+// item.FinalizeWithError() is called exactly once for that item, under all circumstances (dispatch, rejection, sweep,
 // or shutdown).
 //
 // If Submit or SubmitOrBlock return an error, ownership remains with the caller (the Controller), which must then
@@ -307,12 +307,13 @@ func (p *Processor) enqueue(item *FlowItem) {
 	}
 
 	// --- Configuration Validation ---
+	// Registry errors on both lookups are flattened with %v; see tryDistribution for why a finalized error must
+	// not preserve registry sentinels.
 	managedQ, err := p.registry.ManagedQueue(key)
 	if err != nil {
-		finalErr := fmt.Errorf("configuration error: failed to get queue for flow key %s: %w", key, err)
+		finalErr := fmt.Errorf("configuration error: failed to get queue for flow key %s: %v", key, err)
 		p.logger.Error(finalErr, "Rejecting request, queue lookup failed", "flowKey", key, "requestID", req.ID())
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
-		p.recordDrop(types.QueueOutcomeRejectedOther)
+		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 
@@ -320,10 +321,9 @@ func (p *Processor) enqueue(item *FlowItem) {
 	// This check is safe because it is performed by the single-writer Run goroutine.
 	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
 	if err != nil {
-		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %w", key.Priority, err)
+		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
-		p.recordDrop(types.QueueOutcomeRejectedOther)
+		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 	if !ok {
@@ -336,9 +336,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 				"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
 				"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
 				"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
-			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
-				types.ErrRejected, types.ErrNoEndpoints))
-			p.recordDrop(types.QueueOutcomeRejectedNoEndpoints)
+			p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, types.ErrNoEndpoints))
 			return
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
@@ -347,9 +345,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
 			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
 			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
-			types.ErrRejected, types.ErrQueueAtCapacity))
-		p.recordDrop(types.QueueOutcomeRejectedCapacity)
+		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, types.ErrQueueAtCapacity))
 		return
 	}
 
@@ -359,8 +355,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		finalErr := fmt.Errorf("failed to add item to queue for flow key %s: %w", key, err)
 		p.logger.Error(finalErr, "Rejecting request, queue add failed",
 			"flowKey", key, "requestID", req.ID())
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
-		p.recordDrop(types.QueueOutcomeRejectedOther)
+		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
 	p.logger.V(logutil.TRACE).Info("Item enqueued.",
@@ -632,7 +627,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
 	}
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
-	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+	removedItem.FinalizeWithError(nil)
 	return nil
 }
 
@@ -668,6 +663,7 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 func (p *Processor) sweepFinalizedItems() {
 	now := p.clock.Now()
 	regime := p.regime.Load()
+	expiryErr := expiryError(regime.empty)
 
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
@@ -679,16 +675,16 @@ func (p *Processor) sweepFinalizedItems() {
 			if item.FinalState() != nil {
 				return true
 			}
-			outcome, expired := isExpired(item, now, regime, p.noEndpointRequestTTL)
-			if !expired {
+			if !isExpired(item, now, regime, p.noEndpointRequestTTL) {
 				return false
 			}
 			// Finalizing here rather than in a separate pass keeps expiry to a single scan. Finalization is
 			// idempotent, and an item finalized but not removed is the same zombie state the sweep already
 			// tolerates, so a queue that declines the removal costs nothing beyond a later sweep.
-			item.FinalizeWithOutcome(outcome, expiryError(outcome))
+			item.FinalizeWithError(expiryErr)
 			logger.V(logutil.TRACE).Info("Evicted item, queue-wait budget exhausted.",
-				"requestID", item.OriginalRequest().ID(), "outcome", outcome, "poolEmpty", regime.empty)
+				"requestID", item.OriginalRequest().ID(), "outcome", item.FinalState().Outcome,
+				"poolEmpty", regime.empty)
 			return true
 		}
 		removedItems := managedQ.Cleanup(predicate)
@@ -705,8 +701,8 @@ func (p *Processor) sweepFinalizedItems() {
 	p.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
 }
 
-// isExpired reports whether item has exhausted the queue-wait budget in force, and the outcome that eviction would
-// carry. A zero budget disables eviction in that regime.
+// isExpired reports whether item has exhausted the queue-wait budget in force. A zero budget disables eviction in
+// that regime.
 //
 // Elapsed time is charged from the later of enqueue and the most recent regime change. Charging from enqueue alone
 // would shed a request the moment it becomes dispatchable: an endpoint appearing after the saturation budget has
@@ -717,25 +713,26 @@ func isExpired(
 	now time.Time,
 	regime *regimeSample,
 	noEndpointRequestTTL time.Duration,
-) (types.QueueOutcome, bool) {
-	budget, outcome := item.EffectiveTTL(), types.QueueOutcomeEvictedTTL
+) bool {
+	budget := item.EffectiveTTL()
 	if regime.empty {
-		budget, outcome = noEndpointRequestTTL, types.QueueOutcomeEvictedNoEndpoints
+		budget = noEndpointRequestTTL
 	}
 	if budget <= 0 {
-		return outcome, false
+		return false
 	}
 
 	chargeFrom := item.EnqueueTime()
 	if regime.since.After(chargeFrom) {
 		chargeFrom = regime.since
 	}
-	return outcome, !now.Before(chargeFrom.Add(budget))
+	return !now.Before(chargeFrom.Add(budget))
 }
 
-// expiryError builds the error accompanying an expiry eviction, wrapping the sentinels that callers match on.
-func expiryError(outcome types.QueueOutcome) error {
-	if outcome == types.QueueOutcomeEvictedNoEndpoints {
+// expiryError builds the error accompanying an expiry eviction, wrapping the sentinels that callers match on. The
+// no-endpoint regime adds `types.ErrNoEndpoints` so the eviction classifies as genuine unavailability.
+func expiryError(poolEmpty bool) error {
+	if poolEmpty {
 		return fmt.Errorf("%w: %w: %w", types.ErrEvicted, types.ErrTTLExpired, types.ErrNoEndpoints)
 	}
 	return fmt.Errorf("%w: %w", types.ErrEvicted, types.ErrTTLExpired)
@@ -756,9 +753,7 @@ func (p *Processor) shutdown() {
 					continue
 				}
 				// Finalize buffered items.
-				item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
-					fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning))
-				p.recordDrop(types.QueueOutcomeRejectedOther)
+				p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning))
 			default:
 				break DrainLoop
 			}
@@ -776,7 +771,6 @@ func (p *Processor) evictAll() {
 		key := managedQ.FlowQueueAccessor().FlowKey()
 		removedItems := managedQ.Drain()
 
-		outcome := types.QueueOutcomeEvictedOther
 		errShutdown := fmt.Errorf("%w: %w", types.ErrEvicted, types.ErrFlowControllerNotRunning)
 		for _, i := range removedItems {
 			item, ok := i.(*FlowItem)
@@ -786,17 +780,23 @@ func (p *Processor) evictAll() {
 				continue
 			}
 
-			// Finalization is idempotent; safe to call even if already finalized externally.
 			// The per-request log is emitted by EnqueueAndWait when it unblocks.
-			item.FinalizeWithOutcome(outcome, errShutdown)
-			p.recordDrop(item.FinalState().Outcome)
+			p.finalizeAndRecordDrop(item, errShutdown)
 		}
 	}
 	p.processAllQueuesConcurrently("evictAll", processFn)
 }
 
+// finalizeAndRecordDrop finalizes item with err and counts the outcome actually stored. Finalization is idempotent
+// (sync.Once), so when the controller goroutine finalizes the same item concurrently (e.g. a TTL expiry racing the
+// processor's capacity rejection), the winner's outcome is the one counted.
+func (p *Processor) finalizeAndRecordDrop(item *FlowItem, err error) {
+	item.FinalizeWithError(err)
+	p.recordDrop(item.FinalState().Outcome)
+}
+
 func (p *Processor) recordDrop(outcome types.QueueOutcome) {
-	if outcome == types.QueueOutcomeDispatched || outcome == types.QueueOutcomeNotYetFinalized {
+	if outcome == types.QueueOutcomeDispatched {
 		return
 	}
 	p.dropCounts[outcome].Add(1)

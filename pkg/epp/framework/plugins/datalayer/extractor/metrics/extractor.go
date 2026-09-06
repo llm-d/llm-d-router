@@ -269,8 +269,8 @@ func populateLoRAMetrics(clone *fwkdl.Metrics, metric *dto.Metric, errs *[]error
 }
 
 // populateCacheInfoMetrics updates the metrics with cache info from the metric labels.
-// blockSizeLabelName and numBlocksLabelName allow engines to use different label names
-// (e.g. SGLang uses "page_size" and "num_pages" instead of "block_size" and "num_gpu_blocks").
+// blockSizeLabelName and numBlocksLabelName allow engines to carry the values under
+// label names other than "block_size" and "num_gpu_blocks".
 func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSizeLabelName, numBlocksLabelName string, errs *[]error) {
 	clone.CacheBlockSize = 0
 	clone.CachePrefixMatchUnit = 0
