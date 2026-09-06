@@ -57,11 +57,18 @@ func (f RequestFormat) String() string {
 	}
 }
 
-// DetectFormat classifies an inbound request path. The chi router registers
-// only PathChatCompletions, PathCompletions, and PathResponses, so in production
-// path is always one of those three; the FormatGenerate fallback covers only
-// callers that pass an arbitrary path. There is no error return because an
-// unrecognized path is not a failure: it maps to the generate format by design.
+// DetectFormat classifies an inbound request path by substring match. The chi
+// router registers PathChatCompletions, PathCompletions, PathResponses, and
+// DefaultGeneratePath; DetectFormat maps the first three by name and
+// everything else, including DefaultGeneratePath itself, to FormatGenerate.
+// There is no error return because an unrecognized path is not a failure: it
+// maps to the generate format by design.
+//
+// A step that decides which body field to read based on wire format (chat
+// completions' "messages" versus Responses' "input") must gate on this result
+// rather than on which field happens to be present in the body: an unrelated
+// route's request could carry a same-shaped stray field, and key presence
+// alone cannot tell that apart from the field this request actually means.
 func DetectFormat(path string) RequestFormat {
 	if strings.Contains(path, PathChatCompletions) {
 		return FormatChatCompletions

@@ -245,6 +245,80 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 	}
 }
 
+// Which body field injectUUIDs walks is decided by the request's
+// OriginalPath, not by which fields happen to be present. A chat-completions
+// request that also carries a stray top-level "input" array must not have
+// that array's image part stamped with a uuid.
+func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		messages := parsed["messages"].([]any)
+		msgPart := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if msgPart["uuid"] != testImageHash {
+			t.Fatalf("expected uuid=%s on the messages image part, got %v", testImageHash, msgPart["uuid"])
+		}
+
+		input := parsed["input"].([]any)
+		inputPart := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if _, ok := inputPart["uuid"]; ok {
+			t.Fatalf("expected no uuid stamped on the stray input array's part, got %v", inputPart["uuid"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-stray-input",
+		OriginalPath: testChatCompletionsPath,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz"},
+		Body: map[string]any{
+			"model": "llama-3",
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/cat.jpg"}},
+					},
+				},
+			},
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_image", "image_url": "https://example.com/dog.jpg"},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+}
+
 func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	var parsed map[string]any
 

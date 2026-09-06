@@ -134,10 +134,17 @@ func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
 	reqCtx.Body["tokens"] = tokens
 }
 
-// injectUUIDs stamps image parts with their multimodal hash, reading whichever
-// body field matches the request's own path: a chat-completions request never
-// carries "input" and a Responses request never carries "messages", so which
-// field to walk is decided by path, not by which fields happen to be present.
+// injectUUIDs stamps image parts with their multimodal hash, walking whichever
+// body field gateway.DetectFormat's result implies (see its doc comment for
+// why the field is chosen by path rather than by presence).
+//
+// DetectFormat rather than resolveFormat: decode always proxies to
+// reqCtx.OriginalPath with reqCtx.Body largely as received, regardless of
+// useOpenAIFormat, so the wire shape to walk here tracks the request's actual
+// path. When useOpenAIFormat is false the body has already been rewritten
+// upstream to the token-array shape and carries neither field, so both
+// functions agree in practice; resolveFormat's FormatGenerate answer would
+// also just find nothing to walk.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 	switch gateway.DetectFormat(reqCtx.OriginalPath) {
 	case gateway.FormatChatCompletions:

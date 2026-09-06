@@ -145,6 +145,91 @@ func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
 	}
 }
 
+// An input_image part referencing a file_id instead of a bare image_url string
+// has no way to be downloaded and inlined, and silently skipping it would
+// desync this step's positional indexing from encode's (which counts every
+// input_image part regardless of how its image is referenced). It must be
+// rejected instead.
+func TestReplaceMediaURLsStep_Responses_RejectsFileIDImage(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.PathResponses,
+		Body: map[string]any{
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
+						map[string]any{"type": "input_image", "file_id": "file-abc123"},
+					},
+				},
+			},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for input_image part with no image_url string")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+// Which body field this step walks is decided by the request's OriginalPath,
+// not by which fields happen to be present. A chat-completions request that
+// also carries a stray top-level "input" array (an SDK/proxy forwarding an
+// unknown field, or a client mid-migration between the two APIs) must not
+// have that field's image downloaded and processed as if it were Responses.
+func TestReplaceMediaURLsStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
+	var hits atomic.Int32
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{})
+
+	strayImageURL := imageServer.URL + "/stray.jpg"
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: gateway.PathChatCompletions,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "just text"},
+			},
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_image", "image_url": strayImageURL},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("expected the stray input array's image to never be fetched, got %d hits", hits.Load())
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected 0 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	input := reqCtx.Body["input"].([]any)
+	part := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["image_url"] != strayImageURL {
+		t.Fatalf("expected stray input's image_url left untouched, got %v", part["image_url"])
+	}
+}
+
 func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 

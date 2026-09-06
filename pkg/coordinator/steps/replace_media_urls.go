@@ -139,9 +139,8 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	// Which body field to walk is decided by the request's own path, not by
-	// which fields happen to be present: a chat-completions request never
-	// carries "input" and a Responses request never carries "messages".
+	// Walk whichever body field gateway.DetectFormat's result implies (see its
+	// doc comment for why the field is chosen by path rather than by presence).
 	var imageURLs []imageRef
 	switch gateway.DetectFormat(reqCtx.OriginalPath) {
 	case gateway.FormatChatCompletions:
@@ -150,7 +149,11 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		}
 	case gateway.FormatResponses:
 		if input, ok := reqCtx.Body["input"].([]any); ok {
-			imageURLs = collectResponsesImageRefs(input)
+			var err error
+			imageURLs, err = collectResponsesImageRefs(input)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -265,7 +268,13 @@ func collectChatCompletionsImageRefs(messages []any) []imageRef {
 // collectResponsesImageRefs walks a Responses-API input array for input_image
 // parts. Unlike chat-completions' image_url part, the URL here is a bare
 // string field on the part itself (part["image_url"]), not a nested object.
-func collectResponsesImageRefs(input []any) []imageRef {
+//
+// An input_image part with no string image_url (e.g. a file_id reference to a
+// previously uploaded file) is rejected rather than skipped: encode's
+// collectImageParts counts every input_image part regardless of how its image
+// is referenced, so silently excluding one here would desync the two
+// functions' positional indexing and misassign hashes to the wrong image.
+func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 	var refs []imageRef
 	for itemIdx, item := range input {
 		itemMap, ok := item.(map[string]any)
@@ -286,7 +295,7 @@ func collectResponsesImageRefs(input []any) []imageRef {
 			}
 			url, ok := partMap[imageURLPartType].(string)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("input item %d part %d: input_image with no image_url string is not supported: %w", itemIdx, partIdx, pipeline.ErrBadRequest)
 			}
 			refs = append(refs, imageRef{
 				msgIdx:  itemIdx,
@@ -296,7 +305,7 @@ func collectResponsesImageRefs(input []any) []imageRef {
 			})
 		}
 	}
-	return refs
+	return refs, nil
 }
 
 func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 string) {

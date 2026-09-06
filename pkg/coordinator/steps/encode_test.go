@@ -437,6 +437,61 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_ResponsesFormat_PreservesDetail verifies that a client's
+// optional detail field on an input_image part survives onto the synthetic
+// encode sub-request. It is a sibling of image_url on the Responses part
+// rather than nested inside it, so it needs its own copy in
+// buildSingleImageContent instead of coming along for free.
+func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-detail": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-detail",
+		OriginalPath: gateway.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc", "detail": "low"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-detail", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	input := receivedBody["input"].([]any)
+	part := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["detail"] != "low" {
+		t.Fatalf("expected detail=low preserved on the encode sub-request, got %v", part["detail"])
+	}
+}
+
 // TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens verifies that
 // the encode chat sub-request, built fresh from the request context, does not
 // carry the client's sampling fields: max_completion_tokens is not propagated,
