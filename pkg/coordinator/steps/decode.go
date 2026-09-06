@@ -126,10 +126,19 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	return nil
 }
 
-// injectUUIDs stamps image parts with their multimodal hash, reading whichever
-// body field matches the request's own path: a chat-completions request never
-// carries "input" and a Responses request never carries "messages", so which
-// field to walk is decided by path, not by which fields happen to be present.
+// injectUUIDs stamps image parts with their multimodal hash, walking whichever
+// body field reqcommon.DetectAPIType's result implies: a chat-completions
+// request never carries "input" and a Responses request never carries
+// "messages", so which field to walk is decided by path, not by which fields
+// happen to be present.
+//
+// DetectAPIType rather than resolveFormat: decode always proxies to
+// reqCtx.OriginalPath with reqCtx.Body largely as received, regardless of
+// useOpenAIFormat, so the wire shape to walk here tracks the request's actual
+// path. When useOpenAIFormat is false the body has already been rewritten
+// upstream to the token-array shape and carries neither field, so both
+// functions agree in practice; resolveFormat's APITypeVLLMGenerate answer
+// would also just find nothing to walk.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeChatCompletions:
