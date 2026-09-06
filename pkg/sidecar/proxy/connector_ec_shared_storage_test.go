@@ -234,6 +234,42 @@ func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
 	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
 }
 
+// TestBuildEncoderRequest_MinTokens is a regression test: a client-supplied
+// min_tokens above the encoder leg's max_tokens=1 cap trips vLLM's
+// min_tokens<=max_tokens validation.
+func TestBuildEncoderRequest_MinTokens(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "https://example.com/image.jpg",
+						},
+					},
+				},
+			},
+		},
+		"max_tokens": 50,
+		"min_tokens": 5,
+	}
+
+	mmItem := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "https://example.com/image.jpg",
+		},
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.Equal(t, 1, encoderRequest["max_tokens"])
+	assert.NotContains(t, encoderRequest, "min_tokens")
+}
+
 func TestMMItemURL(t *testing.T) {
 	tests := []struct {
 		name     string

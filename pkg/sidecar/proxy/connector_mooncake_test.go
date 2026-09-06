@@ -134,6 +134,39 @@ var _ = Describe("Mooncake Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	It("should strip min_tokens from the prefill leg and restore it in decode", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		body := chatCompletionsRequestBodyWithMinTokens
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		if resp.StatusCode != 200 {
+			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			Fail(string(bp))
+		}
+
+		Eventually(func() int {
+			return len(testInfo.prefillHandler.GetCompletionRequests())
+		}).Should(Equal(1))
+
+		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
+		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).ToNot(HaveKey(requestFieldMinTokens))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		dreq := testInfo.decodeHandler.GetCompletionRequests()[0]
+		Expect(dreq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should not panic when prefill response is slower than decode response", func() {
 		// Stop previously injected servers
 		testInfo.decodeBackend.Close()
