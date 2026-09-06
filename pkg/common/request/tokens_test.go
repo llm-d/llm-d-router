@@ -232,6 +232,15 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
 		},
 		{
+			// The Responses API has no max_tokens field; vLLM's ResponsesRequest
+			// ignores it, so max_output_tokens is the only field that caps output
+			// length and must be set even when the client never sent it.
+			name:    "responses caps max_output_tokens even when the client omitted it",
+			apiType: APITypeResponses,
+			body:    map[string]any{"model": "m"},
+			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
+		},
+		{
 			// max_tokens and max_completion_tokens are not Responses fields, so
 			// tokenLimitFields does not name them and they are left as sent.
 			// min_tokens is stripped for every API; see CapSingleToken.
