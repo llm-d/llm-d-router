@@ -149,6 +149,9 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if config.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixTokensToMatch must be >= 0 (current value: %d)", config.MaxPrefixTokensToMatch)
 	}
+	if config.MaxPrefixBlocksToMatch < 0 {
+		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
+	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
@@ -181,9 +184,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
-	if handle != nil {
-		go p.CleanUpInactivePods(ctx, handle)
-	}
+	go p.CleanUpInactivePods(ctx, handle)
 
 	return p, nil
 }

@@ -23,8 +23,9 @@ import (
 var _ plugin.Handle = &fakeHandle{}
 
 type fakeHandle struct {
-	ctx     context.Context
-	plugins map[string]plugin.Plugin
+	ctx                context.Context
+	plugins            map[string]plugin.Plugin
+	crossReplicaSyncer plugin.Plugin
 }
 
 func newFakeHandle(ctx context.Context) *fakeHandle {
@@ -61,6 +62,14 @@ func (h *fakeHandle) PodList() []k8stypes.NamespacedName {
 
 func (h *fakeHandle) Metrics() plugin.MetricsRecorder {
 	return nil
+}
+
+func (h *fakeHandle) CrossReplicaSyncer() plugin.Plugin {
+	return h.crossReplicaSyncer
+}
+
+func (h *fakeHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
+	h.crossReplicaSyncer = syncer
 }
 
 type stubPlugin struct {

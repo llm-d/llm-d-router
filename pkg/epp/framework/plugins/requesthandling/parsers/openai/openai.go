@@ -49,14 +49,16 @@ const (
 	// imagesEditsAPI is the OpenAI-compatible image edit (image-to-image) endpoint.
 	// Requests are multipart/form-data.
 	imagesEditsAPI = "images/edits"
+	audioSpeechAPI = "audio/speech"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
 
 	contentType = "content-type"
-	// The base media type for Server-Sent Events. We check for this substring
-	// to account for optional parameters like "; charset=utf-8" often appended by proxies.
+	// The base media type for Server-Sent Events. responseMediaType strips
+	// optional parameters such as "; charset=utf-8".
 	eventStreamType = "text/event-stream"
+	octetStreamType = "application/octet-stream"
 
 	promptTokensField        = "prompt_tokens"
 	inputTokensField         = "input_tokens"
@@ -66,6 +68,12 @@ const (
 	inputTokensDetailsField  = "input_tokens_details"
 	cachedTokensField        = "cached_tokens"
 	totalTokensField         = "total_tokens"
+
+	// Text to speech api response format:
+	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
+	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"
+	vllmOmniOutputTokensHeader = "x-vllm-omni-output-tokens"
+	vllmOmniTotalTokensHeader  = "x-vllm-omni-total-tokens"
 )
 
 // compile-time type validation
@@ -107,6 +115,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
 			imagesEditsAPI,
+			audioSpeechAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -151,10 +160,19 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		extractedBody.Model = model
 	}
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
-	if stream, ok := bodyMap["stream"].(bool); ok && stream {
-		extractedBody.Stream = true
-	}
+	extractedBody.Stream = isStreamingRequest(apiType, bodyMap)
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
+	if stream, ok := bodyMap["stream"].(bool); ok && stream {
+		return true
+	}
+	if apiType != audioSpeechAPI {
+		return false
+	}
+	streamFormat, _ := bodyMap["stream_format"].(string)
+	return streamFormat == "sse" || streamFormat == "audio"
 }
 
 func tokenInputField(body *fwkrh.InferenceRequestBody) string {
@@ -194,23 +212,21 @@ func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
 	}
 }
 
-// ParseResponse extracts usage metadata from the provider's response.
-// It automatically detects and handles both standard JSON responses and SSE streams.
-func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {
+// ParseResponse extracts usage metadata from JSON, SSE, and binary audio responses.
+func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*fwkrh.ParsedResponse, error) {
+	mediaType := responseMediaType(headers)
+	if strings.HasPrefix(mediaType, "audio/") || mediaType == octetStreamType {
+		if !endOfStream {
+			return &fwkrh.ParsedResponse{}, nil
+		}
+		return &fwkrh.ParsedResponse{Usage: extractUsageHeaders(headers)}, nil
+	}
 	if len(body) == 0 {
 		// An empty body can occur during streaming; for instance, Envoy proxies
 		// may emit a trailing empty body with the EndOfStream flag set to true.
 		return nil, nil //nolint:nilnil
 	}
-
-	isStream := false
-	for k, v := range headers {
-		if strings.ToLower(k) == contentType && strings.Contains(strings.ToLower(v), eventStreamType) {
-			isStream = true
-			break
-		}
-	}
-	if isStream {
+	if mediaType == eventStreamType {
 		return p.parseStreamResponse(body)
 	}
 
@@ -249,6 +265,51 @@ func isStreamTerminator(content []byte) bool {
 	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte("[DONE]"))
 }
 
+func responseMediaType(headers map[string]string) string {
+	value, ok := headerValue(headers, contentType)
+	if !ok {
+		return ""
+	}
+	mediaType, _, _ := strings.Cut(value, ";")
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
+func headerValue(headers map[string]string, name string) (string, bool) {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func extractUsageHeaders(headers map[string]string) *fwkrh.Usage {
+	usage := &fwkrh.Usage{}
+	found := false
+
+	for header, target := range map[string]*int{
+		vllmOmniInputTokensHeader:  &usage.PromptTokens,
+		vllmOmniOutputTokensHeader: &usage.CompletionTokens,
+		vllmOmniTotalTokensHeader:  &usage.TotalTokens,
+	} {
+		value, ok := headerValue(headers, header)
+		if !ok {
+			continue
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || parsed < 0 {
+			continue
+		}
+		*target = parsed
+		found = true
+	}
+
+	if !found {
+		return nil
+	}
+	return usage
+}
+
 // determineAPITypeFromPath determines the API type based on the request path.
 // The suffix-based matching supports both standard OpenAI paths (e.g. /v1/chat/completions)
 // and provider-specific paths (e.g. Vertex AI's /v1/projects/.../chat/completions).
@@ -276,6 +337,9 @@ func determineAPITypeFromPath(path string) string {
 	}
 	if request.MatchPathSuffix(path, "/images/edits") {
 		return imagesEditsAPI
+	}
+	if request.MatchPathSuffix(path, "/audio/speech") {
+		return audioSpeechAPI
 	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
@@ -307,6 +371,21 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 			return nil, validationErr
 		}
 		return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
+
+	case audioSpeechAPI:
+		validationErr := errors.New("invalid text to speech request: must have string input field")
+		var speechRequest struct {
+			Input *string `json:"input"`
+		}
+		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
+			return nil, requestBodyDecodeError(err, validationErr)
+		}
+		if speechRequest.Input == nil {
+			return nil, validationErr
+		}
+		return &fwkrh.InferenceRequestBody{
+			TextToSpeech: &fwkrh.TextToSpeechRequest{Input: *speechRequest.Input},
+		}, nil
 
 	case chatCompletionsAPI:
 		validationErr := errors.New("invalid chat completions request: must have valid messages field")
@@ -358,7 +437,8 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	mediaType, params, err := mime.ParseMediaType(headerValue(headers, contentType))
+	contentTypeValue, _ := headerValue(headers, contentType)
+	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
 		return nil, errors.New("images edits request must have a multipart/form-data content-type")
 	}
@@ -419,16 +499,6 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 		return nil, errors.New("invalid images edits request: must have prompt field")
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
-}
-
-// headerValue returns the value of the named header, matching case-insensitively.
-func headerValue(headers map[string]string, name string) string {
-	for k, v := range headers {
-		if strings.EqualFold(k, name) {
-			return v
-		}
-	}
-	return ""
 }
 
 func requestBodyDecodeError(err, validationErr error) error {
@@ -531,16 +601,8 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	event: response.completed
 //	data: {"response":{"usage":{"input_tokens":31,..},...},"type":"response.completed"}
 //
-// It extracts usage from events with type="response.completed".
+// It extracts usage from events with type="response.completed" or "speech.audio.done".
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
-	var streamResponse struct {
-		Usage    *fwkrh.Usage `json:"usage"`
-		Response struct {
-			Usage json.RawMessage `json:"usage"` // Delay JSON decoding until we know we have usage data
-		} `json:"response"`
-		Type string `json:"type"`
-	}
-
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
@@ -551,22 +613,44 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 		if isStreamTerminator(content) || !bytes.Contains(content, []byte("usage")) {
 			continue
 		}
+		var streamResponse struct {
+			Usage    json.RawMessage `json:"usage"`
+			Response struct {
+				Usage json.RawMessage `json:"usage"` // Delay JSON decoding until we know we have usage data
+			} `json:"response"`
+			Type string `json:"type"`
+		}
 		if err := json.Unmarshal(content, &streamResponse); err != nil {
 			continue
 		}
 		// Standard ChatCompletion / vLLM usage format
-		if streamResponse.Usage != nil {
-			return streamResponse.Usage
+		if len(streamResponse.Usage) > 0 {
+			if strings.HasPrefix(streamResponse.Type, "speech.audio.") {
+				if streamResponse.Type == "speech.audio.done" {
+					return extractRawUsage(streamResponse.Usage)
+				}
+				continue
+			}
+			var usage *fwkrh.Usage
+			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
+				return usage
+			}
 		}
 		// Responses API streaming format
 		if len(streamResponse.Response.Usage) > 0 && streamResponse.Type == "response.completed" {
-			jsonBytes, _ := json.Marshal(map[string]any{
-				"usage": streamResponse.Response.Usage,
-			})
-			if usage, err := extractUsage(jsonBytes); err == nil && usage != nil {
+			if usage := extractRawUsage(streamResponse.Response.Usage); usage != nil {
 				return usage
 			}
 		}
 	}
 	return nil
+}
+
+func extractRawUsage(raw json.RawMessage) *fwkrh.Usage {
+	jsonBytes, _ := json.Marshal(map[string]any{"usage": raw})
+	usage, err := extractUsage(jsonBytes)
+	if err != nil {
+		return nil
+	}
+	return usage
 }

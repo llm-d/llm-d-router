@@ -7,21 +7,22 @@ metadata:
   labels:
     {{- include "llm-d-router.labels" . | nindent 4 }}
 spec:
+  {{- $modelServers := .Values.router.modelServers | default dict }}
   targetPorts:
-  {{- range .Values.router.modelServers.targetPorts }}
+  {{- range $modelServers.targetPorts }}
   - number: {{ .number }}
   {{- end }}
-  {{- if .Values.router.modelServers.protocol }}
-  {{- if eq .Values.router.modelServers.protocol "grpc" }}
+  {{- if $modelServers.protocol }}
+  {{- if eq $modelServers.protocol "grpc" }}
   appProtocol: "kubernetes.io/h2c"
-  {{- else if eq .Values.router.modelServers.protocol "http" }}
+  {{- else if eq $modelServers.protocol "http" }}
   appProtocol: "http"
   {{- end }}
   {{- end }}
   selector:
     matchLabels:
-      {{- if .Values.router.modelServers.matchLabels }}
-      {{- range $key, $value := .Values.router.modelServers.matchLabels }}
+      {{- if $modelServers.matchLabels }}
+      {{- range $key, $value := $modelServers.matchLabels }}
       {{ $key }}: {{ quote $value }}
       {{- end }}
       {{- end }}

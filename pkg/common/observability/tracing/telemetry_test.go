@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -452,7 +454,7 @@ func TestNewTraceExporter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.exporterType, func(t *testing.T) {
-			exporter, err := newTraceExporter(context.Background(), tc.exporterType)
+			exporter, err := newTraceExporter(context.Background(), &errorHandler{logger: testr.New(t)}, tc.exporterType)
 			if err != nil {
 				t.Fatalf("newTraceExporter(%q) error = %v", tc.exporterType, err)
 			}
@@ -498,4 +500,40 @@ func TestNoneExporterStillCreatesSpans(t *testing.T) {
 		t.Error("span is not sampled, want the sampler to be unaffected by the exporter")
 	}
 	span.End()
+}
+
+// "none" exports nothing, so the line naming the selected exporter is the only
+// evidence that tracing initialised rather than failed silently.
+func TestNoneExporterReportsSelection(t *testing.T) {
+	clearEnv(t, "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG")
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
+
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
+	})
+
+	var logged []string
+	logger := funcr.New(func(_, args string) {
+		logged = append(logged, args)
+	}, funcr.Options{})
+
+	shutdown, err := InitTracing(context.Background(), logger, testServiceName)
+	if err != nil {
+		t.Fatalf("InitTracing() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown() error = %v", err)
+		}
+	})
+
+	for _, line := range logged {
+		if strings.Contains(line, "init OTel trace exporter") && strings.Contains(line, exporterTypeNone) {
+			return
+		}
+	}
+	t.Errorf("logged %q, want the selected exporter type reported", logged)
 }

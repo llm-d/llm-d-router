@@ -586,7 +586,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	completionRequest[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill: true,
 		requestFieldDoRemoteDecode:  false,
-		requestFieldRemoteEngineID:  fmt.Sprintf("%s:%d", prefillHost, s.config.MoRIIOPrefillHandshakePort),
+		requestFieldRemoteEngineID:  net.JoinHostPort(prefillHost, strconv.Itoa(s.config.MoRIIOPrefillHandshakePort)),
 		// Empty (not nil) since decode allocates its own blocks in WRITE mode.
 		requestFieldRemoteBlockIDs:       []any{},
 		requestFieldRemoteHost:           prefillHost,

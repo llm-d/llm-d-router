@@ -69,13 +69,13 @@ func (i *indexer) Add(hashes []blockHash, pod server) {
 		lruForPod = newLRU
 	}
 
-	// Add to LRU (may evict)
-	for _, hash := range hashes {
+	// Insert hashes tail-first: matching is anchored at the first block, so
+	// the head is the most valuable entry and must stay cached longest; an
+	// oversized batch naturally keeps exactly its head. hashToPods is updated
+	// in the same iteration because the eviction callback can fire mid-batch.
+	for idx := len(hashes) - 1; idx >= 0; idx-- {
+		hash := hashes[idx]
 		lruForPod.Add(hash, struct{}{})
-	}
-
-	// Update hashToPods
-	for _, hash := range hashes {
 		podIDs := i.hashToPods[hash]
 		if podIDs == nil {
 			podIDs = make(podSet)

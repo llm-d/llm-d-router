@@ -213,6 +213,10 @@ func TestDataProducerValidation(t *testing.T) {
 	}, {
 		AutoTune:        false,
 		BlockSizeTokens: 0,
+	}, {
+		AutoTune:               false,
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: -1,
 	}}
 
 	for _, config := range validConfigs {

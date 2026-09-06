@@ -65,14 +65,23 @@ type warmer interface {
 
 // warmup primes the render path so the first request does not pay the cold-start
 // cost. It retries a text render until the backend responds, then issues a
-// best-effort multimodal render. It returns on success, on the attempt cap, or
-// on context cancellation.
+// best-effort multimodal render. It returns on success, on the attempt cap, on
+// an authentication rejection, or on context cancellation.
 func (b renderBackend) warmup(ctx context.Context) {
-	logger := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
 	for i := 0; i < warmupAttempts; i++ {
-		if _, err := b.produce(ctx, warmupChat()); err == nil {
+		_, err := b.produce(ctx, warmupChat())
+		if err == nil {
 			_, _ = b.produce(ctx, warmupChat(warmupImage))
-			logger.Info("token-producer backend warmed up", "attempts", i+1)
+			logger.V(logutil.DEBUG).Info("token-producer backend warmed up", "attempts", i+1)
+			return
+		}
+		// Warmup carries no credentials; an auth rejection will not clear on retry.
+		if isRenderAuthError(err) {
+			logger.V(logutil.DEFAULT).Info(
+				"token-producer backend requires authentication, skipping warmup; "+
+					"the first request pays the cold-start cost",
+				"err", err)
 			return
 		}
 		select {
@@ -81,7 +90,7 @@ func (b renderBackend) warmup(ctx context.Context) {
 			return
 		}
 	}
-	logger.Info("token-producer backend warmup did not complete")
+	logger.V(logutil.DEBUG).Info("token-producer backend warmup did not complete")
 }
 
 // warmupChat builds a single-message chat body carrying the given image URLs.

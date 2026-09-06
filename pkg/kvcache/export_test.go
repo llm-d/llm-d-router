@@ -22,10 +22,10 @@ import (
 
 // NewIndexerForTest constructs an Indexer with injected dependencies.
 // Exported only for testing via the export_test.go pattern.
-func NewIndexerForTest(tp kvblock.TokenProcessor, idx kvblock.Index, scorer KVBlockScorer) *Indexer {
+func NewIndexerForTest(tp kvblock.TokenProcessor, idx kvblock.Index, backends []*KVCacheBackendConfig) *Indexer {
 	return &Indexer{
 		tokenProcessor: tp,
 		kvBlockIndex:   idx,
-		kvBlockScorer:  scorer,
+		tierWeights:    tierWeightsFromBackends(backends),
 	}
 }

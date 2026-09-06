@@ -820,6 +820,157 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "text to speech request body",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+				"input":           "Hello from llm-d.",
+				"voice":           "default",
+				"ref_audio":       "data:audio/wav;base64,UklGRg==",
+				"ref_text":        "Hello.",
+				"response_format": "wav",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Hello from llm-d.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+					"input":           "Hello from llm-d.",
+					"voice":           "default",
+					"ref_audio":       "data:audio/wav;base64,UklGRg==",
+					"ref_text":        "Hello.",
+					"response_format": "wav",
+				},
+			},
+		},
+		{
+			name:    "text to speech request via prefix-mounted path with stream",
+			headers: map[string]string{":path": "/openai/v1/audio/speech"},
+			body: map[string]any{
+				"model":  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":  "Stream this response.",
+				"voice":  "ryan",
+				"stream": true,
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":  "Stream this response.",
+					"voice":  "ryan",
+					"stream": true,
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "text to speech request with SSE stream format",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":           "Stream this response as SSE.",
+				"stream":          false,
+				"stream_format":   "sse",
+				"response_format": "pcm",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response as SSE.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":           "Stream this response as SSE.",
+					"stream":          false,
+					"stream_format":   "sse",
+					"response_format": "pcm",
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "text to speech request with raw audio stream format",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":           "Stream this response as raw audio.",
+				"stream":          false,
+				"stream_format":   "audio",
+				"response_format": "wav",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response as raw audio.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":           "Stream this response as raw audio.",
+					"stream":          false,
+					"stream_format":   "audio",
+					"response_format": "wav",
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "text to speech request with stream and raw audio stream format",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+				"input":           "Stream this response.",
+				"stream":          true,
+				"stream_format":   "audio",
+				"response_format": "pcm",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{
+					Input: "Stream this response.",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+					"input":           "Stream this response.",
+					"stream":          true,
+					"stream_format":   "audio",
+					"response_format": "pcm",
+				},
+				Stream: true,
+			},
+		},
+		{
+			name:    "text to speech request with empty input",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model": "test",
+				"input": "",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{},
+				Payload: fwkrh.PayloadMap{
+					"model": "test",
+					"input": "",
+				},
+			},
+		},
+		{
+			name:    "text to speech request missing input",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model": "test",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "text to speech request with non-string input",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model": "test",
+				"input": []any{"not", "supported"},
+			},
+			wantErr: true,
+		},
 		// Path-based detection tests
 		{
 			name:    "conversations API via path",
@@ -1381,10 +1532,12 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 	parser := NewOpenAIParser()
 
 	tests := []struct {
-		name    string
-		body    []byte
-		want    *fwkrh.ParsedResponse
-		wantErr bool
+		name        string
+		body        []byte
+		headers     map[string]string
+		endOfStream bool
+		want        *fwkrh.ParsedResponse
+		wantErr     bool
 	}{
 		{
 			name: "Chat Completion (uses prompt_tokens)",
@@ -1500,11 +1653,54 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			body:    []byte(`{malformed`),
 			wantErr: true,
 		},
+		{
+			name:    "Audio stream chunk",
+			body:    []byte{0x52, 0x49, 0x46, 0x46},
+			headers: map[string]string{contentType: "audio/wav"},
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
+		{
+			name: "Audio response with usage headers",
+			body: []byte{0x52, 0x49, 0x46, 0x46},
+			headers: map[string]string{
+				"Content-Type":                   "audio/wav; charset=binary",
+				"X-Vllm-Omni-Input-Tokens":       "12",
+				"X-Vllm-Omni-Output-Tokens":      "24",
+				"X-Vllm-Omni-Total-Tokens":       "36",
+				"X-Vllm-Omni-Input-Text-Tokens":  "7",
+				"X-Vllm-Omni-Input-Audio-Tokens": "5",
+			},
+			endOfStream: true,
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     12,
+					CompletionTokens: 24,
+					TotalTokens:      36,
+				},
+			},
+		},
+		{
+			name: "Octet-stream response with malformed usage headers",
+			body: []byte{0x00, 0x01, 0x02},
+			headers: map[string]string{
+				contentType:                      "application/octet-stream",
+				"x-vllm-omni-input-tokens":       "invalid",
+				"x-vllm-omni-output-tokens":      "-1",
+				"x-vllm-omni-total-tokens":       "3.5",
+				"x-vllm-omni-input-audio-tokens": "3",
+			},
+			endOfStream: true,
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.body, map[string]string{}, false)
+			got, err := parser.ParseResponse(context.Background(), tt.body, tt.headers, tt.endOfStream)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseResponse() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1646,6 +1842,18 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 				StreamedEvents: 2,
 			},
 		},
+		{
+			name:  "Speech audio done event",
+			chunk: []byte("event: speech.audio.delta\ndata: {\"type\":\"speech.audio.delta\",\"audio\":\"UklGRg==\",\"response_format\":\"pcm\"}\n\nevent: speech.audio.done\ndata: {\"type\":\"speech.audio.done\",\"usage\":{\"input_tokens\":12,\"output_tokens\":24,\"total_tokens\":36}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     12,
+					CompletionTokens: 24,
+					TotalTokens:      36,
+				},
+				StreamedEvents: 2,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1703,6 +1911,7 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
 			imagesEditsAPI,
+			audioSpeechAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}

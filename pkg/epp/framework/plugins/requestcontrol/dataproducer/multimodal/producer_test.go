@@ -212,8 +212,9 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 }
 
 type testHandle struct {
-	ctx     context.Context
-	podList func() []k8stypes.NamespacedName
+	ctx                context.Context
+	podList            func() []k8stypes.NamespacedName
+	crossReplicaSyncer plugin.Plugin
 }
 
 func (h *testHandle) Context() context.Context {
@@ -236,6 +237,14 @@ func (h *testHandle) GetAllPluginsWithNames() map[string]plugin.Plugin {
 
 func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return nil
+}
+
+func (h *testHandle) CrossReplicaSyncer() plugin.Plugin {
+	return h.crossReplicaSyncer
+}
+
+func (h *testHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
+	h.crossReplicaSyncer = syncer
 }
 
 func (h *testHandle) PodList() []k8stypes.NamespacedName {
