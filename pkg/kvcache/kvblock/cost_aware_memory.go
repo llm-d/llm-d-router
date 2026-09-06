@@ -297,36 +297,40 @@ func (m *CostAwareMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHa
 
 	for idx, key := range requestKeys {
 		keyStr := key.String()
-		if pods, found := m.data.Get(keyStr); found { //nolint:nestif // TODO: can this be optimized?
-			if pods == nil || pods.Len() == 0 {
-				traceLogger.Info("no pods found for key, cutting search", "key", key)
-				return podsPerKey, nil // early stop since prefix-chain breaks here
-			}
-
-			highestHitIdx = idx
-
-			if podIdentifierSet.Len() == 0 {
-				// If no pod identifiers are provided, return all pods
-				pods.cache.Range(func(k, value interface{}) bool {
-					if pod, ok := k.(PodEntry); ok {
-						podsPerKey[key] = append(podsPerKey[key], pod)
-					}
-					return true
-				})
-			} else {
-				// Filter pods based on the provided pod identifiers
-				pods.cache.Range(func(k, value interface{}) bool {
-					if pod, ok := k.(PodEntry); ok {
-						if podIdentifierSet.Has(pod.PodIdentifier) {
-							podsPerKey[key] = append(podsPerKey[key], pod)
-						}
-					}
-					return true
-				})
-			}
-		} else {
-			traceLogger.Info("key not found in index", "key", key)
+		pods, found := m.data.Get(keyStr)
+		if !found || pods == nil || pods.Len() == 0 {
+			traceLogger.Info("no pods found for key, cutting search", "key", key)
+			return podsPerKey, nil // early stop since prefix-chain breaks here
 		}
+
+		var filteredPods []PodEntry
+		if podIdentifierSet.Len() == 0 {
+			// If no pod identifiers are provided, return all pods
+			pods.cache.Range(func(k, value interface{}) bool {
+				if pod, ok := k.(PodEntry); ok {
+					filteredPods = append(filteredPods, pod)
+				}
+				return true
+			})
+		} else {
+			// Filter pods based on the provided pod identifiers
+			pods.cache.Range(func(k, value interface{}) bool {
+				if pod, ok := k.(PodEntry); ok {
+					if podIdentifierSet.Has(pod.PodIdentifier) {
+						filteredPods = append(filteredPods, pod)
+					}
+				}
+				return true
+			})
+		}
+
+		if len(filteredPods) == 0 {
+			traceLogger.Info("no pods found for key, cutting search", "key", key)
+			return podsPerKey, nil // early stop since prefix-chain breaks here
+		}
+
+		podsPerKey[key] = filteredPods
+		highestHitIdx = idx
 	}
 
 	traceLogger.Info("lookup completed", "highest-hit-index", highestHitIdx,

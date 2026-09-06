@@ -288,17 +288,16 @@ func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 		pods, found := m.data.Peek(requestKey)
 		if !found {
 			if traceLogger.Enabled() {
-				traceLogger.Info("key not found in index", "key", requestKey)
+				traceLogger.Info("no pods found for key, cutting search", "key", requestKey)
 			}
-			continue
+			return podsPerKey, nil // early stop since prefix-chain breaks here
 		}
 		var filtered []PodEntry
-		total := 0
 		if pods != nil {
-			filtered, total = pods.filteredEntries(podIdentifierSet)
+			filtered, _ = pods.filteredEntries(podIdentifierSet)
 		}
 		visited = idx + 1
-		if total == 0 {
+		if len(filtered) == 0 {
 			if traceLogger.Enabled() {
 				traceLogger.Info("no pods found for key, cutting search", "key", requestKey)
 			}
@@ -309,10 +308,7 @@ func (m *InMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 		}
 
 		highestHitIdx = idx
-
-		if len(filtered) > 0 {
-			podsPerKey[requestKey] = filtered
-		}
+		podsPerKey[requestKey] = filtered
 	}
 
 	if err := ctx.Err(); err != nil {
