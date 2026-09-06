@@ -93,7 +93,7 @@ func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 	content := msgs[0].(map[string]any)["content"].([]any)
 	imgPart := content[1].(map[string]any)["image_url"].(map[string]any)
 	url := imgPart["url"].(string)
-	if url[:len("data:image/jpeg;base64,")] != "data:image/jpeg;base64," {
+	if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
 		t.Fatalf("expected data URI, got %s", url)
 	}
 }
@@ -140,7 +140,7 @@ func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
 	input := reqCtx.Body["input"].([]any)
 	content := input[0].(map[string]any)["content"].([]any)
 	url := content[1].(map[string]any)["image_url"].(string)
-	if url[:len("data:image/jpeg;base64,")] != "data:image/jpeg;base64," {
+	if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
 		t.Fatalf("expected data URI, got %s", url)
 	}
 }
