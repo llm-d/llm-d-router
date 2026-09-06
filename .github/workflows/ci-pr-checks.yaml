@@ -11,6 +11,8 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -57,7 +59,7 @@ jobs:
 
   verify-helm-charts:
     needs: check-changes
-    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -100,7 +102,7 @@ jobs:
       # Missing cache is not an error; compare-coverage.sh reports all
       # components as new and exits 0.
       - name: Restore main branch coverage baseline
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/cache/restore@v6
         with:
           path: coverage/baseline
@@ -132,13 +134,13 @@ jobs:
 
       - name: Compare coverage against main baseline
         id: coverage-gate
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         continue-on-error: true
         shell: bash
         run: make coverage-compare BASELINE_DIR=coverage/baseline
 
       - name: Find latest release branch
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         id: find-releases
         shell: bash
         run: |
@@ -152,7 +154,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Download and compare release coverage baselines
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         shell: bash
         run: |
           if [[ ! -s /tmp/release_branches.txt ]]; then
@@ -214,7 +216,7 @@ jobs:
           overwrite: true
 
       - name: Enforce coverage gate
-        if: github.event_name == 'pull_request' && steps.coverage-gate.outcome == 'failure'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.coverage-gate.outcome == 'failure'
         run: |
           echo "::error::Coverage regression detected -- see the coverage report in the job summary above."
           exit 1
