@@ -719,3 +719,74 @@ func TestZMQSubscriber_ReplayedLiveEventsDoNotTriggerAnotherReplay(t *testing.T)
 	time.Sleep(300 * time.Millisecond)
 	assert.Equal(t, int32(1), h.buffer.requests.Load())
 }
+
+type reconnectConsumer struct {
+	stored chan uint64
+	resets chan string
+}
+
+func (c *reconnectConsumer) ProcessEvents(_ context.Context, _ kvevents.EventSource, batch kvevents.EventBatch) error {
+	for _, event := range batch.Events {
+		if stored, ok := event.(*kvevents.BlockStoredEvent); ok {
+			for _, hash := range stored.BlockHashes {
+				c.stored <- hash
+			}
+		}
+	}
+	return nil
+}
+
+func (c *reconnectConsumer) Reset(_ context.Context, endpoint string) error {
+	c.resets <- endpoint
+	return nil
+}
+
+func TestZMQSubscriber_ConsumerReconnectReplaysWithoutLiveTraffic(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	defer cancel()
+	consumer := &reconnectConsumer{stored: make(chan uint64, 10), resets: make(chan string, 10)}
+	pool := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	pool.Start(ctx)
+	subManager := kvevents.NewSubscriberManager(pool)
+	t.Cleanup(func() {
+		subManager.Shutdown(ctx)
+		pool.Shutdown(ctx)
+	})
+
+	pubEndpoint := availableEndpoint(t, ctx)
+	pub := zmq4.NewPub(ctx)
+	require.NoError(t, pub.Listen(pubEndpoint))
+	t.Cleanup(func() { pub.Close() })
+	replayEndpoint := availableEndpoint(t, ctx)
+	buffer := startReplayBuffer(t, ctx, replayEndpoint)
+	buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)})
+	require.NoError(t, subManager.EnsureSubscriber(ctx, "test-pod", "10.0.0.1:8000",
+		pubEndpoint, replayEndpoint, "kv@", true))
+
+	select {
+	case hash := <-consumer.stored:
+		require.Equal(t, uint64(100), hash)
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial replay did not reach the consumer")
+	}
+	require.Equal(t, "10.0.0.1:8000", <-consumer.resets)
+	require.NoError(t, pub.Close())
+	select {
+	case endpoint := <-consumer.resets:
+		require.Equal(t, "10.0.0.1:8000", endpoint)
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnect did not invalidate the source")
+	}
+
+	// The restarted publisher's first event is buffered before reconnection.
+	buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 200)})
+	pub = zmq4.NewPub(ctx)
+	require.NoError(t, pub.Listen(pubEndpoint))
+	select {
+	case hash := <-consumer.stored:
+		require.Equal(t, uint64(200), hash)
+	case <-time.After(10 * time.Second):
+		t.Fatal("reconnect did not replay the restarted publisher without live traffic")
+	}
+	require.Equal(t, uint64(0), buffer.lastStartSeq.Load())
+}

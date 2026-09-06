@@ -104,6 +104,10 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			z.runSubscriber(ctx)
 			if z.pool.consumer != nil && z.sourceEndpoint != "" {
 				z.pool.resetForSource("", z.sourceEndpoint)
+				// Cleared availability requires a full replay on reconnect.
+				z.lastSeq, z.lastLiveSeq = 0, 0
+				z.hasLastSeq, z.hasLastLiveSeq = false, false
+				z.lastReplayFailure = time.Time{}
 			}
 			// wait before retrying, unless the context has been canceled.
 			select {
