@@ -91,17 +91,21 @@ func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 		target = sp
 	}
 
-	target[reqcommon.FieldMaxTokens] = 1
+	// The Responses API schema has no max_tokens field; vLLM's ResponsesRequest
+	// ignores it, so max_output_tokens is the only field that actually caps
+	// output length and must be set unconditionally, not only when the client
+	// already sent it.
+	if format == gateway.FormatResponses {
+		body[reqcommon.FieldMaxOutputTokens] = 1
+	} else {
+		target[reqcommon.FieldMaxTokens] = 1
+		if _, ok := body[reqcommon.FieldMaxCompletionTokens]; ok {
+			body[reqcommon.FieldMaxCompletionTokens] = 1
+		}
+	}
 	// Strip rather than clamp min_tokens: it defaults to 0 in vLLM, so removing it
 	// keeps min_tokens <= max_tokens=1 without raising the floor above the cap.
 	delete(target, reqcommon.FieldMinTokens)
-
-	if _, ok := body[reqcommon.FieldMaxCompletionTokens]; ok {
-		body[reqcommon.FieldMaxCompletionTokens] = 1
-	}
-	if _, ok := body[reqcommon.FieldMaxOutputTokens]; ok {
-		body[reqcommon.FieldMaxOutputTokens] = 1
-	}
 
 	body[reqcommon.FieldStream] = false
 	delete(body, reqcommon.FieldStreamOptions)
