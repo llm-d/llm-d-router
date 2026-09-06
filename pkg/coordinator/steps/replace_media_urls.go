@@ -48,6 +48,8 @@ const imageURLPartType = "image_url"
 
 const inputImagePartType = "input_image"
 
+const inputImageDetailField = "detail"
+
 const defaultContentType = "application/octet-stream"
 
 // defaultMaxDownloadSize is the default cap for max_download_size, in megabytes.
@@ -137,12 +139,19 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
+	// Which body field to walk is decided by the request's own path, not by
+	// which fields happen to be present: a chat-completions request never
+	// carries "input" and a Responses request never carries "messages".
 	var imageURLs []imageRef
-	if messages, ok := reqCtx.Body["messages"].([]any); ok {
-		imageURLs = append(imageURLs, collectChatCompletionsImageRefs(messages)...)
-	}
-	if input, ok := reqCtx.Body["input"].([]any); ok {
-		imageURLs = append(imageURLs, collectResponsesImageRefs(input)...)
+	switch gateway.DetectFormat(reqCtx.OriginalPath) {
+	case gateway.FormatChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			imageURLs = collectChatCompletionsImageRefs(messages)
+		}
+	case gateway.FormatResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			imageURLs = collectResponsesImageRefs(input)
+		}
 	}
 
 	if len(imageURLs) == 0 {

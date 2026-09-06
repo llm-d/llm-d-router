@@ -276,17 +276,22 @@ func collectImageParts(items []any, partType string) []map[string]any {
 // buildSingleImageContent builds a synthetic single-image content part for
 // the encode sub-request. The image value's shape differs by format:
 // chat-completions nests it as image_url.url, while Responses' input_image
-// part stores it as a bare string directly on the part.
+// part stores it as a bare string directly on the part; Responses' optional
+// detail field is a sibling of image_url on that same part, so it is copied
+// across separately rather than coming along with the URL.
 func buildSingleImageContent(imageParts []map[string]any, index int, format gateway.RequestFormat) map[string]any {
 	if format == gateway.FormatResponses {
-		var url string
-		if index >= 0 && index < len(imageParts) {
-			url, _ = imageParts[index][imageURLPartType].(string)
-		}
-		return map[string]any{
+		content := map[string]any{
 			"type":      inputImagePartType,
-			"image_url": url,
+			"image_url": "",
 		}
+		if index >= 0 && index < len(imageParts) {
+			content["image_url"], _ = imageParts[index][imageURLPartType].(string)
+			if detail, ok := imageParts[index][inputImageDetailField]; ok {
+				content[inputImageDetailField] = detail
+			}
+		}
+		return content
 	}
 	if index >= 0 && index < len(imageParts) {
 		return map[string]any{

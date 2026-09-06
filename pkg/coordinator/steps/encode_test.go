@@ -351,10 +351,6 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
-// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
-// The encode chat sub-request is built fresh from the request context and does
-// not carry the client's sampling fields, so max_completion_tokens is not
-// propagated and is never injected: max_tokens=1 alone caps output.
 func TestEncodeStep_ResponsesFormat(t *testing.T) {
 	var receivedBody map[string]any
 
@@ -441,6 +437,10 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens verifies that
+// the encode chat sub-request, built fresh from the request context, does not
+// carry the client's sampling fields: max_completion_tokens is not propagated,
+// and max_tokens=1 alone caps output.
 func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T) {
 	var receivedBody map[string]any
 
