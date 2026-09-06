@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -47,6 +48,8 @@ const ReplaceMediaURLsStepName = "replace-media-urls"
 const imageURLPartType = "image_url"
 
 const inputImagePartType = "input_image"
+
+const inputImageDetailField = "detail"
 
 const defaultContentType = "application/octet-stream"
 
@@ -137,12 +140,19 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
+	// Which body field to walk is decided by the request's own path, not by
+	// which fields happen to be present: a chat-completions request never
+	// carries "input" and a Responses request never carries "messages".
 	var imageURLs []imageRef
-	if messages, ok := reqCtx.Body["messages"].([]any); ok {
-		imageURLs = append(imageURLs, collectChatCompletionsImageRefs(messages)...)
-	}
-	if input, ok := reqCtx.Body["input"].([]any); ok {
-		imageURLs = append(imageURLs, collectResponsesImageRefs(input)...)
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			imageURLs = collectChatCompletionsImageRefs(messages)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			imageURLs = collectResponsesImageRefs(input)
+		}
 	}
 
 	if len(imageURLs) == 0 {

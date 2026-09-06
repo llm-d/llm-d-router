@@ -28,6 +28,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
@@ -56,6 +58,7 @@ func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -106,6 +109,7 @@ func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
 	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathResponses,
 		Body: map[string]any{
 			"input": []any{
 				map[string]any{
@@ -146,6 +150,7 @@ func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{"role": "user", "content": "just text"},
@@ -171,6 +176,7 @@ func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
 	step := newLoopbackStep(t, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -207,6 +213,7 @@ func TestReplaceMediaURLsStep_DataURIInput(t *testing.T) {
 
 	const dataURI = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -295,6 +302,7 @@ func TestReplaceMediaURLsStep_MixedHTTPAndDataURIOrdering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			step := newLoopbackStep(t, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
+				OriginalPath: reqcommon.PathChatCompletions,
 				Body: map[string]any{
 					"messages": []any{
 						map[string]any{"role": "user", "content": tt.parts},
@@ -408,6 +416,7 @@ func TestReplaceMediaURLsStep_RejectsTooManyEntries(t *testing.T) {
 	}
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -457,6 +466,7 @@ func TestReplaceMediaURLsStep_AllowsAtLimit(t *testing.T) {
 	step := newLoopbackStep(t, map[string]any{"max_multimodal_entries": 2})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -488,6 +498,7 @@ func TestReplaceMediaURLsStep_MultipleImages(t *testing.T) {
 	step := newLoopbackStep(t, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -591,7 +602,7 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
-			reqCtx := &pipeline.RequestContext{Body: tt.body}
+			reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathChatCompletions, Body: tt.body}
 			if err := step.Execute(context.Background(), reqCtx); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -605,6 +616,7 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 func TestReplaceMediaURLsStep_InvalidDataURI(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -638,6 +650,7 @@ func TestReplaceMediaURLsStep_EmptyContentType(t *testing.T) {
 
 	step := newLoopbackStep(t, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -670,6 +683,7 @@ func TestReplaceMediaURLsStep_DownloadUnreachable(t *testing.T) {
 
 	step := newLoopbackStep(t, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -743,6 +757,7 @@ func TestReplaceMediaURLsStep_RejectsOversizedBody(t *testing.T) {
 	step := newLoopbackStep(t, map[string]any{"max_download_size": 1})
 
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -798,6 +813,7 @@ func TestReplaceMediaURLsStep_AllowsBodyAtCap(t *testing.T) {
 
 	step := newLoopbackStep(t, map[string]any{"max_download_size": capMB})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -837,6 +853,7 @@ func TestReplaceMediaURLsStep_RejectsOneOversizedAmongMany(t *testing.T) {
 
 	step := newLoopbackStep(t, map[string]any{"max_download_size": 1})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -1110,6 +1127,7 @@ func TestReplaceMediaURLsStep_RejectsNonListAllowedDomains(t *testing.T) {
 func TestReplaceMediaURLsStep_RejectsNonImageDataURI(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -1136,6 +1154,7 @@ func TestReplaceMediaURLsStep_RejectsNonImageDataURI(t *testing.T) {
 func TestReplaceMediaURLsStep_RejectsMissingMediaType(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{
@@ -1164,6 +1183,7 @@ func TestReplaceMediaURLsStep_CancelledContextSkipsDataURIParse(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body: map[string]any{
 			"messages": []any{
 				map[string]any{

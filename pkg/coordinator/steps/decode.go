@@ -126,23 +126,28 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	return nil
 }
 
+// injectUUIDs stamps image parts with their multimodal hash, reading whichever
+// body field matches the request's own path: a chat-completions request never
+// carries "input" and a Responses request never carries "messages", so which
+// field to walk is decided by path, not by which fields happen to be present.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	hashIdx := 0
-	if messages, ok := reqCtx.Body["messages"].([]any); ok {
-		hashIdx = injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries, hashIdx)
-	}
-	if input, ok := reqCtx.Body["input"].([]any); ok {
-		injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries, hashIdx)
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries)
+		}
 	}
 }
 
 // injectImagePartUUIDs walks items (chat-completions messages or a Responses
 // input array) for content parts of partType and stamps each with the hash of
-// its corresponding multimodal entry, in order, starting at startIdx. It
-// returns the next unused index, so a caller walking multiple item arrays for
-// the same request can keep hash assignment contiguous across both.
-func injectImagePartUUIDs(items []any, partType string, entries []pipeline.MultimodalEntry, startIdx int) int {
-	hashIdx := startIdx
+// its corresponding multimodal entry, in order.
+func injectImagePartUUIDs(items []any, partType string, entries []pipeline.MultimodalEntry) {
+	hashIdx := 0
 	for _, item := range items {
 		itemMap, ok := item.(map[string]any)
 		if !ok {
@@ -166,5 +171,4 @@ func injectImagePartUUIDs(items []any, partType string, entries []pipeline.Multi
 			}
 		}
 	}
-	return hashIdx
 }
