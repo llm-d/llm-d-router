@@ -92,9 +92,8 @@ func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 	}
 
 	// The Responses API schema has no max_tokens field; vLLM's ResponsesRequest
-	// ignores it, so max_output_tokens is the only field that actually caps
-	// output length and must be set unconditionally, not only when the client
-	// already sent it.
+	// ignores it, so max_output_tokens is the only field that caps output
+	// length here.
 	if format == gateway.FormatResponses {
 		body[reqcommon.FieldMaxOutputTokens] = 1
 	} else {

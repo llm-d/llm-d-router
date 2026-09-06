@@ -145,11 +145,8 @@ func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
 	}
 }
 
-// An input_image part referencing a file_id instead of a bare image_url string
-// has no way to be downloaded and inlined, and silently skipping it would
-// desync this step's positional indexing from encode's (which counts every
-// input_image part regardless of how its image is referenced). It must be
-// rejected instead.
+// See collectResponsesImageRefs' doc comment for why a file_id-referenced
+// image is rejected rather than skipped.
 func TestReplaceMediaURLsStep_Responses_RejectsFileIDImage(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 
@@ -180,11 +177,9 @@ func TestReplaceMediaURLsStep_Responses_RejectsFileIDImage(t *testing.T) {
 	}
 }
 
-// Which body field this step walks is decided by the request's OriginalPath,
-// not by which fields happen to be present. A chat-completions request that
-// also carries a stray top-level "input" array (an SDK/proxy forwarding an
-// unknown field, or a client mid-migration between the two APIs) must not
-// have that field's image downloaded and processed as if it were Responses.
+// See gateway.DetectFormat's doc comment for why this step gates on path
+// rather than field presence. A chat-completions request carrying a stray
+// top-level "input" array must not have that field's image processed.
 func TestReplaceMediaURLsStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 	var hits atomic.Int32
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

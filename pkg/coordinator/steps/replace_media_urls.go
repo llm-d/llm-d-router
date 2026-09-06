@@ -181,10 +181,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		if strings.HasPrefix(ref.url, "data:") {
 			contentType, b64, err := parseDataURI(ref.url)
 			if err != nil {
-				return fmt.Errorf("parsing data URI at message %d part %d: %w: %w", ref.msgIdx, ref.partIdx, err, pipeline.ErrBadRequest)
+				return fmt.Errorf("parsing data URI at item %d part %d: %w: %w", ref.msgIdx, ref.partIdx, err, pipeline.ErrBadRequest)
 			}
 			if !allowedImageContentType(contentType) {
-				return fmt.Errorf("data URI content type %q not allowed at message %d part %d: %w", contentType, ref.msgIdx, ref.partIdx, pipeline.ErrBadRequest)
+				return fmt.Errorf("data URI content type %q not allowed at item %d part %d: %w", contentType, ref.msgIdx, ref.partIdx, pipeline.ErrBadRequest)
 			}
 			results[i] = downloadResult{ref: ref, base64Data: b64, contentType: contentType}
 			continue
@@ -270,10 +270,10 @@ func collectChatCompletionsImageRefs(messages []any) []imageRef {
 // string field on the part itself (part["image_url"]), not a nested object.
 //
 // An input_image part with no string image_url (e.g. a file_id reference to a
-// previously uploaded file) is rejected rather than skipped: encode's
-// collectImageParts counts every input_image part regardless of how its image
-// is referenced, so silently excluding one here would desync the two
-// functions' positional indexing and misassign hashes to the wrong image.
+// previously uploaded file) is rejected: encode's collectImageParts counts
+// every input_image part regardless of how its image is referenced, so
+// excluding one here would desync the two functions' positional indexing and
+// misassign hashes to the wrong image.
 func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 	var refs []imageRef
 	for itemIdx, item := range input {
