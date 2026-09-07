@@ -414,8 +414,16 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				terminalErr = fmt.Errorf("malformed replay frame with %d frames", len(frames))
 				break
 			}
+			if attemptReplayed == 0 && seq > expectedSeq {
+				// A bounded replay buffer can lose removals for indexed blocks.
+				z.pool.resetForSource(topic, z.sourceEndpoint)
+				logger.Info("Rebuilding from retained replay history",
+					"requestedSeq", expectedSeq, "firstAvailableSeq", seq,
+					"replayEndpoint", z.replayEndpoint)
+				expectedSeq = seq
+			}
 			if seq != expectedSeq {
-				terminalErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
+				receiveErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
 				break
 			}
 

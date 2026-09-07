@@ -155,6 +155,8 @@ type replayBuffer struct {
 	fail         atomic.Bool
 	partialOnce  atomic.Bool
 	partialAfter int
+	omitOnce     atomic.Bool
+	omitSeq      atomic.Uint64
 	messageDelay time.Duration
 	silent       bool
 	requests     atomic.Int32
@@ -207,6 +209,9 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 			sent := 0
 			for _, replay := range messages {
 				if replay.seq < startSeq {
+					continue
+				}
+				if replay.seq == buffer.omitSeq.Load() && buffer.omitOnce.CompareAndSwap(true, false) {
 					continue
 				}
 				if messageDelay > 0 {
@@ -563,14 +568,84 @@ func TestZMQSubscriber_ProactiveReplayAcceptsEndAfterProgress(t *testing.T) {
 	require.Len(t, hits[key], 1, "terminal marker after replay progress must preserve the rebuilt index")
 }
 
-func TestZMQSubscriber_ProactiveReplayRejectsTruncatedHistory(t *testing.T) {
+func TestZMQSubscriber_ProactiveReplayRebuildsFromTruncatedHistory(t *testing.T) {
 	h := newReplayHarness(t, []replayMessage{
 		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
 	}, false)
 
-	time.Sleep(300 * time.Millisecond)
-	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
-	require.Error(t, err, "replay starting after the requested sequence must not populate the index")
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond, "retained replay history must rebuild partial availability")
+	h.send(t, 2, buildBlockRemovedPayload(t, 200))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+		return err != nil
+	}, 5*time.Second, 50*time.Millisecond, "live events must follow the retained replay suffix")
+	require.Equal(t, int32(1), h.buffer.requests.Load())
+}
+
+func TestZMQSubscriber_GapReplayRebuildsFromTruncatedHistory(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
+	var oldKey kvblock.BlockHash
+	require.Eventually(t, func() bool {
+		var err error
+		oldKey, err = h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// The missing history can contain removals for already indexed blocks.
+	h.buffer.set(replayMessage{seq: 3, payload: buildDistinctBlockStoredPayload(t, 300)})
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 300))
+	require.Eventually(t, func() bool {
+		oldHits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{oldKey}, nil)
+		_, newErr := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		return lookupErr == nil && len(oldHits[oldKey]) == 0 && newErr == nil
+	}, 5*time.Second, 50*time.Millisecond, "truncated recovery must clear stale availability before rebuilding")
+
+	h.send(t, 4, buildBlockRemovedPayload(t, 300))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		return err != nil
+	}, 5*time.Second, 50*time.Millisecond, "the triggering live event must not duplicate the replayed block")
+	require.Equal(t, int32(2), h.buffer.requests.Load())
+}
+
+func TestZMQSubscriber_ReplayResumesAfterMissingFrame(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	h.buffer.set(
+		replayMessage{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+		replayMessage{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+		replayMessage{seq: 3, payload: buildDistinctBlockStoredPayload(t, 400)},
+	)
+	h.buffer.omitSeq.Store(2)
+	h.buffer.omitOnce.Store(true)
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 400))
+	require.Eventually(t, func() bool {
+		for _, hash := range []kvblock.BlockHash{100, 200, 300, 400} {
+			key, err := h.index.GetRequestKey(h.ctx, hash)
+			if err != nil {
+				return false
+			}
+			hits, err := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
+			if err != nil || len(hits[key]) != 1 {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 50*time.Millisecond, "a missing replay frame must be recovered before later frames are indexed")
+	require.Equal(t, uint64(2), h.buffer.lastStartSeq.Load())
+	h.send(t, 4, buildBlockRemovedPayload(t, 400))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(400))
+		return err != nil
+	}, 5*time.Second, 50*time.Millisecond, "resuming replay must not duplicate stored blocks")
 }
 
 func TestZMQSubscriber_ProactiveReplayClearsPartialHistoryOnGap(t *testing.T) {
