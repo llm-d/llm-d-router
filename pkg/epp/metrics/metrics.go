@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 	compbasemetrics "k8s.io/component-base/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -402,8 +403,31 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fai
 		return false
 	}
 	elapsedSeconds := complete.Sub(received).Seconds()
-	llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(elapsedSeconds)
+	observeWithTraceExemplar(ctx,
+		llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority),
+		elapsedSeconds)
 	return true
+}
+
+// observeWithTraceExemplar records an observation, attaching the request's trace
+// ID as a Prometheus exemplar so a point on a latency graph can be opened as the
+// trace that produced it.
+//
+// The exemplar is attached only when the span is sampled. An unsampled span still
+// carries a trace ID, but no trace was ever exported for it, so attaching one
+// would give dashboards links that resolve to nothing.
+//
+// Exemplars are only carried by the OpenMetrics exposition format; see
+// openMetricsFilterProvider in cmd/epp/runner for how the endpoint negotiates it.
+func observeWithTraceExemplar(ctx context.Context, observer prometheus.Observer, value float64) {
+	sc := trace.SpanContextFromContext(ctx)
+	if sc.IsSampled() {
+		if exemplarObserver, ok := observer.(prometheus.ExemplarObserver); ok {
+			exemplarObserver.ObserveWithExemplar(value, prometheus.Labels{"trace_id": sc.TraceID().String()})
+			return
+		}
+	}
+	observer.Observe(value)
 }
 
 // RecordResponseSizes records the response sizes.
