@@ -46,6 +46,12 @@ jobs:
 
   build-and-push:
     needs: set-params
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/ci-build-images.yaml
     with:
       epp-image-name: ${{ needs.set-params.outputs.epp_name }}

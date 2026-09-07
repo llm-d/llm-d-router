@@ -42,6 +42,7 @@ type mockDataProducerP struct {
 	pluginType string
 	produces   map[fwkplugin.DataKey]any
 	consumes   map[fwkplugin.DataKey]any
+	optional   map[fwkplugin.DataKey]any
 }
 
 type mockProducedDataType struct {
@@ -65,7 +66,61 @@ func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
 }
 
 func (m *mockDataProducerP) Consumes() fwkplugin.DataDependencies {
-	return fwkplugin.DataDependencies{Required: m.consumes}
+	return fwkplugin.DataDependencies{Required: m.consumes, Optional: m.optional}
+}
+
+func TestOptionalDataDependencyOrder(t *testing.T) {
+	key := fwkplugin.NewDataKey("prefixMatch", "cache")
+	cache := &mockDataProducerP{name: "cache", produces: map[fwkplugin.DataKey]any{key: int(0)}}
+	load := &mockDataProducerP{name: "load", optional: map[fwkplugin.DataKey]any{key: int(0)}}
+
+	t.Run("configured producer precedes optional consumer", func(t *testing.T) {
+		dag, err := buildDAG(
+			map[string]fwkplugin.ProducerPlugin{"cache/mock": cache, "load/mock": load},
+			map[string]fwkplugin.ConsumerPlugin{"load/mock": load})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"cache/mock"}, dag["load/mock"])
+		ordered, err := util.TopologicalSort(dag)
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"cache/mock", "load/mock"}, ordered)
+	})
+
+	t.Run("absent optional producer allows fallback", func(t *testing.T) {
+		ordered, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{load})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"load/mock"}, ordered)
+
+		handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+		handle.AddPlugin(load.TypedName().Name, load)
+		factory := fwkplugin.FactoryFunc(func(string, *json.Decoder, fwkplugin.Handle) (fwkplugin.Plugin, error) {
+			t.Error("optional dependency must not instantiate its default producer")
+			return cache, nil
+		})
+		err = CreateMissingDataProducers(context.Background(), map[string]string{key.String(): "cache"},
+			map[string]fwkplugin.FactoryFunc{"cache": factory}, handle)
+		assert.NoError(t, err)
+		assert.Len(t, handle.GetAllPlugins(), 1)
+	})
+
+	t.Run("optional dependency type must match", func(t *testing.T) {
+		wrong := &mockDataProducerP{name: "wrong", optional: map[fwkplugin.DataKey]any{key: string("")}}
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{cache, wrong})
+		assert.ErrorContains(t, err, "data type mismatch")
+	})
+
+	t.Run("optional dependency respects execution layers", func(t *testing.T) {
+		consumer := &MockConsumerFairnessPolicy{optional: map[fwkplugin.DataKey]any{key: int(0)}}
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{cache, consumer})
+		assert.ErrorContains(t, err, "invalid plugin layer execution order")
+	})
+
+	t.Run("optional cycle is rejected", func(t *testing.T) {
+		other := fwkplugin.NewDataKey("load", "load")
+		first := &mockDataProducerP{name: "first", produces: map[fwkplugin.DataKey]any{key: nil}, optional: map[fwkplugin.DataKey]any{other: nil}}
+		second := &mockDataProducerP{name: "second", produces: map[fwkplugin.DataKey]any{other: nil}, consumes: map[fwkplugin.DataKey]any{key: nil}}
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{first, second})
+		assert.ErrorContains(t, err, "cycle detected")
+	})
 }
 
 func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
@@ -92,10 +147,11 @@ func (m *typedMockPlugin) Produce(ctx context.Context, request *fwksched.Inferen
 type MockConsumerFairnessPolicy struct {
 	fwkfcmocks.MockFairnessPolicy
 	consumes map[fwkplugin.DataKey]any
+	optional map[fwkplugin.DataKey]any
 }
 
 func (m *MockConsumerFairnessPolicy) Consumes() fwkplugin.DataDependencies {
-	return fwkplugin.DataDependencies{Required: m.consumes}
+	return fwkplugin.DataDependencies{Required: m.consumes, Optional: m.optional}
 }
 
 type MockSchedulingPlugin struct {
