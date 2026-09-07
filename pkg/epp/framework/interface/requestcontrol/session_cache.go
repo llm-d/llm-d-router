@@ -45,7 +45,9 @@ type SessionCacheRequest struct {
 	Stamp string
 	// FullReport requests reused blocks as well as newly stored blocks.
 	FullReport bool
-	// TotalTokens is the prompt length in real or estimated tokens.
+	// TotalTokens is the full prompt length in engine-token units, measured
+	// or estimated by the manager. It includes content beyond the known prefixes
+	// and is authoritative for affinity and prefill-load accounting.
 	TotalTokens int
 	// Prefixes are alternative observations, never a union of session branches.
 	Prefixes []SessionCachePrefix

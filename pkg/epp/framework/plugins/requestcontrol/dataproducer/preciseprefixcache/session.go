@@ -201,7 +201,9 @@ func (p *Producer) produceFromSession(ctx context.Context, request *scheduling.I
 		info := infos[fmt.Sprintf("%s:%s", md.Address, md.Port)]
 		if info == nil {
 			info = attrprefix.NewPrefixCacheMatchInfo(0, lookup.TotalTokens, 1).
-				WithCachedBlocksByTier(map[string]int{})
+				WithCachedBlocksByTier(map[string]int{}).
+				WithInputTokenCount(lookup.TotalTokens).
+				WithObservedTokenCount(0)
 		}
 		results = append(results, endpointResult{endpoint: ep, info: info})
 	}
@@ -223,7 +225,9 @@ func (p *Producer) matchSessionPrefix(ctx context.Context, prefix fwkrc.SessionC
 	// Unit-size blocks preserve token coverage across engine block sizes.
 	info := attrprefix.NewPrefixCacheMatchInfo(score, totalTokens, 1).
 		WithCachedBlockCount(0).
-		WithCachedBlocksByTier(map[string]int{})
+		WithCachedBlocksByTier(map[string]int{}).
+		WithInputTokenCount(totalTokens).
+		WithObservedTokenCount(match.MatchedBlocks * prefix.BlockSizeTokens)
 	if prefix.Exact {
 		info.WithCachedBlockCount(matchedTokens).
 			WithCachedBlocksByTier(map[string]int{"gpu": matchedTokens})

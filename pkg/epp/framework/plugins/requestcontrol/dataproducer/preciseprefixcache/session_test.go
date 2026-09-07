@@ -3,6 +3,7 @@ package preciseprefixcache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,10 +19,65 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
+
+func TestSessionCacheCalibratedInputLength(t *testing.T) {
+	for _, inputCount := range []int{7200, 11018} {
+		for _, resident := range []int{112, 93, 46, 0} {
+			t.Run(fmt.Sprintf("input-%d/resident-%d", inputCount, resident), func(t *testing.T) {
+				p, _ := newSessionProducer(t)
+				hashes := make([]uint64, 112)
+				for i := range hashes {
+					hashes[i] = uint64(i + 1)
+				}
+				require.NoError(t, p.sessionEvents.ProcessEvents(t.Context(), kvevents.EventSource{Endpoint: "10.0.0.1:8080"},
+					kvevents.EventBatch{Events: []kvevents.GenericEvent{
+						&kvevents.BlockStoredEvent{BlockHashes: hashes, BlockSize: 64, DeviceTier: "GPU"},
+						&kvevents.BlockRemovedEvent{BlockHashes: hashes[resident:], DeviceTier: "GPU"},
+					}}))
+				req := sessionRequest("stamp", "")
+				req.Body.TokenizedRequest = fwkrh.NewTokenizedRequest([][]uint32{make([]uint32, inputCount)})
+				req.PutAttribute(sessionTestKey(), fwkrc.SessionCacheRequest{Stamp: "stamp", TotalTokens: 7200,
+					Prefixes: []fwkrc.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: hashes, BlockSizeTokens: 64}}})
+				endpoints := freshEndpoints()
+				require.NoError(t, p.Produce(t.Context(), req, endpoints))
+				value, _ := endpoints[0].Get(p.dk)
+				info := value.(*attrprefix.PrefixCacheMatchInfo)
+				require.Equal(t, resident*64, info.MatchBlocks())
+				require.Zero(t, info.CachedBlockCount())
+				observed, present := info.ObservedTokenCount()
+				require.True(t, present)
+				require.Equal(t, resident*64, observed)
+				filter, err := prefixcacheaffinity.Factory("affinity", plugin.StrictDecoder(json.RawMessage(`{"prefixMatchInfoProducerName":"cache"}`)), nil)
+				require.NoError(t, err)
+				candidates := 2
+				if resident >= 93 {
+					candidates = 1
+				}
+				require.Len(t, filter.(*prefixcacheaffinity.Plugin).Filter(t.Context(), req, endpoints), candidates)
+				load, err := inflightload.InFlightLoadProducerFactory("load", plugin.StrictDecoder(json.RawMessage(`{"prefixMatchInfoProducerName":"cache"}`)), testutils.NewTestHandle(t.Context()))
+				require.NoError(t, err)
+				require.NoError(t, load.(*inflightload.InFlightLoadProducer).Produce(t.Context(), req, endpoints))
+				for i, ep := range endpoints {
+					want := int64(7200)
+					if i == 0 {
+						want -= int64(resident * 64)
+					}
+					got, ok := ep.Get(attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName("load"))
+					require.True(t, ok)
+					require.Equal(t, want, got.(*attrconcurrency.UncachedRequestTokens).Tokens)
+				}
+			})
+		}
+	}
+}
 
 // testSessionManager selects an explicitly named prior request. Production
 // managers can resolve continuations using their own identity or content data.

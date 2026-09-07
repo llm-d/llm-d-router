@@ -139,8 +139,8 @@ The data path is:
 4. Decoded KV batches update block availability and reach the manager through
    `ProcessEvents`, including the serving endpoint, wire sequence, DP rank,
    group, and optional session stamp. Tokens are not hashed on this path.
-5. GPU removal events remove physical availability once, even after repeated
-   full reports or reports from several sessions. Session associations remain
+5. GPU removal events remove availability for the reported hashes, even after
+   repeated full reports or reports from several sessions. Session associations remain
    owned by the manager. Stream gaps without replay, replay failures,
    subscription attachment, disconnects, and endpoint removal invoke `Reset`;
    the manager invalidates report completeness and can request a full report
@@ -164,6 +164,10 @@ The availability index projects cache namespace, endpoint, DP rank, group, and
 engine hash into its keys. A block shared by sessions has one availability entry
 in that scope. The producer retains observed source/group metadata for lookup;
 an endpoint reset removes that metadata along with its availability entries.
+Store reports are idempotent. The engine event protocol does not distinguish a
+physical allocation from a reused-block report, so the index cannot count
+duplicate physical copies. A removal conservatively marks that hash unavailable
+at the reported location until another store report arrives.
 Use a separate Redis database if token lookup and session lookup share a Redis
 server. Their index key spaces must remain separate.
 
@@ -176,7 +180,17 @@ availability. Speculative indexing is rejected in this mode.
 decisions. Estimated similarity leaves it false: the scorer receives an
 affinity score, while cached-block and cached-tier counts are zero. Session
 results use unit-size blocks so coverage is expressed in tokens independently
-of the engine block size. `TotalTokens` can come from either token backend.
+of the engine block size. `ObservedTokenCount` exposes the contiguous resident
+block count times the engine block size, including when `Exact` is false.
+
+`TotalTokens` is the manager's full prompt length in engine-token units. With
+estimated tokens, the manager can combine an observed prefix length with an
+estimate of the new suffix. A complete prompt path gives a lower bound rounded
+down to a full block; response usage supplies the exact length, including the
+partial tail. Reports can include generated tokens, so the manager must establish
+the prompt boundary before using a path's length. Block hashes do not reveal
+token contents. `InputTokenCount` carries the manager's length to the inflight
+producer so affinity and prefill load use the same units.
 
 The estimate backend makes no renderer requests. The vLLM session-event support
 in [vllm-project/vllm#51381](https://github.com/vllm-project/vllm/pull/51381)
