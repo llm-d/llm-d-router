@@ -102,16 +102,17 @@ metadata:
 
 ### Multi-Tier Offloading Configuration
 
-The built-in vLLM config extracts tiered offloading metrics for tier `1:fs`
-(the default single filesystem tier). Single-tier deployments need no
-configuration.
+The built-in vLLM config extracts tiered offloading metrics for tier `1:fs`,
+the label a single filesystem secondary tier reports. Single-tier deployments
+need no configuration.
 
-Multi-tier deployments must override the vLLM engine config to add entries
-for each tier. The tier label format is `{index}:{type}`, where `index` is
-the position in the `secondary_tiers` list (starting at 1) and `type` is the
-tier type (`fs`, `p2p`, `obj` for S3-compatible stores, or a custom type).
-Check your vLLM `TieringOffloadingSpec` config or scrape output to confirm
-the exact labels.
+Multi-tier deployments must override the vLLM engine config with one entry per
+tier. vLLM builds the label as `{position}:{type}`, where `position` is the
+entry's index in `secondary_tiers` plus one and `type` is that entry's `type`
+string. Built-in types are `fs`, `p2p`, and `obj` (S3-compatible stores); an
+out-of-tree tier reports the `type` it declares. Ordering decides the number,
+so `secondary_tiers: [p2p, fs]` reports `1:p2p` and `2:fs`, and the specs here
+must mirror the deployed order.
 
 > [!NOTE]
 > Overriding `engineConfigs` for `"vllm"` replaces the entire built-in
@@ -137,6 +138,32 @@ parameters:
           metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"2:p2p\"}"
         - attributeKey: "tiering_chunk_hits_obj"
           metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"3:obj\"}"
+```
+
+### CPU-Only Offloading
+
+`CPUOffloadingSpec` own metrics (
+`vllm:kv_offload_cpu_cache_usage_perc`,
+`vllm:kv_offload_cpu_cache_write_usage_perc`,
+`vllm:kv_offload_cpu_cache_read_usage_perc`,
+`vllm:kv_offload_store_bytes_total`,
+`vllm:kv_offload_load_bytes_total`
+) are not extracted by default. Add the ones into `customMetrics` entries:
+
+```yaml
+type: core-metrics-extractor
+parameters:
+  engineConfigs:
+    - name: "vllm"
+      # Standard specs (required, overriding replaces the built-in config)
+      queuedRequestsSpec: "vllm:num_requests_waiting"
+      runningRequestsSpec: "vllm:num_requests_running"
+      kvUsageSpec: "vllm:kv_cache_usage_perc"
+      loraSpec: "vllm:lora_requests_info"
+      cacheInfoSpec: "vllm:cache_config_info"
+      customMetrics:
+        - attributeKey: "cpu_offload_usage"
+          metricSpec: "vllm:kv_offload_cpu_cache_usage_perc"
 ```
 
 ## Multi-cluster support
