@@ -115,6 +115,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/responsereceived/destinationendpointserved"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -740,6 +741,12 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(testfilter.HeaderBasedTestingFilterType, fwkplugin.StabilityBeta, testfilter.HeaderBasedTestingFilterFactory)
 	fwkplugin.Register(testresponsereceived.DestinationEndpointServedVerifierType, fwkplugin.StabilityBeta, testresponsereceived.DestinationEndpointServedVerifierFactory)
+
+	// Alpha attribution plugin for the cluster-scoped (multicluster)
+	// EPP whose data plane is ORIGINAL_DST. Emits the picked endpoint
+	// Name in the same header the verifier writes; the two are
+	// mutually exclusive per profile.
+	fwkplugin.Register(destinationendpointserved.PluginType, fwkplugin.StabilityAlpha, destinationendpointserved.Factory)
 
 	// register datalayer metrics collection plugins
 	// Beta
