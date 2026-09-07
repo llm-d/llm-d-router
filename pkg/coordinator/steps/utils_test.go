@@ -33,6 +33,14 @@ const testHash = "abc123"
 // kwargs_data entry.
 const testKwargs = "dGVuc29y"
 
+// Per-image stand-ins used across prefill/render feature tests.
+const (
+	testKwargsA   = "dGVuc29yLWE="
+	testKwargsB   = "dGVuc29yLWI="
+	testMetadataA = "bWV0YS1h"
+	testMetadataB = "bWV0YS1i"
+)
+
 func TestReadErrorBody_CapsOversizedBody(t *testing.T) {
 	body := readErrorBody(strings.NewReader(strings.Repeat("a", maxErrorBodySize*4)))
 	if len(body) != maxErrorBodySize {
@@ -296,6 +304,46 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		_, err := extractMultimodalEntries(features)
 		if err == nil {
 			t.Fatal("expected error for mismatched kwargs count")
+		}
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Errorf("expected ErrBadRequest, got %v", err)
+		}
+	})
+
+	t.Run("mm_metadata_parallel_to_hashes", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+				map[string]any{"offset": float64(5), "length": float64(2)},
+			}},
+			"kwargs_data": map[string]any{"image": []any{"d1", "d2"}},
+			"mm_metadata": map[string]any{"image": []any{"m1", nil}},
+		}
+		entries, err := extractMultimodalEntries(features)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entries[0].MMMetadata != "m1" {
+			t.Fatalf("entry 0 metadata: got %q", entries[0].MMMetadata)
+		}
+		if entries[1].MMMetadata != "" {
+			t.Fatalf("entry 1 metadata: expected empty for null, got %q", entries[1].MMMetadata)
+		}
+	})
+
+	t.Run("length_mismatch_mm_metadata", func(t *testing.T) {
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+				map[string]any{"offset": float64(4), "length": float64(3)},
+			}},
+			"mm_metadata": map[string]any{"image": []any{"m1"}},
+		}
+		_, err := extractMultimodalEntries(features)
+		if err == nil {
+			t.Fatal("expected error for mismatched mm_metadata count")
 		}
 		if !errors.Is(err, pipeline.ErrBadRequest) {
 			t.Errorf("expected ErrBadRequest, got %v", err)
@@ -612,6 +660,62 @@ func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 		features := buildMMFeatures([]pipeline.MultimodalEntry{entry("")}, false)
 		if _, ok := features["kwargs_data"]; ok {
 			t.Errorf("expected kwargs_data absent when includeKwargs is false")
+		}
+	})
+}
+
+func TestBuildPrefillMMFeatures_PreferMetadata(t *testing.T) {
+	entry := func(kwargs, metadata string) pipeline.MultimodalEntry {
+		return pipeline.MultimodalEntry{
+			Hash:        testHash,
+			KwargsData:  kwargs,
+			MMMetadata:  metadata,
+			Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3},
+		}
+	}
+
+	t.Run("with EC prefers mm_metadata and omits kwargs_data", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry(testKwargsA, testMetadataA),
+			entry(testKwargsB, testMetadataB),
+		}, true)
+		if _, ok := features["kwargs_data"]; ok {
+			t.Fatalf("expected kwargs_data omitted, got %v", features["kwargs_data"])
+		}
+		md, ok := features["mm_metadata"].(map[string][]any)
+		if !ok {
+			t.Fatalf("expected mm_metadata map, got %T", features["mm_metadata"])
+		}
+		items := md[ModalityImage]
+		if len(items) != 2 || items[0] != testMetadataA || items[1] != testMetadataB {
+			t.Fatalf("unexpected mm_metadata: %#v", items)
+		}
+	})
+
+	t.Run("without EC keeps kwargs_data even when metadata is present", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry(testKwargsA, testMetadataA),
+		}, false)
+		if _, ok := features["mm_metadata"]; ok {
+			t.Fatalf("expected mm_metadata omitted without EC, got %v", features["mm_metadata"])
+		}
+		kwargs := mmImageKwargs(t, features)
+		if len(kwargs) != 1 || kwargs[0] != testKwargsA {
+			t.Fatalf("expected kwargs_data fallback, got %#v", kwargs)
+		}
+	})
+
+	t.Run("partial metadata falls back to kwargs_data", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry(testKwargsA, testMetadataA),
+			entry(testKwargsB, ""),
+		}, true)
+		if _, ok := features["mm_metadata"]; ok {
+			t.Fatalf("expected mm_metadata omitted on partial metadata, got %v", features["mm_metadata"])
+		}
+		kwargs := mmImageKwargs(t, features)
+		if len(kwargs) != 2 || kwargs[0] != testKwargsA || kwargs[1] != testKwargsB {
+			t.Fatalf("expected kwargs_data fallback, got %#v", kwargs)
 		}
 	})
 }

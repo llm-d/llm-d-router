@@ -112,12 +112,41 @@ func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
 // and optionally kwargs_data) from the request's multimodal entries. It returns
 // nil when there are no entries.
 func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map[string]any {
+	return buildMMFeaturesOpts(entries, includeKwargs, false)
+}
+
+// buildPrefillMMFeatures builds features for the prefill request.
+//
+// When preferMetadata is true and every entry carries non-empty MMMetadata,
+// the result includes mm_metadata and omits kwargs_data. That path is only
+// valid together with ec_transfer_params (vLLM rejects metadata-only features
+// without EC params). Otherwise kwargs_data is included for backward
+// compatibility with renders that do not emit mm_metadata.
+func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, preferMetadata bool) map[string]any {
+	useMetadata := preferMetadata && allEntriesHaveMMMetadata(entries)
+	return buildMMFeaturesOpts(entries, !useMetadata, useMetadata)
+}
+
+func allEntriesHaveMMMetadata(entries []pipeline.MultimodalEntry) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	for _, e := range entries {
+		if e.MMMetadata == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func buildMMFeaturesOpts(entries []pipeline.MultimodalEntry, includeKwargs, includeMetadata bool) map[string]any {
 	if len(entries) == 0 {
 		return nil
 	}
 	hashes := make([]string, len(entries))
 	placeholders := make([]any, len(entries))
 	kwargs := make([]string, len(entries))
+	metadata := make([]string, len(entries))
 	for i, entry := range entries {
 		hashes[i] = entry.Hash
 		placeholders[i] = map[string]any{
@@ -125,31 +154,41 @@ func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map
 			"length": entry.Placeholder.Length,
 		}
 		kwargs[i] = entry.KwargsData
+		metadata[i] = entry.MMMetadata
 	}
 	features := map[string]any{
 		"mm_hashes":       map[string][]string{ModalityImage: hashes},
 		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
 	}
 	if includeKwargs {
-		features["kwargs_data"] = mmKwargsField(kwargs)
+		features["kwargs_data"] = mmBase64Field(kwargs)
+	}
+	if includeMetadata {
+		features["mm_metadata"] = mmBase64Field(metadata)
 	}
 	return features
 }
 
-// mmKwargsField builds the kwargs_data feature value from per-entry KwargsData
-// strings. The empty string is our internal "resolve from cache" sentinel and
-// MUST serialize as JSON null, not "": vLLM treats null (or an absent field) as
-// a cache-hit item to fetch from the encoder cache by hash, whereas "" is decoded
-// as an inline tensor and fails with "Input data was truncated". Non-empty entries
-// are the base64 tensor blobs and are forwarded verbatim.
-func mmKwargsField(kwargs []string) map[string][]any {
-	items := make([]any, len(kwargs))
-	for i, k := range kwargs {
-		if k != "" {
-			items[i] = k
+// mmBase64Field builds a modality-keyed feature value from per-entry base64
+// strings (kwargs_data or mm_metadata). The empty string is our internal
+// "resolve from cache" / absent sentinel and MUST serialize as JSON null, not
+// "": vLLM treats null (or an absent field) as a cache-hit item to fetch from
+// the encoder cache by hash, whereas "" is decoded as an inline blob and fails
+// with "Input data was truncated". Non-empty entries are forwarded verbatim.
+func mmBase64Field(values []string) map[string][]any {
+	items := make([]any, len(values))
+	for i, v := range values {
+		if v != "" {
+			items[i] = v
 		}
 	}
 	return map[string][]any{ModalityImage: items}
+}
+
+// mmKwargsField is kept as a thin alias for tests and call sites that name the
+// kwargs_data wire field explicitly.
+func mmKwargsField(kwargs []string) map[string][]any {
+	return mmBase64Field(kwargs)
 }
 
 // setGenerateTransferParams nests the kv/ec transfer params under
@@ -284,6 +323,8 @@ func mmImageArray(features map[string]any, field string) (arr []any, present boo
 // encoder cache by hash (a cache-hit request), so each entry's KwargsData is "".
 // When present, kwargs_data must be parallel to mm_hashes, but an individual
 // item may be null (a cache hit within a mixed batch), which maps to "".
+// mm_metadata is optional and follows the same parallel/null rules as
+// kwargs_data when present.
 //
 // Returns ErrBadRequest when a present field has the wrong type, required slices
 // have different lengths, or any element has an unexpected type.
@@ -315,6 +356,11 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		return nil, err
 	}
 
+	rawMetadata, hasMetadata, err := mmImageArray(features, "mm_metadata")
+	if err != nil {
+		return nil, err
+	}
+
 	n := len(rawHashes)
 	if len(rawPlaceholders) != n {
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_placeholders has %d: %w",
@@ -326,6 +372,10 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 	if hasKwargs && len(rawKwargs) != n {
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, kwargs_data has %d: %w",
 			n, len(rawKwargs), pipeline.ErrBadRequest)
+	}
+	if hasMetadata && len(rawMetadata) != n {
+		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_metadata has %d: %w",
+			n, len(rawMetadata), pipeline.ErrBadRequest)
 	}
 
 	entries := make([]pipeline.MultimodalEntry, n)
@@ -367,10 +417,22 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			}
 		}
 
+		var metadata string
+		if hasMetadata {
+			switch m := rawMetadata[i].(type) {
+			case string:
+				metadata = m
+			case nil:
+			default:
+				return nil, fmt.Errorf("mm_metadata[%d] must be a string or null: %w", i, pipeline.ErrBadRequest)
+			}
+		}
+
 		entries[i] = pipeline.MultimodalEntry{
 			Index:      i,
 			Hash:       hash,
 			KwargsData: kwarg,
+			MMMetadata: metadata,
 			Placeholder: pipeline.PlaceholderRange{
 				Offset: offset,
 				Length: length,

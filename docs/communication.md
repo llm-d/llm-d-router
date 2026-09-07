@@ -814,37 +814,48 @@ No `features` or `ec_transfer_params` (no images); `prompt` contains the token a
 
 ### Optimization: avoid sending pixel data to prefill
 
-Currently the full `kwargs_data` blobs (containing both `pixel_values` and `image_grid_thw`) are forwarded to the prefill worker. The prefill worker only needs `image_grid_thw` for mRoPE -- the `pixel_values` are redundant since the encoder already consumed them. For large images, the pixel tensors dominate the payload size, so stripping them would significantly reduce the data sent to prefill.
+With a renderer that emits `features.mm_metadata` (see vLLM
+[#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator can
+omit `kwargs_data` on the prefill request when `ec_transfer_params` is present.
 
-**Required changes:**
+`kwargs_data` mixes encoder tensors (`pixel_values`) with lightweight fields
+(`image_grid_thw` and other `keep_on_cpu` / placeholder-metadata fields). Encode
+already consumes the tensors and publishes embeddings through the EC connector.
+Prefill only needs the metadata sibling plus `ec_transfer_params` to load those
+embeddings. For large images the pixel tensors dominate payload size, so dropping
+`kwargs_data` on prefill cuts coordinator-to-prefill traffic.
 
-1. **vLLM render endpoint** (`vllm/entrypoints/openai/render/serving.py`): return `image_grid_thw` as a separate top-level field in the render response, alongside `kwargs_data`. The render step already computes it during image preprocessing (`get_image_grid_thw()` in the vision processor). Example response:
-   ```json
-   {
-     "token_ids": [1, 32000, 32000, 32000, ...],
-     "features": {
-       "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-       "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-       "kwargs_data": {"image": ["<full-msgpack-blob-1>", "<full-msgpack-blob-2>"]},
-       "image_grid_thw": {"image": [[1, 24, 24], [1, 16, 16]]}
-     }
-   }
-   ```
+```text
+Encode  = kwargs_data
+Prefill = mm_metadata + ec_transfer_params
+no EC / old renderers = kwargs_data unchanged
+```
 
-2. **vLLM prefill worker**: accept `image_grid_thw` directly in the features dict (as plain JSON arrays) instead of extracting it from the msgpack `kwargs_data` blob.
+**Coordinator behavior:**
 
-3. **Coordinator render step** (`pkg/steps/render.go`): parse `image_grid_thw` from the render response and store it per `MultimodalEntry`.
+1. **Render step** (`pkg/coordinator/steps/render.go`): parse optional
+   `features.mm_metadata` from the render response (same per-modality item order
+   as `mm_hashes` / `kwargs_data`) and store it on each `MultimodalEntry`.
+2. **Encode step** (`pkg/coordinator/steps/encode.go`): unchanged; encode still
+   sends full `kwargs_data`.
+3. **Prefill step** (`pkg/coordinator/steps/prefill.go`): when
+   `ec_transfer_params` is non-empty and every multimodal entry has
+   `MMMetadata`, emit `mm_metadata` and omit `kwargs_data`. Otherwise keep
+   sending `kwargs_data` so older renderers and non-EC paths (for example
+   generate-path encode skip) stay compatible.
 
-4. **Coordinator prefill step** (`pkg/steps/prefill.go`): send `image_grid_thw` instead of `kwargs_data` in the prefill request features:
-   ```json
-   "features": {
-     "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-     "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-     "image_grid_thw": {"image": [[1, 24, 24], [1, 16, 16]]}
-   }
-   ```
+Example prefill features when the metadata path is active:
 
-5. **Coordinator encode step** (`pkg/steps/encode.go`): no change -- encode continues to send the full `kwargs_data` (pixel values needed for ViT).
+```json
+"features": {
+  "mm_hashes": {"image": ["abc123hash", "def456hash"]},
+  "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
+  "mm_metadata": {"image": ["<base64-metadata-only-msgpack-1>", "<base64-metadata-only-msgpack-2>"]}
+}
+```
+
+vLLM rejects metadata-only `features` without `ec_transfer_params`, so the
+coordinator never takes this path when the EC connector emits no transfer map.
 
 ### Output (mutates RequestContext)
 
