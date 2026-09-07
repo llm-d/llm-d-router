@@ -59,6 +59,54 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(replaceCachedTokens(body, 7)).To(Equal([]byte(`{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`)))
 	})
 
+	It("should buffer non-streaming JSON split across writes", func() {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, false)
+
+		firstChunk := []byte(`{"usage":{"prompt_tokens":64,`)
+		n, err := writer.Write(firstChunk)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(firstChunk)))
+		Expect(recorder.Body.Len()).To(BeZero())
+
+		secondChunk := []byte(`"prompt_tokens_details":{"cached_tokens":49}}}`)
+		n, err = writer.Write(secondChunk)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(secondChunk)))
+		Expect(finalize()).To(Succeed())
+
+		Expect(recorder.Body.String()).To(Equal(`{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`))
+	})
+
+	It("should flush an incomplete non-streaming body unchanged", func() {
+		recorder := httptest.NewRecorder()
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, false)
+
+		body := []byte(`{"usage":`)
+		n, err := writer.Write(body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(body)))
+		Expect(recorder.Body.Len()).To(BeZero())
+		Expect(finalize()).To(Succeed())
+
+		Expect(recorder.Body.Bytes()).To(Equal(body))
+	})
+
+	It("should use the request mode instead of the response content type", func() {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "text/event-stream")
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, false)
+
+		body := []byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":49}}}`)
+		n, err := writer.Write(body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(body)))
+		Expect(finalize()).To(Succeed())
+
+		Expect(recorder.Body.String()).To(Equal(`{"usage":{"prompt_tokens_details":{"cached_tokens":7}}}`))
+	})
+
 	It("should add cached tokens when JSON usage details omit them", func() {
 		body := []byte(`{"usage":{"prompt_tokens":64,"prompt_tokens_details":{}}}`)
 		updated := replaceCachedTokens(body, 7)
@@ -114,7 +162,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should buffer streamed usage chunks split before the data prefix", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer := newCachedTokensResponseWriter(recorder, 8)
+		writer := newCachedTokensResponseWriter(recorder, 8, true)
 
 		n, err := writer.Write([]byte("da"))
 		Expect(err).ToNot(HaveOccurred())
@@ -132,7 +180,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should buffer streamed usage chunks split inside the JSON payload", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer := newCachedTokensResponseWriter(recorder, 7)
+		writer := newCachedTokensResponseWriter(recorder, 7, true)
 
 		firstChunk := []byte(`data: {"choices":[],"usage":{"prompt_tokens":64,`)
 		n, err := writer.Write(firstChunk)
@@ -162,7 +210,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should preserve ReaderFrom while rewriting cached tokens", func() {
 		base := &readerFromResponseWriter{header: http.Header{}}
-		writer := newCachedTokensResponseWriter(base, 7)
+		writer := newCachedTokensResponseWriter(base, 7, false)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -175,7 +223,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should preserve ReaderFrom for streamed responses while rewriting complete lines", func() {
 		base := &readerFromResponseWriter{header: http.Header{"Content-Type": []string{"text/event-stream"}}}
-		writer := newCachedTokensResponseWriter(base, 7)
+		writer := newCachedTokensResponseWriter(base, 7, true)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -189,7 +237,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should flush a trailing streamed data line without a final newline", func() {
 		base := &readerFromResponseWriter{header: http.Header{"Content-Type": []string{"text/event-stream"}}}
-		writer := newCachedTokensResponseWriter(base, 7)
+		writer := newCachedTokensResponseWriter(base, 7, true)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -203,7 +251,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should finalize a trailing streamed data line written without a final newline", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7)
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, true)
 
 		body := []byte(`data: {"choices":[],"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`)
 		n, err := writer.Write(body)

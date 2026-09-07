@@ -454,6 +454,43 @@ EPP generic validations
     {{- fail ".Values.provider.gke.preferredBackends.defaultReplicas must be at least 1 when preferredBackends.enabled is true" }}
   {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+Helper to check if priorityRouting is enabled across chart contexts.
+*/}}
+{{- define "llm-d-router.priorityRouting.enabled" -}}
+{{- $router := .Values.router | default dict -}}
+{{- $proxy := index $router "proxy" | default dict -}}
+{{- if empty $proxy }}{{ $proxy = .Values.proxy | default dict }}{{ end -}}
+{{- $pr := index $proxy "priorityRouting" | default dict -}}
+{{- $enabled := index $pr "enabled" -}}
+{{- if and (not (kindIs "invalid" $enabled)) (not (kindIs "bool" $enabled)) -}}
+{{- fail (printf "priorityRouting.enabled must be a boolean, got %q" (toString $enabled)) -}}
+{{- end -}}
+{{- if and (kindIs "bool" $enabled) $enabled }}true{{ end -}}
+{{- end -}}
+
+{{- define "llm-d-router.priorityRouting.primaryReplicas" -}}
+{{- $router := .Values.router | default dict -}}
+{{- $proxy := index $router "proxy" | default dict -}}
+{{- if empty $proxy }}{{ $proxy = .Values.proxy | default dict }}{{ end -}}
+{{- $pr := index $proxy "priorityRouting" | default dict -}}
+{{- index $pr "primaryReplicas" | default 1 | int -}}
+{{- end -}}
+
+{{- define "llm-d-router.priorityRouting.standbyReplicas" -}}
+{{- $router := .Values.router | default dict -}}
+{{- $proxy := index $router "proxy" | default dict -}}
+{{- if empty $proxy }}{{ $proxy = .Values.proxy | default dict }}{{ end -}}
+{{- $pr := index $proxy "priorityRouting" | default dict -}}
+{{- index $pr "standbyReplicas" | default 1 | int -}}
+{{- end -}}
+
+{{- define "llm-d-router.priorityRouting.totalReplicas" -}}
+{{- $primary := include "llm-d-router.priorityRouting.primaryReplicas" . | int -}}
+{{- $standby := include "llm-d-router.priorityRouting.standbyReplicas" . | int -}}
+{{- add $primary $standby -}}
 {{- end -}}
 
 {{- define "llm-d-router.validations.epp" -}}
@@ -462,6 +499,20 @@ EPP generic validations
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
 {{- include "llm-d-router.validations.epp.tokenizer" . }}
 {{- include "llm-d-router.validations.epp.preferredBackends" . }}
+{{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
+{{- if and $isPriorityRouting (ne (include "llm-d-router.proxyMode" .) "service") -}}
+{{- fail "priorityRouting is only supported when proxy mode is set to 'service' (router.proxy.mode=service)" -}}
+{{- end -}}
+{{- $eppFlags := .Values.router.epp.flags | default dict -}}
+{{- if and $isPriorityRouting (hasKey $eppFlags "health-checking") -}}
+{{- $healthChecking := index $eppFlags "health-checking" -}}
+{{- if not (kindIs "bool" $healthChecking) -}}
+{{- fail (printf ".Values.router.epp.flags.health-checking must be a boolean, got %q" (toString $healthChecking)) -}}
+{{- end -}}
+{{- if not $healthChecking -}}
+{{- fail "priorityRouting requires EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

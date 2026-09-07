@@ -74,6 +74,39 @@ const (
 	testFeatureGate = "test-feature-gate"
 )
 
+type testCrossReplicaSyncer struct{}
+
+func (testCrossReplicaSyncer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "test-syncer", Name: "test-syncer"}
+}
+
+func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
+	return nil
+}
+
+func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+	return nil, false, nil
+}
+
+func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
+	return nil
+}
+
+func (testCrossReplicaSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
+	return candidate, false, nil
+}
+
+func TestBuildDataLayerConfigExposesCrossReplicaSyncerOnHandle(t *testing.T) {
+	handle := fwkplugin.NewEppHandle(context.Background(), nil)
+	syncer := &testCrossReplicaSyncer{}
+	handle.AddPlugin("syncer", syncer)
+
+	cfg, err := buildDataLayerConfig(&configapi.DataLayerConfig{CrossReplicaSyncerPluginRef: "syncer"}, handle)
+	require.NoError(t, err)
+	require.Same(t, syncer, cfg.Syncer)
+	require.Same(t, syncer, handle.CrossReplicaSyncer())
+}
+
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
 
 func TestLoadRawConfiguration(t *testing.T) {
@@ -1083,6 +1116,34 @@ func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	require.Empty(t, cfg.Sources)
+}
+
+func TestBuildDataLayerConfigCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	timeout := 3 * time.Second
+	cfg, err := buildDataLayerConfig(
+		&configapi.DataLayerConfig{
+			CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+		},
+		handle,
+	)
+	require.NoError(t, err)
+	require.Equal(t, timeout, cfg.PublishTimeout)
+}
+
+func TestBuildDataLayerConfigRejectsNonPositiveCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		_, err := buildDataLayerConfig(
+			&configapi.DataLayerConfig{
+				CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+			},
+			handle,
+		)
+		require.ErrorContains(t, err, "crossReplicaPublishTimeout must be positive")
+	}
 }
 
 // --- Helpers & Mocks ---

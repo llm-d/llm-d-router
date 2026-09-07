@@ -224,7 +224,7 @@ dataLayer:
 					},
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - error unmarshaling request bodyMap: invalid character 'o' in literal null (expecting 'u')",
+						"inference error: BadRequest - error extracting request body: invalid character 'o' in literal null (expecting 'u')",
 					),
 				},
 				{

@@ -351,9 +351,14 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 			break
 		}
 		p.registeredEndpoints.Delete(id)
-		endpointName, _ := splitNamespacedName(event.Endpoint.GetMetadata().ID.String())
-		inflightTokens.DeletePartialMatch(prometheus.Labels{"endpoint_name": endpointName})
-		inflightRequests.DeletePartialMatch(prometheus.Labels{"endpoint_name": endpointName})
+		endpointName, namespace := splitNamespacedName(event.Endpoint.GetMetadata().ID.String())
+		labels := prometheus.Labels{
+			"endpoint_name": endpointName,
+			"namespace":     namespace,
+			"producer_name": p.typedName.Name,
+		}
+		inflightTokens.DeletePartialMatch(labels)
+		inflightRequests.DeletePartialMatch(labels)
 		p.DeleteEndpoint(id)
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Cleaned up in-flight load for deleted endpoint", "endpoint", id)
 	case datalayer.EventAddOrUpdate:

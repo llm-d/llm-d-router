@@ -18,13 +18,10 @@ package preciseprefixcache
 
 import (
 	"fmt"
-	"slices"
 
-	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 // extractEndpointSet builds the "address:port" identifier set used to filter
@@ -38,58 +35,4 @@ func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 		}
 	}
 	return endpointSet
-}
-
-// matchedBlockCount returns the number of contiguous cached prefix blocks held
-// by podID, counting from the first block until the first block the pod does
-// not hold. This is the unweighted counterpart of the device-tier-weighted
-// kvblock scorer: every cached block counts as one regardless of device tier,
-// so a pod present at keys[0..n-1] yields n.
-func matchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
-	count := 0
-	for _, key := range keys {
-		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool { return e.PodIdentifier == podID }) {
-			break
-		}
-		count++
-	}
-	return count
-}
-
-// matchedBlockCountByTier returns, per device tier, the number of contiguous
-// cached prefix blocks podID holds in that tier, counting from the first
-// block until the first block the pod does not hold in that tier. A block
-// held in several tiers counts once per tier, so each tier's count is at most
-// matchedBlockCount for the same pod. Tiers are recorded as found in the
-// index, except speculative entries, which count under
-// attrprefix.SpeculativeTierKey: PreRequest inserts them before vLLM has
-// reported placement, so they carry no device tier.
-// Returns a non-nil (possibly empty) map.
-func matchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) map[string]int {
-	counts := map[string]int{}
-	var alive sets.Set[string]
-	for _, key := range keys {
-		tiersAtKey := sets.New[string]()
-		for _, e := range keyToPods[key] {
-			if e.PodIdentifier == podID {
-				if e.Speculative {
-					tiersAtKey.Insert(attrprefix.SpeculativeTierKey)
-				} else {
-					tiersAtKey.Insert(e.DeviceTier)
-				}
-			}
-		}
-		if alive == nil {
-			alive = tiersAtKey
-		} else {
-			alive = alive.Intersection(tiersAtKey)
-		}
-		if alive.Len() == 0 {
-			break
-		}
-		for tier := range alive {
-			counts[tier]++
-		}
-	}
-	return counts
 }

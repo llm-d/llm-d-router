@@ -21,9 +21,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -200,6 +202,30 @@ var _ = Describe("Common Connector tests", func() {
 			})
 		})
 	}
+})
+
+var _ = Describe("IPv6 endpoint address construction", func() {
+	DescribeTable("mooncake bootstrapAddr brackets IPv6 host",
+		func(prefillHostPort string, port int, want string) {
+			got := "http://" + net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port))
+			Expect(got).To(Equal(want))
+		},
+		Entry("IPv4", "10.0.0.1:8080", 9090, "http://10.0.0.1:9090"),
+		Entry("IPv6", "[fd00::1]:8080", 9090, "http://[fd00::1]:9090"),
+	)
+
+	DescribeTable("nixlv2 remoteEngineID brackets IPv6 host",
+		func(prefillPodHostPort string, handshakePort int, want string) {
+			host, _, err := net.SplitHostPort(prefillPodHostPort)
+			if err != nil {
+				host = prefillPodHostPort
+			}
+			got := net.JoinHostPort(host, strconv.Itoa(handshakePort))
+			Expect(got).To(Equal(want))
+		},
+		Entry("IPv4", "10.0.0.1:8080", 61000, "10.0.0.1:61000"),
+		Entry("IPv6", "[fd00::2]:8080", 61000, "[fd00::2]:61000"),
+	)
 })
 
 func sidecarConnectionTestSetup(connector string) *sidecarTestInfo {

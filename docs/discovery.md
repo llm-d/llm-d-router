@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [Overview](#overview)
+- [Pod readiness in Kubernetes discovery](#pod-readiness-in-kubernetes-discovery)
 - [Architecture](#architecture)
 - [The EndpointDiscovery Interface](#the-endpointdiscovery-interface)
   - [EndpointDiscovery](#endpointdiscovery)
@@ -42,6 +43,48 @@ When a discovery plugin is configured:
   datastore via `DiscoveryNotifier`.
 - All scheduling, request control, and metrics collection behaviour is
   unchanged.
+
+---
+
+## Pod readiness in Kubernetes discovery
+
+In the default Kubernetes mode the EPP admits a pod into the routing pool only
+when the pod's aggregate **`Ready`** condition is `True` (see
+`pkg/epp/util/pod/pod.go`). A pod whose `Ready` condition is `False` or
+`Unknown`, or that has a deletion timestamp, is removed from the datastore and
+receives no traffic.
+
+Reading the aggregate `Ready` condition means custom
+[pod readiness gates](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-readiness-gate)
+are honoured without any additional EPP configuration. The kubelet computes
+`Ready` as `ContainersReady` **AND** every condition listed in
+`spec.readinessGates`, so an unsatisfied gate holds the pod out of the routing
+pool even when its container probes already pass:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: vllm          # selected by the InferencePool
+spec:
+  readinessGates:
+    - conditionType: "custom.orchestrator.io/serving"
+```
+
+Until an external controller patches `custom.orchestrator.io/serving` to
+`True` on the pod's status, the pod reports:
+
+```text
+Ready=False
+ContainersReady=True
+```
+
+and the EPP does not route to it. Once the condition flips to `True`, the
+kubelet sets `Ready=True` and the pod joins the pool on the next reconcile.
+
+Note that a gated pod still shows `1/1` in `kubectl get pods`: that column counts
+ready *containers*, while the EPP reads the `Ready` condition.
 
 ---
 

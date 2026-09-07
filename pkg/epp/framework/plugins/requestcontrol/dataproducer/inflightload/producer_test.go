@@ -264,7 +264,7 @@ func TestInFlightLoadProducer_NotificationCleanup(t *testing.T) {
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
 
-func TestInFlightLoadProducer_DeleteEndpointPrunesMetricSeries(t *testing.T) {
+func TestInFlightLoadProducer_DeleteEndpointPrunesOnlyMatchingMetricSeries(t *testing.T) {
 	inflightRequests.Reset()
 	inflightTokens.Reset()
 
@@ -274,8 +274,12 @@ func TestInFlightLoadProducer_DeleteEndpointPrunesMetricSeries(t *testing.T) {
 
 	inflightTokens.WithLabelValues(endpointName, "default", producer.typedName.Name, "fairness-id", "1").Add(1000)
 	inflightRequests.WithLabelValues(endpointName, "default", producer.typedName.Name, "fairness-id", "1").Inc()
+	inflightTokens.WithLabelValues(endpointName, "other", producer.typedName.Name, "fairness-id", "1").Add(2000)
+	inflightRequests.WithLabelValues(endpointName, "other", producer.typedName.Name, "fairness-id", "1").Add(2)
+	inflightTokens.WithLabelValues(endpointName, "default", "other-producer", "fairness-id", "1").Add(3000)
+	inflightRequests.WithLabelValues(endpointName, "default", "other-producer", "fairness-id", "1").Add(3)
 
-	require.Equal(t, 1, promtestutil.CollectAndCount(inflightTokens))
+	require.Equal(t, 3, promtestutil.CollectAndCount(inflightTokens))
 
 	err := producer.Extract(ctx, datalayer.EndpointEvent{
 		Type:     datalayer.EventDelete,
@@ -283,8 +287,21 @@ func TestInFlightLoadProducer_DeleteEndpointPrunesMetricSeries(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.Equal(t, 0, promtestutil.CollectAndCount(inflightTokens))
-	require.Equal(t, 0, promtestutil.CollectAndCount(inflightRequests))
+	expectedTokens := `
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# TYPE llm_d_epp_inflight_tokens gauge
+llm_d_epp_inflight_tokens{endpoint_name="deleted-endpoint",fairness_id="fairness-id",namespace="default",priority="1",producer_name="other-producer"} 3000
+llm_d_epp_inflight_tokens{endpoint_name="deleted-endpoint",fairness_id="fairness-id",namespace="other",priority="1",producer_name="inflight-load-producer"} 2000
+`
+	require.NoError(t, promtestutil.CollectAndCompare(inflightTokens, strings.NewReader(expectedTokens), "llm_d_epp_inflight_tokens"))
+
+	expectedRequests := `
+# HELP llm_d_epp_inflight_requests [ALPHA] Current number of in-flight requests per endpoint, as tracked by the in-flight load producer.
+# TYPE llm_d_epp_inflight_requests gauge
+llm_d_epp_inflight_requests{endpoint_name="deleted-endpoint",fairness_id="fairness-id",namespace="default",priority="1",producer_name="other-producer"} 3
+llm_d_epp_inflight_requests{endpoint_name="deleted-endpoint",fairness_id="fairness-id",namespace="other",priority="1",producer_name="inflight-load-producer"} 2
+`
+	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
 }
 
 func TestInFlightLoadProducer_DumpState(t *testing.T) {

@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,7 +59,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		return
 	}
 
-	bootstrapAddr := fmt.Sprintf("http://%s:%d", extractHost(prefillPodHostPort), s.config.MooncakeBootstrapPort)
+	bootstrapAddr := "http://" + net.JoinHostPort(extractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
 
 	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
 	if err != nil {

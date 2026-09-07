@@ -50,8 +50,9 @@ func (m *mockTokenizer) RenderChat(_ context.Context, payload fwkrh.RequestPaylo
 
 func newTestPlugin(tok tokenizer) *Plugin {
 	return &Plugin{
-		typedName: plugin.TypedName{Type: PluginType, Name: "test"},
-		backend:   renderBackend{tk: tok},
+		typedName:   plugin.TypedName{Type: PluginType, Name: "test"},
+		backend:     renderBackend{tk: tok},
+		backendName: backendVLLM,
 	}
 }
 
@@ -73,7 +74,7 @@ func TestProduceTimeout(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, ep.ProduceTimeout())
 
-	// A render backend whose tokenizer manages no timeout (e.g. UDS) keeps the default.
+	// A render backend whose tokenizer manages no timeout keeps the default.
 	assert.Zero(t, newTestPlugin(&mockTokenizer{}).ProduceTimeout())
 }
 

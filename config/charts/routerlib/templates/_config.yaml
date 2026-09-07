@@ -6,8 +6,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   default-plugins.yaml: |
-    {{- $modelServerProtocol := .Values.router.modelServers.protocol | default "http" }}
-    {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
+    {{- $modelServers := .Values.router.modelServers | default dict }}
+    {{- $modelServerProtocol := $modelServers.protocol | default "http" }}
+    {{- $modelServerType := $modelServers.type | default "vllm" }}
     {{- $parsers := list }}
     {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
       {{- $parsers = append $parsers "vllmgrpc-parser" }}
@@ -28,7 +29,6 @@ data:
         path: {{ .Values.router.epp.metricsDataSource.path | default "/metrics" | quote }}
         insecureSkipVerify: {{ .Values.router.epp.metricsDataSource.insecureSkipVerify | default true }}
     - type: core-metrics-extractor
-      {{- $modelServerType := .Values.router.modelServers.type | default "vllm" }}
       {{- if ne $modelServerType "vllm" }}
       parameters:
         defaultEngine: {{ $modelServerType | quote }}

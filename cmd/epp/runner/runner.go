@@ -669,6 +669,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityBeta, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)
 	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadDataKey)
+	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, attrconcurrency.UncachedRequestTokensDataKey)
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, fwkplugin.StabilityBeta, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
 	fwkplugin.RegisterDeprecated(tokenizer.LegacyPluginType, fwkplugin.StabilityBeta, tokenizer.LegacyPluginFactory, "v0.9.0", "v0.11.0", tokenizer.PluginType) //nolint:staticcheck // deprecated in v0.9.0 (#863)
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, fwkplugin.StabilityBeta, mmproducer.Factory, mmproducer.ProducedKey)
@@ -827,7 +828,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	}
 
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
-	r.requestControlConfig.OrderDataProducerPlugins(dag)
+	r.requestControlConfig.OrderPlugins(dag)
 
 	// Derive the endpoint-scope allowed-key sets while the full plugin set,
 	// including auto-created producers, is known. A plugin missing here is
@@ -1078,9 +1079,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	// File mode runs without a controller manager, so several Kubernetes-only
 	// features are inactive: the InferenceModelRewrite and InferenceObjective
-	// reconcilers never start, and any "k8s-notification-source" plugin in the
-	// data layer config silently fails to bind (Runtime.Start, which wires
-	// notification sources into the manager, is intentionally skipped below).
+	// reconcilers never start, and any "k8s-notification-source" plugin cannot
+	// bind without a controller manager. Cross-replica syncing remains active.
 	// Surface this once at startup so operators porting a K8s config see why
 	// related behavior differs.
 	//
@@ -1194,6 +1194,11 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	g := newRunnableGroup()
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
+	})
+	g.Add("cross-replica-sync", func(ctx context.Context) error {
+		r.dlRuntime.StartCrossReplicaSync(ctx)
+		<-ctx.Done()
+		return nil
 	})
 	// epp-server and health wait for the discovery plugin's initial sync before
 	// going live, so requests and probes never observe an empty datastore. See

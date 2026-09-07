@@ -69,6 +69,36 @@ func TestNewEndpointDispatchesEventWithNoPollers(t *testing.T) {
 	assert.Equal(t, fwkdl.EventDelete, events[1].Type)
 }
 
+func TestReleaseEndpointContinuesWhenPublisherEndpointIsMissing(t *testing.T) {
+	extractor := extmocks.NewEndpointExtractor("test-extractor")
+	epSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-source")
+
+	r := NewRuntime(1)
+	logger := newTestLogger(t)
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{
+				Plugin:     epSrc,
+				Extractors: []fwkplugin.Plugin{extractor},
+			},
+		},
+	}
+	require.NoError(t, r.Configure(cfg, logger))
+
+	endpoint := r.NewEndpoint(context.Background(), &fwkdl.EndpointMetadata{
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "1.2.3.4:5678",
+	})
+	require.NotNil(t, endpoint)
+
+	r.crossReplicaPub = &crossReplicaPublisher{syncer: &fakeSyncer{}}
+	r.ReleaseEndpoint(endpoint)
+
+	events := extractor.GetEvents()
+	require.Len(t, events, 2, "publisher miss must not skip endpoint cleanup")
+	assert.Equal(t, fwkdl.EventDelete, events[1].Type)
+}
+
 func TestUpdateEndpointDispatchesEvent(t *testing.T) {
 	extractor := extmocks.NewEndpointExtractor("test-extractor")
 	epSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-source")
