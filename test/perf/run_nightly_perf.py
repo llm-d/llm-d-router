@@ -114,6 +114,22 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     
     if not os.path.exists(router_config_path):
         raise FileNotFoundError(f"Router config file not found at: {router_config_path}")
+
+    with open(router_config_path, "r") as f:
+        guide_data = yaml.safe_load(f) or {}
+    guide_router = guide_data.get("router") or {}
+    tracing = (guide_router.get("tracing") or {}).get("enabled")
+    if tracing is None:
+        guide_epp = guide_router.get("epp") or {}
+        tracing = (guide_epp.get("flags") or {}).get("tracing")
+        if tracing is None:
+            tracing = False
+        elif str(tracing) in ("1", "t", "T", "true", "TRUE", "True"):
+            tracing = True
+        elif str(tracing) in ("0", "f", "F", "false", "FALSE", "False"):
+            tracing = False
+    if not isinstance(tracing, bool):
+        raise ValueError("tracing requires a boolean router.tracing.enabled or a boolean EPP flag")
         
     release_name = os.path.splitext(os.path.basename(router_config_path))[0]
     
@@ -136,7 +152,7 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
                 "flags": {
                     "v": 4,
                     "enable-pprof": "true",
-                    "tracing": "false"
+                    "tracing": str(tracing).lower()
                 },
                 "resources": {
                     "requests": {
@@ -148,6 +164,9 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
                         "memory": mem_limit
                     }
                 }
+            },
+            "tracing": {
+                "enabled": tracing
             },
             "monitoring": {
                 "prometheus": {
@@ -167,18 +186,11 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
         }
     }
 
-    # Extract guide specific model server labels and nullify them in overrides to avoid helm deep merge keeping them
-    try:
-        with open(router_config_path, "r") as f:
-            guide_data = yaml.safe_load(f)
-            if (guide_data and "router" in guide_data 
-                    and "modelServers" in guide_data["router"] 
-                    and "matchLabels" in guide_data["router"]["modelServers"]):
-                for key in guide_data["router"]["modelServers"]["matchLabels"].keys():
-                    if key != "app":
-                        overrides["router"]["modelServers"]["matchLabels"][key] = None
-    except Exception as e:
-        print(f"Warning: Could not parse router config to extract modelServers labels for nullification: {e}")
+    # Clear model-server labels replaced by the simulator.
+    match_labels = (guide_router.get("modelServers") or {}).get("matchLabels") or {}
+    for key in match_labels:
+        if key != "app":
+            overrides["router"]["modelServers"]["matchLabels"][key] = None
     
     if machine_family:
         overrides["router"]["epp"]["affinity"] = {
@@ -402,12 +414,12 @@ def interpolate_percentile(sorted_buckets, total_count, percentile):
 
 def calculate_percentiles(before, after):
     if not before or not after:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
         
     diff_count = after['count'] - before['count']
     if diff_count <= 0:
         print("No new scheduler events recorded during the test.")
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
         
     diff_buckets = {}
     for le in after['buckets']:
@@ -425,8 +437,9 @@ def calculate_percentiles(before, after):
     sorted_buckets = sorted(diff_buckets.items(), key=bucket_key)
     p50 = interpolate_percentile(sorted_buckets, diff_count, 0.50)
     p95 = interpolate_percentile(sorted_buckets, diff_count, 0.95)
+    p99 = interpolate_percentile(sorted_buckets, diff_count, 0.99)
     
-    return p50 * 1000, p95 * 1000  # Convert to milliseconds
+    return p50 * 1000, p95 * 1000, p99 * 1000  # Convert to milliseconds
 
 def run_benchmark(ns, job_values_path, chart_path, release_name):
     print(f"Deploying benchmark job in namespace: {ns}")
@@ -468,17 +481,26 @@ def cleanup_namespace(ns):
     print(f"Cleaning up namespace: {ns}")
     run_cmd(f"kubectl delete namespace {ns} --wait=false")
 
-def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, router_config_path, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, status, profile_results=None):
+def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, router_config_path, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, p99, status, profile_results=None):
     os.makedirs(results_dir, exist_ok=True)
     results_file = os.path.join(results_dir, f"{test_name}.md")
     file_exists = os.path.exists(results_file)
+    header = "| Timestamp | Namespace | Router Config | Perf Job | Machine Family | Sim Replicas | EPP Images | Container | Idle CPU (m) | Idle Mem (MiB) | Peak CPU (m) | Peak Mem (MiB) | P50 Latency (ms) | P95 Latency (ms) | P99 Latency (ms) | CPU Profile | Memory Profile | Status |"
+    last_header = None
+    if file_exists:
+        with open(results_file, "r") as f:
+            for line in f:
+                if line.startswith("| Timestamp |"):
+                    last_header = line.strip()
     
     with open(results_file, "a") as f:
         if not file_exists:
-            # Write header
             f.write(f"# EPP Router Performance Benchmarking Results: {test_name}\n\n")
-            f.write("| Timestamp | Namespace | Router Config | Perf Job | Machine Family | Sim Replicas | EPP Images | Container | Idle CPU (m) | Idle Mem (MiB) | Peak CPU (m) | Peak Mem (MiB) | P50 Latency (ms) | P95 Latency (ms) | CPU Profile | Memory Profile | Status |\n")
-            f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        if last_header != header:
+            if file_exists:
+                f.write("\n")
+            f.write(header + "\n")
+            f.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
             
         epp_images = "<br>".join(images)
         mf_str = machine_family if machine_family else "-"
@@ -526,7 +548,7 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, route
             peak_cpu = peak_metrics.get(container, {}).get('cpu', '-')
             peak_mem = peak_metrics.get(container, {}).get('mem', '-')
             
-            f.write(f"| {run_time} | {ns} | {config_link} | {job_link} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {cpu_link} | {mem_link} | {status} |\n")
+            f.write(f"| {run_time} | {ns} | {config_link} | {job_link} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {p99:.2f} | {cpu_link} | {mem_link} | {status} |\n")
 
 
 def collect_profiles(ns, epp_pod_name, results_dir, test_name, run_time_clean, profile_results):
@@ -706,7 +728,7 @@ def main():
     status = "SUCCESS"
     idle_metrics = {}
     peak_metrics = {}
-    p50, p95 = 0.0, 0.0
+    p50, p95, p99 = 0.0, 0.0, 0.0
     images = []
     profile_results = {
         'cpu_pprof': None,
@@ -821,8 +843,8 @@ def main():
 
         # Step 8: Scrape Post-Benchmark Metrics & Compute Latency
         metrics_after = scrape_scheduler_metrics(ns, pod_name)
-        p50, p95 = calculate_percentiles(metrics_before, metrics_after)
-        print(f"Benchmark latencies: P50 = {p50:.2f} ms, P95 = {p95:.2f} ms")
+        p50, p95, p99 = calculate_percentiles(metrics_before, metrics_after)
+        print(f"Benchmark latencies: P50 = {p50:.2f} ms, P95 = {p95:.2f} ms, P99 = {p99:.2f} ms")
         print(f"Peak resource usage: {peak_metrics}")
 
     except Exception as e:
@@ -861,6 +883,7 @@ def main():
                 peak_metrics, 
                 p50, 
                 p95, 
+                p99,
                 status,
                 profile_results=profile_results
             )
