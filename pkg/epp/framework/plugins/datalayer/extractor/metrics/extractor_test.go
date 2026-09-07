@@ -922,7 +922,7 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 		assertNoScalarMetric(t, ep, "tiering_allocation_failures")
 	})
 
-	t.Run("partial tiering metrics, error on missing", func(t *testing.T) {
+	t.Run("partial tiering metrics, missing tiers left unset", func(t *testing.T) {
 		ep := fwkdl.NewEndpoint(nil, nil)
 		data := sourcemetrics.PrometheusMetricMap{
 			defaultTotalQueuedRequestsMetric:  gaugeFamily(5),
@@ -934,8 +934,8 @@ func TestTieredOffloadingExtraction(t *testing.T) {
 		}
 
 		err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
-		if err == nil {
-			t.Error("expected error for partial tiering metrics, got nil")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
 
 		assertScalarMetric(t, ep, "tiering_chunk_hits", 50.0)

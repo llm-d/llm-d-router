@@ -41,9 +41,7 @@ type Mapping struct {
 	// config as separate gauge values rather than labels on an info metric.
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
-	// TieredOffloading holds specs for vLLM kv_offload_tiering_* metrics.
-	// When no tiering metric is found the block is silently skipped;
-	// when at least one is present, missing metrics are treated as errors.
+	// TieredOffloading holds specs for the engine's KV offload tiering metrics.
 	TieredOffloading []AttributeMetric
 	CustomMetrics    []CustomMetric
 }
@@ -178,9 +176,12 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
-	tieredOffloading, tieredErrs := parseCustomMetrics(cfg.TieredOffloading)
+	// Both fields write to the same attribute namespace, so they share one seen
+	// set: a key already claimed is rejected, whichever field claims it second.
+	seenKeys := make(map[string]struct{}, len(cfg.TieredOffloading)+len(cfg.CustomMetrics))
+	tieredOffloading, tieredErrs := parseAttributeMetrics("tieredOffloadingSpecs", cfg.TieredOffloading, seenKeys)
 	errs = append(errs, tieredErrs...)
-	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
+	customMetrics, customErrs := parseAttributeMetrics("customMetrics", cfg.CustomMetrics, seenKeys)
 	errs = append(errs, customErrs...)
 
 	if len(errs) != 0 {
@@ -201,25 +202,27 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	}, nil
 }
 
-func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
-	metrics := make([]CustomMetric, 0, len(configs))
+// parseAttributeMetrics validates the entries of one attribute-metric config
+// field, naming that field in errors so an operator can locate the entry.
+// seenKeys accumulates the attribute keys already claimed on this engine.
+func parseAttributeMetrics(field string, configs []AttributeMetric, seenKeys map[string]struct{}) ([]AttributeMetric, []error) {
+	metrics := make([]AttributeMetric, 0, len(configs))
 	var errs []error
-	seenKeys := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
 		if cfg.AttributeKey == "" {
-			errs = append(errs, errors.New("custom metric attributeKey cannot be empty"))
+			errs = append(errs, fmt.Errorf("%s: attributeKey cannot be empty", field))
 			continue
 		}
 		if _, ok := seenKeys[cfg.AttributeKey]; ok {
-			errs = append(errs, fmt.Errorf("custom metric attributeKey %q is duplicated", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("%s: attributeKey %q is duplicated", field, cfg.AttributeKey))
 			continue
 		}
 		seenKeys[cfg.AttributeKey] = struct{}{}
 		if cfg.Spec == nil {
-			errs = append(errs, fmt.Errorf("custom metric %q spec cannot be empty", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("%s: %q spec cannot be empty", field, cfg.AttributeKey))
 			continue
 		}
-		metrics = append(metrics, CustomMetric{
+		metrics = append(metrics, AttributeMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         cfg.Spec,
 		})

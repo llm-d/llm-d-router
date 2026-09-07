@@ -199,26 +199,15 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
-	if len(mapping.TieredOffloading) > 0 { // only work on vLLM as it is configured with TieredOffloading
-		metrics := make([]*dto.Metric, len(mapping.TieredOffloading))
-		fetchErrs := make([]error, len(mapping.TieredOffloading))
-		tieringDetected := false
-		for i, tiered := range mapping.TieredOffloading {
-			metrics[i], fetchErrs[i] = tiered.Spec.getLatestMetric(families)
-			if fetchErrs[i] == nil {
-				tieringDetected = true
-			}
+	// All specs absent means the engine is not offloading at all: leave the attributes unset so a
+	// non-tiering endpoint is distinguishable from an idle tiering one.
+	for _, tiered := range mapping.TieredOffloading {
+		metric, err := tiered.Spec.getLatestMetric(families)
+		if err != nil {
+			continue
 		}
-		if tieringDetected { // when none tiering metrics exist, skip adding into attribute
-			for i, tiered := range mapping.TieredOffloading {
-				if fetchErrs[i] != nil { // only report missing tiering metrics
-					errs = append(errs, fmt.Errorf("tiering metric %q: %w", tiered.AttributeKey, fetchErrs[i]))
-					continue
-				}
-				ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(tiered.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metrics[i])))
-				updated = true
-			}
-		}
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(tiered.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
+		updated = true
 	}
 
 	for _, custom := range mapping.CustomMetrics {
