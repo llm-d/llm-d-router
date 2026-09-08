@@ -38,19 +38,19 @@ func TestExtractorExtract(t *testing.T) {
 	// PollingDispatcher contract; Extract does not guard against it.
 	tests := []struct {
 		name    string
-		data    *ModelResponse
+		data    *attrmodels.ModelResponse
 		wantErr bool
 		updated bool // whether metrics are expected to change
 	}{
 		{
 			name:    "empty ModelsResponse",
-			data:    &ModelResponse{},
+			data:    &attrmodels.ModelResponse{},
 			wantErr: false,
 			updated: false,
 		},
 		{
 			name: "valid models response",
-			data: &ModelResponse{
+			data: &attrmodels.ModelResponse{
 				Object: "list",
 				Data: []attrmodels.ModelData{
 					{
@@ -81,7 +81,7 @@ func TestExtractorExtract(t *testing.T) {
 			if ok && before != nil {
 				t.Error("expected empty attributes")
 			}
-			err := extractor.Extract(ctx, fwkdl.PollInput[*ModelResponse]{Payload: tt.data, Endpoint: ep})
+			err := extractor.Extract(ctx, fwkdl.PollInput[*attrmodels.ModelResponse]{Payload: tt.data, Endpoint: ep})
 			after, ok := attr.Get(key)
 			if !ok && tt.updated {
 				t.Error("expected updated attributes")
