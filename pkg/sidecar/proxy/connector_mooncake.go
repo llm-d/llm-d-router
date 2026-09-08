@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"strconv"
@@ -83,10 +84,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		"engine_id", engineID)
 
 	// Build prefill request body
-	prefillData := make(map[string]any)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
+	prefillData := maps.Clone(requestData)
 	prefillData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill: false,
 		requestFieldDoRemoteDecode:  true,
@@ -110,10 +108,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	}
 
 	// Build decode request body
-	decodeData := make(map[string]any)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
+	decodeData := maps.Clone(requestData)
 	decodeData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill:     true,
 		requestFieldDoRemoteDecode:      false,

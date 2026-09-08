@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -93,15 +94,13 @@ func extractMMItems(requestData map[string]any) []map[string]any {
 	return items
 }
 
-// buildEncoderRequest creates a per-item encoder request: a deep copy of the
-// original chat-completions request with only the multimodal item in
+// buildEncoderRequest creates a per-item encoder request: a one-level copy of
+// the client's request carrying only the multimodal item in
 // messages[0].content (text removed), capped to a single output token, and
-// stream disabled.
+// stream disabled. The copy is one level deep, so nested values it does not
+// replace are shared with the client's body and must not be written through.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := make(map[string]any)
-	for k, v := range originalRequest {
-		encoderRequest[k] = v
-	}
+	encoderRequest := maps.Clone(originalRequest)
 
 	messages := []map[string]any{
 		{

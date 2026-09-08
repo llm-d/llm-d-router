@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -178,10 +179,7 @@ func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
-	modifiedRequest := make(map[string]interface{})
-	for k, v := range requestData {
-		modifiedRequest[k] = v
-	}
+	modifiedRequest := maps.Clone(requestData)
 
 	// Generate bootstrap host from prefill host
 	bootstrapHost := extractHost(prefillHostPort)
