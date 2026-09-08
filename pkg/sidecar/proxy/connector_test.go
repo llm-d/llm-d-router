@@ -19,6 +19,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -30,6 +31,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
@@ -291,6 +293,105 @@ var _ = Describe("IPv6 endpoint address construction", func() {
 		},
 		Entry("IPv4", "10.0.0.1:8080", 61000, "10.0.0.1:61000"),
 		Entry("IPv6", "[fd00::2]:8080", 61000, "[fd00::2]:61000"),
+	)
+})
+
+// Every connector copies the parsed request body and writes into the copy. A
+// body that is not a JSON object parses to a nil map, which accepts no writes,
+// so it must be refused before it reaches a connector.
+var _ = Describe("Non-object request body", func() {
+	DescribeTable("is refused with 400 before the connector runs",
+		func(connector, body string) {
+			testInfo := sidecarConnectionTestSetup(connector)
+			proxyBaseAddr := testInfo.startProxy()
+
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+			resp, err := http.DefaultClient.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			defer resp.Body.Close() //nolint:errcheck
+
+			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
+			respBody, err := io.ReadAll(resp.Body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(respBody)).To(ContainSubstring("BadRequestError"))
+
+			By("verifying neither leg was dispatched")
+			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeZero())
+			Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeZero())
+
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		},
+		Entry("nixlv2 null", KVConnectorNIXLV2, `null`),
+		Entry("shared-storage null", KVConnectorSharedStorage, `null`),
+		Entry("mooncake null", KVConnectorMooncake, `null`),
+		Entry("p2p null", KVConnectorOffloading, `null`),
+		Entry("sglang null", KVConnectorSGLang, `null`),
+		Entry("nixlv2 array", KVConnectorNIXLV2, `[]`),
+		Entry("p2p malformed", KVConnectorOffloading, `{"model":`),
+	)
+})
+
+// Every entry point reads the client body through readJSONBody before it does
+// anything else, so a client that drops the connection mid-body must get the
+// same vLLM error envelope whichever path the sidecar is configured for. The
+// decoder-only paths are covered too: they write into the parsed body as well.
+var _ = Describe("Unreadable request body", func() {
+	DescribeTable("is refused with a vLLM error envelope",
+		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request)) {
+			proxy := NewProxy(config)
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, errReader{})
+
+			handle(proxy, w, r)
+
+			Expect(w.Code).To(Equal(http.StatusBadRequest))
+			var got errorResponse
+			Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed())
+			Expect(got.Object).To(Equal("error"))
+			Expect(got.Type).To(Equal("BadRequestError"))
+			Expect(got.Code).To(Equal(http.StatusBadRequest))
+			Expect(got.Message).To(ContainSubstring("failed to read request body"))
+		},
+		Entry("nixlv2", Config{Port: "0", KVConnector: KVConnectorNIXLV2},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleNIXLV2(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
+			}),
+		Entry("shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleSharedStorage(w, r, "10.0.0.1:8080", reqcommon.APITypeChatCompletions)
+			}),
+		Entry("mooncake", Config{Port: "0", KVConnector: KVConnectorMooncake},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleMooncake(w, r, "10.0.0.1:8080", reqcommon.APITypeChatCompletions)
+			}),
+		Entry("p2p", Config{Port: "0", KVConnector: KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleP2P(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
+			}),
+		Entry("sglang", Config{Port: "0", KVConnector: KVConnectorSGLang},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleSGLang(w, r, "10.0.0.1:8080")
+			}),
+		Entry("ec-nixl", Config{Port: "0", KVConnector: KVConnectorNIXLV2, ECConnector: ECConnectorNIXL},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"})
+			}),
+		Entry("ec-shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage, ECConnector: ECExampleConnector},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"})
+			}),
+		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.decodeWithP2PSource(w, r, "10.0.0.2:8080")
+			}),
+		Entry("chunked decode", Config{Port: "0", DecodeChunkSize: 16},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.runChunkedDecode(w, r)
+			}),
 	)
 })
 

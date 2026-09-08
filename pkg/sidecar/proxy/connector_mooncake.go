@@ -44,19 +44,8 @@ const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if err := errorJSONInvalid(fmt.Errorf("failed to read request body: %w", err), w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	var requestData map[string]any
-	if err := json.Unmarshal(body, &requestData); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 

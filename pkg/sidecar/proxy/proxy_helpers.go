@@ -167,11 +167,16 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
+	}
+	// A JSON "null" body parses without error into a nil map. Callers copy the
+	// parsed body and write into the copy, and a write to a nil map panics.
+	if parsed == nil {
+		return nil, nil, fmt.Errorf("%w: request body must be a JSON object", errInvalidJSON)
 	}
 	return raw, parsed, nil
 }
@@ -179,10 +184,7 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		if !errors.Is(err, errInvalidJSON) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(err.Error()))
-		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false

@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"math/rand/v2"
 	"net/http"
@@ -55,13 +54,8 @@ func init() {
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
-	// Make Request
-	requestData, err := s.parseSGLangRequest(r)
-
-	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -195,20 +189,6 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 		"bootstrap_room", roomID)
 
 	return modifiedRequest
-}
-
-func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, error) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read request body: %w", err)
-	}
-
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
-		return nil, fmt.Errorf("failed to parse request body: %w", err)
-	}
-
-	return requestData, nil
 }
 
 func (s *Server) generateSGLangRoomID() int64 {
