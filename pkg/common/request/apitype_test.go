@@ -21,32 +21,20 @@ import (
 	"testing"
 )
 
-func TestAPIType_String(t *testing.T) {
-	cases := map[APIType]string{
-		APITypeChatCompletions: "chat_completions",
-		APITypeCompletions:     "completions",
-		APITypeResponses:       "responses",
-		APITypeGenerate:        "generate",
-		APIType(7):             "APIType(7)",
+func TestAPIType_StringAndPath(t *testing.T) {
+	cases := map[APIType]struct{ name, path string }{
+		APITypeChatCompletions: {"chat_completions", PathChatCompletions},
+		APITypeCompletions:     {"completions", PathCompletions},
+		APITypeResponses:       {"responses", PathResponses},
+		APITypeGenerate:        {"generate", PathGenerate},
+		APIType(7):             {"APIType(7)", PathGenerate},
 	}
 	for apiType, want := range cases {
-		if got := apiType.String(); got != want {
-			t.Errorf("APIType(%d).String() = %q, want %q", int(apiType), got, want)
+		if got := apiType.String(); got != want.name {
+			t.Errorf("APIType(%d).String() = %q, want %q", int(apiType), got, want.name)
 		}
-	}
-}
-
-func TestAPIType_Path(t *testing.T) {
-	cases := map[APIType]string{
-		APITypeChatCompletions: PathChatCompletions,
-		APITypeCompletions:     PathCompletions,
-		APITypeResponses:       PathResponses,
-		APITypeGenerate:        PathGenerate,
-		APIType(7):             PathGenerate,
-	}
-	for apiType, want := range cases {
-		if got := apiType.Path(); got != want {
-			t.Errorf("APIType(%d).Path() = %q, want %q", int(apiType), got, want)
+		if got := apiType.Path(); got != want.path {
+			t.Errorf("APIType(%d).Path() = %q, want %q", int(apiType), got, want.path)
 		}
 	}
 }
