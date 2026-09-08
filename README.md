@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > **API & Code Consolidation**: Core Endpoint Picker (EPP) code and the `InferenceObjective` and `InferenceModelRewrite` APIs have been merged into this repository from [Gateway API Inference Extension (GIE)]. The GIE repository now exclusively hosts the `InferencePool` API—an extension of the [Kubernetes Gateway API]—and defines the Endpoint Picker Protocol.
 
-The **llm-d Router** is the intelligent entry point for inference traffic, delivering LLM load and prefix-cache aware routing, request prioritization, and advanced flow control across diverse request formats to fulfill complex serving objectives. It supports a flexible deployment model: it can run in **Standalone Mode** (where a self-managed Envoy proxy runs alongside the EPP in the same pod) or integrate with L7 load balancers—including self-managed instances (e.g., Istio, AgentGateway) and cloud-managed services (e.g., Google Cloud's Application Load Balancer)—via the Kubernetes Gateway API. 
+The **llm-d Router** is the intelligent entry point for inference traffic, delivering LLM load and prefix-cache aware routing, request prioritization, and advanced flow control across diverse request formats to fulfill complex serving objectives. It supports a flexible deployment model: it can run in **Standalone Mode**, where a self-managed Envoy proxy runs either alongside the EPP or as a separate service, or integrate with L7 load balancers—including self-managed instances (e.g., Istio, AgentGateway) and cloud-managed services (e.g., Google Cloud's Application Load Balancer)—via the Kubernetes Gateway API.
 
 The router achieves its intelligence through an **Endpoint Picker (EPP)** that integrates with production-grade proxies (such as [Envoy]) via the [ext-proc] protocol, injecting real-time signals into the data plane to optimize request placement.
 
@@ -35,7 +35,12 @@ This repository hosts the following core components:
 The llm-d Router supports two primary deployment modes as specified in the [Kubernetes Gateway API Inference Extensions]:
 
 ### 1. Standalone Mode
-A lightweight deployment where a self-managed Envoy proxy runs alongside the EPP in the same pod. This mode is ideal for clusters without Gateway API infrastructure or for basic testing and local evaluations.
+A deployment with a self-managed Envoy proxy that does not require Gateway API infrastructure. The standalone Helm chart supports two Envoy proxy topologies:
+
+- **Sidecar mode** (default): The proxy runs in the EPP pod. This topology is suited to basic testing and local evaluations.
+- **Service mode**: The proxy runs as a separate, horizontally scalable Deployment and Service and reaches EPP through the EPP Service. Set `router.proxy.mode=service` to scale the proxy independently from EPP.
+
+See the [Helm chart documentation] for configuration examples.
 
 ### 2. Gateway Mode (Inference Gateway)
 The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
@@ -69,6 +74,7 @@ To ensure clarity across the project, we use the following standard terminology:
 [Gateway API]:https://github.com/kubernetes-sigs/gateway-api
 [Envoy]:https://github.com/envoyproxy/envoy
 [ext-proc]:https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter
+[Helm chart documentation]:config/charts/README.md
 
 ## Contributing
 
