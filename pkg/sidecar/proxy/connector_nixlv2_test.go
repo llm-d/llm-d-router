@@ -277,7 +277,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		prefillReq := testInfo.prefillHandler.CompletionRequests[0]
 		Expect(prefillReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(prefillReq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prefillReq).ToNot(HaveKey(requestFieldMinTokens))
 
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 		Expect(decodeReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
@@ -296,7 +296,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		prefillReq := testInfo.prefillHandler.CompletionRequests[0]
 		Expect(prefillReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(prefillReq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prefillReq).ToNot(HaveKey(requestFieldMinTokens))
 
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 		Expect(decodeReq).ToNot(HaveKey(requestFieldMaxTokens))
@@ -806,7 +806,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
 
 		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(samplingParamsOf(prq1)).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(samplingParamsOf(prq1)).ToNot(HaveKey(requestFieldMinTokens))
 		Expect(prq1).To(HaveKeyWithValue("stream", false))
 
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
@@ -822,7 +822,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
 		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).ToNot(HaveKey(requestFieldMinTokens))
 
 		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
 		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
@@ -838,7 +838,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
 		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).ToNot(HaveKey(requestFieldMinTokens))
 
 		decodeSP := samplingParamsOf(testInfo.decodeHandler.CompletionRequests[0])
 		Expect(decodeSP).ToNot(HaveKey(requestFieldMaxTokens))
@@ -854,7 +854,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		prefillSP := samplingParamsOf(testInfo.prefillHandler.CompletionRequests[0])
 		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prefillSP).ToNot(HaveKey(requestFieldMinTokens))
 
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 		Expect(decodeReq).ToNot(HaveKey(requestFieldSamplingParams))
@@ -1089,7 +1089,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		prefillReq := env.prefillHandler.GetCompletionRequests()[0]
 		Expect(prefillReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(prefillReq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 1)))
+		Expect(prefillReq).ToNot(HaveKey(requestFieldMinTokens))
 
 		decodeReq := env.decodeHandler.GetCompletionRequests()[0]
 		Expect(decodeReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
