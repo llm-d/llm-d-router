@@ -21,16 +21,15 @@ import "maps"
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token request for a prefill or encode leg.
 //
-// max_completion_tokens is capped alongside max_tokens where the API has it:
-// vLLM and SGLang accept the two together and prefer max_completion_tokens, so
-// setting both caps the leg regardless of which field the engine consults.
-// min_tokens is stripped rather than clamped: it defaults to 0 in vLLM, so
-// removing it keeps min_tokens <= max_tokens=1 without raising the floor above
-// the cap (vLLM's SamplingParams rejects min_tokens > max_tokens).
+// The caps to rewrite come from APIType.TokenLimitFields, so each API's output
+// caps are named in one place. min_tokens is a floor rather than a cap, so it
+// is stripped unconditionally instead: it defaults to 0 in vLLM, so removing it
+// keeps min_tokens <= max_tokens=1 without raising the floor above the cap
+// (vLLM's SamplingParams rejects min_tokens > max_tokens).
 //
-// TODO: the Responses API caps output with max_output_tokens (see
-// APIType.TokenLimitFields), which this function does not touch, so a
-// /v1/responses prefill leg carrying only that field is not single-token.
+// Chat completions lists both max_tokens and max_completion_tokens: vLLM and
+// SGLang accept the two together and prefer max_completion_tokens, so capping
+// both bounds the leg regardless of which field the engine consults.
 func CapSingleToken(body map[string]any, apiType APIType) {
 	limits, created := apiType.TokenLimitMap(body)
 	if !created && apiType == APITypeGenerate {
@@ -41,11 +40,12 @@ func CapSingleToken(body map[string]any, apiType APIType) {
 		body[FieldSamplingParams] = limits
 	}
 
-	limits[FieldMaxTokens] = 1
-	delete(limits, FieldMinTokens)
-	if apiType != APITypeGenerate {
-		limits[FieldMaxCompletionTokens] = 1
+	for _, field := range apiType.TokenLimitFields() {
+		if field != FieldMinTokens {
+			limits[field] = 1
+		}
 	}
+	delete(limits, FieldMinTokens)
 
 	body[FieldStream] = false
 	delete(body, FieldStreamOptions)

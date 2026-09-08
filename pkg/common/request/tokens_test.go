@@ -139,12 +139,19 @@ func TestCapSingleToken(t *testing.T) {
 			},
 		},
 		{
-			// max_output_tokens is the field the Responses API bounds output
-			// with, and it survives: see the TODO on CapSingleToken.
-			name:    "responses caps the shared fields but not max_output_tokens",
+			name:    "responses caps max_output_tokens",
+			apiType: APITypeResponses,
+			body:    map[string]any{"model": "m", "max_output_tokens": 800},
+			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
+		},
+		{
+			// max_tokens and max_completion_tokens are not Responses fields, so
+			// TokenLimitFields does not name them and they are left as sent.
+			// min_tokens is a floor and is stripped for every API.
+			name:    "responses leaves fields the API does not use",
 			apiType: APITypeResponses,
 			body:    map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5, "max_output_tokens": 800},
-			want:    map[string]any{"model": "m", "max_tokens": 1, "max_completion_tokens": 1, "max_output_tokens": 800, "stream": false},
+			want:    map[string]any{"model": "m", "max_tokens": 100, "max_output_tokens": 1, "stream": false},
 		},
 		{
 			name:    "generate preserves other sampling_params entries",
