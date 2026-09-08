@@ -28,6 +28,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/test/integration"
 )
 
@@ -381,7 +382,7 @@ func metricReqTotal(model, target string, priority int) string {
     # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
     # TYPE llm_d_epp_request_total counter
     llm_d_epp_request_total{%s} 1
-    `, labelsToString([]label{{"fairness_id", ""}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    `, labelsToString([]label{{"fairness_id", metadata.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {
