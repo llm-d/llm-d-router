@@ -114,8 +114,8 @@ func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mode
 // parseGenerateRequest decodes a /inference/v1/generate body into an
 // InferenceRequestBody. Token IDs are required; everything else is optional.
 func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResult, error) {
-	bodyMap := make(map[string]any)
-	if err := parserutil.Unmarshal(rawBody, &bodyMap); err != nil {
+	bodyMap, err := parserutil.UnmarshalMapWithRawField(rawBody, "token_ids")
+	if err != nil {
 		return nil, err
 	}
 

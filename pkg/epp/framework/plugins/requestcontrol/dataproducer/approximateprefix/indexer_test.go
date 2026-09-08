@@ -50,6 +50,22 @@ func TestIndexer_AddAndGet(t *testing.T) {
 
 	servers = i.Get(blockHash(4))
 	assert.Empty(t, servers, "Cache should not contain non-existent hash")
+
+	// A batch larger than the capacity keeps its head: matching is anchored
+	// at the first block, and hashToPods must mirror the LRU membership.
+	i.Add([]blockHash{blockHash(4), blockHash(5), blockHash(6)}, pod)
+
+	assert.Equal(t, 2, i.podToLRU[pod.ServerID].Len(), "Cache size should stay at capacity after a batch add")
+	assert.NotEmpty(t, i.Get(blockHash(4)), "head hashes should remain cached")
+	assert.NotEmpty(t, i.Get(blockHash(5)), "head hashes should remain cached")
+	assert.Empty(t, i.Get(blockHash(6)), "hash truncated off the batch tail must not be reported as cached")
+	assert.Len(t, i.hashToPods, 2, "hashToPods should track exactly the LRU membership")
+
+	// Eviction pressure from a later batch strips the tail first: the head
+	// anchors all matching for the prompt and stays cached longest.
+	i.Add([]blockHash{blockHash(7)}, pod)
+	assert.NotEmpty(t, i.Get(blockHash(4)), "head hash should survive tail-first eviction")
+	assert.Empty(t, i.Get(blockHash(5)), "tail hash should be evicted before the head")
 }
 
 func TestIndexer_RemovePodAndEviction(t *testing.T) {
@@ -110,6 +126,13 @@ func TestIndexer_RemovePodAndEviction(t *testing.T) {
 
 	// Ensure hashToPods contains exactly indexerSize hashes (post-eviction and server2 removal)
 	assert.Len(t, i.hashToPods, indexerSize, "hashToPods should contain %d hashes after cleanup", indexerSize)
+
+	// RemovePod enumerates LRU keys to clean hashToPods, so the mirror must
+	// be exact for the cleanup to be complete.
+	i.Add([]blockHash{11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}, server1) // 12 hashes > capacity 10
+	i.RemovePod(server1.ServerID)
+
+	assert.Empty(t, i.hashToPods, "hashToPods should be empty after removing the last pod")
 }
 
 func TestIndexer_ConcurrentAddRemovePod(t *testing.T) {

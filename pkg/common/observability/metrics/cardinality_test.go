@@ -14,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cardinality
+package metrics
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,38 +35,37 @@ func TestBoundedLabel(t *testing.T) {
 	require.Equal(t, "", b.Bound(""), "empty value passes through without consuming a slot")
 }
 
-// Pinned values must emit their real label even when the cap is exhausted by
-// unpinned values, and must not consume cap slots themselves.
+// Pinned names model operator-configured values (for example EPP's
+// InferenceModelRewrite sources and targets): they must emit their real label
+// even when the cap is exhausted by unconfigured values, and must not consume
+// cap slots themselves.
 func TestBoundedLabelPin(t *testing.T) {
 	b := NewBoundedLabel(2)
 
 	b.Pin("configured")
 	b.Pin("configured") // idempotent
 	require.Equal(t, "a", b.Bound("a"), "pin does not consume a cap slot")
-	require.Equal(t, "b", b.Bound("b"), "cap still has room for a second unpinned value")
-	require.Equal(t, OverflowValue, b.Bound("c"), "cap full for unpinned values")
-	require.Equal(t, "configured", b.Bound("configured"), "pinned value survives a full cap")
+	require.Equal(t, "b", b.Bound("b"), "cap still has room for a second unconfigured name")
+	require.Equal(t, OverflowValue, b.Bound("c"), "cap full for unconfigured names")
+	require.Equal(t, "configured", b.Bound("configured"), "pinned name survives a full cap")
 
 	b.Pin("late")
-	require.Equal(t, "late", b.Bound("late"), "value pinned after the cap fills still emits its real label")
+	require.Equal(t, "late", b.Bound("late"), "name pinned after the cap fills still emits its real label")
 }
 
-// SetFairnessIDLabelLimit replaces the shared fairness limiter, so the cap
-// applies and previously admitted values are cleared.
-func TestSetFairnessIDLabelLimit(t *testing.T) {
-	t.Cleanup(func() { SetFairnessIDLabelLimit(DefaultFairnessIDLabelLimit) })
-
-	SetFairnessIDLabelLimit(2)
-	require.Equal(t, "a", BoundFairnessID("a"))
-	require.Equal(t, "b", BoundFairnessID("b"))
-	require.Equal(t, OverflowValue, BoundFairnessID("c"), "value beyond the cap collapses to overflow")
-
-	SetFairnessIDLabelLimit(0)
-	require.Equal(t, OverflowValue, BoundFairnessID("a"), "a zero cap collapses every value to overflow")
-
-	SetFairnessIDLabelLimit(10)
-	for i := 0; i < 5; i++ {
-		require.NotEqual(t, OverflowValue, BoundFairnessID(fmt.Sprintf("tenant-%d", i)),
-			"raising the cap admits new values again")
+func TestBoundedLabelConcurrentAdmissionsUnderCap(t *testing.T) {
+	b := NewBoundedLabel(1000)
+	got := make([]string, 500)
+	var wg sync.WaitGroup
+	for i := 0; i < 500; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = b.Bound(fmt.Sprintf("m%d", i))
+		}(i)
+	}
+	wg.Wait()
+	for i, g := range got {
+		require.Equal(t, fmt.Sprintf("m%d", i), g)
 	}
 }

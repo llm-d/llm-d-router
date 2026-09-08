@@ -21,8 +21,12 @@ const (
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldMaxTokens            = "max_tokens"
+	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldStream               = "stream"
+	FieldStreamOptions        = "stream_options"
 	FieldSamplingParams       = "sampling_params"
 	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"

@@ -187,17 +187,10 @@ func (fcac *FlowControlAdmissionController) Admit(
 	}
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
-	// A TTL expiry signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
-	// the pool is empty. This covers the queued eviction outcome and a pre-admission expiry, which surfaces as
-	// RejectedOther or EvictedOther wrapping ErrTTLExpired. Probe pool emptiness (nil metadata = whole pool) only
-	// on those paths.
-	ttlPoolEmpty := false
-	if outcome == types.QueueOutcomeEvictedTTL ||
-		((outcome == types.QueueOutcomeRejectedOther || outcome == types.QueueOutcomeEvictedOther) &&
-			errors.Is(err, types.ErrTTLExpired)) {
-		ttlPoolEmpty = len(fcac.endpointCandidates.Locate(ctx, nil)) == 0
-	}
-	return translateFlowControlOutcome(outcome, err, ttlPoolEmpty)
+	// Pool emptiness (nil metadata = whole pool) is a live probe, so it is passed lazily and runs only when the
+	// mapping consults it: a TTL expiry whose regime is not already established by ErrNoEndpoints.
+	poolEmpty := func() bool { return len(fcac.endpointCandidates.Locate(ctx, nil)) == 0 }
+	return translateFlowControlError(err, poolEmpty)
 }
 
 // flowControlRequest is an adapter that implements the FlowControlRequest interface.
@@ -247,53 +240,41 @@ func (r *flowControlRequest) FlowKey() flowcontrol.FlowKey {
 	return flowcontrol.FlowKey{ID: r.fairnessID, Priority: r.priority}
 }
 
-// translateFlowControlOutcome maps the context-rich outcome of the Flow Control layer to the public errcommon.Error
-// contract used by the Director.
+// translateFlowControlError maps the finalization error of the Flow Control layer to the public errcommon.Error
+// contract used by the Director. The error is the authoritative encoding of the final state, so the mapping switches
+// on its sentinels; the Rejected/Evicted family only refines the message text. Pre- and post-admission terminations
+// with the same cause (e.g. a TTL expiry while buffered vs. while queued) therefore agree by construction.
 //
 // Error codes encode availability: ResourceExhausted (429) means capacity exists but is contended (backpressure),
-// ServiceUnavailable (503) means no serving capacity exists right now. A queue-wait TTL eviction is therefore 429
-// when the pool has endpoints and 503 (ttlPoolEmpty) when it does not.
-func translateFlowControlOutcome(outcome types.QueueOutcome, err error, ttlPoolEmpty bool) error {
-	msg := "request rejected by flow control"
-	if err != nil {
-		msg = err.Error()
-	}
-
-	switch outcome {
-	case types.QueueOutcomeDispatched:
+// ServiceUnavailable (503) means no serving capacity exists right now. A queue-wait TTL expiry is therefore 429
+// when the pool has endpoints and 503 when it does not; poolEmpty is the live probe deciding that split, invoked
+// only when the TTL case is reached.
+func translateFlowControlError(err error, poolEmpty func() bool) error {
+	if err == nil {
 		return nil
-	case types.QueueOutcomeRejectedCapacity:
-		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
-	case types.QueueOutcomeRejectedNoEndpoints:
+	}
+	msg := err.Error()
+
+	switch {
+	case errors.Is(err, types.ErrFlowControllerNotRunning):
+		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "flow controller shutting down: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonShuttingDown)}}
+	case errors.Is(err, types.ErrNoEndpoints):
 		// No serving capacity exists (e.g. pool scaled to zero): signal genuine unavailability rather than backpressure.
+		// An eviction additionally spent its queue-wait budget waiting for an endpoint to appear.
+		if errors.Is(err, types.ErrEvicted) {
+			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
+		}
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
-	case types.QueueOutcomeEvictedNoEndpoints:
-		// The queue-wait budget was exhausted while the pool had no endpoints, so the regime is already established and
-		// needs no probe: waiting failed because nothing came up to serve the request.
-		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
-	case types.QueueOutcomeEvictedTTL:
-		if ttlPoolEmpty {
+	case errors.Is(err, types.ErrQueueAtCapacity):
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+	case errors.Is(err, types.ErrTTLExpired):
+		if poolEmpty() {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 		}
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "request timed out in queue: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)}}
-	case types.QueueOutcomeEvictedContextCancelled:
+	case errors.Is(err, types.ErrContextCancelled):
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}
-	case types.QueueOutcomeRejectedOther, types.QueueOutcomeEvictedOther:
-		switch {
-		case errors.Is(err, types.ErrFlowControllerNotRunning):
-			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "flow controller shutting down: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonShuttingDown)}}
-		// A TTL expiry or client disconnect that fires before the item is admitted to a queue (e.g. while
-		// buffered in the enqueue channel or blocked in submission) surfaces as RejectedOther/EvictedOther
-		// rather than as a dedicated eviction outcome. These are client-caused terminations, so delegate
-		// to the mapping of the post-admission equivalent; the two paths then agree by construction.
-		case errors.Is(err, types.ErrTTLExpired):
-			return translateFlowControlOutcome(types.QueueOutcomeEvictedTTL, err, ttlPoolEmpty)
-		case errors.Is(err, types.ErrContextCancelled):
-			return translateFlowControlOutcome(types.QueueOutcomeEvictedContextCancelled, err, ttlPoolEmpty)
-		default:
-			return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
-		}
 	default:
-		return errcommon.Error{Code: errcommon.Internal, Msg: "unhandled flow control outcome: " + msg}
+		return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonInternal)}}
 	}
 }

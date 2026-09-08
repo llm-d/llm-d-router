@@ -17,14 +17,18 @@ limitations under the License.
 package epp
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -37,6 +41,132 @@ var (
 	// errTest is a test error used to verify error handling in extractors.
 	errTest = errors.New("test error")
 )
+
+type controlledNotificationExtractor struct {
+	*mocks.NotificationExtractor
+	entered chan string
+	results chan error
+}
+
+func newControlledNotificationExtractor(name string) *controlledNotificationExtractor {
+	return &controlledNotificationExtractor{
+		NotificationExtractor: mocks.NewNotificationExtractor(name),
+		entered:               make(chan string),
+		results:               make(chan error),
+	}
+}
+
+func (e *controlledNotificationExtractor) Extract(ctx context.Context, event fwkdl.NotificationEvent) error {
+	select {
+	case e.entered <- event.Object.GetName():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-e.results:
+		if err != nil {
+			return err
+		}
+		return e.NotificationExtractor.Extract(ctx, event)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func setupInitialNotificationSyncTest(t *testing.T) (context.Context, ctrl.Manager, client.Client, string, *datalayer.Runtime, *controlledNotificationExtractor) {
+	t.Helper()
+
+	namespace := "notification-sync-" + uuid.New().String()[:8]
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+	require.NoError(t, k8sClient.Create(context.Background(), ns))
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(context.Background(), ns)
+	})
+
+	mgr, mgrClient := setupTestManager(t, testEnv.Config, namespace)
+	ctx, cancel := context.WithTimeout(context.Background(), testContextTimeout)
+	t.Cleanup(cancel)
+
+	runtime := datalayer.NewRuntime(time.Second)
+	extractor := newControlledNotificationExtractor("initial-sync")
+	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+	src := notifications.NewK8sNotificationSource(notifications.NotificationSourceType, "pod-watcher", gvk)
+	require.NoError(t, runtime.Configure(&datalayer.Config{
+		Sources: []datalayer.DataSourceConfig{
+			{Plugin: src, Extractors: []fwkplugin.Plugin{extractor}},
+		},
+	}, logger))
+	require.NoError(t, runtime.Start(ctx, mgr))
+	require.Error(t, runtime.CheckReady(), "notification runtime reported ready before manager startup")
+
+	return ctx, mgr, mgrClient, namespace, runtime, extractor
+}
+
+func receiveInitialEvent(ctx context.Context, t *testing.T, extractor *controlledNotificationExtractor) string {
+	t.Helper()
+	select {
+	case name := <-extractor.entered:
+		return name
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for initial notification")
+		return ""
+	}
+}
+
+func TestRuntimeNotificationInitialSyncReadiness(t *testing.T) {
+	t.Run("waits for every initial event", func(t *testing.T) {
+		ctx, mgr, apiClient, namespace, runtime, extractor := setupInitialNotificationSyncTest(t)
+		require.NoError(t, apiClient.Create(ctx, newTestPod("pod-a", namespace)))
+		require.NoError(t, apiClient.Create(ctx, newTestPod("pod-b", namespace)))
+
+		startManagerAndWaitForSync(ctx, t, mgr)
+
+		first := receiveInitialEvent(ctx, t, extractor)
+		require.Error(t, runtime.CheckReady())
+		extractor.results <- nil
+
+		second := receiveInitialEvent(ctx, t, extractor)
+		require.NotEqual(t, first, second)
+		require.Error(t, runtime.CheckReady())
+		extractor.results <- nil
+
+		require.Eventually(t, func() bool {
+			return runtime.CheckReady() == nil
+		}, eventWaitTimeout, eventPollInterval)
+		require.Len(t, extractor.GetEvents(), 2)
+	})
+
+	t.Run("accepts an empty initial list", func(t *testing.T) {
+		ctx, mgr, _, _, runtime, _ := setupInitialNotificationSyncTest(t)
+		startManagerAndWaitForSync(ctx, t, mgr)
+
+		require.Eventually(t, func() bool {
+			return runtime.CheckReady() == nil
+		}, eventWaitTimeout, eventPollInterval)
+	})
+
+	t.Run("waits for a failed initial event retry", func(t *testing.T) {
+		ctx, mgr, apiClient, namespace, runtime, extractor := setupInitialNotificationSyncTest(t)
+		require.NoError(t, apiClient.Create(ctx, newTestPod("pod-a", namespace)))
+
+		startManagerAndWaitForSync(ctx, t, mgr)
+
+		first := receiveInitialEvent(ctx, t, extractor)
+		require.Error(t, runtime.CheckReady())
+		extractor.results <- errTest
+
+		second := receiveInitialEvent(ctx, t, extractor)
+		require.Equal(t, first, second)
+		require.Error(t, runtime.CheckReady())
+		extractor.results <- nil
+
+		require.Eventually(t, func() bool {
+			return runtime.CheckReady() == nil
+		}, eventWaitTimeout, eventPollInterval)
+		require.Len(t, extractor.GetEvents(), 1)
+	})
+}
 
 // setupRuntimeWithExtractor creates a runtime configured with a notification source and extractor.
 // This helper reduces code duplication across test cases.

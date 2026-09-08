@@ -16,11 +16,14 @@ limitations under the License.
 
 package metrics
 
-import "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinality"
+import (
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+)
 
 // Model name labels are populated from the request body, which is not validated
-// against a closed set of served models. An unbounded number of distinct model
-// names would grow the time series set without limit, so they share a fixed cap.
+// against a closed set of served models. Prometheus *Vec types never evict label
+// combinations, so an unbounded number of distinct model names would grow the time
+// series set without limit and exhaust memory.
 //
 // Names configured through InferenceModelRewrite rules (exact-match sources and
 // rewrite targets) are pinned: they always emit their real label and do not count
@@ -28,11 +31,11 @@ import "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/cardinalit
 // model into the overflow bucket.
 const maxModelLabelValues = 1000
 
-var modelLabelLimiter = cardinality.NewBoundedLabel(maxModelLabelValues)
+var modelLabelLimiter = metricsutil.NewBoundedLabel(maxModelLabelValues)
 
 // boundFairnessID caps the request-derived fairness_id label.
 func boundFairnessID(fairnessID string) string {
-	return cardinality.BoundFairnessID(fairnessID)
+	return metricsutil.BoundFairnessID(fairnessID)
 }
 
 // PreAdmitModelLabels pins the given model names so they always emit their real

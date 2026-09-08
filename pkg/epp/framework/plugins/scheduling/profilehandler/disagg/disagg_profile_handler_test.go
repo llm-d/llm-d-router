@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -17,6 +18,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -280,6 +282,62 @@ func TestHandlerFactory(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, p)
+			}
+		})
+	}
+}
+
+func TestHandler_Consumes_PrefixMatchInfoProducerName(t *testing.T) {
+	const preciseName = "precise-prefix-cache-producer"
+
+	prefixDecider := func(t *testing.T, producerName string) deciderPlugin {
+		t.Helper()
+		decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+			NonCachedTokens:             4,
+			PrefixMatchInfoProducerName: producerName,
+		})
+		require.NoError(t, err)
+		return decider
+	}
+
+	tests := []struct {
+		name        string
+		pdDecider   func(t *testing.T) deciderPlugin
+		expectedKey plugin.DataKey
+	}{
+		{
+			name:        "nil pd decider",
+			pdDecider:   func(*testing.T) deciderPlugin { return nil },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "decider that does not select a prefix producer",
+			pdDecider:   func(*testing.T) deciderPlugin { return newAlwaysDisaggPDDecider() },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "empty prefixMatchInfoProducerName",
+			pdDecider:   func(t *testing.T) deciderPlugin { return prefixDecider(t, "") },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "named prefixMatchInfoProducerName",
+			pdDecider:   func(t *testing.T) deciderPlugin { return prefixDecider(t, preciseName) },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewDisaggProfileHandler(
+				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
+				tt.pdDecider(t), nil,
+			)
+
+			consumed := handler.Consumes()
+			assert.Contains(t, consumed.Required, tt.expectedKey)
+			assert.Contains(t, consumed.Required, tokenproducer.TokenizedPromptDataKey)
+			if tt.expectedKey != attrprefix.PrefixCacheMatchInfoDataKey {
+				assert.NotContains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey)
 			}
 		})
 	}

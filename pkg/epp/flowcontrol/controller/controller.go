@@ -260,15 +260,12 @@ func (fc *FlowController) EnqueueAndWait(
 	reqCtx, cancel, enqueueTime, saturationTTL := fc.createRequestContext(ctx, req)
 	defer cancel()
 
-	var finalOutcome types.QueueOutcome
-
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
 	err := fc.withConnectionWithFallback(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
 
 		select { // Non-blocking check on controller lifecycle.
 		case <-fc.parentCtx.Done():
-			finalOutcome = types.QueueOutcomeRejectedOther
 			return fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning)
 		default:
 		}
@@ -279,27 +276,21 @@ func (fc *FlowController) EnqueueAndWait(
 		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, saturationTTL, conn)
 		if err != nil {
 			// Distribution failed terminally (e.g., context cancelled during blocking submit).
-			// The item has already been finalized by tryDistribution.
-			finalState := item.FinalState()
-			finalOutcome = finalState.Outcome
-			return finalState.Err
+			// The item has already been finalized by tryDistribution, and err is its finalized error.
+			return err
 		}
 
 		// Distribution was successful; ownership of the item has been transferred to a processor.
 		// Now, we block here in awaitFinalization until the request is finalized by either the processor (e.g., dispatched,
 		// rejected) or the controller itself (e.g., caller's context cancelled/TTL expired).
-		outcome, err := fc.awaitFinalization(reqCtx, item)
-
-		// The outcome is terminal (Dispatched, Evicted, or another rejection).
-		finalOutcome = outcome
-		return err
+		return fc.awaitFinalization(reqCtx, item)
 	})
 
-	// If WithConnection returned an error (e.g. connection failure, context cancelled before lease), we must ensure we
-	// return a valid rejection outcome.
-	// In the success case (where the closure ran), finalOutcome is set inside the closure.
-	if err != nil && finalOutcome == types.QueueOutcomeNotYetFinalized {
-		finalOutcome = types.QueueOutcomeRejectedOther
+	// Every finalization path wraps a family sentinel. An error without one comes from the lease machinery
+	// (e.g. connection failure before the closure ran), which is pre-queue by definition; OutcomeFromError already
+	// classified it RejectedOther, so only the error needs the family wrap.
+	finalOutcome, ok := types.OutcomeFromError(err)
+	if !ok {
 		err = fmt.Errorf("%w: %w", types.ErrRejected, err)
 	}
 
@@ -361,7 +352,8 @@ func (fc *FlowController) withConnectionWithFallback(
 
 // tryDistribution handles a single attempt to submit a request to the processor.
 // It uses the provided `conn` to access the registry data plane.
-// If this function returns an error, it guarantees that the provided `item` has been finalized.
+// If this function returns an error, it guarantees that the provided `item` has been finalized and that the
+// returned error is the item's finalized error.
 func (fc *FlowController) tryDistribution(
 	reqCtx context.Context,
 	req flowcontrol.FlowControlRequest,
@@ -379,7 +371,7 @@ func (fc *FlowController) tryDistribution(
 	}
 
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
-	item := internal.NewItem(req, effectiveTTL, enqueueTime)
+	item := internal.NewItem(req, effectiveTTL, enqueueTime, fc.logger)
 
 	dp := conn.GetDataPlane()
 	_, err := dp.ManagedQueue(conn.FlowKey())
@@ -392,9 +384,9 @@ func (fc *FlowController) tryDistribution(
 		// flattened with %v because this finalized error is returned through the connection closure in
 		// EnqueueAndWait: a %w-preserved ErrPriorityBandNotFound would be misread by
 		// withConnectionWithFallback as a lease-acquisition failure and silently retried at priority 0.
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
+		item.FinalizeWithError(
 			fmt.Errorf("%w: failed to get ManagedQueue for leased flow: %v", types.ErrRejected, err))
-		return item, err
+		return item, item.FinalState().Err
 	}
 
 	// Distribution is bounded by the saturation budget, not by the request context's backstop. A request still waiting
@@ -407,30 +399,24 @@ func (fc *FlowController) tryDistribution(
 		defer cancel()
 	}
 
-	outcome, err := fc.distributeRequest(distributeCtx, item)
+	err = fc.distributeRequest(distributeCtx, item)
 	if err == nil {
 		// Success: Ownership of the item has been transferred to the processor.
 		return item, nil
 	}
 
 	// For any distribution error, the controller retains ownership and must finalize the item.
-	var finalErr error
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// We propagate the original context error here, EnqueueAndWait will rely on item.FinalState().Err.
-		finalErr = err
 		item.Finalize(context.Cause(distributeCtx))
-	} else { // e.g.,
-		finalErr = fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
-		item.FinalizeWithOutcome(outcome, finalErr)
+	} else {
+		item.FinalizeWithError(err)
 	}
-	return item, finalErr
+	return item, item.FinalState().Err
 }
 
-func finalizeOnControllerShutdown(item *internal.FlowItem) (types.QueueOutcome, error) {
+func finalizeOnControllerShutdown(item *internal.FlowItem) error {
 	item.Finalize(types.ErrFlowControllerNotRunning)
-
-	finalState := item.FinalState()
-	return finalState.Outcome, finalState.Err
+	return item.FinalState().Err
 }
 
 // awaitFinalization blocks until an item is finalized, either by the processor (synchronously) or by the controller
@@ -438,7 +424,7 @@ func finalizeOnControllerShutdown(item *internal.FlowItem) (types.QueueOutcome, 
 func (fc *FlowController) awaitFinalization(
 	reqCtx context.Context,
 	item *internal.FlowItem,
-) (types.QueueOutcome, error) {
+) error {
 	select {
 	case <-reqCtx.Done():
 		// Asynchronous Finalization (Controller-initiated):
@@ -451,8 +437,7 @@ func (fc *FlowController) awaitFinalization(
 		item.Finalize(cause)
 
 		// The processor will eventually discard this "zombie" item during its cleanup sweep.
-		finalState := item.FinalState()
-		return finalState.Outcome, finalState.Err
+		return item.FinalState().Err
 
 	case <-fc.parentCtx.Done():
 		return finalizeOnControllerShutdown(item)
@@ -460,7 +445,7 @@ func (fc *FlowController) awaitFinalization(
 	case finalState := <-item.Done():
 		// Synchronous Finalization (Processor-initiated):
 		// The processor finalized the item (Dispatch, Reject, Shutdown).
-		return finalState.Outcome, finalState.Err
+		return finalState.Err
 	}
 }
 
@@ -515,17 +500,17 @@ func (fc *FlowController) createRequestContext(
 func (fc *FlowController) distributeRequest(
 	ctx context.Context,
 	item *internal.FlowItem,
-) (types.QueueOutcome, error) {
+) error {
 	reqID := item.OriginalRequest().ID()
 	if err := fc.processor.Submit(item); err == nil {
-		return types.QueueOutcomeNotYetFinalized, nil
+		return nil
 	}
 
 	// processor is busy. Attempt a single blocking submission to the candidate.
 	fc.logger.V(logutil.DEBUG).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
 	err := fc.processor.SubmitOrBlock(ctx, item)
 	if err != nil {
-		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
+		return fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
 	}
-	return types.QueueOutcomeNotYetFinalized, nil // Success, ownership transferred.
+	return nil // Success, ownership transferred.
 }

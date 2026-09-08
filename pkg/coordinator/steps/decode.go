@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -28,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -76,8 +78,15 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	proxy := newDecodeProxy(logger, s.gwClient.Transport(), nil)
+	transport := instrumentedTransport(s.gwClient.Transport(), coordmetrics.UpstreamDecode)
+	proxy, out := newDecodeProxy(logger, transport, nil)
 	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	if out.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, Cause: out.TransportErr}
+	}
+	if out.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: out.Status}
+	}
 	return nil
 }
 
