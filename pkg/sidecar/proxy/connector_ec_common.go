@@ -113,7 +113,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest)
+	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
 
 	return encoderRequest
 }
@@ -286,7 +286,7 @@ func (s *Server) runPDPipeline(
 		// The encoder path does not carry a KV cache source: the P2P prefix pull
 		// is not wired through encoder disaggregation. The empty source skips the
 		// p2p injection regardless of --enable-p2p-pull.
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", APITypeChatCompletions)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", reqcommon.APITypeChatCompletions)
 		return
 	}
 

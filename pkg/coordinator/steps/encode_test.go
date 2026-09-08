@@ -353,7 +353,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 
 // TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens verifies the
 // encode chat sub-request carries max_completion_tokens=1 unconditionally
-// (via capSingleTokenOutput/reqcommon.PrimeSingleTokenRequest), even though the
+// (via reqcommon.CapSingleToken), even though the
 // sub-request is built fresh from the request context and never copies the
 // client's own max_completion_tokens value.
 func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -166,7 +168,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 	// Capture what handleECNIXL hands to the P/D connector instead of
 	// running real prefill→decode plumbing.
 	var capturedBody []byte
-	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		buf, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
 		capturedBody = buf
@@ -222,7 +224,7 @@ func TestHandleECEPDAllMissingDoesNotAddField(t *testing.T) {
 	srv.logger = log.Log
 
 	var capturedBody []byte
-	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		buf, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
 		capturedBody = buf
@@ -284,7 +286,7 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 	srv.logger = log.Log
 
 	var capturedBody []byte
-	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		buf, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
 		capturedBody = buf
@@ -525,7 +527,7 @@ func TestHandleECNIXLEmptyEncodeEndPoints(t *testing.T) {
 	srv.logger = log.Log
 
 	var capturedBody []byte
-	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		buf, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
 		capturedBody = buf
@@ -568,7 +570,7 @@ func TestHandleECNIXLTextOnlyRequest(t *testing.T) {
 	srv.logger = log.Log
 
 	var capturedBody []byte
-	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		buf, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)
 		capturedBody = buf
@@ -633,7 +635,7 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 	srv.decoderProxy = httputil.NewSingleHostReverseProxy(decoderURL)
 
 	pdConnectorCalled := false
-	srv.handlePDConnector = func(_ http.ResponseWriter, _ *http.Request, _ string, _ string, _ APIType) {
+	srv.handlePDConnector = func(_ http.ResponseWriter, _ *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		pdConnectorCalled = true
 	}
 

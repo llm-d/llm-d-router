@@ -24,12 +24,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -124,12 +124,16 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// The generate path is matched exactly rather than through DetectAPIType,
+	// which maps every unrecognized path to APITypeGenerate: such a request
+	// carries no token_ids to normalize, so it skips the step instead.
 	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
 		return s.executeGenerate(ctx, reqCtx)
 	}
-	if strings.Contains(reqCtx.OriginalPath, gateway.PathCompletions) {
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeCompletions:
 		return s.executeCompletions(ctx, reqCtx)
-	} else if strings.Contains(reqCtx.OriginalPath, gateway.PathChatCompletions) {
+	case reqcommon.APITypeChatCompletions:
 		return s.executeChatCompletions(ctx, reqCtx)
 	}
 	logger := log.FromContext(ctx).WithName(RenderStepName)

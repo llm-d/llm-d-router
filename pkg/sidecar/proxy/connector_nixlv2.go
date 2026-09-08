@@ -34,26 +34,11 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
-// tokenLimitMap returns the map holding the token-limit fields: sampling_params
-// for the generate API (created if absent), or the request itself otherwise.
-// The second return value reports whether an empty sampling_params map was
-// synthesized; callers must drop it before dispatching downstream if it stays empty.
-func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
-	if apiType != APITypeGenerate {
-		return req, false
-	}
-	if sp, ok := req[requestFieldSamplingParams].(map[string]any); ok {
-		return sp, false
-	}
-	sp := map[string]any{}
-	req[requestFieldSamplingParams] = sp
-	return sp, true
-}
-
-func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType APIType) {
-	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
+func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
+	tokenLimitFields := apiType.TokenLimitFields()
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
 	original, completionRequest, ok := s.readJSONBody(r, w)
@@ -115,7 +100,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		val     any
 		present bool
 	}
-	tokenMap, createdSamplingParams := tokenLimitMap(completionRequest, apiType)
+	tokenMap, createdSamplingParams := apiType.TokenLimitMap(completionRequest)
 	savedTokenValues := make([]savedField, len(tokenLimitFields))
 	for i, field := range tokenLimitFields {
 		if v, ok := tokenMap[field]; ok {

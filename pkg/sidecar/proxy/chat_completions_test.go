@@ -23,6 +23,8 @@ import (
 	"net/url"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"k8s.io/utils/set"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -30,9 +32,9 @@ import (
 
 // testPrefillHeaderRouting is a shared table-driven helper that exercises
 // prefill-header parsing, sampling, passthrough, and P/D protocol invocation
-// for any APIType.  Both TestServer_chatCompletionsHandler and
+// for any reqcommon.APIType.  Both TestServer_chatCompletionsHandler and
 // TestServer_responsesHandler delegate to it.
-func testPrefillHeaderRouting(t *testing.T, apiType APIType) {
+func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 	t.Helper()
 	tests := []struct {
 		name     string
@@ -126,7 +128,7 @@ func testPrefillHeaderRouting(t *testing.T, apiType APIType) {
 				s.prefillSamplerFn = func(n int) int { return i % n }
 				var hostPort string
 				var capturedReq *http.Request
-				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ string, _ APIType) {
+				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ string, _ reqcommon.APIType) {
 					hostPort = selectedHostPort
 					capturedReq = r
 				}
@@ -175,11 +177,11 @@ func testPrefillHeaderRouting(t *testing.T, apiType APIType) {
 }
 
 func TestServer_chatCompletionsHandler(t *testing.T) {
-	testPrefillHeaderRouting(t, APITypeChatCompletions)
+	testPrefillHeaderRouting(t, reqcommon.APITypeChatCompletions)
 }
 
 func TestServer_responsesHandler(t *testing.T) {
-	testPrefillHeaderRouting(t, APITypeResponses)
+	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
 }
 
 func TestServer_encoderEndpointRouting(t *testing.T) {
@@ -322,7 +324,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 
 			var pdCalled bool
 			var pdHost string
-			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
+			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
 				pdCalled = true
 				pdHost = host
 				capturedReq = r
@@ -337,7 +339,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 
 			recorder := httptest.NewRecorder()
 			recorder.Code = 0
-			s.disaggregatedPrefillHandler(APITypeChatCompletions)(recorder, tt.r)
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, tt.r)
 
 			switch {
 			case tt.expectedEPD:
@@ -395,18 +397,5 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestAPIType_String(t *testing.T) {
-	t.Parallel()
-	if g, w := APITypeChatCompletions.String(), "chat_completions"; g != w {
-		t.Errorf("APITypeChatCompletions.String() = %q, want %q", g, w)
-	}
-	if g, w := APITypeResponses.String(), "responses"; g != w {
-		t.Errorf("APITypeResponses.String() = %q, want %q", g, w)
-	}
-	if g, w := APIType(7).String(), fmt.Sprintf("APIType(%d)", 7); g != w {
-		t.Errorf("APIType(7).String() = %q, want %q", g, w)
 	}
 }

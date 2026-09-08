@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"go.opentelemetry.io/otel"
@@ -57,13 +59,13 @@ func runPrefillHandler(t *testing.T, logged *[]string) (downstream logr.Logger) 
 	s.logger = capture
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
-	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 		downstream = log.FromContext(r.Context())
 	}
 
 	req := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, http.NoBody)
 	req.Header.Set(routing.PrefillEndpointHeader, "prefill-pod:8000")
-	s.disaggregatedPrefillHandler(APITypeChatCompletions)(httptest.NewRecorder(), req)
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
 
 	return downstream
 }

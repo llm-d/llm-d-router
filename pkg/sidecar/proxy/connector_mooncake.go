@@ -40,7 +40,7 @@ const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the oth
 
 const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id in header to prefill
 
-func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
 	body, err := io.ReadAll(r.Body)
@@ -93,7 +93,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		requestFieldTransferID:      transferID,
 	}
 	// update fields from original body; return asap.
-	reqcommon.PrimeSingleTokenRequest(prefillData)
+	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {

@@ -29,6 +29,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // TestHandleEC_Multimedia asserts that video_url, audio_url, and input_audio
@@ -142,7 +144,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			srv.logger = log.Log
 
 			var capturedBody []byte
-			srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+			srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 				buf, err := io.ReadAll(r.Body)
 				assert.NoError(t, err)
 				capturedBody = buf
