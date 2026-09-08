@@ -1205,6 +1205,28 @@ func TestModelServerPortFlagBeatsYAML(t *testing.T) {
 	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
 }
 
+func TestMetricsCertPathYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-path: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/metrics-certs", opts.MetricsCertPath)
+}
+
+// A CLI flag overrides the metrics-cert-path YAML key.
+func TestMetricsCertPathFlagBeatsYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-path: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	setFlag(t, testPFlagSet, metricsCertPath, "/etc/cli-flag-certs")
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/cli-flag-certs", opts.MetricsCertPath)
+}
+
 func TestCompleteTLSConfiguration(t *testing.T) {
 	tests := []struct {
 		name                         string

@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,6 +30,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/llm-d/llm-d-router/pkg/common"
 )
 
 // envMoRIIOMetricsAddr is a backward-compatible fallback for enabling the
@@ -103,21 +106,32 @@ func (s *Server) metricsAddr() string {
 // metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR),
 // registering the goroutine on grp so it shares the server lifecycle and shuts
 // down with ctx. When neither is set (the default) it is a no-op and the
-// counters simply go unscraped.
+// counters simply go unscraped. A metrics server failure (for example an
+// invalid --metrics-cert-path) is logged and never propagated to grp: the
+// data-plane proxy keeps running without a /metrics endpoint rather than
+// going down over an optional feature.
 func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 	addr := s.metricsAddr()
 	if addr == "" {
 		return
 	}
 	grp.Go(func() error {
-		return s.serveMetrics(ctx, addr)
+		if err := s.serveMetrics(ctx, addr); err != nil {
+			s.logger.Error(err, "metrics server failed; proxy continues without metrics")
+		}
+		return nil
 	})
 }
 
 // serveMetrics serves the shared controller-runtime metrics registry at
 // /metrics on addr until ctx is cancelled, then shuts the server down
 // gracefully. Registration of the moriio_dns_* counters is ensured here so they
-// are present even if no resolver has been constructed yet.
+// are present even if no resolver has been constructed yet. The metrics server
+// uses HTTP by default. When --metrics-cert-path is set, or metrics-cert-path
+// is set in the sidecar YAML, it serves /metrics over HTTPS using tls.crt and
+// tls.key from that directory, with no fallback to HTTP. Startup and serving
+// errors are returned to maybeStartMetrics, which logs them. The shutdown
+// goroutine logs shutdown errors.
 func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 	registerDNSMetrics()
 
@@ -129,6 +143,15 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	serveTLS := s.config.MetricsCertPath != ""
+	if serveTLS {
+		tlsConfig, err := s.metricsTLSConfig(ctx)
+		if err != nil {
+			return err
+		}
+		server.TLSConfig = tlsConfig
+	}
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -138,10 +161,39 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		}
 	}()
 
-	s.logger.Info("starting MoRI-IO metrics server", "addr", addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		s.logger.Error(err, "metrics server failed")
+	s.logger.Info("starting MoRI-IO metrics server", "addr", addr, "tls", serveTLS)
+	var err error
+	if serveTLS {
+		err = server.ListenAndServeTLS("", "")
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// metricsTLSConfig loads tls.crt and tls.key from Config.MetricsCertPath for
+// the HTTPS metrics server. Changes to either file take effect without
+// restarting the sidecar.
+func (s *Server) metricsTLSConfig(ctx context.Context) (*tls.Config, error) {
+	certFile := s.config.MetricsCertPath + "/tls.crt"
+	keyFile := s.config.MetricsCertPath + "/tls.key"
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load metrics TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+	}
+
+	reloader, err := common.NewCertReloader(ctx, s.config.MetricsCertPath, &cert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start metrics cert reloader: %w", err)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return reloader.Get(), nil
+		},
+	}, nil
 }

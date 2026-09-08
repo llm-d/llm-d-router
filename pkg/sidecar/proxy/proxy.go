@@ -217,6 +217,11 @@ type Config struct {
 	// on a separate address from the data-plane proxy port. Takes precedence
 	// over the MORIIO_METRICS_ADDR env var (kept for backward compatibility).
 	MetricsPort int
+	// MetricsCertPath is the directory holding tls.crt and tls.key for the
+	// metrics endpoint. Empty (the default) serves metrics over plain HTTP.
+	// Independent of SecureServing/CertPath, which apply to the data-plane
+	// listener.
+	MetricsCertPath string
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int

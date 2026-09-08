@@ -547,6 +547,11 @@ expose these counters at `/metrics` on that port; `0` (the default) disables it.
 The `MORIIO_METRICS_ADDR` env var (e.g. `:9090`) is a backward-compatible
 fallback, consulted only when `--metrics-port` is unset.
 
+The endpoint serves plain HTTP by default. Pass `--metrics-cert-path` with a
+directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
+The metrics TLS setting is independent of `--secure-proxy` and `--cert-path`,
+which apply to the sidecar data-plane listener.
+
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `moriio_dns_reresolve_total` | Counter | - | Successful request-path re-resolutions of a peer DNS name (counted per actual lookup; concurrent lookups coalesced by singleflight count once). |
