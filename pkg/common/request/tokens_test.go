@@ -124,6 +124,30 @@ func TestCapSingleToken(t *testing.T) {
 			},
 		},
 		{
+			// The sidecar caps the leg straight off the client body, with no
+			// equivalent of the coordinator's validateSamplingParams ahead of
+			// it, so a malformed sampling_params arrives here. The leg still
+			// has to carry a cap, so the field is replaced.
+			name:    "generate replaces a non-object sampling_params",
+			apiType: APITypeGenerate,
+			body:    map[string]any{"model": "m", "sampling_params": "not-an-object"},
+			want: map[string]any{
+				"model":           "m",
+				"sampling_params": map[string]any{"max_tokens": 1},
+				"stream":          false,
+			},
+		},
+		{
+			name:    "generate replaces a null sampling_params",
+			apiType: APITypeGenerate,
+			body:    map[string]any{"model": "m", "sampling_params": nil},
+			want: map[string]any{
+				"model":           "m",
+				"sampling_params": map[string]any{"max_tokens": 1},
+				"stream":          false,
+			},
+		},
+		{
 			name:    "generate leaves the top-level fields alone",
 			apiType: APITypeGenerate,
 			body: map[string]any{

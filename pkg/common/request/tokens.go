@@ -30,12 +30,14 @@ import "maps"
 // Chat completions lists both max_tokens and max_completion_tokens: vLLM and
 // SGLang accept the two together and prefer max_completion_tokens, so capping
 // both bounds the leg regardless of which field the engine consults.
+//
+// body is rewritten in place, so the caller passes its own copy. A one-level
+// copy is enough: the generate API caps inside sampling_params, and that nested
+// map is replaced rather than written through, so a body that still shares it
+// with the decode leg keeps the client's limits.
 func CapSingleToken(body map[string]any, apiType APIType) {
 	limits, created := apiType.TokenLimitMap(body)
 	if !created && apiType == APITypeGenerate {
-		// TokenLimitMap handed back the caller's own sampling_params. Callers
-		// copy the request body one level deep and marshal the original for the
-		// decode leg, so writing through this map would cap decode as well.
 		limits = maps.Clone(limits)
 		body[FieldSamplingParams] = limits
 	}
