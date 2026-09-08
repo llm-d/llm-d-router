@@ -19,7 +19,7 @@ plugins:
   - type: precise-prefix-cache-producer
     parameters:
       tokenProcessorConfig:
-        blockSize: 64
+        blockSizeTokens: 64
       kvEventsConfig:
         topicFilter: "kv@"
   - type: p2p-source-producer

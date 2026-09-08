@@ -34,8 +34,6 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 		}
 		seenRevisions := uniqueRevisions(current, c.revisionLabelKey)
 		distribution := c.distributionSnapshot()
-		// TODO: Make the initial Pod snapshot a condition of EPP readiness.
-		// Until a generic readiness hook exists, an empty snapshot fails closed.
 		shares := make(map[string]float64, len(seenRevisions))
 		allowedRevisions := make(map[string]struct{}, len(seenRevisions))
 		for revision := range seenRevisions {

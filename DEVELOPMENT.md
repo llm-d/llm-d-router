@@ -690,8 +690,8 @@ helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION \
   --set inferenceExtension.enabled=true
 ```
 
-For more details, see the Gateway API Inference Extension
-[getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+For more details, see the
+[Gateway API Inference Extension documentation](https://gateway-api-inference-extension.sigs.k8s.io/).
 
 ### RBAC and Permissions
 
@@ -870,8 +870,8 @@ helm uninstall kgateway -n kgateway-system
 helm uninstall kgateway-crds -n kgateway-system
 ```
 
-For more details, see the Gateway API Inference Extension
-[getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+For more details, see the
+[Gateway API Inference Extension documentation](https://gateway-api-inference-extension.sigs.k8s.io/).
 
 ## Logging
 

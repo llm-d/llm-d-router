@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	datagraph "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -92,8 +94,9 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 
 	preciseKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName)
 
-	// The optional dependency points at the configured precise producer, not approx.
+	// The dependency remains optional even when a producer is explicitly selected.
 	require.Contains(t, producer.Consumes().Optional, preciseKey)
+	require.NotContains(t, producer.Consumes().Required, preciseKey)
 	require.NotContains(t, producer.Consumes().Optional, attrprefix.PrefixCacheMatchInfoDataKey)
 
 	// The discount reads PrefixCacheMatchInfo from the configured producer's key
@@ -106,6 +109,44 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 	miss := newStubSchedulingEndpoint("ep-miss")
 	miss.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 	require.Equal(t, int64(5), producer.estimateRequestTokens(miss, nil, 5))
+
+	// Exercise the real dependency sorter and current-request projection. The
+	// selected owner has 41,280 of 43,992 input tokens cached; charging the full
+	// prompt would make an idle cold endpoint look cheaper than a busy warm one.
+	cache := &cacheMatchTestProducer{key: preciseKey}
+	ordered, err := datagraph.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{producer, cache})
+	require.NoError(t, err)
+	require.Less(t, slices.Index(ordered, cache.TypedName().String()), slices.Index(ordered, producer.TypedName().String()))
+	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint("warm"), newStubSchedulingEndpoint("cold")}
+	req := makeTokenRequest("warm-follow-up", 43992)
+	for _, name := range ordered {
+		var next requestcontrol.DataProducer = producer
+		if name == cache.TypedName().String() {
+			next = cache
+		}
+		require.NoError(t, next.Produce(ctx, req, endpoints))
+	}
+	for i, want := range []int64{2712, 43992} {
+		value, ok := endpoints[i].Get(producer.uncachedRequestTokensDk)
+		require.True(t, ok)
+		require.Equal(t, want, value.(*attrconcurrency.UncachedRequestTokens).Tokens)
+	}
+}
+
+type cacheMatchTestProducer struct{ key fwkplugin.DataKey }
+
+func (p *cacheMatchTestProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "precise-prefix-cache-producer", Name: "precise-prefix-cache-producer"}
+}
+
+func (p *cacheMatchTestProducer) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{p.key: attrprefix.PrefixCacheMatchInfo{}}
+}
+
+func (p *cacheMatchTestProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	endpoints[0].Put(p.key, attrprefix.NewPrefixCacheMatchInfo(645, 687, 64))
+	endpoints[1].Put(p.key, attrprefix.NewPrefixCacheMatchInfo(0, 687, 64))
+	return nil
 }
 
 func TestInFlightLoadProducer_Produce(t *testing.T) {

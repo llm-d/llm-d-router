@@ -133,8 +133,8 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 }
 
 func (c *Config) validate() error {
-	if c.AffinityThreshold > 1.0 {
-		return fmt.Errorf("affinityThreshold must be <= 1.0, got %f", c.AffinityThreshold)
+	if c.AffinityThreshold < 0 || c.AffinityThreshold > 1.0 {
+		return fmt.Errorf("affinityThreshold must be in [0, 1], got %f", c.AffinityThreshold)
 	}
 	if c.ExplorationProbability < 0 || c.ExplorationProbability > 1.0 {
 		return fmt.Errorf("explorationProbability must be in [0, 1], got %f", c.ExplorationProbability)
