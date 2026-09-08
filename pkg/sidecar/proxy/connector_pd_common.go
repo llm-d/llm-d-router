@@ -26,23 +26,16 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 // runConcurrentPD fires the prefill and decode legs of a concurrent-dispatch
-// P/D protocol (Mooncake, OffloadingConnector P2P, SGLang) in parallel:
-// prefill runs in a goroutine and its response is discarded (only status and
-// duration are recorded on its span), while decode runs on the calling
-// goroutine and streams its response to w. connector is recorded on both
-// spans to identify the protocol. The per-request "prefill request
-// completed" log line is unified at DEBUG for all three connectors,
-// deliberately dropping the prior per-connector split (Mooncake/SGLang at
-// TRACE, P2P at DEBUG): three verbosity levels for structurally identical
-// code was the inconsistency worth fixing, not a behavior worth preserving.
-// prepareRequests, if non-nil, is called after both requests are built so a
-// caller can attach protocol-specific headers (e.g. Mooncake's DP-rank
-// header) before dispatch.
+// P/D protocol (Mooncake, SGLang) in parallel: prefill runs in a goroutine
+// and its response is discarded (only status and duration are recorded on
+// its span), while decode runs on the calling goroutine and streams its
+// response to w. connector is recorded on both spans to identify the
+// protocol.
 func (s *Server) runConcurrentPD(
 	w http.ResponseWriter,
 	r *http.Request,
