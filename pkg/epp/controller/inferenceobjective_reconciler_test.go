@@ -38,42 +38,42 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 )
 
 var (
-	inferencePool = testutil.MakeInferencePool("test-pool1").Namespace("ns1").ObjRef()
-	infObjective1 = testutil.MakeInferenceObjective("model1").
+	inferencePool = fwkgaie.MakeInferencePool("test-pool1").Namespace("ns1").ObjRef()
+	infObjective1 = fwkgaie.MakeInferenceObjective("model1").
 			Namespace(inferencePool.Namespace).
 			Priority(int32(1)).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
 			PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
-	infObjective1Pool2 = testutil.MakeInferenceObjective(infObjective1.Name).
+	infObjective1Pool2 = fwkgaie.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(*infObjective1.Spec.Priority).
 				CreationTimestamp(metav1.Unix(1001, 0)).
 				PoolName("test-pool2").
 				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
-	infObjective1Critical = testutil.MakeInferenceObjective(infObjective1.Name).
+	infObjective1Critical = fwkgaie.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				Priority(int32(2)).
 				CreationTimestamp(metav1.Unix(1003, 0)).
 				PoolName(inferencePool.Name).
 				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
-	infObjective1Deleted = testutil.MakeInferenceObjective(infObjective1.Name).
+	infObjective1Deleted = fwkgaie.MakeInferenceObjective(infObjective1.Name).
 				Namespace(infObjective1.Namespace).
 				CreationTimestamp(metav1.Unix(1004, 0)).
 				DeletionTimestamp().
 				PoolName(inferencePool.Name).
 				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
-	infObjective1DiffGroup = testutil.MakeInferenceObjective(infObjective1.Name).
+	infObjective1DiffGroup = fwkgaie.MakeInferenceObjective(infObjective1.Name).
 				Namespace(inferencePool.Namespace).
 				Priority(int32(1)).
 				CreationTimestamp(metav1.Unix(1005, 0)).
 				PoolName(inferencePool.Name).
 				PoolGroup(v1alpha2.GroupName).ObjRef()
-	infObjective2 = testutil.MakeInferenceObjective("model2").
+	infObjective2 = fwkgaie.MakeInferenceObjective("model2").
 			Namespace(inferencePool.Namespace).
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).

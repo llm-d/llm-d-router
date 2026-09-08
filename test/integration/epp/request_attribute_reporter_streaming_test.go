@@ -21,7 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 func TestRequestAttributeReporterStreaming(t *testing.T) {
@@ -33,7 +33,7 @@ func TestRequestAttributeReporterStreaming(t *testing.T) {
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
-	requests := integration.ReqLLM(reqLogger, "hello", "modelName", "modelName")
+	requests := fwkepp.ReqLLM(reqLogger, "hello", "modelName", "modelName")
 
 	respRequests := ReqResponseOnly(
 		map[string]string{"content-type": "text/event-stream", "status": "200"},
@@ -47,7 +47,7 @@ func TestRequestAttributeReporterStreaming(t *testing.T) {
 	requests = append(requests, respRequests...)
 
 	// We send ReqHeaders, ReqBody, RespHeaders, RespBody(chunk1), RespBody(chunk2), RespBody(chunk3) -> 6 responses
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 6)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 6)
 	require.NoError(t, err)
 
 	res := responses[5]

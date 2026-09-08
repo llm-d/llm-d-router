@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 var reqLogger = zap.New(zap.UseDevMode(true), zap.Level(-1*zapcore.Level(logutil.DEFAULT)))
@@ -46,7 +46,7 @@ func TestRequestAttributeReporter(t *testing.T) {
 
 	// Send the complete simulated transaction (Request headers -> target selection -> Response headers -> Response body)
 	// 1. Envoy sends the request (Headers + Body)
-	requests := integration.ReqLLM(reqLogger, "hello", "modelName", "modelName")
+	requests := fwkepp.ReqLLM(reqLogger, "hello", "modelName", "modelName")
 
 	// 2. Envoy sends the upstream response (Headers + Body)
 	respRequests := ReqResponseOnly(
@@ -60,7 +60,7 @@ func TestRequestAttributeReporter(t *testing.T) {
 	// 2. request body response
 	// 3. response header response
 	// 4. response body response (this is where dynamic metadata is attached)
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 4)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 4)
 	require.NoError(t, err)
 	require.Len(t, responses, 4)
 
