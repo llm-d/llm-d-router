@@ -56,7 +56,11 @@ type Indexer struct {
 
 	tokenProcessor kvblock.TokenProcessor // turns tokens to kv block keys
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
+	keyWalker      kvblock.KeyWalker      // kvBlockIndex's walk capability; nil without one
 	tierWeights    map[string]float64     // device tier -> weight for the prefix matcher
+	// recordHits enables the contiguous-chain hit metrics, under the same
+	// option that instruments the index.
+	recordHits bool
 }
 
 // NewKVCacheIndexer creates a KVCacheIndex given a Config. Callers tokenize
@@ -84,14 +88,26 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 		return nil, fmt.Errorf("unsupported scoring strategy: %s", strategy)
 	}
 
-	indexer := &Indexer{
-		config:         config,
+	// A nil index config selects kvblock's defaults, metrics off included.
+	recordHits := config.KVBlockIndexConfig != nil && config.KVBlockIndexConfig.EnableMetrics
+	indexer := newIndexer(tokenProcessor, kvBlockIndex, config.BackendConfigs, recordHits)
+	indexer.config = config
+	return indexer, nil
+}
+
+// newIndexer wires an Indexer over kvBlockIndex, keeping its walk capability
+// when it has one.
+func newIndexer(tokenProcessor kvblock.TokenProcessor, kvBlockIndex kvblock.Index,
+	backends []*KVCacheBackendConfig, recordHits bool,
+) *Indexer {
+	keyWalker, _ := kvBlockIndex.(kvblock.KeyWalker)
+	return &Indexer{
 		tokenProcessor: tokenProcessor,
 		kvBlockIndex:   kvBlockIndex,
-		tierWeights:    tierWeightsFromBackends(config.BackendConfigs),
+		keyWalker:      keyWalker,
+		tierWeights:    tierWeightsFromBackends(backends),
+		recordHits:     recordHits,
 	}
-
-	return indexer, nil
 }
 
 // Run starts the indexer. Blocks until ctx is cancelled.
@@ -171,7 +187,7 @@ func (k *Indexer) ScoreTokens(
 	}
 	traceLogger.Info("found tokens", "tokens", tokens, "block-keys", blockKeys)
 
-	matches, keysFound, err := k.matchBlockKeys(ctx, blockKeys, sets.New(podIdentifiers...))
+	matches, err := k.MatchBlockKeys(ctx, blockKeys, sets.New(podIdentifiers...))
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("failed to match block keys: %w", err)
@@ -182,11 +198,12 @@ func (k *Indexer) ScoreTokens(
 	for pod, m := range matches {
 		podScores[pod] = m.WeightedScore
 	}
-	// Block-level hit telemetry: requested keys held by any candidate pod,
-	// regardless of chains. The longest chain is on the matcher's span.
+	// Block-level hit telemetry: the longest contiguous prefix one candidate
+	// holds, which is as far as a walk reads.
+	blocksFound := maxMatchedBlocks(matches)
 	span.SetAttributes(
-		attribute.Float64("llm_d.kv_cache.block_hit_ratio", float64(keysFound)/float64(len(blockKeys))),
-		attribute.Int("llm_d.kv_cache.blocks_found", keysFound),
+		attribute.Float64("llm_d.kv_cache.block_hit_ratio", float64(blocksFound)/float64(len(blockKeys))),
+		attribute.Int("llm_d.kv_cache.blocks_found", blocksFound),
 	)
 
 	return podScores, nil
