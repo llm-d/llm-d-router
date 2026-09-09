@@ -980,7 +980,7 @@ N and N+1, providing users with a two release grace period to adjust before the 
 Please use the [template](.github/PULL_REQUEST_TEMPLATE.md) provided when creating a PR.
 If using coding agents, please ensure that the agent uses the PR template format as well.
 The template contains a `release-notes` section which must be filled for any change that has
-user facing impact.
+user facing impact; a required check validates it on the PR.
 
 For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
 

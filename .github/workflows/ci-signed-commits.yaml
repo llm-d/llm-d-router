@@ -8,11 +8,15 @@ on:
 jobs:
   check-signed-commits:
     name: Check signed commits in PR
+    # Skip signed-commits enforcement for the bot-authored release-notes
+    # assembly branch: the release-notes App can't sign commits, and
+    # assembly is a deterministic transform reviewed by a maintainer before
+    # merge. Pin to the specific prefix so an unrelated bot pushing to
+    # release-notes/<other> doesn't bypass.
     if: |
       github.event_name == 'pull_request_target' &&
       !(
-        (startsWith(github.head_ref, 'release-notes/pr-') ||
-         startsWith(github.head_ref, 'release-notes/assemble-')) &&
+        startsWith(github.head_ref, 'release-notes/assemble-') &&
         endsWith(github.event.pull_request.user.login, '[bot]')
       )
     runs-on: ubuntu-latest
