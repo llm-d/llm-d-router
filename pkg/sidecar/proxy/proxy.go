@@ -51,7 +51,6 @@ const (
 	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
 	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
 	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
-	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
 	requestFieldMinTokens            = reqcommon.FieldMinTokens
 	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
 	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill
@@ -286,8 +285,7 @@ func (c Config) String() string {
 
 // pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
 // validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
-// absent); the APIType lets each connector decide internally which JSON fields
-// (if any) need special handling.
+// absent); the APIType selects the fields that cap the prefill leg.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
 type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)

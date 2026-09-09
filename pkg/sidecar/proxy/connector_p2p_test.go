@@ -255,6 +255,13 @@ var _ = Describe("P2P Connector", func() {
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
 	})
+
+	It("should cap sampling_params in the prefill leg and restore originals in decode", func() {
+		expectGenerateLegTokenLimits(testInfo)
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
 })
 
 var _ = DescribeTable("p2pPullAvailable",

@@ -167,6 +167,13 @@ var _ = Describe("Mooncake Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	It("should cap sampling_params in the prefill leg and restore originals in decode", func() {
+		expectGenerateLegTokenLimits(testInfo)
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should not panic when prefill response is slower than decode response", func() {
 		// Stop previously injected servers
 		testInfo.decodeBackend.Close()

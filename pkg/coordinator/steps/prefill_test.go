@@ -133,6 +133,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
 	}
+	// The leg body is built from RequestContext, so this guards against the branch
+	// starting to forward client sampling_params.
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
@@ -225,13 +227,17 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	if prefillBody["request_id"] != "req-compl" {
 		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
 	}
-	// Prefill leg caps output to a single token: max_tokens is pinned to 1 and
-	// min_tokens is stripped (it defaults to 0, keeping min_tokens <= max_tokens).
+	// The leg body is built from RequestContext, so this guards against the branch
+	// starting to forward client limits.
 	if prefillBody["max_tokens"] != float64(1) {
 		t.Fatalf("expected max_tokens=1, got %v", prefillBody["max_tokens"])
 	}
 	if _, ok := prefillBody["min_tokens"]; ok {
 		t.Fatalf("expected min_tokens to be stripped, got %v", prefillBody["min_tokens"])
+	}
+	// The legacy Completions API does not define max_completion_tokens.
+	if _, ok := prefillBody["max_completion_tokens"]; ok {
+		t.Fatalf("completions leg carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
 	}
 	// Completions format has top-level kv_transfer_params
 	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)

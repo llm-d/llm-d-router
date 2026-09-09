@@ -90,8 +90,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
 	}
 
-	// The prefill leg is built on a one-level copy, as every other connector
-	// does, so the client's body stays intact for the decode leg below.
+	// Keeps the client's body intact for the decode leg below.
 	prefillRequest := maps.Clone(completionRequest)
 
 	// WRITE mode populates the destination fields the prefill engine needs for
@@ -428,8 +427,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	parentCtx := r.Context()
 	requestStartedAt := time.Now()
 
-	// The prefill leg is built on a one-level copy so the client's body stays
-	// intact for the decode leg built below.
+	// Keeps the client's body intact for the decode leg built below.
 	prefillRequest := maps.Clone(completionRequest)
 
 	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).

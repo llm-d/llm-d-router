@@ -142,12 +142,7 @@ var _ = Describe("readJSONBody", func() {
 			_, _, ok := proxy.readJSONBody(newRequest(), w)
 			Expect(ok).To(BeFalse())
 
-			var got errorResponse
-			Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed())
-			Expect(got.Object).To(Equal("error"))
-			Expect(got.Type).To(Equal("BadRequestError"))
-			Expect(got.Code).To(Equal(http.StatusBadRequest))
-			Expect(got.Message).ToNot(BeEmpty())
+			expectErrorEnvelope(w.Body.Bytes())
 		},
 		Entry("null body", func() *http.Request { return postBody(`null`) }),
 		Entry("malformed body", func() *http.Request { return postBody(`{"model":`) }),
@@ -170,6 +165,21 @@ var _ = Describe("readJSONBody", func() {
 		Expect(logged).To(ContainElement(ContainSubstring("failed to send error response to client")))
 	})
 })
+
+// expectErrorEnvelope asserts the vLLM error envelope a gateway unmarshals and
+// returns its message, so a caller can additionally check the refusal reason.
+func expectErrorEnvelope(body []byte) string {
+	GinkgoHelper()
+
+	var got errorResponse
+	Expect(json.Unmarshal(body, &got)).To(Succeed())
+	Expect(got.Object).To(Equal("error"))
+	Expect(got.Type).To(Equal("BadRequestError"))
+	Expect(got.Code).To(Equal(http.StatusBadRequest))
+	Expect(got.Message).ToNot(BeEmpty())
+
+	return got.Message
+}
 
 // errWriter accepts a status code and then fails the body write, standing in
 // for a client that hangs up before it reads the response.

@@ -95,10 +95,9 @@ func extractMMItems(requestData map[string]any) []map[string]any {
 }
 
 // buildEncoderRequest creates a per-item encoder request: a one-level copy of
-// the client's request carrying only the multimodal item in
-// messages[0].content (text removed), capped to a single output token, and
-// stream disabled. The copy is one level deep, so nested values it does not
-// replace are shared with the client's body and must not be written through.
+// the client's request carrying only the multimodal item in messages[0].content
+// (text removed), capped to a single output token, and stream disabled. Nested
+// values the copy does not replace are shared with the client's body.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
 	encoderRequest := maps.Clone(originalRequest)
 

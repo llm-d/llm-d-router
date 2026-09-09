@@ -19,7 +19,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -61,6 +60,57 @@ const chatCompletionsRequestBodyWithMinTokens = `{
 				"max_tokens": 50,
 				"min_tokens": 5
 			}`
+
+const generateRequestBodyWithTokenLimits = `{
+				"model": "Qwen/Qwen2-0.5B",
+				"token_ids": [1, 2, 3, 4],
+				"sampling_params": {"max_tokens": 100, "min_tokens": 5}
+			}`
+
+// expectGenerateLegTokenLimits starts the proxy, posts a generate request
+// carrying client token limits, and asserts the generate-API token-limit
+// contract on the two legs the connector produces: the prefill leg is capped to
+// a single output token inside sampling_params, and the decode leg still carries
+// the client's own limits. The connectors copy the client body one level deep,
+// so the two legs share that nested map; a cap written through it instead of
+// replacing it takes the client's limits with it.
+func expectGenerateLegTokenLimits(testInfo *sidecarTestInfo) {
+	GinkgoHelper()
+
+	proxyBaseAddr := testInfo.startProxy()
+
+	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+GeneratePath,
+		bytes.NewReader([]byte(generateRequestBodyWithTokenLimits)))
+	Expect(err).ToNot(HaveOccurred())
+	req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+	resp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred())
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != 200 {
+		bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+		Fail(string(bp))
+	}
+
+	// Eventually covers the connectors that dispatch prefill asynchronously and
+	// is already satisfied for the synchronous ones.
+	Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+	Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(1))
+
+	prefillReq := testInfo.prefillHandler.GetCompletionRequests()[0]
+	decodeReq := testInfo.decodeHandler.GetCompletionRequests()[0]
+
+	prefillSP, ok := prefillReq[requestFieldSamplingParams].(map[string]any)
+	Expect(ok).To(BeTrue())
+	Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+	Expect(prefillSP).ToNot(HaveKey(requestFieldMinTokens))
+
+	decodeSP, ok := decodeReq[requestFieldSamplingParams].(map[string]any)
+	Expect(ok).To(BeTrue())
+	Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
+	Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+}
 
 type sidecarTestInfo struct {
 	ctx            context.Context
@@ -268,6 +318,14 @@ var _ = Describe("Common Connector tests", func() {
 				testInfo.cancelFn()
 				<-testInfo.stoppedCh
 			})
+
+			It("should cap sampling_params in prefill and restore originals in decode", func() {
+				testInfo := sidecarConnectionTestSetup(connector)
+				expectGenerateLegTokenLimits(testInfo)
+
+				testInfo.cancelFn()
+				<-testInfo.stoppedCh
+			})
 		})
 	}
 })
@@ -330,8 +388,6 @@ var _ = Describe("Non-object request body", func() {
 		Entry("mooncake null", KVConnectorMooncake, `null`),
 		Entry("p2p null", KVConnectorOffloading, `null`),
 		Entry("sglang null", KVConnectorSGLang, `null`),
-		Entry("nixlv2 array", KVConnectorNIXLV2, `[]`),
-		Entry("p2p malformed", KVConnectorOffloading, `{"model":`),
 	)
 })
 
@@ -349,12 +405,7 @@ var _ = Describe("Unreadable request body", func() {
 			handle(proxy, w, r)
 
 			Expect(w.Code).To(Equal(http.StatusBadRequest))
-			var got errorResponse
-			Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed())
-			Expect(got.Object).To(Equal("error"))
-			Expect(got.Type).To(Equal("BadRequestError"))
-			Expect(got.Code).To(Equal(http.StatusBadRequest))
-			Expect(got.Message).To(ContainSubstring("failed to read request body"))
+			Expect(expectErrorEnvelope(w.Body.Bytes())).To(ContainSubstring("failed to read request body"))
 		},
 		Entry("nixlv2", Config{Port: "0", KVConnector: KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {

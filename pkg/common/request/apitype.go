@@ -18,6 +18,7 @@ package request
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -96,40 +97,39 @@ func DetectAPIType(path string) APIType {
 	}
 }
 
-// JSON request field names that carry output token limits, by API.
-// Do not mutate these slices.
+// JSON request field names that cap output tokens, by API. The Completions and
+// generate APIs share a list: neither defines max_completion_tokens, so capping
+// it would put a field on the wire that a strict server is free to reject.
 var (
-	chatCompletionTokenLimitFields = []string{FieldMaxTokens, FieldMaxCompletionTokens, FieldMinTokens}
+	chatCompletionTokenLimitFields = []string{FieldMaxTokens, FieldMaxCompletionTokens}
+	maxTokensOnlyTokenLimitFields  = []string{FieldMaxTokens}
 	responsesTokenLimitFields      = []string{FieldMaxOutputTokens}
-	generateTokenLimitFields       = []string{FieldMaxTokens, FieldMinTokens}
 )
 
-// TokenLimitFields returns the token limit field names the API uses.
+// TokenLimitFields returns the output token cap field names the API uses.
 // The returned slices are shared package-level vars; callers must not mutate them.
 func (a APIType) TokenLimitFields() []string {
 	switch a {
+	case APITypeCompletions, APITypeGenerate:
+		return maxTokensOnlyTokenLimitFields
 	case APITypeResponses:
 		return responsesTokenLimitFields
-	case APITypeGenerate:
-		return generateTokenLimitFields
 	default:
 		return chatCompletionTokenLimitFields
 	}
 }
 
 // TokenLimitMap returns the map inside body that holds the token limit fields:
-// sampling_params for the generate API (created if absent), body itself
-// otherwise. The second return value reports whether an empty sampling_params
-// map was synthesized; callers must drop it before dispatching downstream if it
-// stays empty.
-func (a APIType) TokenLimitMap(body map[string]any) (map[string]any, bool) {
+// sampling_params for the generate API, body itself otherwise. The generate map
+// is always replaced with one body owns, so a caller that writes into the result
+// never reaches a nested map the body was cloned from.
+func (a APIType) TokenLimitMap(body map[string]any) map[string]any {
 	if a != APITypeGenerate {
-		return body, false
+		return body
 	}
-	if sp, ok := body[FieldSamplingParams].(map[string]any); ok {
-		return sp, false
-	}
-	sp := map[string]any{}
-	body[FieldSamplingParams] = sp
-	return sp, true
+	sp, _ := body[FieldSamplingParams].(map[string]any)
+	owned := make(map[string]any, len(sp)+1)
+	maps.Copy(owned, sp)
+	body[FieldSamplingParams] = owned
+	return owned
 }

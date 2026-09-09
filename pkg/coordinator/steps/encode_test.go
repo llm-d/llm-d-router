@@ -581,9 +581,9 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 }
 
 // TestEncodeStep_GenerateFormat_CapsSingleToken verifies the generate-format
-// encoder sub-request caps output to a single token: sampling_params carries
-// max_tokens=1 and strips min_tokens (it defaults to 0, keeping min_tokens <=
-// max_tokens).
+// encoder sub-request carries sampling_params.max_tokens=1. The sub-request is
+// built from RequestContext, so the min_tokens check guards against the step
+// starting to forward client sampling_params.
 func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	var samplingParams map[string]any
 

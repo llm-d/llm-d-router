@@ -16,39 +16,33 @@ limitations under the License.
 
 package request
 
-import "maps"
-
 // CapSingleToken rewrites body into a synthetic, non-streaming,
-// single-output-token request for a prefill or encode leg.
+// single-output-token request for a prefill or encode leg. It returns the map
+// the caps were written into, which is where the generate API also expects
+// transfer params, so a caller adding them needs no second lookup.
 //
 // The caps to rewrite come from APIType.TokenLimitFields, so each API's output
-// caps are named in one place. min_tokens is a floor rather than a cap, so it
-// is stripped unconditionally instead: it defaults to 0 in vLLM, so removing it
-// keeps min_tokens <= max_tokens=1 without raising the floor above the cap
-// (vLLM's SamplingParams rejects min_tokens > max_tokens).
+// caps are named in one place. min_tokens is a floor rather than a cap, so it is
+// stripped instead of capped: it defaults to 0 in vLLM, so removing it keeps
+// min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
+// SamplingParams rejects min_tokens > max_tokens).
 //
 // Chat completions lists both max_tokens and max_completion_tokens: vLLM and
 // SGLang accept the two together and prefer max_completion_tokens, so capping
 // both bounds the leg regardless of which field the engine consults.
 //
 // body is rewritten in place, so the caller passes its own copy. A one-level
-// copy is enough: the generate API caps inside sampling_params, and that nested
-// map is replaced rather than written through, so a body that still shares it
-// with the decode leg keeps the client's limits.
-func CapSingleToken(body map[string]any, apiType APIType) {
-	limits, created := apiType.TokenLimitMap(body)
-	if !created && apiType == APITypeGenerate {
-		limits = maps.Clone(limits)
-		body[FieldSamplingParams] = limits
-	}
-
+// copy is enough: the generate API caps inside sampling_params, and
+// TokenLimitMap replaces that nested map rather than writing through it, so a
+// body that still shares it with the decode leg keeps the client's limits.
+func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
+	limits := apiType.TokenLimitMap(body)
 	for _, field := range apiType.TokenLimitFields() {
-		if field != FieldMinTokens {
-			limits[field] = 1
-		}
+		limits[field] = 1
 	}
 	delete(limits, FieldMinTokens)
 
 	body[FieldStream] = false
 	delete(body, FieldStreamOptions)
+	return limits
 }

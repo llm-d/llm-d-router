@@ -37,6 +37,15 @@ type genImage struct {
 // payload.
 const generateTestKwargs = "dGVuc29y"
 
+// Client token limits every generate spec sends inside sampling_params. The
+// generate wire format nests its limits there rather than at the top level, so
+// these drive the capping contract on the native path: prefill pins max_tokens
+// to 1 and drops min_tokens, decode keeps both.
+const (
+	generateMinTokens = 3
+	generateMaxTokens = 5
+)
+
 // generateSteps lists the pipeline steps a generate request drives that do real
 // work: render parses token_ids locally, then prefill and decode.
 // replace-media-urls no-ops (the generate wire format carries no message URLs)
@@ -47,7 +56,7 @@ var generateSteps = []string{"render", "prefill", "decode"}
 var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
 	ginkgo.It("routes a text-only generate end-to-end", func() {
 		runCoordinatorPipeline(gateway.DefaultGeneratePath,
-			generateBody(modelName, nil), generateSteps, 0, 0, 0)
+			generateBody(modelName, nil), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
 	})
 
 	ginkgo.It("routes a single-image generate end-to-end", func() {
@@ -55,7 +64,7 @@ var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
 			{Hash: "e2e-gen-hash-0", Offset: 1, Length: 3},
 		}
 		runCoordinatorPipeline(gateway.DefaultGeneratePath,
-			generateBody(modelName, images), generateSteps, 0, 0, 0)
+			generateBody(modelName, images), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
 		verifyEncodeSkipped(getNamespace())
 	})
 })
@@ -66,9 +75,12 @@ var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
 // the image modality.
 func generateBody(model string, images []genImage) []byte {
 	body := map[string]any{
-		"model":           model,
-		"token_ids":       generateTokenIDs(images),
-		"sampling_params": map[string]any{"max_tokens": 1},
+		"model":     model,
+		"token_ids": generateTokenIDs(images),
+		"sampling_params": map[string]any{
+			"max_tokens": generateMaxTokens,
+			"min_tokens": generateMinTokens,
+		},
 	}
 
 	if len(images) > 0 {

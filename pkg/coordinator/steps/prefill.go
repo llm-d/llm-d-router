@@ -186,10 +186,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"token_ids":  reqCtx.TokenIDs,
 			"model":      reqCtx.Model,
 		}
-		// CapSingleToken creates sampling_params; the transfer params go into
-		// that same map so only one copy is ever attached to the body.
-		reqcommon.CapSingleToken(body, format)
-		setGenerateTransferParams(body[reqcommon.FieldSamplingParams].(map[string]any), kvParams, ecParams)
+		setGenerateTransferParams(reqcommon.CapSingleToken(body, format), kvParams, ecParams)
 		if features != nil {
 			body["features"] = features
 		}

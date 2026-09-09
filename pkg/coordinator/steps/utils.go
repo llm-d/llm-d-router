@@ -59,19 +59,20 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
-// resolveFormat maps a request path to the wire format a step emits. Completions
-// is always honored; otherwise OpenAI formats collapse to APITypeGenerate unless
-// useOpenAIFormat is set. The steps build no Responses-API body, so
-// APITypeResponses collapses to generate as well.
+// resolveFormat maps a request path to the wire format a step emits. The steps
+// build only Completions, Chat Completions, and generate bodies, so any other
+// API collapses to APITypeGenerate; Chat Completions additionally requires
+// useOpenAIFormat.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
-	detected := reqcommon.DetectAPIType(path)
-	if detected == reqcommon.APITypeCompletions {
-		return reqcommon.APITypeCompletions
+	switch detected := reqcommon.DetectAPIType(path); detected {
+	case reqcommon.APITypeCompletions:
+		return detected
+	case reqcommon.APITypeChatCompletions:
+		if useOpenAIFormat {
+			return detected
+		}
 	}
-	if !useOpenAIFormat || detected == reqcommon.APITypeResponses {
-		return reqcommon.APITypeGenerate
-	}
-	return detected
+	return reqcommon.APITypeGenerate
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
