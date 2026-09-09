@@ -11,6 +11,10 @@
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
+      {{- if .Values.router.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: {{ .Values.router.epp.terminationGracePeriodSeconds | default 130 }}
       {{- if and .Values.router.tokenizer.enabled .Values.router.tokenizer.initContainers }}
