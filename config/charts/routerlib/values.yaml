@@ -3,6 +3,9 @@ extraServicePorts: []
 # Kubernetes cluster DNS domain, used to build in-cluster Service FQDNs.
 clusterDomain: cluster.local
 
+# Secrets holding credentials for pulling images from private registries
+imagePullSecrets: []
+
 epp:
   replicas: 1
 

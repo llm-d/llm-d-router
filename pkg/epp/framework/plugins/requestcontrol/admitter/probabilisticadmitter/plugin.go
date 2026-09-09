@@ -79,8 +79,8 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 	if params.QueueDepthThreshold <= 0 {
 		return nil, fmt.Errorf("plugin '%s': queueDepthThreshold must be > 0, got %d", Type, params.QueueDepthThreshold)
 	}
-	if params.KVCacheUtilThreshold <= 0.0 {
-		return nil, fmt.Errorf("plugin '%s': kvCacheUtilThreshold must be > 0, got %g", Type, params.KVCacheUtilThreshold)
+	if params.KVCacheUtilThreshold <= 0.0 || params.KVCacheUtilThreshold > 1.0 {
+		return nil, fmt.Errorf("plugin '%s': kvCacheUtilThreshold must be in (0, 1], got %g", Type, params.KVCacheUtilThreshold)
 	}
 	if params.Power <= 0 {
 		return nil, fmt.Errorf("plugin '%s': power must be > 0, got %g", Type, params.Power)

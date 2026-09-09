@@ -59,11 +59,11 @@ const (
 // dispatchDecode routes a fully-prepared decode request to either chunked
 // decode or the regular decoder proxy. Chunked decode is only used for
 // chat completions requests when s.config.DecodeChunkSize > 0.
-// completionRequest is the already-parsed JSON map; callers that hold it
+// body is the already-parsed JSON map; callers that hold it
 // should use this instead of calling s.decoderProxy directly.
-func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
+func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map[string]any) {
 	if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
-		s.runChunkedDecodeFromMap(w, r, completionRequest)
+		s.runChunkedDecodeFromMap(w, r, body)
 		return
 	}
 	s.decoderProxy.ServeHTTP(w, r)
@@ -72,18 +72,18 @@ func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, completi
 // runChunkedDecode reads and parses the body, then delegates to
 // runChunkedDecodeFromMap.
 func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
-	original, completionRequest, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
 
-	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), completionRequest)
+	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), body)
 }
 
-// runChunkedDecodeFromMap executes chunked decode given an already-parsed completionRequest map.
+// runChunkedDecodeFromMap executes chunked decode given an already-parsed body map.
 // Non-streaming: accumulated chunks are reassembled into a single JSON response.
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
-func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) {
+func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, body map[string]any) {
 	s.logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
 	ctx, span := tracing.Tracer(tracerScope).Start(r.Context(), "chunked_decode",
@@ -91,8 +91,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	)
 	defer span.End()
 
-	streamingEnabled, _ := completionRequest[requestFieldStream].(bool)
-	originalMaxTokens := resolveMaxTokens(completionRequest)
+	streamingEnabled, _ := body[requestFieldStream].(bool)
+	originalMaxTokens := resolveMaxTokens(body)
 
 	span.SetAttributes(
 		attribute.Int("llm_d.pd_proxy.chunked_decode.chunk_size", s.config.DecodeChunkSize),
@@ -146,7 +146,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			chunkBudget = remaining
 		}
 
-		chunkReq := maps.Clone(completionRequest)
+		chunkReq := maps.Clone(body)
 		chunkReq[requestFieldMaxTokens] = chunkBudget
 		chunkReq[requestFieldMaxCompletionTokens] = chunkBudget
 		chunkReq[requestFieldStream] = false
@@ -235,7 +235,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Append the generated text to the request so the next chunk continues
 		// from where this one left off.
 		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
-		appendChunkToRequest(s.logger, completionRequest, chunkText)
+		appendChunkToRequest(s.logger, body, chunkText)
 	}
 
 	span.SetAttributes(
