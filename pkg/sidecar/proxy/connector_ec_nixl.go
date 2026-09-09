@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // fanoutEncoderCollect fans out per-image encoder requests and merges
@@ -102,8 +104,13 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 
 	// Step 1: fan out to encoders, collect per-image ec_transfer_params.
 	if len(encodeEndPoints) > 0 {
+		encodeStart := time.Now()
 		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID)
 		if err != nil {
+			// fanoutEncoderCollect only errors once it has actually dispatched
+			// to an encoder, so the duration sample is meaningful here too.
+			metrics.RecordEncodeDuration(time.Since(encodeStart))
+			metrics.RecordError(metrics.StageEncode)
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
@@ -111,6 +118,10 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 			return
 		}
 		if total > 0 {
+			// total == 0 means there was no multimodal input to encode, so no
+			// encoder was actually invoked; skip the sample rather than skew
+			// the histogram with a sub-microsecond no-op.
+			metrics.RecordEncodeDuration(time.Since(encodeStart))
 			// All-missing degrades silently to primer-mode; warn so the
 			// operator sees the regression.
 			if contributed == 0 {

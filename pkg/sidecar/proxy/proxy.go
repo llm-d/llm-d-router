@@ -209,9 +209,11 @@ type Config struct {
 
 	// MetricsPort is the port for the Prometheus /metrics endpoint. 0 (the
 	// default) disables it; when > 0 the sidecar serves the shared metrics
-	// registry (carrying the moriio_dns_* counters) at /metrics on that port,
-	// on a separate address from the data-plane proxy port. Takes precedence
-	// over the MORIIO_METRICS_ADDR env var (kept for backward compatibility).
+	// registry (carrying the moriio_dns_* and llm_d_disagg_sidecar_* counters)
+	// at /metrics on that port, on a separate address from the data-plane
+	// proxy port so the model server's own /metrics path stays reachable
+	// through the proxy. Takes precedence over the MORIIO_METRICS_ADDR env
+	// var (kept for backward compatibility).
 	MetricsPort int
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
@@ -503,7 +505,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startHTTP(ctx)
 	})
 
-	// Opt-in Prometheus /metrics endpoint (MORIIO_METRICS_ADDR); no-op when unset.
+	// Opt-in Prometheus /metrics endpoint (--metrics-port or MORIIO_METRICS_ADDR); no-op when unset.
 	s.maybeStartMetrics(ctx, grp)
 
 	return grp.Wait()

@@ -28,6 +28,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // runConcurrentPD fires the prefill and decode legs of a concurrent-dispatch
@@ -87,11 +88,13 @@ func (s *Server) runConcurrentPD(
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
+		metrics.RecordPrefillDuration(prefillDuration)
 		prefillSpan.SetAttributes(
 			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
+			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
 		s.logger.V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
@@ -110,9 +113,15 @@ func (s *Server) runConcurrentPD(
 	decodeStart := time.Now()
 
 	decodeReq = decodeReq.WithContext(ctx)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	decodeWriter := &statusCapturingResponseWriter{ResponseWriter: w}
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
+	if isHTTPError(decodeWriter.statusCode) {
+		metrics.RecordError(metrics.StageDecode)
+		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	}
 	decodeSpan.SetAttributes(
 		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
 		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),

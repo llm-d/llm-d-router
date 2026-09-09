@@ -34,6 +34,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // tokenLimitMap returns the map holding the token-limit fields: sampling_params
@@ -242,12 +243,14 @@ retryLoop:
 	}
 
 	prefillDuration := time.Since(prefillStart)
+	metrics.RecordPrefillDuration(prefillDuration)
 	prefillSpan.SetAttributes(
 		attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
 		attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
 	)
 
 	if isHTTPError(pw.statusCode) {
+		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
 			logging.HTTPBodyKey, pw.buffer.String())
@@ -427,7 +430,8 @@ retryLoop:
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
 		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
 	}
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
+	statusWriter := &statusCapturingResponseWriter{ResponseWriter: w}
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
@@ -437,12 +441,19 @@ retryLoop:
 		s.dispatchDecode(decodeWriter, dreq, body)
 	}
 	if err := finalizeDecodeWriter(); err != nil {
+		metrics.RecordDecodeDuration(time.Since(decodeStart))
+		metrics.RecordError(metrics.StageDecode)
 		s.logger.Error(err, "failed to flush cached token response writer")
 		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
 		return
 	}
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
+	if statusWriter.statusCode < 200 || statusWriter.statusCode >= 300 {
+		metrics.RecordError(metrics.StageDecode)
+		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	}
 	decodeSpan.SetAttributes(attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())))
 
 	// Calculate end-to-end P/D timing metrics.

@@ -55,6 +55,37 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 	return w.buffer.Bytes()
 }
 
+// statusCapturingResponseWriter passes writes straight through to the
+// underlying http.ResponseWriter while recording the final status code, so a
+// streamed response (SSE included) can still be observed for error metrics
+// without buffering its body.
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *statusCapturingResponseWriter) WriteHeader(statusCode int) {
+	if w.statusCode == 0 {
+		w.statusCode = statusCode
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush relays to the underlying writer's Flusher so SSE streaming through
+// this wrapper keeps working; a no-op if the underlying writer can't flush.
+func (w *statusCapturingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
 // until the caller decides the outcome (the "commit point"). It is used by the
 // MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill

@@ -29,15 +29,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // envMoRIIOMetricsAddr is a backward-compatible fallback for enabling the
 // Prometheus scrape endpoint. When set to a listen address (e.g. ":9090") and
 // the --metrics-port flag is unset, the sidecar serves the shared
-// controller-runtime metrics registry (which carries the moriio_dns_* counters)
-// at /metrics on that address. The --metrics-port flag takes precedence. Empty
-// (with no flag) disables it. Kept on a separate address so it never clashes
-// with the data-plane proxy port.
+// controller-runtime metrics registry (which carries the moriio_dns_* and
+// llm_d_disagg_sidecar_* counters) at /metrics on that address. The
+// --metrics-port flag takes precedence. Empty (with no flag) disables it.
+// Kept on a separate address so it never clashes with the data-plane proxy
+// port.
 const envMoRIIOMetricsAddr = "MORIIO_METRICS_ADDR"
 
 // moriioDNSSubsystem is the Prometheus subsystem prefix for the MoRI-IO
@@ -116,10 +119,12 @@ func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 
 // serveMetrics serves the shared controller-runtime metrics registry at
 // /metrics on addr until ctx is cancelled, then shuts the server down
-// gracefully. Registration of the moriio_dns_* counters is ensured here so they
-// are present even if no resolver has been constructed yet.
+// gracefully. Registration of the moriio_dns_* and llm_d_disagg_sidecar_*
+// counters is ensured here so they are present even if no resolver has been
+// constructed yet.
 func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 	registerDNSMetrics()
+	metrics.Register()
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(crmetrics.Registry, promhttp.HandlerOpts{}))
@@ -138,7 +143,7 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		}
 	}()
 
-	s.logger.Info("starting MoRI-IO metrics server", "addr", addr)
+	s.logger.Info("starting metrics server", "addr", addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		s.logger.Error(err, "metrics server failed")
 		return err

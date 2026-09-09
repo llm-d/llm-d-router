@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -63,6 +64,7 @@ func openAIAPIAttr(apiType APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
+		metrics.RecordRequest(apiType.String())
 		tracer := tracing.Tracer(tracerScope)
 		ctx, span := tracer.Start(r.Context(), "forward_request",
 			trace.WithSpanKind(trace.SpanKindServer),
@@ -195,6 +197,11 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				attribute.Int("llm_d.ec_proxy.encoder_count", len(allowedEncoders)),
 				attribute.Int("llm_d.ec_proxy.encoder_candidates", len(encoderHostPorts)),
 			)
+			if len(prefillHostPort) > 0 {
+				metrics.RecordDisagg(metrics.DisaggTypeEPD)
+			} else {
+				metrics.RecordDisagg(metrics.DisaggTypeED)
+			}
 			s.handleECConnector(w, r, prefillHostPort, allowedEncoders)
 			return
 		}
@@ -210,6 +217,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 
 		if len(prefillHostPort) > 0 {
 			logger.V(logging.DEBUG).Info("using P/D protocol")
+			metrics.RecordDisagg(metrics.DisaggTypePD)
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
