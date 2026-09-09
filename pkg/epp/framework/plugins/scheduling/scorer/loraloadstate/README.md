@@ -45,16 +45,40 @@ default; other engines set `loraLoadedSpec` and `loraGPULoadedSpec` in their `en
 
 ## Configuration
 
-This scorer currently has no runtime parameters.
+**Location:** `plugins[N].parameters`
 
-**Configuration Example:**
+### Parameters
+
+The gaps between tiers encode the relative cost of serving the adapter from each state, and
+that cost grows with adapter size. A small adapter loads in tens of milliseconds and the
+defaults are generous; a large one makes a miss expensive, so pull `freeSlotScore` toward
+`saturatedScore`. Use the profile `weight` to scale the whole scorer against the load and
+prefix-cache scorers.
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `gpuResidentScore` | `float` | No | `1.0` | Adapter occupies a GPU slot. |
+| `cpuResidentScore` | `float` | No | `0.8` | Adapter is only in the host cache. |
+| `freeSlotScore` | `float` | No | `0.6` | Adapter not resident, a GPU slot is free. |
+| `saturatedScore` | `float` | No | `0.0` | Adapter not resident, every GPU slot taken. |
+
+Each score must be in `[0, 1]` and they must satisfy `gpuResidentScore >= cpuResidentScore >=
+freeSlotScore >= saturatedScore`; otherwise the whole set is ignored, logged, and the defaults
+are used.
+
+### Example
+
 ```yaml
 plugins:
   - type: lora-load-state-scorer
     name: lora-load-state
+    parameters:
+      cpuResidentScore: 0.9
+      freeSlotScore: 0.2
+      saturatedScore: 0.1
 schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: lora-load-state
-        weight: 1
+        weight: 2
 ```

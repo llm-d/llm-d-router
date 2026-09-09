@@ -19,6 +19,9 @@ package loraloadstate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -28,12 +31,66 @@ import (
 
 const (
 	LoraLoadStateScorerType = "lora-load-state-scorer"
-
-	scoreGPUResident = 1.0
-	scoreCPUResident = 0.8
-	scoreFreeSlot    = 0.6
-	scoreSaturated   = 0.0
 )
+
+// Parameters tunes the score each residency tier receives. The gaps between
+// tiers encode the relative cost of serving the adapter from that state, which
+// grows with adapter size: a large adapter makes a miss expensive and the
+// free-slot tier should sit close to saturated. Unset fields keep the defaults.
+// Pointers so an explicit 0.0 is distinguishable from unset.
+type Parameters struct {
+	// GPUResidentScore is given when the adapter occupies a GPU slot. Default 1.0.
+	GPUResidentScore *float64 `json:"gpuResidentScore,omitempty"`
+	// CPUResidentScore is given when the adapter is only in the host cache. Default 0.8.
+	CPUResidentScore *float64 `json:"cpuResidentScore,omitempty"`
+	// FreeSlotScore is given when the adapter is not resident but a GPU slot is free. Default 0.6.
+	FreeSlotScore *float64 `json:"freeSlotScore,omitempty"`
+	// SaturatedScore is given when the adapter is not resident and every GPU slot is taken. Default 0.0.
+	SaturatedScore *float64 `json:"saturatedScore,omitempty"`
+}
+
+type tierScores struct {
+	gpuResident float64
+	cpuResident float64
+	freeSlot    float64
+	saturated   float64
+}
+
+var defaultTierScores = tierScores{gpuResident: 1.0, cpuResident: 0.8, freeSlot: 0.6, saturated: 0.0}
+
+// tierScores applies the parameters over the defaults. Scores outside [0, 1]
+// or that break gpu >= cpu >= freeSlot >= saturated are rejected as a set and
+// the defaults are used.
+func (p *Parameters) tierScores(ctx context.Context) tierScores {
+	scores := defaultTierScores
+	if p == nil {
+		return scores
+	}
+	pick := func(v *float64, d float64) float64 {
+		if v == nil {
+			return d
+		}
+		return *v
+	}
+	candidate := tierScores{
+		gpuResident: pick(p.GPUResidentScore, scores.gpuResident),
+		cpuResident: pick(p.CPUResidentScore, scores.cpuResident),
+		freeSlot:    pick(p.FreeSlotScore, scores.freeSlot),
+		saturated:   pick(p.SaturatedScore, scores.saturated),
+	}
+	inRange := func(v float64) bool { return v >= 0 && v <= 1 }
+	ordered := candidate.gpuResident >= candidate.cpuResident &&
+		candidate.cpuResident >= candidate.freeSlot &&
+		candidate.freeSlot >= candidate.saturated
+	if !inRange(candidate.gpuResident) || !inRange(candidate.cpuResident) ||
+		!inRange(candidate.freeSlot) || !inRange(candidate.saturated) || !ordered {
+		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer tier scores; each must be in [0, 1] with gpuResident >= cpuResident >= freeSlot >= saturated, using defaults",
+			"gpuResidentScore", candidate.gpuResident, "cpuResidentScore", candidate.cpuResident,
+			"freeSlotScore", candidate.freeSlot, "saturatedScore", candidate.saturated)
+		return scores
+	}
+	return candidate
+}
 
 // compile-time type assertion
 var (
@@ -42,14 +99,25 @@ var (
 )
 
 // LoraLoadStateScorerFactory defines the factory function for LoraLoadStateScorer.
-func LoraLoadStateScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	return NewLoraLoadStateScorer().WithName(name), nil
+func LoraLoadStateScorerFactory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	parameters := Parameters{}
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", LoraLoadStateScorerType, err)
+		}
+	}
+	ctx := context.Background()
+	if handle != nil {
+		ctx = handle.Context()
+	}
+	return NewLoraLoadStateScorer(ctx, &parameters).WithName(name), nil
 }
 
 // NewLoraLoadStateScorer initializes a new LoraLoadStateScorer and returns its pointer.
-func NewLoraLoadStateScorer() *LoraLoadStateScorer {
+func NewLoraLoadStateScorer(ctx context.Context, params *Parameters) *LoraLoadStateScorer {
 	return &LoraLoadStateScorer{
 		typedName: fwkplugin.TypedName{Type: LoraLoadStateScorerType, Name: LoraLoadStateScorerType},
+		scores:    params.tierScores(ctx),
 	}
 }
 
@@ -59,6 +127,7 @@ func NewLoraLoadStateScorer() *LoraLoadStateScorer {
 // so an idle adapter still attracts its own traffic.
 type LoraLoadStateScorer struct {
 	typedName fwkplugin.TypedName
+	scores    tierScores
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -102,13 +171,13 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 
 		switch {
 		case resident && state.Level == fwkdl.LoraLoadLevelGPU:
-			scores[endpoint] = scoreGPUResident
+			scores[endpoint] = s.scores.gpuResident
 		case resident:
-			scores[endpoint] = scoreCPUResident
+			scores[endpoint] = s.scores.cpuResident
 		case m.GPULoadedModels < m.MaxActiveModels:
-			scores[endpoint] = scoreFreeSlot
+			scores[endpoint] = s.scores.freeSlot
 		default:
-			scores[endpoint] = scoreSaturated
+			scores[endpoint] = s.scores.saturated
 		}
 	}
 

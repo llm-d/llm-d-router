@@ -18,6 +18,8 @@ package loraloadstate
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,7 +139,7 @@ func TestLoraLoadStateScorer(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			scores := NewLoraLoadStateScorer().Score(context.Background(), test.request, test.endpoints)
+			scores := NewLoraLoadStateScorer(context.Background(), nil).Score(context.Background(), test.request, test.endpoints)
 			assert.Len(t, scores, len(test.expected))
 			for _, ep := range test.endpoints {
 				name := ep.GetMetadata().ID.Name
@@ -149,6 +151,68 @@ func TestLoraLoadStateScorer(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoraLoadStateScorerParameters(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	gpu := fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU}
+	cpu := fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelCPU}
+	fleet := []fwksched.Endpoint{
+		endpoint("gpu", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}, GPULoadedModels: 1, MaxActiveModels: 2}),
+		endpoint("cpu", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu}, GPULoadedModels: 2, MaxActiveModels: 2}),
+		endpoint("free", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{}, GPULoadedModels: 1, MaxActiveModels: 2}),
+		endpoint("full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{}, GPULoadedModels: 2, MaxActiveModels: 2}),
+	}
+	request := &fwksched.InferenceRequest{TargetModel: "target"}
+	defaults := map[string]float64{"gpu": 1.0, "cpu": 0.8, "free": 0.6, "full": 0.0}
+
+	tests := []struct {
+		name     string
+		params   *Parameters
+		expected map[string]float64
+	}{
+		{name: "nil parameters use defaults", params: nil, expected: defaults},
+		{name: "empty parameters use defaults", params: &Parameters{}, expected: defaults},
+		{
+			name:     "large adapter: a miss is nearly as bad as saturation",
+			params:   &Parameters{CPUResidentScore: f(0.9), FreeSlotScore: f(0.1), SaturatedScore: f(0.05)},
+			expected: map[string]float64{"gpu": 1.0, "cpu": 0.9, "free": 0.1, "full": 0.05},
+		},
+		{
+			name:     "partial override keeps the other defaults",
+			params:   &Parameters{FreeSlotScore: f(0.3)},
+			expected: map[string]float64{"gpu": 1.0, "cpu": 0.8, "free": 0.3, "full": 0.0},
+		},
+		{
+			name:     "out of range falls back to defaults as a set",
+			params:   &Parameters{GPUResidentScore: f(1.5), FreeSlotScore: f(0.1)},
+			expected: defaults,
+		},
+		{
+			name:     "tier order violation falls back to defaults as a set",
+			params:   &Parameters{CPUResidentScore: f(0.2), FreeSlotScore: f(0.5)},
+			expected: defaults,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scores := NewLoraLoadStateScorer(context.Background(), test.params).Score(context.Background(), request, fleet)
+			for _, ep := range fleet {
+				assert.InDelta(t, test.expected[ep.GetMetadata().ID.Name], scores[ep], 0.0001, ep.GetMetadata().ID.Name)
+			}
+		})
+	}
+}
+
+func TestLoraLoadStateScorerFactoryParameters(t *testing.T) {
+	decoder := json.NewDecoder(strings.NewReader(`{"cpuResidentScore": 0.95, "freeSlotScore": 0.2, "saturatedScore": 0.1}`))
+	plugin, err := LoraLoadStateScorerFactory("big-adapters", decoder, nil)
+	assert.NoError(t, err)
+	scorer := plugin.(*LoraLoadStateScorer)
+	assert.Equal(t, tierScores{gpuResident: 1.0, cpuResident: 0.95, freeSlot: 0.2, saturated: 0.1}, scorer.scores)
+
+	_, err = LoraLoadStateScorerFactory("bad", json.NewDecoder(strings.NewReader(`{"freeSlotScore": "high"}`)), nil)
+	assert.Error(t, err)
 }
 
 func TestLoraLoadStateScorerPlugin(t *testing.T) {
