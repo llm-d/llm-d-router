@@ -18,7 +18,7 @@ Testing session affinity requires stateful request sessions that persist across 
 In multi-turn chat mode, `inference-perf` **appends** each turn's user question and assistant response to the session's ongoing conversation history (`context`):
 - **Why large prompt sizes fail**: When configured with `95,000` system prompt tokens + `5,000` question tokens + `1,000` output tokens, a session's input prompt reaches **100,000 tokens on Turn 1** and grows by **6,000 tokens per turn**. By Turn 6, requests exceed the vLLM simulator pod's maximum context length (`max_model_len = 131072`), causing HTTP 400 Bad Request errors and multi-megabyte JSON body timeouts (`"body size exceeds the given limit"`).
 - **Why `2,000 / 500 / 200` sizing is optimal**:
-  - Configured in [shared_prefix_100k-1k-10qps_session-affinity.yaml](../config/shared_prefix_100k-1k-10qps_session-affinity.yaml) with `system_prompt_len: 2000`, `question_len: 500`, and `output_len: 200`, each turn adds **700 tokens** to the conversation.
+  - Configured in [shared_prefix_100k-1k-10qps_session-affinity.yaml](../shared_prefix_100k-1k-10qps_session-affinity.yaml) with `system_prompt_len: 2000`, `question_len: 500`, and `output_len: 200`, each turn adds **700 tokens** to the conversation.
   - Across a 300-second benchmark run (~60 turns per session at 10 QPS across 50 sessions), a session's total history reaches **~44,000 tokens**—safely below the 131,072 context limit.
   - This cleanly isolates control-plane session affinity overhead (header inspection, token decoding, and pod pinning) without network I/O saturation.
 
@@ -37,7 +37,7 @@ All tests were executed on GKE (`e2` machine family) with 10 simulated vLLM back
 | **Total System CPU (m)** | **1,896m** (1.90 cores) | **2,061m** (2.06 cores) | **2,125m** (2.13 cores) | **1,937m** (1.94 cores) | **2,317m** (2.32 cores) | **~8% lower total CPU** for two-stage P/D affinity vs. baseline scoring |
 | **EPP Peak Heap Memory** | **104 MiB** | **177 MiB** | **135 MiB** | **183 MiB** | **310 MiB** | **~2.3x lower EPP heap memory** without prefix/KV cache tracking |
 | **Total System Memory** | **164 MiB** | **236 MiB** | **188 MiB** | **244 MiB** | **365 MiB** | **~1.9x lower total system memory** footprint |
-| **Router Configuration** | [session-affinity-filter.yaml](../config/router-configs/session-affinity-filter.yaml) | [load-aware-session-affinity.yaml](../config/router-configs/load-aware-session-affinity.yaml) | [pd-session-affinity.yaml](../config/router-configs/pd-session-affinity.yaml) | [random-passthrough-parser.yaml](../config/router-configs/random-passthrough-parser.yaml) | [optimized-baseline.yaml](../config/router-configs/optimized-baseline.yaml) | Configured plugins & request parsers |
+| **Router Configuration** | [session-affinity-filter.yaml](../router-configs/session-affinity-filter.yaml) | [load-aware-session-affinity.yaml](../router-configs/load-aware-session-affinity.yaml) | [pd-session-affinity.yaml](../router-configs/pd-session-affinity.yaml) | [random-passthrough-parser.yaml](../router-configs/random-passthrough-parser.yaml) | [optimized-baseline.yaml](../router-configs/optimized-baseline.yaml) | Configured plugins & request parsers |
 
 ---
 
