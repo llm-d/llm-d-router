@@ -1,7 +1,12 @@
 # Ignore transient failures on gnu.org (it sometimes refuses connections)
 exclude = [
   "^https://www.gnu.org/software/make/?$",
-  "^https://www.envoyproxy.io/"
+  "^https://www.envoyproxy.io/",
+  "^https://llm-d\\.slack\\.com/",
+  "^https://meet\\.google\\.com/",
+  "^https://docs\\.google\\.com/",
+  "^https://drive\\.google\\.com/",
+  "^https://app\\.fossa\\.com/"
 ]
 
 # Per-request timeout in seconds. Sized for slow upstream docs sites

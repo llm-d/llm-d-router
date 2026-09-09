@@ -51,6 +51,7 @@ const (
 	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
 	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
 	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
+	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
 	requestFieldMinTokens            = reqcommon.FieldMinTokens
 	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
 	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill

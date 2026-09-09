@@ -96,6 +96,7 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 		"queueDepthThreshold", cfg.QueueDepthThreshold,
 		"kvCacheUtilThreshold", cfg.KVCacheUtilThreshold,
 		"metricsStalenessThreshold", cfg.MetricsStalenessThreshold.String(),
+		"stalenessPolicy", cfg.StalenessPolicy,
 		"headroom", cfg.Headroom)
 
 	if cfg.Headroom > 1.0 {
@@ -125,6 +126,9 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 // For each pod, the score is determined by the most constrained resource (Compute or Memory):
 //
 //	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
+//
+// Pods with missing or stale metrics contribute 1.0 under the saturated policy, or are excluded
+// from the average under the ignore policy.
 func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
 	if len(candidates) == 0 {
 		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
@@ -140,11 +144,14 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 		podMetrics := e.GetMetrics()
 
 		if podMetrics == nil || time.Since(podMetrics.UpdateTime) > d.config.MetricsStalenessThreshold {
-			// Fail closed: an endpoint whose metrics are missing or stale scores as fully saturated. A
-			// fleet-wide metrics collection failure therefore halts dispatch entirely rather than
-			// admitting blind; the gauge and the rate-limited log below exist so operators can tell that
-			// stall apart from genuine overload (which typically scores above 1.0).
-			totalScore += 1.0
+			if d.config.StalenessPolicy != StalenessIgnore {
+				// Saturated: an endpoint whose metrics are missing or stale scores as fully
+				// saturated. A fleet-wide metrics collection failure therefore halts dispatch
+				// entirely rather than admitting blind; the gauge and the rate-limited log below
+				// exist so operators can tell that stall apart from genuine overload (which
+				// typically scores above 1.0).
+				totalScore += 1.0
+			}
 			staleCount++
 			continue
 		}
@@ -161,6 +168,16 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 		d.maybeLogStaleEndpoints(staleCount, len(candidates))
 	}
 
+	// Under ignore, stale endpoints are out of the average; if every candidate is stale the pool
+	// scores 0.0 and dispatch continues, consistent with Filter's fail-open fallback.
+	if d.config.StalenessPolicy == StalenessIgnore {
+		fresh := len(candidates) - staleCount
+		if fresh == 0 {
+			return 0.0
+		}
+		return totalScore / float64(fresh)
+	}
+
 	return totalScore / float64(len(candidates))
 }
 
@@ -175,10 +192,11 @@ func (d *Detector) maybeLogStaleEndpoints(staleCount, total int) {
 		return // Another goroutine logged concurrently.
 	}
 	d.logger.V(logutil.DEFAULT).Info(
-		"Endpoints with missing or stale metrics are scored as fully saturated (fail-closed); "+
+		"Endpoints with missing or stale metrics observed; "+
 			"if dispatch is stalled, check model-server metrics collection (scrape path, port, TLS, auth)",
 		"staleEndpoints", staleCount,
 		"totalEndpoints", total,
+		"stalenessPolicy", d.config.StalenessPolicy,
 		"metricsStalenessThreshold", d.config.MetricsStalenessThreshold.String())
 }
 

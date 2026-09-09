@@ -40,7 +40,7 @@ var _ = Describe("bodyAsJSON", func() {
 
 		Expect(err).ToNot(HaveOccurred())
 		Expect(string(raw)).To(Equal(`{"model":"m","max_tokens":5}`))
-		Expect(parsed).To(HaveKeyWithValue("model", "m"))
+		Expect(parsed).To(HaveKeyWithValue("model", json.RawMessage(`"m"`)))
 		Expect(parsed).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 5)))
 	})
 
@@ -104,7 +104,7 @@ var _ = Describe("readJSONBody", func() {
 
 		Expect(ok).To(BeTrue())
 		Expect(string(raw)).To(Equal(`{"model":"m"}`))
-		Expect(parsed).To(HaveKeyWithValue("model", "m"))
+		Expect(parsed).To(HaveKeyWithValue("model", json.RawMessage(`"m"`)))
 		Expect(w.Code).To(Equal(http.StatusOK))
 	})
 
@@ -117,7 +117,7 @@ var _ = Describe("readJSONBody", func() {
 		Expect(parsed).To(BeNil())
 		Expect(w.Code).To(Equal(http.StatusBadRequest))
 		Expect(w.Body.String()).To(ContainSubstring("BadRequestError"))
-		Expect(w.Body.String()).To(ContainSubstring("must be a JSON object"))
+		Expect(w.Body.String()).To(ContainSubstring("is not a JSON object"))
 	})
 
 	It("answers a read failure with a vLLM-shaped 400", func() {
@@ -198,3 +198,55 @@ type errReader struct{}
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
 
 var _ io.Reader = errReader{}
+
+var _ = Describe("decodeRequestBody", func() {
+	It("decodes inspected fields and keeps the rest as raw bytes", func() {
+		tools := `[{"type":"function","function":{"parameters":{"properties":{"b":{},"a":{}}}}}]`
+		parsed, err := decodeRequestBody([]byte(`{"stream":true,"max_tokens":5,"tools":` + tools + `}`))
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(parsed[requestFieldStream]).To(BeTrue())
+		Expect(parsed[requestFieldMaxTokens]).To(BeNumerically("==", 5))
+		Expect(parsed["tools"]).To(Equal(json.RawMessage(tools)))
+
+		out, err := json.Marshal(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(out)).To(ContainSubstring(`"tools":` + tools))
+	})
+
+	It("rejects non-object bodies", func() {
+		_, err := decodeRequestBody([]byte(`[1,2]`))
+		Expect(err).To(HaveOccurred())
+
+		_, err = decodeRequestBody([]byte(`null`))
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("keeps messages raw and decodes them on use", func() {
+		messages := `[{"role":"user","content":"Hi"}]`
+		parsed, err := decodeRequestBody([]byte(`{"messages":` + messages + `}`))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(parsed[requestFieldMessages]).To(Equal(json.RawMessage(messages)))
+
+		decoded, err := requestMessages(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(decoded).To(HaveLen(1))
+	})
+
+	It("treats a null messages field as absent", func() {
+		parsed, err := decodeRequestBody([]byte(`{"messages":null}`))
+		Expect(err).ToNot(HaveOccurred())
+
+		decoded, err := requestMessages(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(decoded).To(BeNil())
+	})
+
+	It("reports a messages field that is not an array", func() {
+		_, err := requestMessages(map[string]any{requestFieldMessages: json.RawMessage(`{}`)})
+		Expect(err).To(HaveOccurred())
+
+		_, err = requestMessages(map[string]any{requestFieldMessages: 5})
+		Expect(err).To(HaveOccurred())
+	})
+})

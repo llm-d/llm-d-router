@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -141,7 +142,12 @@ func TestExtractMMItems(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			items := extractMMItems(tt.request)
+			body, err := json.Marshal(tt.request)
+			assert.NoError(t, err)
+			parsed, err := decodeRequestBody(body)
+			assert.NoError(t, err)
+
+			items := extractMMItems(log.Log, parsed)
 			assert.Equal(t, tt.expected, len(items), "unexpected number of MM items")
 		})
 	}
@@ -363,17 +369,13 @@ func inlineAudioItem(data string) map[string]any {
 	return map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": data, "format": "wav"}}
 }
 
-// userMessageRequest wraps content items in a minimal chat-completions request.
+// userMessageRequest wraps content items in a minimal chat-completions request,
+// with messages held as raw bytes the way decodeRequestBody leaves them.
 func userMessageRequest(items ...map[string]any) map[string]any {
-	content := make([]any, len(items))
-	for i, item := range items {
-		content[i] = item
-	}
-	return map[string]any{
-		"messages": []any{
-			map[string]any{"role": "user", "content": content},
-		},
-	}
+	messages, _ := json.Marshal([]any{
+		map[string]any{"role": "user", "content": items},
+	})
+	return map[string]any{"messages": json.RawMessage(messages)}
 }
 
 func TestFanoutEncoderPrimerDeduplication(t *testing.T) {

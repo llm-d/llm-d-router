@@ -32,8 +32,6 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/pflag"
-	uberzap "go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -693,15 +691,12 @@ func validatePortRange(startPort, rangeSize int) error {
 	return nil
 }
 
-// NewLogger returns a logger configured from the Options logging flags,
-// with a custom level encoder that maps verbosity levels to their semantic
-// names instead of always rendering V(n) as "debug".
+// NewLogger returns a logger configured from the Options logging flags with
+// OpenTelemetry field names and severity fields.
 func (opts *Options) NewLogger() logr.Logger {
-	config := uberzap.NewProductionEncoderConfig()
-	config.EncodeLevel = logutil.LevelEncoder
-	return zap.New(
-		zap.UseFlagOptions(&opts.loggingOptions),
-		zap.Encoder(zapcore.NewJSONEncoder(config)),
+	return logutil.NewLoggerWithOptions(
+		"llm-d-router-disagg-sidecar",
+		&opts.loggingOptions,
 	)
 }
 
