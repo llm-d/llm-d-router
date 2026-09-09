@@ -1,6 +1,6 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-router)](https://goreportcard.com/report/github.com/llm-d/llm-d-router)
 [![Go Reference](https://pkg.go.dev/badge/github.com/llm-d/llm-d-router.svg)](https://pkg.go.dev/github.com/llm-d/llm-d-router)
-[![License](https://img.shields.io/github/license/llm-d/llm-d-router)](/LICENSE)
+[![License](https://img.shields.io/github/license/llm-d/llm-d-router)](./LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C08SBNRRSBD)
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_shield)
 

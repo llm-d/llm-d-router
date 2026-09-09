@@ -159,6 +159,8 @@ type ActiveFlowConnection interface {
 	GetDataPlane() FlowRegistryDataPlane
 	// FlowKey returns the immutable identity of the flow this connection is pinned to.
 	FlowKey() flowcontrol.FlowKey
+	// DefaultRequestTTL returns the queue-wait bound configured for the leased priority band and whether it was set.
+	DefaultRequestTTL() (time.Duration, bool)
 }
 
 // ManagedQueue defines the interface for a flow's queue.

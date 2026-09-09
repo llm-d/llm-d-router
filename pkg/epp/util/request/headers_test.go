@@ -32,6 +32,7 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 	systemHeaders := []string{
 		metadata.FlowFairnessIDKey,
 		metadata.OldFlowFairnessIDKey,
+		metadata.InferenceTTLHeaderKey,
 		metadata.ObjectiveKey,
 		metadata.OldObjectiveKey,
 		metadata.ModelNameRewriteKey,

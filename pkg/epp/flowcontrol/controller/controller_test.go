@@ -172,9 +172,11 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 
 // mockActiveFlowConnection is a local mock for the `contracts.ActiveFlowConnection` interface.
 type mockActiveFlowConnection struct {
-	RegistryV    contracts.FlowRegistry
-	RegistryFunc func() contracts.FlowRegistry
-	FlowKeyV     flowcontrol.FlowKey
+	RegistryV             contracts.FlowRegistry
+	RegistryFunc          func() contracts.FlowRegistry
+	FlowKeyV              flowcontrol.FlowKey
+	DefaultRequestTTLV    time.Duration
+	DefaultRequestTTLSetV bool
 }
 
 func (m *mockActiveFlowConnection) GetDataPlane() contracts.FlowRegistryDataPlane {
@@ -186,6 +188,10 @@ func (m *mockActiveFlowConnection) GetDataPlane() contracts.FlowRegistryDataPlan
 
 func (m *mockActiveFlowConnection) FlowKey() flowcontrol.FlowKey {
 	return m.FlowKeyV
+}
+
+func (m *mockActiveFlowConnection) DefaultRequestTTL() (time.Duration, bool) {
+	return m.DefaultRequestTTLV, m.DefaultRequestTTLSetV
 }
 
 // mockRegistryClient is a mock for the controller's registry dependency.
@@ -298,6 +304,62 @@ func newTestRequest(key flowcontrol.FlowKey) *fwkfcmocks.MockFlowControlRequest 
 	}
 }
 
+func TestCreateRequestContextResolvesTTL(t *testing.T) {
+	t.Parallel()
+	enqueueTime := time.Now()
+
+	testCases := []struct {
+		name       string
+		globalTTL  time.Duration
+		bandTTL    time.Duration
+		bandSet    bool
+		requestTTL time.Duration
+		wantTTL    time.Duration
+	}{
+		{name: "global inherited", globalTTL: time.Minute, wantTTL: time.Minute},
+		{name: "shorter band replaces global", globalTTL: time.Minute, bandTTL: 5 * time.Second, bandSet: true, wantTTL: 5 * time.Second},
+		{name: "longer band replaces global", globalTTL: time.Minute, bandTTL: 5 * time.Minute, bandSet: true, wantTTL: 5 * time.Minute},
+		{name: "request shortens band", globalTTL: time.Minute, bandTTL: 5 * time.Second, bandSet: true, requestTTL: time.Second, wantTTL: time.Second},
+		{name: "request cannot extend band", globalTTL: time.Minute, bandTTL: 5 * time.Second, bandSet: true, requestTTL: time.Minute, wantTTL: 5 * time.Second},
+		{name: "unbounded band", globalTTL: time.Minute, bandSet: true},
+		{name: "request bounds unbounded band", globalTTL: time.Minute, bandSet: true, requestTTL: time.Second, wantTTL: time.Second},
+		{name: "unbounded global"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fc := &FlowController{config: &Config{DefaultRequestTTL: tc.globalTTL}}
+			req := newTestRequest(defaultFlowKey)
+			req.InitialEffectiveTTLV = tc.requestTTL
+
+			_, cancel, effectiveTTL := fc.createRequestContext(
+				context.Background(), req, tc.bandTTL, tc.bandSet, enqueueTime,
+			)
+			defer cancel()
+			assert.Equal(t, tc.wantTTL, effectiveTTL)
+		})
+	}
+}
+
+func TestCreateRequestContextPreservesEarlierParentDeadline(t *testing.T) {
+	t.Parallel()
+	enqueueTime := time.Now()
+	parentDeadline := enqueueTime.Add(time.Second)
+	parent, parentCancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer parentCancel()
+	fc := &FlowController{config: &Config{DefaultRequestTTL: time.Minute}}
+
+	ctx, cancel, effectiveTTL := fc.createRequestContext(
+		parent, newTestRequest(defaultFlowKey), 5*time.Second, true, enqueueTime,
+	)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, parentDeadline, deadline)
+	assert.Equal(t, time.Second, effectiveTTL)
+}
+
 // --- Test Cases ---
 
 // TestFlowController_EnqueueAndWait covers the primary API entry point, focusing on validation, distribution logic,
@@ -307,6 +369,39 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 
 	t.Run("Rejections", func(t *testing.T) {
 		t.Parallel()
+
+		t.Run("OnBandTTLExpiredDuringFlowAcquisition", func(t *testing.T) {
+			t.Parallel()
+			const bandTTL = 20 * time.Millisecond
+			submitted := make(chan struct{}, 1)
+			processor := &mockProcessor{
+				SubmitFunc: func(_ *internal.FlowItem) error {
+					submitted <- struct{}{}
+					return nil
+				},
+			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: time.Minute}, nil, processor,
+				withHarnessClock(clock.RealClock{}))
+			h.mockRegistry.WithConnectionFunc = func(
+				key flowcontrol.FlowKey,
+				fn func(contracts.ActiveFlowConnection) error,
+			) error {
+				time.Sleep(2 * bandTTL)
+				return fn(&mockActiveFlowConnection{
+					RegistryV:             h.mockRegistry,
+					FlowKeyV:              key,
+					DefaultRequestTTLV:    bandTTL,
+					DefaultRequestTTLSetV: true,
+				})
+			}
+
+			outcome, err := h.fc.EnqueueAndWait(context.Background(), newTestRequest(defaultFlowKey))
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, types.ErrTTLExpired)
+			assert.Equal(t, types.QueueOutcomeRejectedOther, outcome)
+			assert.Empty(t, submitted, "expired request must not be submitted to the processor")
+		})
 
 		t.Run("OnReqCtxExpiredBeforeDistribution", func(t *testing.T) {
 			t.Parallel()
