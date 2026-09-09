@@ -28,11 +28,11 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -147,9 +147,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
-		attribute.Bool("llm_d.pd_proxy.prefill.async", false),
+		semconv.LLMDPDProxyPrefillTarget(prefillHost),
+		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyPrefillAsync(false),
 	)
 	prefillStart := time.Now()
 
@@ -159,8 +159,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
-		attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-		attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
+		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
+		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
@@ -195,8 +195,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	)
 	defer decodeSpan.End()
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", false),
+		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyDecodeConcurrentWithPrefill(false),
 	)
 	decodeStart := time.Now()
 
@@ -204,8 +204,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	decodeDuration := time.Since(decodeStart)
 	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
+		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),
 	)
 
 	// End-to-end P/D timing. True TTFT captures time from gateway request start
@@ -218,10 +218,10 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-		attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-		attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.Bool("llm_d.pd_proxy.concurrent_pd", false),
+		semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+		semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
+		semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyConcurrentPD(false),
 	)
 }
 

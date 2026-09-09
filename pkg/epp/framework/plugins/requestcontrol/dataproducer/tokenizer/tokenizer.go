@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -393,13 +394,13 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		attrs := []attribute.KeyValue{
-			attribute.String("llm_d.epp.token_producer.backend", p.backendName),
+			semconv.LLMDEPPTokenProducerBackend(p.backendName),
 		}
 		if request.TargetModel != "" {
-			attrs = append(attrs, attribute.String("gen_ai.request.model", request.TargetModel))
+			attrs = append(attrs, semconv.GenAIRequestModel(request.TargetModel))
 		}
 		if request.RequestID != "" {
-			attrs = append(attrs, attribute.String("gen_ai.request.id", request.RequestID))
+			attrs = append(attrs, semconv.GenAIRequestID(request.RequestID))
 		}
 		span.SetAttributes(attrs...)
 	}
@@ -411,7 +412,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 	if tp == nil || tp.TokenCount() == 0 {
 		if tracingActive {
-			span.SetAttributes(attribute.String("llm_d.epp.token_producer.result", resultSkippedNoTokens))
+			span.SetAttributes(semconv.LLMDEPPTokenProducerResult(resultSkippedNoTokens))
 		}
 		return nil
 	}
@@ -420,7 +421,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 
 	if tracingActive {
 		span.SetAttributes(append(mmobs.SpanAttributes(request),
-			attribute.Int("llm_d.epp.token_producer.token_count", tp.TokenCount()),
+			semconv.LLMDEPPTokenProducerTokenCount(tp.TokenCount()),
 		)...)
 	}
 	return nil
