@@ -156,12 +156,21 @@ class DeployEPPTests(OfflineTestCase):
                     )
 
     def test_invalid_tracing_is_rejected_before_cluster_commands(self):
-        for config in (
+        configs = [
             {"router": {"tracing": {"enabled": "false"}}},
             {"router": {"tracing": {"enabled": 1}}},
             {"router": {"epp": {"flags": {"tracing": "invalid"}}}},
             {"router": {"epp": {"flags": {"tracing": []}}}},
-        ):
+        ]
+        for value in (True, False, "invalid", "", 1, 0, ["invalid"], []):
+            configs.extend(
+                [
+                    {"router": {"tracing": value}},
+                    {"router": {"epp": value}},
+                    {"router": {"epp": {"flags": value}}},
+                ]
+            )
+        for config in configs:
             with self.subTest(config=config):
                 config_path = self.directory / "invalid.yaml"
                 config_path.write_text(yaml.safe_dump(config))
@@ -197,7 +206,10 @@ class DeployEPPTests(OfflineTestCase):
         for config in (
             {},
             {"router": {}},
+            {"router": {"tracing": None}},
+            {"router": {"epp": None}},
             {"router": {"epp": {}}},
+            {"router": {"epp": {"flags": None}}},
             {"router": {"epp": {"flags": {}}}},
             {"router": {"epp": {"flags": {"tracing": None}}}},
             {"router": {"tracing": {"enabled": None}}},
@@ -208,6 +220,39 @@ class DeployEPPTests(OfflineTestCase):
                     overrides["router"]["epp"]["flags"]["tracing"], "false"
                 )
                 self.assertEqual(overrides["router"]["tracing"], {"enabled": False})
+
+    def test_malformed_model_server_labels_warn_and_keep_simulator_overrides(self):
+        for model_servers in (
+            True,
+            1,
+            "invalid",
+            ["matchLabels"],
+            {"matchLabels": True},
+            {"matchLabels": 1},
+            {"matchLabels": ["role"]},
+        ):
+            with self.subTest(model_servers=model_servers):
+                with mock.patch.object(perf, "print") as output:
+                    overrides = self.deploy(
+                        {
+                            "router": {
+                                "tracing": {"enabled": True},
+                                "modelServers": model_servers,
+                            }
+                        }
+                    )
+                self.assertEqual(
+                    overrides["router"]["modelServers"]["matchLabels"],
+                    {"app": "llm-d-sim"},
+                )
+                self.assertEqual(overrides["router"]["tracing"], {"enabled": True})
+                warnings = [
+                    call.args[0]
+                    for call in output.call_args_list
+                    if call.args[0].startswith("Warning:")
+                ]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("modelServers labels for nullification", warnings[0])
 
     def test_existing_router_recipes_remain_disabled(self):
         config_dir = Path(perf.__file__).parent / "config" / "router-configs"

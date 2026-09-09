@@ -118,10 +118,18 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     with open(router_config_path, "r") as f:
         guide_data = yaml.safe_load(f) or {}
     guide_router = guide_data.get("router") or {}
-    tracing = (guide_router.get("tracing") or {}).get("enabled")
+    tracing_cfg = guide_router.get("tracing")
+    if tracing_cfg is not None and not isinstance(tracing_cfg, dict):
+        raise ValueError("router.tracing must be a mapping")
+    tracing = (tracing_cfg or {}).get("enabled")
     if tracing is None:
-        guide_epp = guide_router.get("epp") or {}
-        tracing = (guide_epp.get("flags") or {}).get("tracing")
+        guide_epp = guide_router.get("epp")
+        if guide_epp is not None and not isinstance(guide_epp, dict):
+            raise ValueError("tracing requires router.epp to be a mapping")
+        flags_cfg = (guide_epp or {}).get("flags")
+        if flags_cfg is not None and not isinstance(flags_cfg, dict):
+            raise ValueError("tracing requires router.epp.flags to be a mapping")
+        tracing = (flags_cfg or {}).get("tracing")
         if tracing is None:
             tracing = False
         elif str(tracing) in ("1", "t", "T", "true", "TRUE", "True"):
@@ -187,10 +195,13 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     }
 
     # Clear model-server labels replaced by the simulator.
-    match_labels = (guide_router.get("modelServers") or {}).get("matchLabels") or {}
-    for key in match_labels:
-        if key != "app":
-            overrides["router"]["modelServers"]["matchLabels"][key] = None
+    try:
+        match_labels = (guide_router.get("modelServers") or {}).get("matchLabels") or {}
+        for key in match_labels.keys():
+            if key != "app":
+                overrides["router"]["modelServers"]["matchLabels"][key] = None
+    except AttributeError as e:
+        print(f"Warning: Could not parse router config to extract modelServers labels for nullification: {e}")
     
     if machine_family:
         overrides["router"]["epp"]["affinity"] = {
