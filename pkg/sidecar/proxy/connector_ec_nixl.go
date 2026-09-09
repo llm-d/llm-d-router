@@ -86,7 +86,7 @@ func (s *Server) fanoutEncoderCollect(
 func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, completionRequest, ok := s.readJSONBody(r, w)
+	_, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -102,7 +102,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 
 	// Step 1: fan out to encoders, collect per-image ec_transfer_params.
 	if len(encodeEndPoints) > 0 {
-		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), completionRequest, encodeEndPoints, requestID)
+		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID)
 		if err != nil {
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
@@ -117,7 +117,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 				s.logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
 					"requestID", requestID, "items", total)
 			} else {
-				completionRequest[requestFieldECTransferParams] = params
+				body[requestFieldECTransferParams] = params
 				if contributed < total {
 					s.logger.Info("warning: ec_transfer_params partially populated; some items missing transfer metadata",
 						"requestID", requestID, "contributed", contributed, "items", total)
@@ -126,5 +126,5 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		}
 	}
 
-	s.runPDPipeline(w, r, completionRequest, prefillEndPoint, requestID)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID)
 }

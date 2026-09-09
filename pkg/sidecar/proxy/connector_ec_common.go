@@ -241,19 +241,19 @@ func (s *Server) fanoutEncoder(
 // runPDPipeline finalizes the post-encoder request and dispatches it to the
 // configured P/D connector or directly to the decoder. The caller has already
 // generated requestID and merged any encoder-side metadata into
-// completionRequest. On JSON-marshal failure, runPDPipeline writes the error
+// body. On JSON-marshal failure, runPDPipeline writes the error
 // response itself (matching the existing handler pattern) and returns.
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
 	r *http.Request,
-	completionRequest map[string]any,
+	body map[string]any,
 	prefillEndPoint string,
 	requestID string,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
-	completionRequest[requestFieldCacheHitThreshold] = 0
+	body[requestFieldCacheHitThreshold] = 0
 
-	modifiedBody, err := json.Marshal(completionRequest)
+	modifiedBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -277,7 +277,7 @@ func (s *Server) runPDPipeline(
 			"prefiller", prefillEndPoint,
 			"bodyBytes", len(modifiedBody),
 		}
-		if ec, ok := completionRequest[requestFieldECTransferParams]; ok {
+		if ec, ok := body[requestFieldECTransferParams]; ok {
 			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec, 64))
 		}
 		v.Info("forwarding request after encoder", kv...)

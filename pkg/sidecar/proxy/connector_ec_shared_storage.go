@@ -41,7 +41,7 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, completionRequest, ok := s.readJSONBody(r, w)
+	_, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -58,7 +58,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 
 	// Step 1: Process through Encoder cluster (if has MM input)
 	if len(encodeEndPoints) > 0 {
-		if err := s.fanoutEncoderPrimer(r.Context(), completionRequest, encodeEndPoints, requestID); err != nil {
+		if err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID); err != nil {
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
@@ -67,5 +67,5 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
-	s.runPDPipeline(w, r, completionRequest, prefillEndPoint, requestID)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID)
 }
