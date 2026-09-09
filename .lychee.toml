@@ -9,6 +9,18 @@ exclude = [
   "^https://app\\.fossa\\.com/"
 ]
 
+# release-notes.d/ — fragments are sourced verbatim from PR bodies; let
+# the original PR's link check be authoritative.
+#
+# .github/copilot-instructions.md is a symlink to ../AGENTS.md (as is
+# ./CLAUDE.md). GitHub dereferences the symlink for display so relative
+# links resolve from AGENTS.md at the repo root; lychee reads the raw
+# path and breaks on otherwise-correct links. Skip the duplicate.
+exclude_path = [
+  "release-notes.d",
+  ".github/copilot-instructions.md",
+]
+
 # Per-request timeout in seconds. Sized for slow upstream docs sites
 # (e.g. sigs.k8s.io subdomains under load); 20s was tight enough to fire
 # spurious timeouts on otherwise-reachable links.
