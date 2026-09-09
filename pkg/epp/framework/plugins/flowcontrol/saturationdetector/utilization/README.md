@@ -23,18 +23,26 @@ The global pool saturation is then evaluated across all candidate endpoints as a
     PoolSaturation = Average(EndpointScore)
 
 **Heterogeneous Deployments:** Because this detector calculates saturation as an unweighted average of individual endpoint scores, it treats all endpoints equally regardless of their physical capacity. In deployments with heterogeneous compute (e.g., mixing H100 and L4 nodes), a small, saturated endpoint has the exact same impact on global backpressure as a massive, saturated endpoint. Contrast this with the Concurrency Detector, which evaluates saturation as a single aggregate fraction, biasing toward larger endpoints.
-*Note: Endpoints with missing or stale metrics are aggressively scored as 100% saturated (fail-closed).*
+*Note: Endpoints with missing or stale metrics are scored according to `stalenessPolicy`: as 100% saturated under `saturated` (default), or excluded from the pool average under `ignore`. An empty candidate list reads 1.0 under both policies.*
 
-**Operational dependency:** because stale endpoints score as saturated, Flow Control dispatch depends on the
-health of model-server metrics collection (scrape path, port, TLS, auth). A fleet-wide scrape outage pins
+**Operational dependency:** under `saturated`, a fleet-wide scrape outage pins
 `flow_control_pool_saturation` at 1.0 and halts dispatch entirely. The `flow_control_stale_endpoints` gauge and a
 rate-limited detector log distinguish this from genuine overload: stale endpoints read exactly 1.0, while genuine
-oversubscription typically reads above 1.0. This fail-closed posture is deliberate — admitting blind on missing
+oversubscription typically reads above 1.0. `saturated` is the default because admitting blind on missing
 data risks overloading model servers with no backpressure signal at all. Staleness also tends to correlate with
-overload: a server too busy to serve its metrics endpoint is often the one that is saturated, so failing open
-would hide exactly the wrong endpoints. The posture is not configurable; if field evidence shows a need, a
-staleness policy (for example, holding the last known score for a bounded window) can be added later without
-changing this default.
+overload: a server too busy to serve its metrics endpoint is often the one that is saturated, so `ignore`
+discounts the endpoints most likely to be overloaded from the backpressure signal. Deployments whose availability budget cannot absorb a dispatch halt
+during a metrics collection outage can select `ignore`, which excludes stale endpoints from the saturation
+average and scores an all-stale pool at 0.0, consistent with the Filter's fail-open fallback. Under `ignore`,
+a fleet-wide scrape outage means dispatching with no backpressure signal at all; the stale-endpoints gauge and
+detector log are the primary operational signal in that posture.
+
+`stalenessPolicy` governs the `SaturationDetector` role only. The `Filter` role always drops stale candidates
+and falls back to the original list when every candidate is stale, independent of this setting. Slow scrape
+cadences should be tuned with `metricsStalenessThreshold` rather than `ignore`: if the poll interval is
+longer than the staleness threshold, every sample reads stale between polls and `saturated` will block
+dispatch almost continuously. The policy field is an enum so additional degradations (for example, holding
+the last known score for a bounded window) can be added later.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:
@@ -59,7 +67,8 @@ The plugin accepts JSON parameters decoding to the following fields:
 
 - `queueDepthThreshold` (`int`): Target waiting queue depth limit. Serves as the "ideal" queue capacity for a single endpoint. Must be > 0. (Default: `5`)
 - `kvCacheUtilThreshold` (`float64`): Target KV cache memory utilization limit, expressed as a fraction. Must be in `(0.0, 1.0]`. (Default: `0.8`)
-- `metricsStalenessThreshold` (`string` / duration): Maximum age of metrics before an endpoint is considered stale. Stale endpoints are treated as 100% saturated. Must be > 0. (Default: `"200ms"`)
+- `metricsStalenessThreshold` (`string` / duration): Maximum age of metrics before an endpoint is considered stale. How stale endpoints are scored is controlled by `stalenessPolicy`. Must be > 0. (Default: `"200ms"`)
+- `stalenessPolicy` (`string`): How endpoints with missing or stale metrics contribute to pool saturation: `"saturated"` scores them as fully saturated; `"ignore"` excludes them from the saturation average. (Default: `"saturated"`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal thresholds, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
 
 ## Trade-offs

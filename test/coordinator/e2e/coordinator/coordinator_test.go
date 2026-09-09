@@ -221,7 +221,7 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 
 	for _, step := range expectedSteps {
 		stepField := `"step":"` + step + `"`
-		gomega.Expect(logHasLine(logs, `"msg":"step complete"`, stepField)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"step complete"`, stepField)).To(gomega.BeTrue(),
 			"coordinator logs have no 'step complete' entry for step %q", step)
 	}
 
@@ -236,15 +236,15 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 		// never sees, so the kv connector's "preparing decode kv params" trace,
 		// which always sets do_remote_prefill=true, is where the decode leg surfaces.
 		ginkgo.By("Verifying kv_transfer_params forwarded on the prefill request")
-		gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
 			"coordinator logs have no prefill request body carrying kv_transfer_params")
 
 		ginkgo.By("Verifying kv_transfer_params in the prefill response")
-		gomega.Expect(logHasLine(logs, `"msg":"response body"`, `"do_remote_prefill":true`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"response body"`, `"do_remote_prefill":true`)).To(gomega.BeTrue(),
 			"coordinator logs have no prefill response body carrying kv_transfer_params with do_remote_prefill=true")
 
 		ginkgo.By("Verifying kv_transfer_params on the decode leg")
-		gomega.Expect(logHasLine(logs, `"msg":"preparing decode kv params"`, `"do_remote_prefill":true`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"preparing decode kv params"`, `"do_remote_prefill":true`)).To(gomega.BeTrue(),
 			"coordinator logs have no decode kv_transfer_params with do_remote_prefill=true")
 	}
 
@@ -252,7 +252,7 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 		// The encode step fans out one sub-request per image; this marker is
 		// logged by the step itself, so it holds for any ec connector.
 		ginkgo.By("Verifying encode completed all image sub-requests")
-		gomega.Expect(logHasLine(logs, `"msg":"all sub-requests complete"`, fmt.Sprintf(`"count":%d`, expectedImages))).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"all sub-requests complete"`, fmt.Sprintf(`"count":%d`, expectedImages))).To(gomega.BeTrue(),
 			"coordinator logs missing 'all sub-requests complete' with count=%d", expectedImages)
 
 		if ecNIXL {
@@ -260,11 +260,11 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 			// ("merged encode response","total":N), then the merged set is carried
 			// on the prefill request body.
 			ginkgo.By("Verifying ec_transfer_params merged for all images")
-			gomega.Expect(logHasLine(logs, `"msg":"merged encode response"`, fmt.Sprintf(`"total":%d`, expectedImages))).To(gomega.BeTrue(),
+			gomega.Expect(logHasLine(logs, `"body":"merged encode response"`, fmt.Sprintf(`"total":%d`, expectedImages))).To(gomega.BeTrue(),
 				"coordinator logs missing merged encode response with total=%d", expectedImages)
 
 			ginkgo.By("Verifying ec_transfer_params forwarded on the prefill request")
-			gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
+			gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
 				"coordinator logs have no prefill request body carrying ec_transfer_params")
 		}
 	}
@@ -385,7 +385,7 @@ func fetchCoordinatorLogs(nsName string) string {
 // on the coordinator running at log_level 5.
 func verifyTokenLimits(logs string, wantMin, wantMax int, capLegs []string) {
 	ginkgo.By("Verifying decode leg forwards the client min_tokens/max_tokens")
-	gomega.Expect(logHasLine(logs, `"msg":"request body"`, `"epp-profile":"decode"`,
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"decode"`,
 		fmt.Sprintf(`"min_tokens":%d`, wantMin), fmt.Sprintf(`"max_tokens":%d`, wantMax))).To(gomega.BeTrue(),
 		"coordinator logs have no decode request body carrying min_tokens=%d and max_tokens=%d", wantMin, wantMax)
 
@@ -393,11 +393,11 @@ func verifyTokenLimits(logs string, wantMin, wantMax int, capLegs []string) {
 		phaseField := `"epp-profile":"` + phase + `"`
 
 		ginkgo.By("Verifying " + phase + " leg caps max_tokens to 1")
-		gomega.Expect(logHasLine(logs, `"msg":"request body"`, phaseField, `"max_tokens":1`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"max_tokens":1`)).To(gomega.BeTrue(),
 			"coordinator logs have no %s request body carrying max_tokens=1", phase)
 
 		ginkgo.By("Verifying " + phase + " leg strips min_tokens")
-		gomega.Expect(logHasLine(logs, `"msg":"request body"`, phaseField, `"min_tokens"`)).To(gomega.BeFalse(),
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"min_tokens"`)).To(gomega.BeFalse(),
 			"%s request body must not carry min_tokens", phase)
 	}
 }
@@ -410,7 +410,7 @@ func verifyEncodeSkipped(nsName string) {
 	logs := fetchCoordinatorLogs(nsName)
 
 	ginkgo.By("Verifying encode was skipped for the generate request")
-	gomega.Expect(logHasLine(logs, `"msg":"skipping encode for generate request"`)).To(gomega.BeTrue(),
+	gomega.Expect(logHasLine(logs, `"body":"skipping encode for generate request"`)).To(gomega.BeTrue(),
 		"coordinator logs missing 'skipping encode for generate request'")
 }
 

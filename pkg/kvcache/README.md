@@ -22,17 +22,22 @@ indexer owns block-key computation, index lookup, and prefix matching.
   fixed-size blocks and hash each block (chaining the previous block's hash so a
   key encodes its whole prefix). `extraFeatures` taints the hash with per-block
   multimodal metadata when present.
-- **Matching.** `MatchBlockKeys` queries the
-  [`kvblock.Index`](kvblock/README.md) for the pods that hold each block key,
-  optionally restricted to a caller-supplied pod set, and folds the result
-  into one `PodMatch` per pod holding the first key: the pod's longest run of
-  consecutive block hits starting from block 0, its weighted score (per
-  device tier, `BackendConfigs`), and the run length per tier. The matching
-  rules live in one accumulator, so every caller sees the same semantics.
+- **Matching.** `MatchBlockKeys` reads the pods that hold each block key
+  from the [`kvblock.Index`](kvblock/README.md), optionally restricted to a
+  caller-supplied pod set, and folds them into one `PodMatch` per pod holding
+  the first key: the pod's longest run of consecutive block hits starting
+  from block 0, its weighted score (per device tier, `BackendConfigs`), and
+  the run length per tier. It walks the index in key order when the backend
+  is a `kvblock.KeyWalker` and materializes `Lookup` otherwise; both feed the
+  one accumulator that holds the matching rules, so every caller and backend
+  sees the same semantics. The contiguous-chain hit metrics are recorded
+  here, under the index's `enableMetrics` option.
 - **Scoring.** `ScoreTokens` reports each pod's weighted score, so a pod that
   holds a longer contiguous prefix ranks higher.
 - **Tracing.** Index operations and the matcher emit OpenTelemetry spans,
-  no-ops when tracing is not configured.
+  no-ops when tracing is not configured. The `match_block_keys` span emits
+  `key_count`, `pod_filter_count`, `walked`, `pods_matched`, and `longest_chain`
+  under the `llm_d.kv_cache.prefix_match` attribute prefix.
 
 ## Key Types
 

@@ -30,7 +30,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - The PR addresses that issue and nothing else: no renames, reformatting, refactors, new abstractions, or pattern changes beyond what the issue requires.
 - Unrelated improvements belong in their own issue and PR, not folded into this PR. If you spot dead code or unrelated bugs in passing, mention them; don't fix them.
 - Self-check on the way out: if the change grew larger than expected or the fix feels hacky, rewrite the clean version before opening the PR.
-- Verify the code passs `make presubmit` locally before submitting a PR.
+- Verify the code passes `make presubmit` locally before submitting a PR.
 - Always use the project's `.github/PULL_REQUEST_TEMPLATE.md`.
   - Document user (not developer) facing changes in the ```release-note``` block. The  `release-notes.d/unreleased/*`
     file is automatically generated from the block's content - do not create the file directly. 
@@ -44,6 +44,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - Docs and comments describe the current state on its own terms. No "previously", "now", "recently", "renamed from", "added to fix", "this PR", "see above", or other temporal, deictic, or conversational framing. A reader with no context for the change must still understand the text.
 - State each fact once, in its canonical location. Do not duplicate across struct docs, prose, tables, inline comments, and examples.
 - Do not use Unicode symbols or special characters in general, unless explicitly requested.
+- Do not alias an import to the name Go already infers from the package. `make lint` enforces this via revive's `redundant-import-alias`, except for version-suffixed packages (`v1`, `v1alpha1`, ...): `goimports` always writes that alias, so the rule excludes them rather than fight `make format`.
 
 ### Constructions to delete
 

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"golang.org/x/sync/errgroup"
@@ -53,17 +54,18 @@ func truncateLongStrings(v any, maxLen int) any {
 }
 
 // extractMMItems extracts all multimodal items from the request messages.
-func extractMMItems(requestData map[string]any) []map[string]any {
+func extractMMItems(logger logr.Logger, requestData map[string]any) []map[string]any {
 	var items []map[string]any
 
-	messages, ok := requestData["messages"].([]any)
-	if !ok {
+	messages, err := requestMessages(requestData)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("cannot read request messages for multimodal extraction", "error", err)
 		return items
 	}
 
 	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
+		var msgMap map[string]any
+		if err := json.Unmarshal(msg, &msgMap); err != nil {
 			continue
 		}
 
@@ -113,7 +115,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest, originalRequest)
+	reqcommon.PrimeSingleTokenRequest(encoderRequest)
 
 	return encoderRequest
 }
@@ -139,7 +141,7 @@ func mmItemURL(item map[string]any) string {
 // there is no multimodal content. The caller should skip the encoder
 // stage in that case.
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
-	raw := extractMMItems(originalRequest)
+	raw := extractMMItems(s.logger, originalRequest)
 	if len(raw) == 0 {
 		return nil
 	}
@@ -239,19 +241,19 @@ func (s *Server) fanoutEncoder(
 // runPDPipeline finalizes the post-encoder request and dispatches it to the
 // configured P/D connector or directly to the decoder. The caller has already
 // generated requestID and merged any encoder-side metadata into
-// completionRequest. On JSON-marshal failure, runPDPipeline writes the error
+// body. On JSON-marshal failure, runPDPipeline writes the error
 // response itself (matching the existing handler pattern) and returns.
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
 	r *http.Request,
-	completionRequest map[string]any,
+	body map[string]any,
 	prefillEndPoint string,
 	requestID string,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
-	completionRequest[requestFieldCacheHitThreshold] = 0
+	body[requestFieldCacheHitThreshold] = 0
 
-	modifiedBody, err := json.Marshal(completionRequest)
+	modifiedBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -275,7 +277,7 @@ func (s *Server) runPDPipeline(
 			"prefiller", prefillEndPoint,
 			"bodyBytes", len(modifiedBody),
 		}
-		if ec, ok := completionRequest[requestFieldECTransferParams]; ok {
+		if ec, ok := body[requestFieldECTransferParams]; ok {
 			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec, 64))
 		}
 		v.Info("forwarding request after encoder", kv...)

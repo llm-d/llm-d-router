@@ -51,8 +51,8 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 
-	var requestData map[string]any
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	requestData, err := decodeRequestBody(body)
+	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
@@ -79,7 +79,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
+	reqcommon.PrimeSingleTokenRequest(prefillData)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
@@ -89,7 +89,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("prefill request body", "body", string(prefillBody))
+		v.Info("prefill request body", logging.HTTPBodyKey, string(prefillBody))
 	}
 
 	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
@@ -114,7 +114,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("decode request body", "body", string(decodeBody))
+		v.Info("decode request body", logging.HTTPBodyKey, string(decodeBody))
 	}
 
 	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort)
@@ -367,7 +367,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("decoder request body with p2p source", "body", string(newBody))
+		v.Info("decoder request body with p2p source", logging.HTTPBodyKey, string(newBody))
 	}
 
 	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData)

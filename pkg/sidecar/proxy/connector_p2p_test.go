@@ -111,6 +111,39 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	It("should strip min_tokens from the prefill leg and restore it in decode", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		body := chatCompletionsRequestBodyWithMinTokens
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		if resp.StatusCode != 200 {
+			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			Fail(string(bp))
+		}
+
+		Eventually(func() int {
+			return len(testInfo.prefillHandler.GetCompletionRequests())
+		}).Should(Equal(1))
+
+		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
+		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).ToNot(HaveKey(requestFieldMinTokens))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		dreq := testInfo.decodeHandler.GetCompletionRequests()[0]
+		Expect(dreq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should not dispatch the decode leg until the prefill leg has returned", func() {
 		// The decode leg pulls KV from the prefiller's secondary tier. If it is
 		// dispatched first, its fetch arrives before any blocks are stored and
@@ -195,7 +228,7 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not add max_completion_tokens to the prefill leg when absent from the original request", func() {
+	It("should add max_completion_tokens=1 to the prefill leg even when absent from the original request", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
@@ -217,7 +250,7 @@ var _ = Describe("P2P Connector", func() {
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
 		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
+		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
