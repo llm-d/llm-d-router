@@ -106,9 +106,6 @@ fi
 # By default we are not setting up for KV cache
 export KV_CACHE_ENABLED="${KV_CACHE_ENABLED:-false}"
 
-# By default we are not setting up for external tokenizer
-export EXTERNAL_TOKENIZER_ENABLED="${EXTERNAL_TOKENIZER_ENABLED:-false}"
-
 # Replica counts for E (Encode), P (Prefill), and D (Decode)
 export VLLM_REPLICA_COUNT_E="${VLLM_REPLICA_COUNT_E:-1}"
 export VLLM_REPLICA_COUNT_P="${VLLM_REPLICA_COUNT_P:-1}"
@@ -158,9 +155,7 @@ fi
 
 # Determine EPP config file based on disaggregation flags
 # KV cache and data parallel are independent options that work with any mode
-if [ "${EXTERNAL_TOKENIZER_ENABLED}" == "true" ]; then
-  DEFAULT_EPP_CONFIG="deploy/config/sim-epp-external-tokenizer-config.yaml"
-elif [ "${KV_CACHE_ENABLED}" == "true" ]; then
+if [ "${KV_CACHE_ENABLED}" == "true" ]; then
   DEFAULT_EPP_CONFIG="deploy/config/sim-epp-kvcache-config.yaml"
 elif [ "${DISAGG_E}" == "true" ] && [ "${DISAGG_P}" == "true" ]; then
   DEFAULT_EPP_CONFIG="deploy/config/sim-e-p-d-epp-config.yaml"
@@ -405,7 +400,7 @@ TEMP_FILE=$(mktemp)
 trap "rm -f \"${TEMP_FILE}\"" EXIT
 
 kubectl --context ${KUBE_CONTEXT} delete configmap epp-config --ignore-not-found
-envsubst '$MODEL_NAME' < ${EPP_CONFIG} > ${TEMP_FILE}
+envsubst '${MODEL_NAME} ${VLLM_RENDER_URL}' < ${EPP_CONFIG} > ${TEMP_FILE}
 kubectl --context ${KUBE_CONTEXT} create configmap epp-config --from-file=epp-config.yaml=${TEMP_FILE}
 
 # The replica count is changed in some end to end tests

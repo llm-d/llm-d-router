@@ -74,6 +74,39 @@ const (
 	testFeatureGate = "test-feature-gate"
 )
 
+type testCrossReplicaSyncer struct{}
+
+func (testCrossReplicaSyncer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "test-syncer", Name: "test-syncer"}
+}
+
+func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
+	return nil
+}
+
+func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+	return nil, false, nil
+}
+
+func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
+	return nil
+}
+
+func (testCrossReplicaSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
+	return candidate, false, nil
+}
+
+func TestBuildDataLayerConfigExposesCrossReplicaSyncerOnHandle(t *testing.T) {
+	handle := fwkplugin.NewEppHandle(context.Background(), nil)
+	syncer := &testCrossReplicaSyncer{}
+	handle.AddPlugin("syncer", syncer)
+
+	cfg, err := buildDataLayerConfig(&configapi.DataLayerConfig{CrossReplicaSyncerPluginRef: "syncer"}, handle)
+	require.NoError(t, err)
+	require.Same(t, syncer, cfg.Syncer)
+	require.Same(t, syncer, handle.CrossReplicaSyncer())
+}
+
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
 
 func TestLoadRawConfiguration(t *testing.T) {
@@ -264,6 +297,39 @@ func TestLoadRawConfiguration(t *testing.T) {
 			deprecated: false,
 		},
 		{
+			name:       "Success - Deprecated discovery.pluginRef",
+			configText: successDeprecatedDiscoveryPluginRefText,
+			want: &configapi.EndpointPickerConfig{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "EndpointPickerConfig",
+					APIVersion: configapi.GroupVersion.String(),
+				},
+				Plugins: []configapi.PluginSpec{
+					{Name: "maxScore", Type: "max-score-picker"},
+					{Name: "my-disc", Type: "file-discovery"},
+				},
+				SchedulingProfiles: []configapi.SchedulingProfile{
+					{
+						Name: "default",
+						Plugins: []configapi.SchedulingPlugin{
+							{PluginRef: "maxScore"},
+						},
+					},
+				},
+				FeatureGates: configapi.FeatureGates{},
+				DataLayer: &configapi.DataLayerConfig{
+					Discovery: &configapi.DiscoveryConfig{
+						PluginRef: "my-disc",
+						Endpoints: &configapi.EndpointDiscoveryConfig{
+							PluginRef: "my-disc",
+						},
+					},
+				},
+			},
+			wantErr:    false,
+			deprecated: true,
+		},
+		{
 			name:       "Success - Deprecated Top-level SaturationDetector",
 			configText: successDeprecatedTopLevelSaturationDetectorText,
 			want: &configapi.EndpointPickerConfig{
@@ -376,6 +442,92 @@ func TestLoadRawConfiguration(t *testing.T) {
 			} else {
 				require.False(t, tc.deprecated, "Valid configuration was marked as deprecated")
 			}
+		})
+	}
+}
+
+// TestLoadRawConfigExtraGates verifies that flag-supplied feature gates are appended to the
+// configuration's own featureGates list, and so take precedence over it. The rawConfig assertion
+// matters as much as the map: InstantiateAndConfigure and validateConfig each re-derive gate from
+// rawConfig.FeatureGates, so a gate applied only to the returned map would leave them disagreeing.
+func TestLoadRawConfigExtraGates(t *testing.T) {
+	t.Parallel()
+
+	RegisterFeatureGate(testFeatureGate, true)
+	RegisterFeatureGate(flowcontrol.FeatureGate, false)
+
+	tests := []struct {
+		name       string
+		configText string
+		extraGates []string
+		wantGates  map[string]bool
+		wantRaw    configapi.FeatureGates
+		wantErr    bool
+	}{
+		{
+			name:       "flag gate with no config",
+			extraGates: []string{flowcontrol.FeatureGate},
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: true,
+			},
+			wantRaw: configapi.FeatureGates{flowcontrol.FeatureGate},
+		},
+		{
+			name:       "flag explicit false overrides registered default",
+			extraGates: []string{testFeatureGate + "=false"},
+			wantGates: map[string]bool{
+				testFeatureGate:         false,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{testFeatureGate + "=false"},
+		},
+		{
+			name:       "bare flag gate overrides file's explicit false",
+			configText: successNoProfilesText,
+			extraGates: []string{testFeatureGate},
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{testFeatureGate + "=false", testFeatureGate},
+		},
+		{
+			name: "no flag gates leaves config untouched",
+			wantGates: map[string]bool{
+				testFeatureGate:         true,
+				flowcontrol.FeatureGate: false,
+			},
+			wantRaw: configapi.FeatureGates{},
+		},
+		{
+			name:       "unregistered flag gate is rejected",
+			extraGates: []string{"no-such-gate"},
+			wantErr:    true,
+		},
+		{
+			name:       "non-boolean flag value is rejected",
+			extraGates: []string{flowcontrol.FeatureGate + "=notabool"},
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logger := logging.NewTestLogger()
+
+			got, gates, err := LoadRawConfig([]byte(tc.configText), logger, tc.extraGates...)
+
+			if tc.wantErr {
+				require.Error(t, err, "Expected LoadRawConfig to fail")
+				return
+			}
+			require.NoError(t, err, "Expected LoadRawConfig to succeed")
+
+			require.Empty(t, cmp.Diff(tc.wantGates, gates), "Resolved feature gates mismatch")
+			require.Empty(t, cmp.Diff(tc.wantRaw, got.FeatureGates),
+				"rawConfig.FeatureGates must carry the flag entries so later phases derive the same gates")
 		})
 	}
 }
@@ -964,6 +1116,34 @@ func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	require.Empty(t, cfg.Sources)
+}
+
+func TestBuildDataLayerConfigCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	timeout := 3 * time.Second
+	cfg, err := buildDataLayerConfig(
+		&configapi.DataLayerConfig{
+			CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+		},
+		handle,
+	)
+	require.NoError(t, err)
+	require.Equal(t, timeout, cfg.PublishTimeout)
+}
+
+func TestBuildDataLayerConfigRejectsNonPositiveCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		_, err := buildDataLayerConfig(
+			&configapi.DataLayerConfig{
+				CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+			},
+			handle,
+		)
+		require.ErrorContains(t, err, "crossReplicaPublishTimeout must be positive")
+	}
 }
 
 // --- Helpers & Mocks ---

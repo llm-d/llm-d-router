@@ -2,17 +2,14 @@ name: Check Signed Commits in PR
 
 on:
   pull_request_target:
+  merge_group:
+    types: [checks_requested]
 
 jobs:
   check-signed-commits:
     name: Check signed commits in PR
-    # Skip signed-commits enforcement for bot-authored release-notes branches:
-    # per-PR fragments under release-notes/pr-*, assembly under
-    # release-notes/assemble-*. The release-notes App can't sign commits;
-    # fragment content is sourced from already-reviewed PR bodies and
-    # assembly is a deterministic transform. Pin to the two specific prefixes
-    # so an unrelated bot pushing to release-notes/<other> doesn't bypass.
     if: |
+      github.event_name == 'pull_request_target' &&
       !(
         (startsWith(github.head_ref, 'release-notes/pr-') ||
          startsWith(github.head_ref, 'release-notes/assemble-')) &&
@@ -30,3 +27,58 @@ jobs:
             🚨 Unsigned commits detected! Please sign your commits.
 
             For instructions on how to set up GPG/SSH signing and verify your commits, please see [GitHub Documentation](https://docs.github.com/en/authentication/managing-commit-signature-verification).
+
+  dco-check:
+    name: dco-check
+    # Runs on pull_request_target (not merge_group) for the same bot-branch
+    # skip as check-signed-commits; merge_group entries never originate from
+    # those bot branches directly, so the skip only needs to guard the PR side.
+    if: |
+      github.event_name == 'merge_group' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        !(
+          (startsWith(github.head_ref, 'release-notes/pr-') ||
+           startsWith(github.head_ref, 'release-notes/assemble-')) &&
+          endsWith(github.event.pull_request.user.login, '[bot]')
+        )
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify Signed-off-by trailer matches commit author email (DCO)
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+          else
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          fi
+          fail=0
+          for c in $(git rev-list "$base..$head"); do
+            author_email=$(git show -s --format='%ae' "$c")
+            trailers=$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")
+            if [ -z "$trailers" ]; then
+              echo "::error::commit $c is missing a Signed-off-by trailer (author email: $author_email)"
+              fail=1
+              continue
+            fi
+            match=0
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              case "$line" in
+                *"<$author_email>"*) match=1 ;;
+              esac
+            done <<<"$trailers"
+            if [ "$match" -ne 1 ]; then
+              echo "::error::commit $c Signed-off-by email does not match commit author email. expected: $author_email, found: $trailers"
+              fail=1
+            fi
+          done
+          exit $fail

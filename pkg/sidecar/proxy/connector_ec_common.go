@@ -113,7 +113,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest, originalRequest)
+	reqcommon.PrimeSingleTokenRequest(encoderRequest)
 
 	return encoderRequest
 }

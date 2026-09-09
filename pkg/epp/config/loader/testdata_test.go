@@ -933,6 +933,25 @@ schedulingProfiles:
   - pluginRef: maxScorePicker
 `
 
+// successDeprecatedDiscoveryPluginRefText tests that the deprecated bare
+// discovery.pluginRef is migrated to discovery.endpoints.pluginRef.
+const successDeprecatedDiscoveryPluginRefText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- name: my-disc
+  type: file-discovery
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+dataLayer:
+  discovery:
+    pluginRef: my-disc
+`
+
 // successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,
 // copied to nested location, and handled.
 const successDeprecatedTopLevelSaturationDetectorText = `

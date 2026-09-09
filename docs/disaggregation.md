@@ -235,7 +235,6 @@ By default, llm-d uses the label key `llm-d.ai/role` with values:
 - `"encode-decode"` → pods capable of both encode and decode (E/PD, rare)
 - `"prefill-decode"` → pods capable of both prefill and decode
 - `"encode-prefill-decode"` → pods capable of all three stages
-- `"both"` → **deprecated** (use `"prefill-decode"` instead)
 
 However, external systems may use alternative labels like:
 ```yaml
@@ -424,6 +423,7 @@ Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declarin
 
 - `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
 - `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
+- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads for both the disaggregation decision and the conditional-decode 412 gate. If unspecified, the `approx-prefix-cache-producer` is used.
 
 **Conditional-decode 412 gate**
 

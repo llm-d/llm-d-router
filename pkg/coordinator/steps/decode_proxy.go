@@ -27,6 +27,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -35,6 +36,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -89,31 +91,64 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 	return proxyReq, nil
 }
 
-// newDecodeProxy builds the streaming reverse proxy for a decode-phase request.
-// modifyResponse, when non-nil, inspects each upstream response (the conditional
-// cache probe uses it to detect a 412). Transport errors are logged and answered
-// 502, except errCacheMiss, which is swallowed so the miss falls through.
+// decodeOutcome captures the visible result of a decode-phase proxy call.
+// Status is the upstream HTTP status observed via ModifyResponse (0 if the
+// round trip failed before headers). TransportErr carries a round-trip failure
+// (connection refused, timeout, TCP reset) after the ErrorHandler has already
+// answered 502. Both fields let the caller emit error metrics without another
+// write to the client, which is already committed by the proxy.
+type decodeOutcome struct {
+	Status       int
+	TransportErr error
+}
+
+// newDecodeProxy builds the streaming reverse proxy for a decode-phase request
+// and a decodeOutcome the caller reads after ServeHTTP returns. modifyResponse,
+// when non-nil, inspects each upstream response (the conditional cache probe
+// uses it to detect a 412) and runs after the outcome captures the status.
+// Transport errors are logged and answered 502, except errCacheMiss, which is
+// swallowed so the miss falls through.
 //
 // A failure after the upstream response has started streaming cannot become a
 // 502: the 200 status and partial body are already on the wire, so the proxy
 // aborts the connection (the client sees a truncated response). The stdlib only
 // surfaces that case through its ErrorLog, so ErrorLog is wired to the
 // request-scoped logger to make the truncation observable with the request id.
-func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
-		Director:       func(_ *http.Request) {},
-		FlushInterval:  -1,
-		Transport:      transport,
-		ModifyResponse: modifyResponse,
-		ErrorLog:       log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, proxyErr error) {
+func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) (*httputil.ReverseProxy, *decodeOutcome) {
+	out := &decodeOutcome{}
+	proxy := &httputil.ReverseProxy{
+		Director:      func(_ *http.Request) {},
+		FlushInterval: -1,
+		Transport:     transport,
+		ModifyResponse: func(resp *http.Response) error {
+			out.Status = resp.StatusCode
+			if modifyResponse != nil {
+				return modifyResponse(resp)
+			}
+			return nil
+		},
+		ErrorLog: log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, proxyErr error) {
 			if errors.Is(proxyErr, errCacheMiss) {
 				return
 			}
-			logger.Error(proxyErr, "proxy error")
+			// A request whose context already ended (client disconnected, or a
+			// client-set deadline expired) is a routine lifecycle event, not a
+			// backend fault. Check req.Context().Err() rather than proxyErr's
+			// identity: Transport.RoundTrip's ResponseHeaderTimeout returns
+			// net/http's errTimeout, which satisfies
+			// errors.Is(err, context.DeadlineExceeded) by stdlib design and
+			// would otherwise misclassify a hung backend as a client cancellation.
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				logger.V(logutil.VERBOSE).Info("decode proxy: client cancelled", "error", ctxErr)
+			} else {
+				out.TransportErr = proxyErr
+				logger.Error(proxyErr, "proxy error")
+			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
+	return proxy, out
 }
 
 // proxyErrorLogWriter adapts the reverse proxy's *log.Logger sink to the
@@ -127,4 +162,40 @@ type proxyErrorLogWriter struct {
 func (w *proxyErrorLogWriter) Write(p []byte) (int, error) {
 	w.logger.Error(errors.New(strings.TrimSpace(string(p))), "decode proxy streaming error: client received a partial response")
 	return len(p), nil
+}
+
+// timedRoundTripper wraps an http.RoundTripper and reports the wall-clock time
+// spent inside inner.RoundTrip. RoundTrip returns as soon as response headers
+// arrive (or a transport-level error occurs), so this measures the same
+// "single outbound call" the non-streaming steps time by wrapping gwClient.Post
+// and keeps upstream_request_duration_seconds comparable across upstreams; the
+// decode-path ReverseProxy would otherwise fold streaming body-copy duration
+// into the same histogram.
+type timedRoundTripper struct {
+	inner  http.RoundTripper
+	record func(time.Duration)
+}
+
+func (t *timedRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	start := time.Now()
+	resp, err := t.inner.RoundTrip(r)
+	t.record(time.Since(start))
+	return resp, err
+}
+
+// instrumentedTransport wraps base in a timedRoundTripper that reports
+// upstream_request_total and upstream_request_duration_seconds for upstream.
+// base may be nil; http.DefaultTransport is substituted then, matching
+// http.Client.Do.
+func instrumentedTransport(base http.RoundTripper, upstream string) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	coordmetrics.IncUpstreamRequestTotal(upstream)
+	return &timedRoundTripper{
+		inner: base,
+		record: func(d time.Duration) {
+			coordmetrics.RecordUpstreamRequestDuration(upstream, d)
+		},
+	}
 }

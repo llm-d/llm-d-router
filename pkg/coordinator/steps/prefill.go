@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -105,7 +106,9 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 	}
 
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamPrefill)
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
+	call.Done()
 	if err != nil {
 		return fmt.Errorf("prefill: request: %w", err)
 	}

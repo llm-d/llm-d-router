@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -133,8 +134,8 @@ func TestRunPickerPluginSingleSpan(t *testing.T) {
 		key  attribute.Key
 		want string
 	}{
-		{"gen_ai.request.model", "m1"},
-		{"gen_ai.request.id", "r1"},
+		{semconv.GenAIRequestModelKey, "m1"},
+		{semconv.GenAIRequestIDKey, "r1"},
 	} {
 		if got := attrs[tc.key].AsString(); got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
@@ -241,10 +242,10 @@ func TestRunPickerPluginOmitsEmptyGenAI(t *testing.T) {
 		t.Fatalf("got %d pick_endpoints spans, want 1", len(spans))
 	}
 	attrs := pickerSpanAttributes(spans[0])
-	if _, ok := attrs["gen_ai.request.model"]; ok {
+	if _, ok := attrs[semconv.GenAIRequestModelKey]; ok {
 		t.Error("gen_ai.request.model set for empty TargetModel")
 	}
-	if _, ok := attrs["gen_ai.request.id"]; ok {
+	if _, ok := attrs[semconv.GenAIRequestIDKey]; ok {
 		t.Error("gen_ai.request.id set for empty RequestID")
 	}
 }

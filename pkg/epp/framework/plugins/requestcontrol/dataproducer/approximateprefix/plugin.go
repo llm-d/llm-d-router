@@ -149,6 +149,9 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if config.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixTokensToMatch must be >= 0 (current value: %d)", config.MaxPrefixTokensToMatch)
 	}
+	if config.MaxPrefixBlocksToMatch < 0 {
+		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
+	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
@@ -181,9 +184,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
-	if handle != nil {
-		go p.CleanUpInactivePods(ctx, handle)
-	}
+	go p.CleanUpInactivePods(ctx, handle)
 
 	return p, nil
 }
@@ -345,8 +346,11 @@ func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 	blockSize := p.config.BlockSizeTokens
 	if p.config.AutoTune && len(endpoints) > 0 {
 		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
-			if metric := endpoint.GetMetrics().CacheBlockSize; metric > 0 {
-				blockSize = metric
+			m := endpoint.GetMetrics()
+			if pmu := m.CachePrefixMatchUnit; pmu > 0 {
+				blockSize = pmu
+			} else if bs := m.CacheBlockSize; bs > 0 {
+				blockSize = bs
 			}
 		}
 	}

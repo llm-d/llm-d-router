@@ -255,7 +255,7 @@ func TestDispatchOrderingSLODeadline(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(len(specs))
+		return h.reg.Stats().Global.Len == uint64(len(specs))
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -328,11 +328,11 @@ func TestPriorityBackpressure(t *testing.T) {
 
 	enqueue("low-1", lowKey)
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "low-priority request should be queued")
 	enqueue("high-1", highKey)
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 2
+		return h.reg.Stats().Global.Len == 2
 	}, time.Second, time.Millisecond, "both requests should be queued")
 
 	detector.Unblock(1)
@@ -390,7 +390,7 @@ func TestFairnessRoundRobin(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(total)
+		return h.reg.Stats().Global.Len == uint64(total)
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -508,7 +508,7 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 
 	const count = 3
 	release := h.fillQueue(t, key, count, 100, func() bool {
-		return h.reg.Stats().TotalLen == count
+		return h.reg.Stats().Global.Len == count
 	})
 
 	// The global limit (3) is exhausted while the band limit (10) still has room, so a further
@@ -547,7 +547,7 @@ func TestByteCapacityEnforcement(t *testing.T) {
 
 	// 3 requests of 300 bytes each (900 total) fit within the 1000-byte budget.
 	release := h.fillQueue(t, key, 3, 300, func() bool {
-		return h.reg.Stats().TotalByteSize == 900
+		return h.reg.Stats().Global.ByteSize == 900
 	})
 
 	// A 4th 300-byte request would bring the band to 1200 bytes, so it must be rejected.
@@ -586,7 +586,7 @@ func TestEmptyPoolRejectsAsNoEndpoints(t *testing.T) {
 
 	// 3 requests of 300 bytes each (900 total) fit within the 1000-byte budget.
 	release := h.fillQueue(t, key, 3, 300, func() bool {
-		return h.reg.Stats().TotalByteSize == 900
+		return h.reg.Stats().Global.ByteSize == 900
 	})
 
 	// The 4th request exceeds the byte budget, but because the pool is empty the rejection must
@@ -764,7 +764,7 @@ func TestCallerContextCancellationEvictsRequest(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "request should be queued before cancelling")
 	reqCancel()
 
@@ -861,7 +861,7 @@ func TestGracefulShutdownDrainsQueuedRequests(t *testing.T) {
 
 	// Wait for all requests to queue (detector is blocked).
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(numRequests)
+		return h.reg.Stats().Global.Len == uint64(numRequests)
 	}, time.Second, time.Millisecond, "all requests should be queued before shutdown")
 
 	// Simulate pod termination: cancel the controller context.
@@ -1209,7 +1209,7 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	// would let an empty dispatch cycle consume its single slot (Saturation() charges inFlight
 	// even when nothing dispatches), leaving the request queued forever.
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "request should be queued before the gauge is read")
 
 	// The increment happens before queue admission, so the gauge is already > 0 here.
@@ -1446,9 +1446,9 @@ func TestHighConcurrencyFlowChurnNoDeadlock(t *testing.T) {
 
 	// Verify aggregate stats are consistent after dispatch + GC.
 	stats := reg.Stats()
-	require.Equal(t, uint64(0), stats.TotalLen,
+	require.Equal(t, uint64(0), stats.Global.Len,
 		"registry should have 0 queued items after all dispatched + GC")
-	require.Equal(t, uint64(0), stats.TotalByteSize,
+	require.Equal(t, uint64(0), stats.Global.ByteSize,
 		"registry should have 0 bytes after all dispatched + GC")
 }
 

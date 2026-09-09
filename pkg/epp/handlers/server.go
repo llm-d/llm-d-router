@@ -144,6 +144,14 @@ type RequestContext struct {
 	// response record defaults an unset cause to a natural completion.
 	TerminationCause fwkrc.TerminationCause
 
+	// FlowControlAdmitted reports whether flow control processed this request. It gates emission of the
+	// FlowQueueDuration response header, distinguishing a genuine zero-wait dispatch from flow control
+	// not running.
+	FlowControlAdmitted bool
+	// FlowControlQueueDuration is the wall-clock time the request spent in flow control admission
+	// (enqueue-and-wait). Meaningful only when FlowControlAdmitted is true.
+	FlowControlQueueDuration time.Duration
+
 	// Lifecycle bookkeeping.
 	firstTokenTimestamp        time.Time
 	lastChunkReceivedTimestamp time.Time
@@ -257,6 +265,22 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCau
 	default:
 		return fwkrc.TerminationCauseError
 	}
+}
+
+func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.TerminationCause {
+	if trailers == nil || trailers.GetTrailers() == nil {
+		return ""
+	}
+
+	for _, header := range trailers.GetTrailers().GetHeaders() {
+		if header.Key == "grpc-status" {
+			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
+				return fwkrc.TerminationCauseError
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
@@ -448,8 +472,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey] = requestID // update in headers so director can consume it
 			}
 			logger = logger.WithValues(reqcommon.RequestIDHeaderKey, requestID)
-			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID will be logged too as part of logger context values.
-			loggerTrace = logger.V(logutil.TRACE)
 			ctx = log.IntoContext(ctx, logger)
 
 			// Re-parent the server span to the upstream trace context (e.g. the
@@ -457,7 +479,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// headers, then start it. The headers are only available here, so the span
 			// cannot be started at the top of Process without orphaning the trace.
 			ctx = extractTraceContext(ctx, v)
-			ctx, span = tracer.Start(ctx, "gateway.request", trace.WithSpanKind(trace.SpanKindServer))
+			ctx, span = tracer.Start(ctx, "request", trace.WithSpanKind(trace.SpanKindServer))
+
+			// Tag every log line of this request with the trace it belongs to.
+			ctx = tracing.LoggerWithSpanContext(ctx, span)
+			logger = log.FromContext(ctx)
+			loggerTrace = logger.V(logutil.TRACE)
+			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID and trace fields are logged as logger context values.
 
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
@@ -576,9 +604,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
-			// For HTTP, the response trailer is not sent. Thus, this case will not be triggered.
-			// For gRPC(over HTTP2), the protocol relies on responseTrailers to determine whether a response is complete.
+			// A non-zero grpc-status indicates a gRPC error. Record the error cause before
+			// finishResponse marks the response complete so the end-of-stream record is not
+			// reported as a natural termination.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
+			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
+				reqCtx.TerminationCause = cause
+			}
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
