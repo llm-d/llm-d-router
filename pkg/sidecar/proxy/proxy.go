@@ -338,7 +338,7 @@ func (c Config) String() string {
 // (if any) need special handling.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, APIType)
 
 // Server is the reverse proxy server
 type Server struct {

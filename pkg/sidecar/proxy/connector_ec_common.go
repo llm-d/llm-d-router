@@ -249,6 +249,7 @@ func (s *Server) runPDPipeline(
 	body map[string]any,
 	prefillEndPoint string,
 	requestID string,
+	apiType APIType,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
 	body[requestFieldCacheHitThreshold] = 0
@@ -288,7 +289,7 @@ func (s *Server) runPDPipeline(
 		// The encoder path does not carry a KV cache source: the P2P prefix pull
 		// is not wired through encoder disaggregation. The empty source skips the
 		// p2p injection regardless of --enable-p2p-pull.
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", APITypeChatCompletions)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", apiType)
 		return
 	}
 
