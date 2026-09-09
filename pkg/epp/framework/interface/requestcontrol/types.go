@@ -19,7 +19,7 @@ package requestcontrol
 import (
 	"google.golang.org/protobuf/types/known/structpb"
 
-	requesthandling "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // TerminationCause labels how a dispatched request's response stream ended. Observers that learn

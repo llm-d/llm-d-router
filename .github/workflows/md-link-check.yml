@@ -55,5 +55,5 @@ jobs:
         with:
           # Exclude release-notes.d/ — fragments are sourced verbatim from
           # PR bodies; let the original PR's link check be authoritative.
-          args: '--config .lychee.toml --verbose --no-progress --exclude-path release-notes.d **/*.md'
+          args: '--config .lychee.toml --verbose --no-progress --exclude-path release-notes.d "**/*.md"'
           fail: true

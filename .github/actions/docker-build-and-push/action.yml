@@ -65,6 +65,9 @@ runs:
       with:
         file: ${{ inputs.docker-file }}
         push: ${{ inputs.push == 'true' }}
+        # SBOM attestations turn the image into a manifest list which the
+        # docker exporter used by the no-push scan pass cannot write.
+        sbom: ${{ inputs.push == 'true' }}
         outputs: ${{ inputs.buildx-outputs }}
         platforms: ${{ inputs.push != 'true' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
         tags: |

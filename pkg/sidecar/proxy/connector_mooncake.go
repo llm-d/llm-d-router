@@ -93,7 +93,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		requestFieldTransferID:      transferID,
 	}
 	// update fields from original body; return asap.
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
+	reqcommon.PrimeSingleTokenRequest(prefillData)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
