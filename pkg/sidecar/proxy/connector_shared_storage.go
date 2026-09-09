@@ -31,7 +31,7 @@ import (
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(logging.DEBUG).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
-	original, completionRequest, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -40,10 +40,10 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
-	if cacheHitThreshold, hasCacheHitThreshold := completionRequest[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
+	if cacheHitThreshold, hasCacheHitThreshold := body[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
 		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
-		needsPrefill, err := s.tryDecode(w, decodeReq, completionRequest)
+		needsPrefill, err := s.tryDecode(w, decodeReq, body)
 		if err != nil {
 			return
 		}
@@ -55,15 +55,15 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	}
 
 	// we clone the completion request to avoid modifying the original request
-	prefillRequest := maps.Clone(completionRequest)
+	prefillRequest := maps.Clone(body)
 	if err := s.prefill(w, r, prefillPodHostPort, prefillRequest); err != nil {
 		s.logger.Error(err, "prefill failed")
 		return
 	}
 
 	s.logger.V(logging.DEBUG).Info("forwarding to decoder after prefill")
-	completionRequest[requestFieldCacheHitThreshold] = 0
-	decodeRequestBody, err := json.Marshal(completionRequest)
+	body[requestFieldCacheHitThreshold] = 0
+	decodeRequestBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
@@ -76,8 +76,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 }
 
 // tryDecode attempts to decode and returns whether prefill is needed.
-func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) (bool, error) {
-	if isStreaming, _ := completionRequest[requestFieldStream].(bool); isStreaming {
+func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, body map[string]any) (bool, error) {
+	if isStreaming, _ := body[requestFieldStream].(bool); isStreaming {
 		if flusher, ok := w.(flushableResponseWriter); ok {
 			bw := newResponseWriterWithBuffer(flusher)
 			return s.tryDecodeStreaming(bw, r)
@@ -215,12 +215,12 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 }
 
 // prefill routes a request to a prefill node
-func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, completionRequest map[string]any) error {
+func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any) error {
 	// Prepare prefill request
-	reqcommon.PrimeSingleTokenRequest(completionRequest)
-	completionRequest[requestFieldCacheHitThreshold] = 0
+	reqcommon.PrimeSingleTokenRequest(body)
+	body[requestFieldCacheHitThreshold] = 0
 
-	pbody, err := json.Marshal(completionRequest)
+	pbody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
