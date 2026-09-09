@@ -138,7 +138,14 @@ and
 * Metric value: The number of adapters occupying GPU slots. This gauge exists from startup, so its
   presence tells the EPP the server reports residency even when no adapter is loaded yet.
 
-The GPU slot capacity is read from the `max_lora` label of `vllm:lora_requests_info`.
+and, for the GPU slot capacity,
+
+* Metric name implemented in vLLM: `vllm:max_gpu_lora_adapters`
+* Metric type: Gauge
+* Metric value: The number of GPU adapter slots (`max_loras`). Present from startup.
+
+When this gauge is absent, capacity falls back to the `max_lora` label of
+`vllm:lora_requests_info`, which only appears once an adapter has served a request.
 
 ## Prefix Cache Reuse
 

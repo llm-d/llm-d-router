@@ -175,6 +175,17 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	if family := lookupFamily(mapping.LoraGPUSlots, families); family != nil { // GPU slot capacity
+		slots := 0
+		for _, metric := range family.GetMetric() {
+			if mapping.LoraGPUSlots.labelsMatch(metric.GetLabel()) {
+				slots = max(slots, int(extractValue(metric)))
+			}
+		}
+		clone.MaxActiveModels = slots
+		updated = true
+	}
+
 	if spec := mapping.CacheInfo; spec != nil { // extract CacheInfo-specific metrics (labels)
 		metric, err := spec.getLatestMetric(families)
 		if err != nil {

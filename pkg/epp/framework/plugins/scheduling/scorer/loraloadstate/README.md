@@ -14,12 +14,23 @@ its worker adapter caches.
 ## What it does
 
 For each candidate endpoint, the plugin looks up the request's `targetModel` in the endpoint's
-resident adapter set and assigns:
+resident adapter set and assigns a tier:
 
 - `1.0`: adapter occupies a GPU slot and can serve immediately
 - `0.8`: adapter is in the host (CPU) cache; serving costs a device copy and possibly an eviction
 - `0.6`: adapter is not resident but the endpoint has a free GPU slot
-- `0.0`: adapter is not resident and every GPU slot is taken
+- `0.3`: adapter is not resident, every slot is taken, but an unpinned resident has no request in
+  flight, so loading evicts an adapter nobody is waiting on
+- `0.0`: adapter is not resident and every slot holds a busy or pinned adapter
+
+Two small bonuses then order endpoints within a tier without ever crossing one (the tiers are
+scaled into the range left over by the bonuses):
+
+- **placement**: a rendezvous hash of the adapter name over the candidate endpoints picks one
+  preferred home, which gets the bonus while the adapter is not resident there. All of an
+  adapter's first misses then land on the same pod instead of scattering by load.
+- **headroom**: proportional to the endpoint's share of free GPU slots, so among equals the
+  endpoint with the most room wins.
 
 Endpoints whose model server does not report residency score by the capacity tiers only, which
 is the same for all such endpoints and leaves the choice to the other scorers in the profile.
@@ -34,6 +45,7 @@ The plugin consumes:
 
 - `metrics.LoadedModelsKey` (`map[string]datalayer.LoraLoadState`)
 - `metrics.GPULoadedModelsKey` (`int`)
+- `metrics.ActiveModelsKey` (`map[string]int`), to tell idle residents from busy ones
 
 It also relies on endpoint metric `MaxActiveModels` to determine remaining GPU slot capacity.
 
@@ -60,11 +72,15 @@ prefix-cache scorers.
 | `gpuResidentScore` | `float` | No | `1.0` | Adapter occupies a GPU slot. |
 | `cpuResidentScore` | `float` | No | `0.8` | Adapter is only in the host cache. |
 | `freeSlotScore` | `float` | No | `0.6` | Adapter not resident, a GPU slot is free. |
-| `saturatedScore` | `float` | No | `0.0` | Adapter not resident, every GPU slot taken. |
+| `evictableScore` | `float` | No | `0.3` | Adapter not resident, slots full, an unpinned resident is idle. |
+| `saturatedScore` | `float` | No | `0.0` | Adapter not resident, every slot busy or pinned. |
+| `placementBonus` | `float` | No | `0.05` | Bonus for the rendezvous-hash home while the adapter is not resident there. |
+| `headroomBonus` | `float` | No | `0.05` | Bonus scaled by the share of free GPU slots. |
 
-Each score must be in `[0, 1]` and they must satisfy `gpuResidentScore >= cpuResidentScore >=
-freeSlotScore >= saturatedScore`; otherwise the whole set is ignored, logged, and the defaults
-are used.
+Each score must be in `[0, 1]`, the tiers must satisfy `gpuResidentScore >= cpuResidentScore >=
+freeSlotScore >= evictableScore >= saturatedScore`, and the two bonuses together must be smaller
+than every non-zero gap between consecutive tiers after scaling; otherwise the whole set is
+ignored, logged, and the defaults are used.
 
 ### Example
 
@@ -75,7 +91,10 @@ plugins:
     parameters:
       cpuResidentScore: 0.9
       freeSlotScore: 0.2
-      saturatedScore: 0.1
+      evictableScore: 0.1
+      saturatedScore: 0.0
+      placementBonus: 0.02
+      headroomBonus: 0.02
 schedulingProfiles:
   - name: default
     plugins:

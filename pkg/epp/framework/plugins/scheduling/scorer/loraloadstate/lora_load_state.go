@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,11 +34,12 @@ const (
 	LoraLoadStateScorerType = "lora-load-state-scorer"
 )
 
-// Parameters tunes the score each residency tier receives. The gaps between
-// tiers encode the relative cost of serving the adapter from that state, which
-// grows with adapter size: a large adapter makes a miss expensive and the
-// free-slot tier should sit close to saturated. Unset fields keep the defaults.
-// Pointers so an explicit 0.0 is distinguishable from unset.
+// Parameters tunes the score each residency tier receives and the two
+// within-tier bonuses. The gaps between tiers encode the relative cost of
+// serving the adapter from that state, which grows with adapter size: a large
+// adapter makes a miss expensive and the free-slot tier should sit close to
+// saturated. Unset fields keep the defaults. Pointers so an explicit 0.0 is
+// distinguishable from unset.
 type Parameters struct {
 	// GPUResidentScore is given when the adapter occupies a GPU slot. Default 1.0.
 	GPUResidentScore *float64 `json:"gpuResidentScore,omitempty"`
@@ -45,26 +47,73 @@ type Parameters struct {
 	CPUResidentScore *float64 `json:"cpuResidentScore,omitempty"`
 	// FreeSlotScore is given when the adapter is not resident but a GPU slot is free. Default 0.6.
 	FreeSlotScore *float64 `json:"freeSlotScore,omitempty"`
-	// SaturatedScore is given when the adapter is not resident and every GPU slot is taken. Default 0.0.
+	// EvictableScore is given when the adapter is not resident, every GPU slot is
+	// taken, and at least one unpinned resident has no request in flight, so
+	// loading costs an eviction nobody is waiting on. Default 0.3.
+	EvictableScore *float64 `json:"evictableScore,omitempty"`
+	// SaturatedScore is given when the adapter is not resident and every GPU slot
+	// holds a busy or pinned adapter. Default 0.0.
 	SaturatedScore *float64 `json:"saturatedScore,omitempty"`
+	// PlacementBonus is added to the one endpoint a rendezvous hash of the adapter
+	// name selects, when the adapter is not resident there, so the first misses
+	// for an adapter converge on a single home. Default 0.05.
+	PlacementBonus *float64 `json:"placementBonus,omitempty"`
+	// HeadroomBonus scales with the endpoint's share of free GPU slots, breaking
+	// ties within a tier toward the endpoint with the most room. Default 0.05.
+	HeadroomBonus *float64 `json:"headroomBonus,omitempty"`
 }
 
-type tierScores struct {
-	gpuResident float64
-	cpuResident float64
-	freeSlot    float64
-	saturated   float64
+type scoreTable struct {
+	gpuResident    float64
+	cpuResident    float64
+	freeSlot       float64
+	evictable      float64
+	saturated      float64
+	placementBonus float64
+	headroomBonus  float64
 }
 
-var defaultTierScores = tierScores{gpuResident: 1.0, cpuResident: 0.8, freeSlot: 0.6, saturated: 0.0}
+var defaultScores = scoreTable{
+	gpuResident: 1.0, cpuResident: 0.8, freeSlot: 0.6, evictable: 0.3, saturated: 0.0,
+	placementBonus: 0.05, headroomBonus: 0.05,
+}
 
-// tierScores applies the parameters over the defaults. Scores outside [0, 1]
-// or that break gpu >= cpu >= freeSlot >= saturated are rejected as a set and
-// the defaults are used.
-func (p *Parameters) tierScores(ctx context.Context) tierScores {
-	scores := defaultTierScores
+// budget is the score range reserved for the bonuses. Tiers are scaled into
+// the remainder so a bonus can reorder endpoints within a tier but never
+// across one.
+func (t scoreTable) budget() float64 { return t.placementBonus + t.headroomBonus }
+
+// valid reports whether every score is in [0, 1], the tiers are ordered
+// gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and the
+// bonuses fit under every non-zero gap between consecutive tiers.
+func (t scoreTable) valid() bool {
+	inRange := func(v float64) bool { return v >= 0 && v <= 1 }
+	tiers := []float64{t.gpuResident, t.cpuResident, t.freeSlot, t.evictable, t.saturated}
+	for _, v := range tiers {
+		if !inRange(v) {
+			return false
+		}
+	}
+	if !inRange(t.placementBonus) || !inRange(t.headroomBonus) || t.budget() >= 1 {
+		return false
+	}
+	for i := 1; i < len(tiers); i++ {
+		gap := tiers[i-1] - tiers[i]
+		if gap < 0 {
+			return false
+		}
+		if gap > 0 && gap*(1-t.budget()) <= t.budget() {
+			return false
+		}
+	}
+	return true
+}
+
+// scores applies the parameters over the defaults, falling back to the
+// defaults as a set when the result is not valid.
+func (p *Parameters) scores(ctx context.Context) scoreTable {
 	if p == nil {
-		return scores
+		return defaultScores
 	}
 	pick := func(v *float64, d float64) float64 {
 		if v == nil {
@@ -72,22 +121,19 @@ func (p *Parameters) tierScores(ctx context.Context) tierScores {
 		}
 		return *v
 	}
-	candidate := tierScores{
-		gpuResident: pick(p.GPUResidentScore, scores.gpuResident),
-		cpuResident: pick(p.CPUResidentScore, scores.cpuResident),
-		freeSlot:    pick(p.FreeSlotScore, scores.freeSlot),
-		saturated:   pick(p.SaturatedScore, scores.saturated),
+	candidate := scoreTable{
+		gpuResident:    pick(p.GPUResidentScore, defaultScores.gpuResident),
+		cpuResident:    pick(p.CPUResidentScore, defaultScores.cpuResident),
+		freeSlot:       pick(p.FreeSlotScore, defaultScores.freeSlot),
+		evictable:      pick(p.EvictableScore, defaultScores.evictable),
+		saturated:      pick(p.SaturatedScore, defaultScores.saturated),
+		placementBonus: pick(p.PlacementBonus, defaultScores.placementBonus),
+		headroomBonus:  pick(p.HeadroomBonus, defaultScores.headroomBonus),
 	}
-	inRange := func(v float64) bool { return v >= 0 && v <= 1 }
-	ordered := candidate.gpuResident >= candidate.cpuResident &&
-		candidate.cpuResident >= candidate.freeSlot &&
-		candidate.freeSlot >= candidate.saturated
-	if !inRange(candidate.gpuResident) || !inRange(candidate.cpuResident) ||
-		!inRange(candidate.freeSlot) || !inRange(candidate.saturated) || !ordered {
-		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer tier scores; each must be in [0, 1] with gpuResident >= cpuResident >= freeSlot >= saturated, using defaults",
-			"gpuResidentScore", candidate.gpuResident, "cpuResidentScore", candidate.cpuResident,
-			"freeSlotScore", candidate.freeSlot, "saturatedScore", candidate.saturated)
-		return scores
+	if !candidate.valid() {
+		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer parameters; scores must be in [0, 1], tiers ordered gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and the bonuses must fit under every tier gap, using defaults",
+			"parameters", fmt.Sprintf("%+v", candidate))
+		return defaultScores
 	}
 	return candidate
 }
@@ -117,7 +163,7 @@ func LoraLoadStateScorerFactory(name string, rawParameters *json.Decoder, handle
 func NewLoraLoadStateScorer(ctx context.Context, params *Parameters) *LoraLoadStateScorer {
 	return &LoraLoadStateScorer{
 		typedName: fwkplugin.TypedName{Type: LoraLoadStateScorerType, Name: LoraLoadStateScorerType},
-		scores:    params.tierScores(ctx),
+		scores:    params.scores(ctx),
 	}
 }
 
@@ -127,7 +173,7 @@ func NewLoraLoadStateScorer(ctx context.Context, params *Parameters) *LoraLoadSt
 // so an idle adapter still attracts its own traffic.
 type LoraLoadStateScorer struct {
 	typedName fwkplugin.TypedName
-	scores    tierScores
+	scores    scoreTable
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -140,14 +186,15 @@ func (s *LoraLoadStateScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Affinity
 }
 
-// Consumes declares the scorer reads the per-pod resident adapter set and GPU
-// slot occupancy from the endpoint's Metrics struct, published by the
-// core-metrics-extractor.
+// Consumes declares the scorer reads the per-pod resident adapter set, GPU
+// slot occupancy and in-flight adapter set from the endpoint's Metrics
+// struct, published by the core-metrics-extractor.
 func (s *LoraLoadStateScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
 			fwkplugin.NewDataKey(metrics.LoadedModelsKey, metrics.MetricsExtractorType):    map[string]fwkdl.LoraLoadState{},
 			fwkplugin.NewDataKey(metrics.GPULoadedModelsKey, metrics.MetricsExtractorType): int(0),
+			fwkplugin.NewDataKey(metrics.ActiveModelsKey, metrics.MetricsExtractorType):    map[string]int{},
 		},
 	}
 }
@@ -164,22 +211,68 @@ func (s *LoraLoadStateScorer) WithName(name string) *LoraLoadStateScorer {
 // endpoint and so leave the decision to the other scorers.
 func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
+	preferred := rendezvous(request.TargetModel, endpoints)
+	scale := 1 - s.scores.budget()
 
 	for _, endpoint := range endpoints {
 		m := endpoint.GetMetrics()
 		state, resident := m.LoadedModels[request.TargetModel]
 
+		var tier float64
 		switch {
 		case resident && state.Level == fwkdl.LoraLoadLevelGPU:
-			scores[endpoint] = s.scores.gpuResident
+			tier = s.scores.gpuResident
 		case resident:
-			scores[endpoint] = s.scores.cpuResident
+			tier = s.scores.cpuResident
 		case m.GPULoadedModels < m.MaxActiveModels:
-			scores[endpoint] = s.scores.freeSlot
+			tier = s.scores.freeSlot
+		case hasIdleResident(m):
+			tier = s.scores.evictable
 		default:
-			scores[endpoint] = s.scores.saturated
+			tier = s.scores.saturated
 		}
+
+		score := tier * scale
+		if !resident && endpoint == preferred {
+			score += s.scores.placementBonus
+		}
+		if m.MaxActiveModels > 0 && m.GPULoadedModels < m.MaxActiveModels {
+			score += s.scores.headroomBonus * float64(m.MaxActiveModels-m.GPULoadedModels) / float64(m.MaxActiveModels)
+		}
+		scores[endpoint] = score
 	}
 
 	return scores
+}
+
+// hasIdleResident reports whether an unpinned GPU-resident adapter has no
+// request in flight, so vLLM can evict it without stalling anyone.
+func hasIdleResident(m *fwkdl.Metrics) bool {
+	for name, state := range m.LoadedModels {
+		if state.Level != fwkdl.LoraLoadLevelGPU || state.Pinned {
+			continue
+		}
+		if _, active := m.ActiveModels[name]; !active {
+			return true
+		}
+	}
+	return false
+}
+
+// rendezvous picks the endpoint with the highest hash of (adapter, endpoint
+// id), which is stable across calls and moves only the adapters that hashed
+// to an endpoint that left.
+func rendezvous(adapter string, endpoints []fwksched.Endpoint) fwksched.Endpoint {
+	var best fwksched.Endpoint
+	var bestHash uint64
+	for _, endpoint := range endpoints {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(adapter))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(endpoint.GetMetadata().ID.String()))
+		if sum := h.Sum64(); best == nil || sum > bestHash {
+			best, bestHash = endpoint, sum
+		}
+	}
+	return best
 }

@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -31,201 +32,194 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
+var (
+	gpu    = fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU}
+	cpu    = fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelCPU}
+	pinned = fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU, Pinned: true}
+)
+
 func endpoint(name string, m *fwkdl.Metrics) fwksched.Endpoint {
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, m, nil)
 }
 
-func TestLoraLoadStateScorer(t *testing.T) {
-	gpu := fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU}
-	cpu := fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelCPU}
-
-	tests := []struct {
-		name      string
-		request   *fwksched.InferenceRequest
-		endpoints []fwksched.Endpoint
-		expected  map[string]float64
-	}{
-		{
-			name:    "every tier at once",
-			request: &fwksched.InferenceRequest{TargetModel: "target"},
-			endpoints: []fwksched.Endpoint{
-				endpoint("gpu-resident", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"target": gpu, "other": gpu},
-					GPULoadedModels: 2, MaxActiveModels: 2,
-				}),
-				endpoint("cpu-resident-full", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"target": cpu, "a": gpu, "b": gpu},
-					GPULoadedModels: 2, MaxActiveModels: 2,
-				}),
-				endpoint("free-slot", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"other": gpu},
-					GPULoadedModels: 1, MaxActiveModels: 2,
-				}),
-				endpoint("saturated", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu},
-					GPULoadedModels: 2, MaxActiveModels: 2,
-				}),
-			},
-			expected: map[string]float64{
-				"gpu-resident":      1.0,
-				"cpu-resident-full": 0.8,
-				"free-slot":         0.6,
-				"saturated":         0.0,
-			},
-		},
-		{
-			name:    "idle resident adapter still wins over a busy one",
-			request: &fwksched.InferenceRequest{TargetModel: "target"},
-			endpoints: []fwksched.Endpoint{
-				endpoint("idle-holder", &fwkdl.Metrics{
-					ActiveModels:    map[string]int{},
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"target": gpu},
-					GPULoadedModels: 1, MaxActiveModels: 4,
-				}),
-				endpoint("busy-elsewhere", &fwkdl.Metrics{
-					ActiveModels:    map[string]int{"other": 1},
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"other": gpu},
-					GPULoadedModels: 1, MaxActiveModels: 4,
-				}),
-			},
-			expected: map[string]float64{"idle-holder": 1.0, "busy-elsewhere": 0.6},
-		},
-		{
-			name:    "cpu-resident beats a cold free slot",
-			request: &fwksched.InferenceRequest{TargetModel: "target"},
-			endpoints: []fwksched.Endpoint{
-				endpoint("cpu-cached", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"target": cpu},
-					GPULoadedModels: 0, MaxActiveModels: 2,
-				}),
-				endpoint("cold", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{},
-					GPULoadedModels: 0, MaxActiveModels: 2,
-				}),
-			},
-			expected: map[string]float64{"cpu-cached": 0.8, "cold": 0.6},
-		},
-		{
-			name:    "residency not reported scores by capacity only",
-			request: &fwksched.InferenceRequest{TargetModel: "target"},
-			endpoints: []fwksched.Endpoint{
-				endpoint("legacy-with-capacity", &fwkdl.Metrics{
-					ActiveModels: map[string]int{"target": 1}, MaxActiveModels: 2,
-				}),
-				endpoint("legacy-unknown-capacity", &fwkdl.Metrics{
-					ActiveModels: map[string]int{"target": 1},
-				}),
-			},
-			expected: map[string]float64{"legacy-with-capacity": 0.6, "legacy-unknown-capacity": 0.0},
-		},
-		{
-			name:    "pinned does not change the tier",
-			request: &fwksched.InferenceRequest{TargetModel: "target"},
-			endpoints: []fwksched.Endpoint{
-				endpoint("pinned", &fwkdl.Metrics{
-					LoadedModels:    map[string]fwkdl.LoraLoadState{"target": {Level: fwkdl.LoraLoadLevelGPU, Pinned: true}},
-					GPULoadedModels: 1, MaxActiveModels: 1,
-				}),
-			},
-			expected: map[string]float64{"pinned": 1.0},
-		},
-		{
-			name:      "no endpoints",
-			request:   &fwksched.InferenceRequest{TargetModel: "target"},
-			endpoints: []fwksched.Endpoint{},
-			expected:  map[string]float64{},
-		},
+func score(t *testing.T, params *Parameters, target string, endpoints ...fwksched.Endpoint) map[string]float64 {
+	t.Helper()
+	scores := NewLoraLoadStateScorer(context.Background(), params).Score(context.Background(), &fwksched.InferenceRequest{TargetModel: target}, endpoints)
+	require.Len(t, scores, len(endpoints))
+	byName := map[string]float64{}
+	for ep, s := range scores {
+		byName[ep.GetMetadata().ID.Name] = s
+		assert.GreaterOrEqual(t, s, 0.0)
+		assert.LessOrEqual(t, s, 1.0)
 	}
+	return byName
+}
 
+// Bonuses are disabled so tier values can be asserted exactly.
+func noBonus() *Parameters {
+	zero := 0.0
+	return &Parameters{PlacementBonus: &zero, HeadroomBonus: &zero}
+}
+
+func TestTiers(t *testing.T) {
+	full := map[string]int{} // no in-flight requests
+	tests := []struct {
+		name     string
+		metrics  *fwkdl.Metrics
+		expected float64
+	}{
+		{"gpu resident", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "other": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: full}, 1.0},
+		{"cpu resident, slots full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu, "a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: full}, 0.8},
+		{"not resident, free slot", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"other": gpu}, GPULoadedModels: 1, MaxActiveModels: 2, ActiveModels: full}, 0.6},
+		{"saturated, a resident is idle", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1}}, 0.3},
+		{"saturated, every resident busy", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1, "b": 1}}, 0.0},
+		{"saturated, idle resident is pinned", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": pinned, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"b": 1}}, 0.0},
+		{"saturated, idle resident only in cpu cache", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "c": cpu}, GPULoadedModels: 1, MaxActiveModels: 1, ActiveModels: map[string]int{"a": 1}}, 0.0},
+		{"residency not reported, capacity known", &fwkdl.Metrics{ActiveModels: map[string]int{"target": 1}, MaxActiveModels: 2}, 0.6},
+		{"residency not reported, capacity unknown", &fwkdl.Metrics{ActiveModels: map[string]int{"target": 1}}, 0.0},
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			scores := NewLoraLoadStateScorer(context.Background(), nil).Score(context.Background(), test.request, test.endpoints)
-			assert.Len(t, scores, len(test.expected))
-			for _, ep := range test.endpoints {
-				name := ep.GetMetadata().ID.Name
-				want, ok := test.expected[name]
-				if !ok {
-					t.Fatalf("no expected score for endpoint %s", name)
-				}
-				assert.InDelta(t, want, scores[ep], 0.0001, "endpoint %s", name)
-			}
+			got := score(t, noBonus(), "target", endpoint("pod", test.metrics))
+			assert.InDelta(t, test.expected, got["pod"], 0.0001)
 		})
 	}
 }
 
-func TestLoraLoadStateScorerParameters(t *testing.T) {
-	f := func(v float64) *float64 { return &v }
-	gpu := fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU}
-	cpu := fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelCPU}
-	fleet := []fwksched.Endpoint{
-		endpoint("gpu", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}, GPULoadedModels: 1, MaxActiveModels: 2}),
-		endpoint("cpu", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu}, GPULoadedModels: 2, MaxActiveModels: 2}),
-		endpoint("free", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{}, GPULoadedModels: 1, MaxActiveModels: 2}),
-		endpoint("full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{}, GPULoadedModels: 2, MaxActiveModels: 2}),
-	}
-	request := &fwksched.InferenceRequest{TargetModel: "target"}
-	defaults := map[string]float64{"gpu": 1.0, "cpu": 0.8, "free": 0.6, "full": 0.0}
+func TestIdleResidentBeatsBusyOneAndFreeSlotBeatsBoth(t *testing.T) {
+	got := score(t, nil, "target",
+		endpoint("free", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu}, GPULoadedModels: 1, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1}}),
+		endpoint("idle-victim", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1}}),
+		endpoint("all-busy", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1, "b": 1}}),
+	)
+	assert.Greater(t, got["free"], got["idle-victim"])
+	assert.Greater(t, got["idle-victim"], got["all-busy"])
+}
 
+func TestPlacementBonusPicksOneHomeAmongEquals(t *testing.T) {
+	cold := func(name string) fwksched.Endpoint {
+		return endpoint(name, &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}})
+	}
+	fleet := []fwksched.Endpoint{cold("pod-a"), cold("pod-b"), cold("pod-c"), cold("pod-d")}
+
+	first := score(t, nil, "adapter-x", fleet...)
+	winners := 0
+	var winner string
+	for name, s := range first {
+		if s > 0 {
+			winners++
+			winner = name
+		}
+	}
+	assert.Equal(t, 1, winners, "exactly one saturated endpoint gets the placement bonus")
+	assert.InDelta(t, 0.05, first[winner], 0.0001)
+
+	// Stable across calls and independent of candidate order.
+	reversed := []fwksched.Endpoint{fleet[3], fleet[2], fleet[1], fleet[0]}
+	assert.Equal(t, first, score(t, nil, "adapter-x", reversed...))
+
+	// A different adapter may pick a different home; the choice is per adapter.
+	other := score(t, nil, "adapter-y", fleet...)
+	var otherWinner string
+	for name, s := range other {
+		if s > 0 {
+			otherWinner = name
+		}
+	}
+	assert.NotEmpty(t, otherWinner)
+
+	// Removing an endpoint that was not the winner keeps the winner.
+	var rest []fwksched.Endpoint
+	for _, ep := range fleet {
+		if ep.GetMetadata().ID.Name != winner {
+			if len(rest) < 2 {
+				rest = append(rest, ep)
+			}
+		}
+	}
+	for _, ep := range fleet {
+		if ep.GetMetadata().ID.Name == winner {
+			rest = append(rest, ep)
+		}
+	}
+	after := score(t, nil, "adapter-x", rest...)
+	assert.InDelta(t, 0.05, after[winner], 0.0001)
+}
+
+func TestPlacementBonusDoesNotApplyToResidentEndpoint(t *testing.T) {
+	// Whatever the hash picks, the resident endpoint scores exactly its tier.
+	for _, name := range []string{"pod-a", "pod-b"} {
+		got := score(t, nil, "target",
+			endpoint(name, &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "o": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
+			endpoint("other", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
+		)
+		assert.InDelta(t, 0.9, got[name], 0.0001)
+	}
+}
+
+func TestHeadroomBonusPrefersRoomAmongEquals(t *testing.T) {
+	got := score(t, nil, "target",
+		endpoint("full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "o": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
+		endpoint("roomy", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}, GPULoadedModels: 1, MaxActiveModels: 4, ActiveModels: map[string]int{}}),
+	)
+	assert.InDelta(t, 0.9, got["full"], 0.0001)
+	assert.InDelta(t, 0.9+0.05*0.75, got["roomy"], 0.0001)
+}
+
+func TestBonusesNeverCrossATier(t *testing.T) {
+	got := score(t, nil, "target",
+		endpoint("cpu-no-room", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu, "a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
+		endpoint("free-max-bonus", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{}, GPULoadedModels: 0, MaxActiveModels: 8, ActiveModels: map[string]int{}}),
+	)
+	assert.Greater(t, got["cpu-no-room"], got["free-max-bonus"])
+}
+
+func TestParameters(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
 	tests := []struct {
 		name     string
 		params   *Parameters
-		expected map[string]float64
+		expected scoreTable
 	}{
-		{name: "nil parameters use defaults", params: nil, expected: defaults},
-		{name: "empty parameters use defaults", params: &Parameters{}, expected: defaults},
+		{"nil uses defaults", nil, defaultScores},
+		{"empty uses defaults", &Parameters{}, defaultScores},
 		{
-			name:     "large adapter: a miss is nearly as bad as saturation",
-			params:   &Parameters{CPUResidentScore: f(0.9), FreeSlotScore: f(0.1), SaturatedScore: f(0.05)},
-			expected: map[string]float64{"gpu": 1.0, "cpu": 0.9, "free": 0.1, "full": 0.05},
+			"large adapter: a miss is nearly as bad as saturation",
+			&Parameters{CPUResidentScore: f(0.9), FreeSlotScore: f(0.15), EvictableScore: f(0.1), SaturatedScore: f(0.0), PlacementBonus: f(0.02), HeadroomBonus: f(0.02)},
+			scoreTable{gpuResident: 1.0, cpuResident: 0.9, freeSlot: 0.15, evictable: 0.1, saturated: 0.0, placementBonus: 0.02, headroomBonus: 0.02},
 		},
-		{
-			name:     "partial override keeps the other defaults",
-			params:   &Parameters{FreeSlotScore: f(0.3)},
-			expected: map[string]float64{"gpu": 1.0, "cpu": 0.8, "free": 0.3, "full": 0.0},
-		},
-		{
-			name:     "out of range falls back to defaults as a set",
-			params:   &Parameters{GPUResidentScore: f(1.5), FreeSlotScore: f(0.1)},
-			expected: defaults,
-		},
-		{
-			name:     "tier order violation falls back to defaults as a set",
-			params:   &Parameters{CPUResidentScore: f(0.2), FreeSlotScore: f(0.5)},
-			expected: defaults,
-		},
+		{"partial override keeps the other defaults", &Parameters{FreeSlotScore: f(0.5)}, scoreTable{1.0, 0.8, 0.5, 0.3, 0.0, 0.05, 0.05}},
+		{"out of range falls back as a set", &Parameters{GPUResidentScore: f(1.5), FreeSlotScore: f(0.1)}, defaultScores},
+		{"tier order violation falls back as a set", &Parameters{CPUResidentScore: f(0.2), FreeSlotScore: f(0.5)}, defaultScores},
+		{"bonuses that could cross a tier fall back as a set", &Parameters{FreeSlotScore: f(0.35), PlacementBonus: f(0.05), HeadroomBonus: f(0.05)}, defaultScores},
+		{"equal tiers are allowed", &Parameters{EvictableScore: f(0.0)}, scoreTable{1.0, 0.8, 0.6, 0.0, 0.0, 0.05, 0.05}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			scores := NewLoraLoadStateScorer(context.Background(), test.params).Score(context.Background(), request, fleet)
-			for _, ep := range fleet {
-				assert.InDelta(t, test.expected[ep.GetMetadata().ID.Name], scores[ep], 0.0001, ep.GetMetadata().ID.Name)
-			}
+			assert.Equal(t, test.expected, NewLoraLoadStateScorer(context.Background(), test.params).scores)
 		})
 	}
 }
 
-func TestLoraLoadStateScorerFactoryParameters(t *testing.T) {
-	decoder := json.NewDecoder(strings.NewReader(`{"cpuResidentScore": 0.95, "freeSlotScore": 0.2, "saturatedScore": 0.1}`))
+func TestFactory(t *testing.T) {
+	decoder := json.NewDecoder(strings.NewReader(`{"cpuResidentScore": 0.95, "freeSlotScore": 0.2, "evictableScore": 0.1, "saturatedScore": 0.0, "placementBonus": 0.02, "headroomBonus": 0.02}`))
 	plugin, err := LoraLoadStateScorerFactory("big-adapters", decoder, nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	scorer := plugin.(*LoraLoadStateScorer)
-	assert.Equal(t, tierScores{gpuResident: 1.0, cpuResident: 0.95, freeSlot: 0.2, saturated: 0.1}, scorer.scores)
+	assert.Equal(t, scoreTable{1.0, 0.95, 0.2, 0.1, 0.0, 0.02, 0.02}, scorer.scores)
+	assert.Equal(t, fwkplugin.TypedName{Type: LoraLoadStateScorerType, Name: "big-adapters"}, scorer.TypedName())
+	assert.Equal(t, fwksched.Affinity, scorer.Category())
+
+	deps := scorer.Consumes()
+	assert.Empty(t, deps.Optional)
+	for _, key := range []string{metrics.LoadedModelsKey, metrics.GPULoadedModelsKey, metrics.ActiveModelsKey} {
+		assert.Contains(t, deps.Required, fwkplugin.NewDataKey(key, metrics.MetricsExtractorType))
+	}
 
 	_, err = LoraLoadStateScorerFactory("bad", json.NewDecoder(strings.NewReader(`{"freeSlotScore": "high"}`)), nil)
 	assert.Error(t, err)
 }
 
-func TestLoraLoadStateScorerPlugin(t *testing.T) {
-	plugin, err := LoraLoadStateScorerFactory("my-lora", nil, nil)
-	assert.NoError(t, err)
-
-	scorer, ok := plugin.(*LoraLoadStateScorer)
-	assert.True(t, ok)
-	assert.Equal(t, fwkplugin.TypedName{Type: LoraLoadStateScorerType, Name: "my-lora"}, scorer.TypedName())
-	assert.Equal(t, fwksched.Affinity, scorer.Category())
-
-	deps := scorer.Consumes()
-	assert.Empty(t, deps.Optional)
-	assert.Contains(t, deps.Required, fwkplugin.NewDataKey(metrics.LoadedModelsKey, metrics.MetricsExtractorType))
-	assert.Contains(t, deps.Required, fwkplugin.NewDataKey(metrics.GPULoadedModelsKey, metrics.MetricsExtractorType))
+func TestNoEndpoints(t *testing.T) {
+	assert.Empty(t, score(t, nil, "target"))
 }

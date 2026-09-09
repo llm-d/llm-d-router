@@ -33,6 +33,7 @@ import (
 const (
 	loraLoadedMetric    = "vllm:lora_adapter_loaded"
 	loraGPULoadedMetric = "vllm:num_gpu_loaded_lora_adapters"
+	loraGPUSlotsMetric  = "vllm:max_gpu_lora_adapters"
 )
 
 func loadedSeries(engine, adapter, level, pinned string, value float64) *dto.Metric {
@@ -207,6 +208,41 @@ func TestExtractorLoraLoadStateResetsWhenResidencyDisappears(t *testing.T) {
 	assert.Equal(t, 0, ep.GetMetrics().GPULoadedModels)
 }
 
+func TestExtractorLoraGPUSlotsOverridesInfoLabel(t *testing.T) {
+	mapping, err := NewMappingFromConfig(MappingConfig{Lora: "vllm:lora_requests_info", LoraGPUSlots: loraGPUSlotsMetric})
+	require.NoError(t, err)
+	registry := NewMappingRegistry()
+	require.NoError(t, registry.Register(DefaultEngineType, mapping))
+	extractor, err := NewCoreMetricsExtractor(registry, "")
+	require.NoError(t, err)
+
+	info := &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: []*dto.Metric{{
+		Label: []*dto.LabelPair{{Name: proto.String(LoraInfoMaxAdaptersMetricName), Value: proto.String("2")}},
+		Gauge: &dto.Gauge{Value: ptr.To(1.0)},
+	}}}
+
+	// Slot gauge present: it wins over the label, largest engine counts.
+	ep := fwkdl.NewEndpoint(nil, nil)
+	families := sourcemetrics.PrometheusMetricMap{
+		"vllm:lora_requests_info": info,
+		loraGPUSlotsMetric:        gaugeFamily(countSeries("0", 4), countSeries("1", 3)),
+	}
+	require.NoError(t, extractor.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}))
+	assert.Equal(t, 4, ep.GetMetrics().MaxActiveModels)
+
+	// Slot gauge alone, before any adapter has served: capacity is still known.
+	ep = fwkdl.NewEndpoint(nil, nil)
+	families = sourcemetrics.PrometheusMetricMap{loraGPUSlotsMetric: gaugeFamily(countSeries("0", 4))}
+	require.NoError(t, extractor.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}))
+	assert.Equal(t, 4, ep.GetMetrics().MaxActiveModels)
+
+	// Slot gauge absent: the label still works.
+	ep = fwkdl.NewEndpoint(nil, nil)
+	families = sourcemetrics.PrometheusMetricMap{"vllm:lora_requests_info": info}
+	require.NoError(t, extractor.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}))
+	assert.Equal(t, 2, ep.GetMetrics().MaxActiveModels)
+}
+
 func TestVLLMDefaultsIncludeLoraResidency(t *testing.T) {
 	extractor, err := newCoreMetricsExtractorPlugin(context.Background(), "test", nil)
 	require.NoError(t, err)
@@ -217,13 +253,17 @@ func TestVLLMDefaultsIncludeLoraResidency(t *testing.T) {
 	require.NotNil(t, mapping.LoraGPULoaded)
 	assert.Equal(t, loraLoadedMetric, mapping.LoraLoaded.Name)
 	assert.Equal(t, loraGPULoadedMetric, mapping.LoraGPULoaded.Name)
+	require.NotNil(t, mapping.LoraGPUSlots)
+	assert.Equal(t, loraGPUSlotsMetric, mapping.LoraGPUSlots.Name)
 	assert.Contains(t, mapping.MetricNames(), loraLoadedMetric)
 	assert.Contains(t, mapping.MetricNames(), loraGPULoadedMetric)
+	assert.Contains(t, mapping.MetricNames(), loraGPUSlotsMetric)
 
 	for _, engine := range []string{"sglang", "trtllm-serve", "triton-tensorrt-llm", "triton"} {
 		mapping, ok := extractor.registry.Get(engine)
 		require.True(t, ok, engine)
 		assert.Nil(t, mapping.LoraLoaded, engine)
 		assert.Nil(t, mapping.LoraGPULoaded, engine)
+		assert.Nil(t, mapping.LoraGPUSlots, engine)
 	}
 }
