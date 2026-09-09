@@ -111,6 +111,35 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
   * `waiting_lora_adapters`: A comma separated list of adapters that are waiting to be served.
     Example: `"waiting_lora_adapters": "adapter1, adapter2"`
 
+## LoRA Adapter Residency
+
+**Required by:** `lora-load-state-scorer`
+
+Model servers that keep a cache of loaded LoRA adapters can report which adapters are resident and
+where, so the EPP can route an adapter's requests to servers that already hold it. Unlike the
+`vllm:lora_requests_info` metric above, which lists adapters with in-flight requests, these metrics
+describe the cache contents and so include idle adapters and adapters loaded at startup.
+
+The model server SHOULD expose the following metrics via the same Prometheus endpoint:
+
+* Metric name implemented in vLLM: `vllm:lora_adapter_loaded`
+* Metric type: Gauge
+* Metric value: `1` while the adapter is resident. A series at `0` is treated as absent.
+* Metric labels:
+  * `adapter_name`: The adapter's public model name, as used in the request's `model` argument.
+  * `level`: `gpu` when the adapter occupies a GPU slot and can serve immediately, `cpu` when it is
+    held only in the host cache.
+  * `pinned`: `true` when the adapter is exempt from eviction.
+
+and
+
+* Metric name implemented in vLLM: `vllm:num_gpu_loaded_lora_adapters`
+* Metric type: Gauge
+* Metric value: The number of adapters occupying GPU slots. This gauge exists from startup, so its
+  presence tells the EPP the server reports residency even when no adapter is loaded yet.
+
+The GPU slot capacity is read from the `max_lora` label of `vllm:lora_requests_info`.
+
 ## Prefix Cache Reuse
 
 **Required by:** `precise-prefix-cache-producer`, `prefix-cache-scorer`, `prefix-cache-affinity-filter`

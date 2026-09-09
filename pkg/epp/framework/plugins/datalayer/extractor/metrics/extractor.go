@@ -42,11 +42,18 @@ const (
 	RunningRequestsSizeKey = "RunningRequestsSize"
 	ActiveModelsKey        = "ActiveModels"
 	WaitingModelsKey       = "WaitingModels"
+	LoadedModelsKey        = "LoadedModels"
+	GPULoadedModelsKey     = "GPULoadedModels"
 
 	// LoRA metrics based on MSP
 	LoraInfoRunningAdaptersMetricName = "running_lora_adapters"
 	LoraInfoWaitingAdaptersMetricName = "waiting_lora_adapters"
 	LoraInfoMaxAdaptersMetricName     = "max_lora"
+
+	// Labels on the per-adapter residency gauge family.
+	LoraLoadedAdapterNameLabel = "adapter_name"
+	LoraLoadedLevelLabel       = "level"
+	LoraLoadedPinnedLabel      = "pinned"
 
 	CacheConfigBlockSizeInfoMetricName   = "block_size"
 	CacheConfigNumGPUBlocksMetricName    = "num_gpu_blocks"
@@ -101,6 +108,8 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 		fwkplugin.NewDataKey(RunningRequestsSizeKey, MetricsExtractorType): int(0),
 		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):        map[string]int{},
 		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
+		fwkplugin.NewDataKey(LoadedModelsKey, MetricsExtractorType):        map[string]fwkdl.LoraLoadState{},
+		fwkplugin.NewDataKey(GPULoadedModelsKey, MetricsExtractorType):     int(0),
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
@@ -156,6 +165,12 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	if spec := mapping.LoraRequestInfo; spec != nil { // extract LoRA-specific metrics
 		if metric := spec.getLatestMetric(families); metric != nil {
 			populateLoRAMetrics(clone, metric, &errs)
+			updated = true
+		}
+	}
+
+	if mapping.LoraLoaded != nil || mapping.LoraGPULoaded != nil { // extract LoRA residency
+		if populateLoraLoadState(clone, mapping, families) {
 			updated = true
 		}
 	}
@@ -266,6 +281,89 @@ func populateLoRAMetrics(clone *fwkdl.Metrics, metric *dto.Metric, errs *[]error
 			}
 		}
 	}
+}
+
+// populateLoraLoadState fills LoadedModels and GPULoadedModels from the
+// residency gauges. Neither family present means the model server does not
+// report residency, so LoadedModels is left nil for scorers to detect. The
+// text exposition drops families with no series, so the always-present GPU
+// count gauge is what distinguishes "nothing loaded" from "not reported".
+// Series at zero are skipped: under prometheus multiprocess mode an evicted
+// adapter's series lingers at zero after removal. With several engines per
+// pod the adapter sets are unioned, gpu outranking cpu, and the GPU count
+// is the largest engine's, so a free slot is only claimed when every engine
+// has one.
+func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sourcemetrics.PrometheusMetricMap) bool {
+	loadedFamily := lookupFamily(mapping.LoraLoaded, families)
+	countFamily := lookupFamily(mapping.LoraGPULoaded, families)
+	if loadedFamily == nil && countFamily == nil {
+		clone.LoadedModels = nil
+		clone.GPULoadedModels = 0
+		return false
+	}
+
+	loaded := map[string]fwkdl.LoraLoadState{}
+	if loadedFamily != nil {
+		for _, metric := range loadedFamily.GetMetric() {
+			if !mapping.LoraLoaded.labelsMatch(metric.GetLabel()) || extractValue(metric) == 0 {
+				continue
+			}
+			var name string
+			var state fwkdl.LoraLoadState
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
+				case LoraLoadedAdapterNameLabel:
+					name = label.GetValue()
+				case LoraLoadedLevelLabel:
+					state.Level = fwkdl.LoraLoadLevel(label.GetValue())
+				case LoraLoadedPinnedLabel:
+					state.Pinned = label.GetValue() == "true"
+				}
+			}
+			if name == "" {
+				continue
+			}
+			if prev, ok := loaded[name]; ok {
+				if prev.Level == fwkdl.LoraLoadLevelGPU {
+					state.Level = prev.Level
+				}
+				state.Pinned = state.Pinned || prev.Pinned
+			}
+			loaded[name] = state
+		}
+	}
+
+	gpuLoaded := 0
+	if countFamily != nil {
+		for _, metric := range countFamily.GetMetric() {
+			if mapping.LoraGPULoaded.labelsMatch(metric.GetLabel()) {
+				gpuLoaded = max(gpuLoaded, int(extractValue(metric)))
+			}
+		}
+	} else {
+		for _, state := range loaded {
+			if state.Level == fwkdl.LoraLoadLevelGPU {
+				gpuLoaded++
+			}
+		}
+	}
+
+	clone.LoadedModels = loaded
+	clone.GPULoadedModels = gpuLoaded
+	return true
+}
+
+// lookupFamily returns the family a spec names, or nil when the spec is unset
+// or the family is absent from the scrape.
+func lookupFamily(spec *Spec, families sourcemetrics.PrometheusMetricMap) *dto.MetricFamily {
+	if spec == nil {
+		return nil
+	}
+	family, exists := families[spec.Name]
+	if !exists || len(family.GetMetric()) == 0 {
+		return nil
+	}
+	return family
 }
 
 // populateCacheInfoMetrics updates the metrics with cache info from the metric labels.
