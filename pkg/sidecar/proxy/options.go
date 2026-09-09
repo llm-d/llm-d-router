@@ -93,7 +93,7 @@ const (
 	defaultP2PConnectorPort      = 7777
 
 	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
-	// dispatch: it bounds how long the decode leg waits on the prefill outcome
+	// dispatch: it bounds how long the decode request waits on the prefill outcome
 	// (and thus KV) before being cancelled, so a hung/failed prefill fails the
 	// request instead of hanging. Prefill in parallel dispatch is capped to one
 	// token, so it normally resolves well within this window.
@@ -270,7 +270,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
 	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
-		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode leg; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
+		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode request; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
@@ -289,7 +289,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MoRIIODecodeNotifyPort, "moriio-decode-notify-port", opts.MoRIIODecodeNotifyPort,
 		"Base MoRI-IO notify port on the decode pod.")
 	fs.StringVar(&opts.MoRIIODecodePodIP, "moriio-local-pod-ip", opts.MoRIIODecodePodIP,
-		"Decode pod's routable address, used as the prefill leg's remote_host. "+
+		"Decode pod's routable address, used as the prefill request's remote_host. "+
 			"A Kubernetes DNS name (e.g., 'pod-name.namespace.svc.cluster.local') "+
 			"is resolved to an IP at startup; a literal IP is used as-is. "+
 			"Defaults to the POD_IP env var. Required with --moriio-write-mode.")
@@ -303,18 +303,18 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&opts.MoRIIOParallelDecodeWaitTimeout, "moriio-parallel-decode-wait-timeout", opts.MoRIIOParallelDecodeWaitTimeout,
 		"Backstop timeout for parallel dispatch: how long decode may wait on the prefill outcome/KV before being cancelled so the request fails instead of hanging. Only used with --moriio-parallel-dispatch.")
 	fs.IntVar(&opts.MoRIIOPrefillHandshakePort, "moriio-prefill-handshake-port", opts.MoRIIOPrefillHandshakePort,
-		"Prefill pod's base MoRI-IO handshake port, used to build the decode leg in parallel-dispatch mode.")
+		"Prefill pod's base MoRI-IO handshake port, used to build the decode request in parallel-dispatch mode.")
 	fs.IntVar(&opts.MoRIIOPrefillNotifyPort, "moriio-prefill-notify-port", opts.MoRIIOPrefillNotifyPort,
 		"Prefill pod's base MoRI-IO notify port.")
 	fs.IntVar(&opts.MoRIIOTPSize, "moriio-tp-size", opts.MoRIIOTPSize,
 		"Tensor-parallel size of the engines, echoed into kv_transfer_params[tp_size].")
 	fs.IntVar(&opts.MoRIIODPSize, "moriio-dp-size", opts.MoRIIODPSize,
-		"Data-parallel world size, emitted as kv_transfer_params[remote_dp_size] on both legs. "+
+		"Data-parallel world size, emitted as kv_transfer_params[remote_dp_size] on both requests. "+
 			"Set to the engine DP size for Wide-EP (TP=1, DP>1); default 1 leaves the wire unchanged.")
 
 	// Wide-EP multi-pod fan-out. Optional: empty preserves single-pod behaviour.
 	// remote_hosts carries the opposite side's pod DNS names (decode on the prefill
-	// leg and vice versa); dp-size-local maps a global DP rank to a pod via
+	// request and vice versa); dp-size-local maps a global DP rank to a pod via
 	// pod_idx = dp_rank / dp_size_local.
 	// DNS names are resolved to IPs at startup (LWS-compatible).
 	fs.StringSliceVar(&opts.MoRIIORemoteHosts, "moriio-remote-hosts", opts.MoRIIORemoteHosts,
@@ -326,7 +326,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Wide-EP: per-pod DP size used to map a global DP rank to a pod index. "+
 			"Must satisfy --moriio-dp-size = dp-size-local * len(hosts).")
 	fs.StringSliceVar(&opts.MoRIIODecodeHosts, "moriio-decode-hosts", opts.MoRIIODecodeHosts,
-		"Wide-EP: comma-separated decode-side pod hosts, emitted as the prefill leg's "+
+		"Wide-EP: comma-separated decode-side pod hosts, emitted as the prefill request's "+
 			"remote_hosts. Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
 			"are resolved to IPs at startup; literal IPs are used as-is. "+
 			"Pair with --moriio-dp-size-local.")
@@ -425,7 +425,7 @@ func (opts *Options) Complete() error {
 		return errors.New("--moriio-parallel-dispatch requires --moriio-write-mode")
 	}
 
-	// Both legs share the same dp_size / dp_size_local contract; only the host
+	// Both requests share the same dp_size / dp_size_local contract; only the host
 	// list differs.
 	if err := validateWideEPHosts(
 		"--moriio-remote-hosts", opts.MoRIIORemoteHosts,
@@ -463,7 +463,7 @@ func (opts *Options) Complete() error {
 	opts.MoRIIODecodeHosts = resolvedDecode
 
 	// Single-host counterpart: --moriio-local-pod-ip is decode's advertised
-	// remote_host on the prefill leg. Resolve it the same way so it can be an
+	// remote_host on the prefill request. Resolve it the same way so it can be an
 	// LWS DNS name (a literal IP passes through unchanged).
 	if opts.MoRIIODecodePodIP != "" {
 		resolved, podIPErr := resolveHostsToIPs([]string{opts.MoRIIODecodePodIP})

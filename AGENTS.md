@@ -41,6 +41,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 - Standard Go. `make format` and `make lint` are authoritative.
 - Comments are terse and only present when the WHY is non-obvious. Never paraphrase the code.
+- Avoid human body-part terms in docs and comments. Use stage/step/request/pod/worker. CPU architecture terms (ARM, arm64, armv7*, armhf) are OK.
 - Docs and comments describe the current state on its own terms. No "previously", "now", "recently", "renamed from", "added to fix", "this PR", "see above", or other temporal, deictic, or conversational framing. A reader with no context for the change must still understand the text.
 - State each fact once, in its canonical location. Do not duplicate across struct docs, prose, tables, inline comments, and examples.
 - Do not use Unicode symbols or special characters in general, unless explicitly requested.

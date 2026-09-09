@@ -277,20 +277,20 @@ func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
 	}, got)
 }
 
-// lateCancelContext reports cancellation from its second poll after arm is
+// lateCancelContext reports cancellation from its second poll after enable is
 // called. The matcher polls once at its first checkpoint and once at
 // completion, so the cancellation lands between them, as one arriving
 // mid-walk would.
 type lateCancelContext struct {
 	context.Context
-	armed bool
-	polls int
+	enabled bool
+	polls   int
 }
 
-func (c *lateCancelContext) arm() { c.armed = true }
+func (c *lateCancelContext) enable() { c.enabled = true }
 
 func (c *lateCancelContext) Err() error {
-	if !c.armed {
+	if !c.enabled {
 		return c.Context.Err()
 	}
 	c.polls++
@@ -300,17 +300,17 @@ func (c *lateCancelContext) Err() error {
 	return nil
 }
 
-// armingIndex arms the request context once the index has been read, so the
+// enablingIndex enables the request context once the index has been read, so the
 // matcher folds the materialized entries under a context about to be
 // cancelled.
-type armingIndex struct {
+type enablingIndex struct {
 	kvblock.Index
 	ctx *lateCancelContext
 }
 
-func (a armingIndex) Lookup(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+func (a enablingIndex) Lookup(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
 	result, err := a.Index.Lookup(ctx, keys, podFilter)
-	a.ctx.arm()
+	a.ctx.enable()
 	return result, err
 }
 
@@ -324,7 +324,7 @@ func TestMatchBlockKeysCancelledBetweenCheckpoints(t *testing.T) {
 		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
 		20: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
 	})
-	indexer := kvcache.NewIndexerForTest(&mockTokenProcessor{}, armingIndex{Index: idx, ctx: ctx}, kvcache.DefaultKVCacheBackendConfig())
+	indexer := kvcache.NewIndexerForTest(&mockTokenProcessor{}, enablingIndex{Index: idx, ctx: ctx}, kvcache.DefaultKVCacheBackendConfig())
 
 	_, err = indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20}, nil)
 	require.ErrorIs(t, err, context.Canceled)

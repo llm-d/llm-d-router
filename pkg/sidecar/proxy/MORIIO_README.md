@@ -23,28 +23,28 @@ MoRI-IO is **off by default** (the sidecar keeps its standard NIXLv2 behavior). 
 
 | Mode | Flags | Dispatch | How the decode DP rank is chosen |
 |------|-------|----------|----------------------------------|
-| Serial WRITE (default) | `--moriio-write-mode` | Prefill first, await its response, then decode | **Propagated** from the prefill leg's returned `remote_dp_rank` (the rank prefill actually ran on); falls back to a stable hash only if the response omits it |
-| Parallel WRITE | `--moriio-write-mode --moriio-parallel-dispatch` | Prefill and decode dispatched **concurrently** | **Pinned up front** from config/hash with `remote_dp_rank_override=true` (prefill has not returned yet), so both legs agree without waiting |
+| Serial WRITE (default) | `--moriio-write-mode` | Prefill first, await its response, then decode | **Propagated** from `remote_dp_rank` returned in the prefill response (the rank prefill actually ran on); falls back to a stable hash only if the response omits it |
+| Parallel WRITE | `--moriio-write-mode --moriio-parallel-dispatch` | Prefill and decode dispatched **concurrently** | **Pinned up front** from config/hash with `remote_dp_rank_override=true` (prefill has not returned yet), so both requests agree without waiting |
 
 **Router-authoritative routing.** In both modes the sidecar and the vLLM MoRI-IO
 connector agree on a single DP rank without each side independently hashing:
 
 - **Serial**: the vLLM prefill connector returns the rank it ran on
   (`remote_dp_rank`, `remote_dp_rank_override=true`); the sidecar copies it onto the
-  decode leg's `x-data-parallel-rank` header.
+  decode request's `x-data-parallel-rank` header.
 - **Parallel**: the sidecar pins the rank itself and sets `remote_dp_rank_override=true`;
-  the connector honors that pin on both legs.
+  the connector honors that pin on both requests.
 
 **Which to use?** Serial is the **shipped default and the SLA-safe path**: parallel
 dispatch is **OFF unless you explicitly pass `--moriio-parallel-dispatch`**, so with
 defaults the sidecar always takes the serial `handleNIXLV2` path. Serial gives the
 tightest correctness guarantee (decode is pinned to the rank prefill truly used).
 
-Parallel dispatch is an **opt-in latency optimization** that overlaps the two legs.
+Parallel dispatch is an **opt-in latency optimization** that overlaps the two requests.
 Because prefill and decode are issued concurrently, it now includes explicit
 **prefill-failure handling** so it stays correct and never hangs:
 
-- **Shared cancelable context.** Both legs derive from one cancelable context. If
+- **Shared cancelable context.** Both requests derive from one cancelable context. If
   prefill returns any non-2xx status (or a transport error, which surfaces as `502`),
   the sidecar cancels that context so decode's in-flight request / KV wait aborts
   immediately instead of waiting for KV that will never arrive.
@@ -55,7 +55,7 @@ Because prefill and decode are issued concurrently, it now includes explicit
   committed and streamed through with its own status, headers, and body/SSE preserved.
 - **Bounded KV-wait backstop.** As a last resort, `--moriio-parallel-decode-wait-timeout`
   (default `30s`) bounds how long decode may wait on the prefill outcome; on expiry both
-  legs are cancelled and the request fails with `504` rather than hanging. Prefill in
+  requests are cancelled and the request fails with `504` rather than hanging. Prefill in
   parallel dispatch is capped to one token, so it normally resolves well within this
   window.
 
@@ -81,7 +81,7 @@ point; the serial path retains fully incremental streaming from the first byte.
 | `--moriio-dp-size` | Data parallel world size |
 | `--moriio-dp-size-local` | Per-pod DP size for multi-pod (`pod_idx = dp_rank / dp_size_local`) |
 | `--moriio-remote-hosts` | Prefill-side pod hosts for fan-out (DNS names preferred) |
-| `--moriio-decode-hosts` | Decode-side pod hosts, emitted as the prefill leg's `remote_hosts` (DNS names preferred) |
+| `--moriio-decode-hosts` | Decode-side pod hosts, emitted as the prefill request's `remote_hosts` (DNS names preferred) |
 | `--moriio-tp-size` | Tensor parallel size |
 | `--moriio-local-pod-ip` | Local pod address, DNS name or IP (defaults to `POD_IP` env); DNS names resolved to IP at startup |
 | `--moriio-decode-handshake-port` | Decode handshake port |

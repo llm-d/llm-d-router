@@ -99,7 +99,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	preq.Header.Add(requestHeaderRequestID, uuidStr)
 
-	// Pin both legs to the same DP rank; the header is skipped for single-DP.
+	// Pin both requests to the same DP rank; the header is skipped for single-DP.
 	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
 	if s.config.MoRIIODPSize > 1 {
 		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
@@ -145,7 +145,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			"tp_size":                        s.config.MoRIIOTPSize,
 			"remote_dp_size":                 s.config.MoRIIODPSize,
 		}
-		// Wide-EP fan-out (prefill leg, serial path): remote_hosts must be the
+		// Wide-EP fan-out (prefill request, serial path): remote_hosts must be the
 		// DECODE-side pod IPs so prefill handshakes the right pods. Re-resolved
 		// per request so peer restarts (new IP) are picked up within the TTL.
 		if decodeHosts := s.currentDecodeHosts(ctx); len(decodeHosts) > 0 {
@@ -170,7 +170,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		}
 	}
 
-	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
 	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	completionRequest[requestFieldStream] = false
@@ -312,12 +312,12 @@ retryLoop:
 
 	dreq.Header.Add(requestHeaderRequestID, uuidStr)
 
-	// Decode's DP rank is PROPAGATED from the prefill leg's returned
-	// kv_transfer_params (remote_dp_rank = the rank prefill actually ran on),
+	// Decode's DP rank is propagated from kv_transfer_params in the prefill
+	// response (remote_dp_rank = the rank prefill actually ran on),
 	// not independently re-derived here. This is the router-applies-the-
 	// connector-returned-rank model (PR #45043 review, njhill): the prefill
-	// connector returns the rank, the router pins the decode leg to it, so both
-	// legs agree without each hashing the request id. The returned rank is
+	// connector returns the rank, the router pins the decode request to it, so both
+	// requests agree without each hashing the request id. The returned remote_dp_rank is
 	// validated to be in [0, dp_size); an omitted, non-numeric, or out-of-range
 	// value falls back to the deterministic hash. The header AND the decode
 	// body's remote_dp_rank are then pinned to the SAME validated value so they
@@ -391,7 +391,7 @@ retryLoop:
 			if _, present := dKVParams["remote_dp_size"]; !present {
 				dKVParams["remote_dp_size"] = s.config.MoRIIODPSize
 			}
-			// Wide-EP fan-out (decode leg, serial path): remote_hosts must be the
+			// Wide-EP fan-out (decode request, serial path): remote_hosts must be the
 			// PREFILL-side pod IPs so decode fans out handshakes across prefill pods.
 			// Re-resolved per request so peer restarts (new IP) are picked up.
 			if remoteHosts := s.currentRemoteHosts(ctx); len(remoteHosts) > 0 {
@@ -495,7 +495,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	maxOutputTokensValue, maxOutputTokensOk := completionRequest[requestFieldMaxOutputTokens]
 	minTokensValue, minTokensOk := completionRequest[requestFieldMinTokens]
 
-	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).
+	// Pin both requests to the same DP rank (kv_transfer_params + HTTP header).
 	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
 
 	// Build prefill body. remote_host points at the decode pod so prefill can
@@ -516,7 +516,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
-	// Wide-EP fan-out (prefill leg): remote_hosts must be the DECODE-side pod
+	// Wide-EP fan-out (prefill request): remote_hosts must be the DECODE-side pod
 	// IPs so prefill handshakes the right pods. Omitted when unset, falling back
 	// to the single-host remote_host path. Re-resolved per request so peer
 	// restarts (new IP) are picked up within the TTL.
@@ -531,7 +531,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			pkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
 		}
 	}
-	// Compose the OffloadingConnector p2p pull onto the NIXL prefill leg.
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
 	s.addP2PPullToPrefill(completionRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	completionRequest[requestFieldStream] = false
@@ -575,7 +575,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		completionRequest[requestFieldMinTokens] = minTokensValue
 	}
 
-	// Synthesise decode-leg kv_transfer_params that the serial path would
+	// Synthesise decode-request kv_transfer_params that the serial path would
 	// otherwise read from the prefill response. do_remote_prefill must be true:
 	// it gates the decode-side send_notify_block that prefill's RDMA Write waits on.
 	prefillHost, _, splitErr := net.SplitHostPort(prefillPodHostPort)
@@ -599,7 +599,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
-	// Wide-EP fan-out (decode leg): the opposite host list, the PREFILL-side
+	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
 	// request so peer restarts (new IP) are picked up within the TTL.
 	if remoteHosts := s.currentRemoteHosts(parentCtx); len(remoteHosts) > 0 {
@@ -633,7 +633,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	// Fire prefill and decode concurrently, but DEFER committing decode's
 	// response to the client until prefill's outcome is known (the commit
-	// point). Both legs share a cancelable context so a failed or hung prefill
+	// point). Both requests share a cancelable context so a failed or hung prefill
 	// aborts decode's in-flight request / KV wait immediately instead of
 	// letting it hang, and decode's output is buffered so a failed prefill can
 	// never surface a bogus 200 to the client.
@@ -769,7 +769,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			}
 		}
 	case <-timer.C:
-		// Prefill did not resolve within the backstop window: cancel both legs
+		// Prefill did not resolve within the backstop window: cancel both requests
 		// and fail rather than hang waiting for KV that may never arrive.
 		cancel()
 		dcw.abort()

@@ -225,7 +225,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	if prefillBody["request_id"] != "req-compl" {
 		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
 	}
-	// Prefill leg caps output to a single token: max_tokens is pinned to 1 and
+	// Prefill request caps output to a single token: max_tokens is pinned to 1 and
 	// min_tokens is stripped (it defaults to 0, keeping min_tokens <= max_tokens).
 	if prefillBody["max_tokens"] != float64(1) {
 		t.Fatalf("expected max_tokens=1, got %v", prefillBody["max_tokens"])
@@ -484,8 +484,8 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 // TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens is a regression
 // test for the one coordinator path where a client-supplied min_tokens survives
 // into the capped body: chat-completions clones reqCtx.Body, so a client
-// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the leg.
-// The generate and completions legs build fresh bodies that never carry it.
+// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the request.
+// The generate and completions requests build fresh bodies that never carry it.
 func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 	var prefillBody map[string]any
 

@@ -899,7 +899,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 	// MoRI-IO WRITE-mode regression test.
 	// When --moriio-write-mode is enabled, the sidecar must populate
-	// remote_host / remote_notify_port / transfer_id on the prefill leg
+	// remote_host / remote_notify_port / transfer_id on the prefill request
 	// (rather than leaving them nil as the standard NIXLv2 contract does) so
 	// the prefill engine's MoRIIOConnector can issue RDMA Write to decode.
 	// The same transfer_id must also be carried forward into the decode request
@@ -1021,9 +1021,9 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	// These tests use mocks and build Config directly - they don't need the
 	// MoRIIOFeatureEnabled gate since they bypass Options.Complete().
 
-	// 1P1D DP=8, concurrent dispatch: both legs pinned to one DP rank, decode
+	// 1P1D DP=8, concurrent dispatch: both requests pinned to one DP rank, decode
 	// flips do_remote_prefill, remote_dp_size carries the DP world size.
-	It("parallel-dispatch 1P1D DP=8 pins both legs to one DP rank and emits remote_dp_size", func() {
+	It("parallel-dispatch 1P1D DP=8 pins both requests to one DP rank and emits remote_dp_size", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 			c.MoRIIODPSize = 8
@@ -1033,7 +1033,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(env.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 
-		By("prefill leg carries WRITE-mode + Wide-EP fields")
+		By("prefill request carries WRITE-mode + Wide-EP fields")
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
 		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
@@ -1047,7 +1047,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(ok).To(BeTrue())
 		Expect(pRank).To(And(BeNumerically(">=", 0), BeNumerically("<", 8)))
 
-		By("decode leg flips do_remote_prefill and reuses the same rank + transfer_id")
+		By("decode request flips do_remote_prefill and reuses the same rank + transfer_id")
 		dkv := kvParams(env.decodeHandler, 0)
 		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, true))
 		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, false))
@@ -1056,15 +1056,15 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv[requestFieldTransferID]).To(Equal(pkv[requestFieldTransferID]))
 		Expect(dkv[requestFieldTransferID]).ToNot(BeEmpty())
 
-		By("both HTTP legs share the same X-Data-Parallel-Rank header")
+		By("both HTTP requests share the same X-Data-Parallel-Rank header")
 		ph := dpRankHeader(env.prefillHandler, 0)
 		Expect(ph).To(Equal(strconv.Itoa(int(pRank))))
 		Expect(dpRankHeader(env.decodeHandler, 0)).To(Equal(ph))
 	})
 
-	// 2P2D DP=16 multi-pod fan-out: each leg's remote_hosts is the opposite
-	// side's pod IPs (prefill leg -> decode IPs, decode leg -> prefill IPs).
-	It("parallel-dispatch 2P2D DP=EP=16 fans out remote_hosts with opposite host lists per leg", func() {
+	// 2P2D DP=16 multi-pod fan-out: each request's remote_hosts is the opposite
+	// side's pod IPs (prefill request -> decode IPs, decode request -> prefill IPs).
+	It("parallel-dispatch 2P2D DP=EP=16 fans out remote_hosts with opposite host lists per request", func() {
 		prefillHosts := []string{testPrefillHostIP1, testPrefillHostIP2}
 		decodeHosts := []string{testDecodeHostIP, testDecodeHostIP2}
 		env := startMoRIProxy(func(c *Config) {
@@ -1079,19 +1079,19 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(env.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 
-		By("prefill leg fans out to the DECODE-side host list")
+		By("prefill request fans out to the DECODE-side host list")
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv["remote_hosts"]).To(Equal([]any{testDecodeHostIP, testDecodeHostIP2}))
 		Expect(pkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
 		Expect(pkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 16)))
 
-		By("decode leg fans out to the PREFILL-side host list")
+		By("decode request fans out to the PREFILL-side host list")
 		dkv := kvParams(env.decodeHandler, 0)
 		Expect(dkv["remote_hosts"]).To(Equal([]any{testPrefillHostIP1, testPrefillHostIP2}))
 		Expect(dkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
 		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, true))
 
-		By("both legs share one pinned DP rank in [0,16)")
+		By("both requests share one pinned DP rank in [0,16)")
 		Expect(dpRankHeader(env.prefillHandler, 0)).To(Equal(dpRankHeader(env.decodeHandler, 0)))
 		pRank, ok := pkv[requestFieldRemoteDPRank].(float64)
 		Expect(ok).To(BeTrue())
@@ -1122,9 +1122,9 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(decodeReq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
 	})
 
-	// 1P1D DP=8, serial dispatch: the prefill leg sets the DP-rank header and
-	// the decode leg's kv_transfer_params are backfilled with the same rank.
-	It("serial WRITE-mode DP=8 pins prefill and decode HTTP legs to the same DP rank", func() {
+	// 1P1D DP=8, serial dispatch: the prefill request sets the DP-rank header and
+	// the decode request's kv_transfer_params are backfilled with the same rank.
+	It("serial WRITE-mode DP=8 pins prefill and decode HTTP requests to the same DP rank", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIODPSize = 8 // ParallelDispatch stays false -> strictly-serial path
 		})
@@ -1258,7 +1258,7 @@ func startMoRIProxy(mutate func(cfg *Config)) *moriProxyEnv {
 }
 
 // send issues a /v1/chat/completions request with the prefill header and
-// asserts a 200.  Both legs have completed (wg.Wait in the concurrent path,
+// asserts a 200. Both requests have completed (wg.Wait in the concurrent path,
 // sequential in the serial path) by the time this returns, so the captured
 // requests / headers are safe to read afterwards.
 func (env *moriProxyEnv) send() {

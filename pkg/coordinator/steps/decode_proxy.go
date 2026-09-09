@@ -80,9 +80,9 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 		v.Info("request body", "method", "POST", "path", reqCtx.OriginalPath, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
 	}
 
-	// The decode leg is proxied straight to the gateway and never passes through
+	// The decode request is proxied straight to the gateway and never passes through
 	// gateway.Client.Request, which is what logs full request bodies at TRACE for
-	// the prefill and encode legs. Log the redacted body here so the decode leg's
+	// the prefill and encode requests. Log the redacted body here so the decode request's
 	// fields (min_tokens, max_tokens, ...) are observable at the same verbosity.
 	if v := logger.V(logutil.TRACE); v.Enabled() {
 		v.Info("request body", "method", "POST", "path", reqCtx.OriginalPath, "headers", httplog.RedactedHeaders(proxyReq.Header), logutil.HTTPBodyKey, gateway.RedactBody(bodyBytes))

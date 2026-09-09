@@ -89,7 +89,7 @@ func TestPickDPRankSingleDP(t *testing.T) {
 
 // TestPickDPRankDeterministic verifies the core invariant: the same
 // requestID + dpSize always returns the same rank. Without this, the
-// prefill and decode legs of one disagg pair would land on different
+// prefill and decode requests of one disagg pair would land on different
 // DP ranks and the MoRI-IO handshake would deadlock.
 func TestPickDPRankDeterministic(t *testing.T) {
 	for i := 0; i < 64; i++ {

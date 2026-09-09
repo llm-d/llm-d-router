@@ -3,7 +3,7 @@ name: CI - Coordinator Test
 # Runs coordinator unit tests and e2e tests. Path filter excludes paths not
 # exercised by the coordinator. The e2e-images and e2e-tests matrix jobs are
 # each followed by a *-status job that aggregates the matrix result, since
-# GitHub required status checks cannot reference individual matrix legs.
+# GitHub required status checks cannot reference individual matrix jobs.
 on:
   push:
     branches:
