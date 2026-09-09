@@ -57,7 +57,7 @@ import (
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Global State (Initialized in TestMain)

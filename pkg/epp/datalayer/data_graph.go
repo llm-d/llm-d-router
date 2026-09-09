@@ -222,9 +222,13 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 				continue
 			}
 			dependencies := consumer.Consumes()
-			if producer.Produces() != nil && dependencies.Required != nil {
+			if producer.Produces() != nil {
 				for producedKey, producedData := range producer.Produces() {
-					if consumedData, ok := dependencies.Required[producedKey]; ok {
+					consumedData, ok := dependencies.Required[producedKey]
+					if !ok {
+						consumedData, ok = dependencies.Optional[producedKey]
+					}
+					if ok {
 						// Check types are same.
 						if reflect.TypeOf(producedData) != reflect.TypeOf(consumedData) {
 							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())

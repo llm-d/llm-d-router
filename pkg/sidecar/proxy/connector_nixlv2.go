@@ -203,7 +203,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", "body", string(pbody))
+		trace.Info("Prefill request", logging.HTTPBodyKey, string(pbody))
 	}
 
 	// Retry on transient 5xx (502/503/504): these failures (e.g. connection
@@ -250,7 +250,7 @@ retryLoop:
 	if isHTTPError(pw.statusCode) {
 		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
-			"body", pw.buffer.String())
+			logging.HTTPBodyKey, pw.buffer.String())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		prefillSpan.End()
 
@@ -425,7 +425,7 @@ retryLoop:
 	// 2. Forward to local decoder.
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("sending request to decoder", "body", string(dbody))
+		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
 	}
 	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
@@ -675,8 +675,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dreq.ContentLength = int64(len(dbody))
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("concurrent-dispatch prefill request body", "body", string(pbody))
-		trace.Info("concurrent-dispatch decode request body", "body", string(dbody))
+		trace.Info("concurrent-dispatch prefill request body", logging.HTTPBodyKey, string(pbody))
+		trace.Info("concurrent-dispatch decode request body", logging.HTTPBodyKey, string(dbody))
 	}
 
 	// Decode writes into a deferred writer that buffers everything until we
@@ -705,7 +705,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancel() // KV will never arrive -> abort decode instead of hanging
 			s.logger.Error(nil, "concurrent-dispatch prefill returned error status",
-				"status", pw.statusCode, "request_id", uuidStr, "body", pw.buffer.String())
+				"status", pw.statusCode, "request_id", uuidStr, logging.HTTPBodyKey, pw.buffer.String())
 		}
 	}()
 

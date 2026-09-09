@@ -51,6 +51,15 @@ const chatCompletionsRequestBodyWithMaxCompletionTokens = `{
 				"max_completion_tokens": 100
 			}`
 
+const chatCompletionsRequestBodyWithMinTokens = `{
+				"model": "Qwen/Qwen2-0.5B",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50,
+				"min_tokens": 5
+			}`
+
 type sidecarTestInfo struct {
 	ctx            context.Context
 	cancelFn       context.CancelFunc
@@ -196,6 +205,63 @@ var _ = Describe("Common Connector tests", func() {
 
 				// The decode request should not have max_completion_tokens if it wasn't in the original request
 				Expect(decodeReq).ToNot(HaveKey("max_completion_tokens"))
+
+				testInfo.cancelFn()
+				<-testInfo.stoppedCh
+			})
+
+			// Regression test: a client min_tokens above the prefill leg's
+			// max_tokens=1 cap trips vLLM's min_tokens<=max_tokens validation.
+			It("should cap min_tokens in prefill and restore original value in decode", func() {
+				testInfo := sidecarConnectionTestSetup(connector)
+
+				By("starting the proxy")
+				go func() {
+					defer GinkgoRecover()
+
+					testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+					err := testInfo.proxy.Start(testInfo.ctx)
+					Expect(err).ToNot(HaveOccurred())
+
+					testInfo.stoppedCh <- struct{}{}
+				}()
+
+				<-testInfo.proxy.readyCh
+				proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+
+				By("sending a /v1/chat/completions request with min_tokens set")
+				body := chatCompletionsRequestBodyWithMinTokens
+
+				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+				Expect(err).ToNot(HaveOccurred())
+				req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+				rp, err := http.DefaultClient.Do(req)
+				Expect(err).ToNot(HaveOccurred())
+
+				if rp.StatusCode != 200 {
+					bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+					Fail(string(bp))
+				}
+
+				By("verifying prefill request's min_tokens does not exceed max_tokens=1")
+				Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+				Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+				prefillReq := testInfo.prefillHandler.CompletionRequests[0]
+
+				Expect(prefillReq).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
+				// Stripped (shared-storage) or capped to 1 (NIXLv2): either way it
+				// must not exceed the prefill leg's max_tokens=1.
+				if minTokens, ok := prefillReq["min_tokens"]; ok {
+					Expect(minTokens).To(BeNumerically("<=", 1))
+				}
+
+				By("verifying decode request keeps the client's original min_tokens=5")
+				Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+				Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+				decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+
+				Expect(decodeReq).To(HaveKeyWithValue("min_tokens", BeNumerically("==", 5)))
 
 				testInfo.cancelFn()
 				<-testInfo.stoppedCh

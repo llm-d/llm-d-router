@@ -17,10 +17,8 @@ request/response data model it consumes.
 
 ## Scope
 
-This package holds only the non-deprecated tokenization types. The deprecated
-UDS tokenizer, tokenization pool, and generated protobufs remain in
-`llm-d-kv-cache` and are imported by the router's deprecated tokenizer adapter;
-see the PR that internalized this subsystem for the rationale.
+This package holds only tokenization types. The tokenizer backends that produce
+them live with the `token-producer` plugin.
 
 ## Related Documentation
 
