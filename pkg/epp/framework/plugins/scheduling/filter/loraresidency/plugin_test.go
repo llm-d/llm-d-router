@@ -31,13 +31,17 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-var gpu = fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU}
+var (
+	gpu = fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelGPU}
+	cpu = fwkdl.LoraLoadState{Level: fwkdl.LoraLoadLevelCPU}
+)
 
 type ep struct {
 	name     string
 	resident bool
 	queue    int
 	kv       float64
+	level    fwkdl.LoraLoadLevel
 }
 
 func fleet(eps ...ep) []fwksched.Endpoint {
@@ -46,6 +50,9 @@ func fleet(eps ...ep) []fwksched.Endpoint {
 		loaded := map[string]fwkdl.LoraLoadState{}
 		if e.resident {
 			loaded["target"] = gpu
+			if e.level == fwkdl.LoraLoadLevelCPU {
+				loaded["target"] = cpu
+			}
 		}
 		out = append(out, fwksched.NewEndpoint(
 			&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: e.name}},
@@ -86,63 +93,91 @@ func TestFilter(t *testing.T) {
 		{
 			name:    "no home: everything passes so the scorer picks the first home",
 			cfg:     cfg,
-			eps:     []ep{{"a", false, 0, 0}, {"b", false, 0, 0}},
+			eps:     []ep{{"a", false, 0, 0, ""}, {"b", false, 0, 0, ""}},
 			want:    []string{"a", "b"},
 			outcome: outcomeNoHome,
 		},
 		{
 			name:    "a home with room: only homes pass",
 			cfg:     cfg,
-			eps:     []ep{{"home", true, 2, 0.5}, {"cold", false, 0, 0}, {"home2", true, 20, 0.9}},
+			eps:     []ep{{"home", true, 2, 0.5, ""}, {"cold", false, 0, 0, ""}, {"home2", true, 20, 0.9, ""}},
 			want:    []string{"home", "home2"},
 			outcome: outcomeSticky,
 		},
 		{
 			name:    "every home saturated by queue: one new copy on an endpoint with room",
 			cfg:     cfg,
-			eps:     []ep{{"home", true, 9, 0.1}, {"cold", false, 0, 0}, {"busy", false, 30, 0.1}},
+			eps:     []ep{{"home", true, 9, 0.1, ""}, {"cold", false, 0, 0, ""}, {"busy", false, 30, 0.1, ""}},
 			want:    []string{"cold"},
 			outcome: outcomeSpread,
 		},
 		{
 			name:    "every home saturated by kv cache: spread",
 			cfg:     cfg,
-			eps:     []ep{{"home", true, 0, 0.95}, {"cold", false, 0, 0.2}},
+			eps:     []ep{{"home", true, 0, 0.95, ""}, {"cold", false, 0, 0.2, ""}},
 			want:    []string{"cold"},
 			outcome: outcomeSpread,
 		},
 		{
 			name:    "cap reached: stay on saturated homes",
 			cfg:     Config{MaxReplicas: 2, QueueThreshold: 8, KVCacheThreshold: 0.8},
-			eps:     []ep{{"h1", true, 9, 0}, {"h2", true, 9, 0}, {"cold", false, 0, 0}},
+			eps:     []ep{{"h1", true, 9, 0, ""}, {"h2", true, 9, 0, ""}, {"cold", false, 0, 0, ""}},
 			want:    []string{"h1", "h2"},
 			outcome: outcomeCapBlocked,
 		},
 		{
 			name:    "cap not yet reached: spread allowed",
 			cfg:     Config{MaxReplicas: 3, QueueThreshold: 8, KVCacheThreshold: 0.8},
-			eps:     []ep{{"h1", true, 9, 0}, {"h2", true, 9, 0}, {"cold", false, 0, 0}},
+			eps:     []ep{{"h1", true, 9, 0, ""}, {"h2", true, 9, 0, ""}, {"cold", false, 0, 0, ""}},
 			want:    []string{"cold"},
 			outcome: outcomeSpread,
 		},
 		{
 			name:    "whole fleet saturated: stay home rather than load under pressure",
 			cfg:     cfg,
-			eps:     []ep{{"home", true, 9, 0}, {"other", false, 9, 0}},
+			eps:     []ep{{"home", true, 9, 0, ""}, {"other", false, 9, 0, ""}},
 			want:    []string{"home"},
 			outcome: outcomeFleetSaturated,
 		},
 		{
 			name:    "saturation checks disabled: homes are always sticky",
 			cfg:     Config{},
-			eps:     []ep{{"home", true, 999, 1.0}, {"cold", false, 0, 0}},
+			eps:     []ep{{"home", true, 999, 1.0, ""}, {"cold", false, 0, 0, ""}},
 			want:    []string{"home"},
 			outcome: outcomeSticky,
 		},
 		{
+			name:    "host-cache copy is not a home: with no gpu home everything passes",
+			cfg:     cfg,
+			eps:     []ep{{"warm", true, 0, 0, fwkdl.LoraLoadLevelCPU}, {"cold", false, 0, 0, ""}},
+			want:    []string{"warm", "cold"},
+			outcome: outcomeNoHome,
+		},
+		{
+			name:    "host-cache copy is not a home: gpu home stays sticky over it",
+			cfg:     cfg,
+			eps:     []ep{{"home", true, 0, 0, fwkdl.LoraLoadLevelGPU}, {"warm", true, 0, 0, fwkdl.LoraLoadLevelCPU}},
+			want:    []string{"home"},
+			outcome: outcomeSticky,
+		},
+		{
+			name:    "spreading prefers host-cache copies with room over cold endpoints",
+			cfg:     cfg,
+			eps:     []ep{{"home", true, 9, 0, fwkdl.LoraLoadLevelGPU}, {"cold", false, 0, 0, ""}, {"warm", true, 0, 0, fwkdl.LoraLoadLevelCPU}},
+			want:    []string{"warm"},
+			outcome: outcomeSpread,
+		},
+		{
+			name:    "spreading falls back to cold endpoints when host-cache copies are saturated",
+			cfg:     cfg,
+			eps:     []ep{{"home", true, 9, 0, fwkdl.LoraLoadLevelGPU}, {"warm", true, 9, 0, fwkdl.LoraLoadLevelCPU}, {"cold", false, 0, 0, ""}},
+			want:    []string{"cold"},
+			outcome: outcomeSpread,
+		},
+		{
 			name:    "single candidate is passed through",
 			cfg:     cfg,
-			eps:     []ep{{"only", false, 0, 0}},
+			eps:     []ep{{"only", false, 0, 0, ""}},
 			want:    []string{"only"},
 			outcome: outcomeNotApplicable,
 		},
@@ -159,7 +194,7 @@ func TestFilter(t *testing.T) {
 func TestFilterWithoutTargetModelPassesThrough(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
-	eps := fleet(ep{"a", true, 0, 0}, ep{"b", false, 0, 0})
+	eps := fleet(ep{"a", true, 0, 0, ""}, ep{"b", false, 0, 0, ""})
 	got := New("test", DefaultConfig).Filter(context.Background(), &fwksched.InferenceRequest{}, eps)
 	assert.Equal(t, []string{"a", "b"}, names(got))
 	assert.Equal(t, 1.0, outcomeCount(outcomeNotApplicable))

@@ -17,7 +17,8 @@ For each candidate endpoint, the plugin looks up the request's `targetModel` in 
 resident adapter set and assigns a tier:
 
 - `1.0`: adapter occupies a GPU slot and can serve immediately
-- `0.8`: adapter is in the host (CPU) cache; serving costs a device copy and possibly an eviction
+- `0.7`: adapter is only in the host (CPU) cache; activating it evicts a GPU resident and, measured on
+  Qwen3-32B, costs about as much as a load from disk
 - `0.6`: adapter is not resident but the endpoint has a free GPU slot
 - `0.3`: adapter is not resident, every slot is taken, but an unpinned resident has no request in
   flight, so loading evicts an adapter nobody is waiting on
@@ -27,7 +28,7 @@ Two small bonuses then order endpoints within a tier without ever crossing one (
 scaled into the range left over by the bonuses):
 
 - **placement**: a rendezvous hash of the adapter name over the candidate endpoints picks one
-  preferred home, which gets the bonus while the adapter is not resident there. All of an
+  preferred home, which gets the bonus while the adapter does not occupy a GPU slot there. All of an
   adapter's first misses then land on the same pod instead of scattering by load.
 - **headroom**: proportional to the endpoint's share of free GPU slots, so among equals the
   endpoint with the most room wins.
@@ -70,12 +71,12 @@ prefix-cache scorers.
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `gpuResidentScore` | `float` | No | `1.0` | Adapter occupies a GPU slot. |
-| `cpuResidentScore` | `float` | No | `0.8` | Adapter is only in the host cache. |
+| `cpuResidentScore` | `float` | No | `0.7` | Adapter is only in the host cache. |
 | `freeSlotScore` | `float` | No | `0.6` | Adapter not resident, a GPU slot is free. |
 | `evictableScore` | `float` | No | `0.3` | Adapter not resident, slots full, an unpinned resident is idle. |
 | `saturatedScore` | `float` | No | `0.0` | Adapter not resident, every slot busy or pinned. |
-| `placementBonus` | `float` | No | `0.05` | Bonus for the rendezvous-hash home while the adapter is not resident there. |
-| `headroomBonus` | `float` | No | `0.05` | Bonus scaled by the share of free GPU slots. |
+| `placementBonus` | `float` | No | `0.03` | Bonus for the rendezvous-hash home while the adapter is not resident there. |
+| `headroomBonus` | `float` | No | `0.03` | Bonus scaled by the share of free GPU slots. |
 
 Each score must be in `[0, 1]`, the tiers must satisfy `gpuResidentScore >= cpuResidentScore >=
 freeSlotScore >= evictableScore >= saturatedScore`, and the two bonuses together must be smaller

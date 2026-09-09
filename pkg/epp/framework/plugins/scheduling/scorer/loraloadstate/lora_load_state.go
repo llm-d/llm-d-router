@@ -43,7 +43,10 @@ const (
 type Parameters struct {
 	// GPUResidentScore is given when the adapter occupies a GPU slot. Default 1.0.
 	GPUResidentScore *float64 `json:"gpuResidentScore,omitempty"`
-	// CPUResidentScore is given when the adapter is only in the host cache. Default 0.8.
+	// CPUResidentScore is given when the adapter is only in the host cache.
+	// Activating a host-cache copy evicts a GPU resident and, measured on
+	// Qwen3-32B, costs about as much as a load from disk, so the default sits
+	// just above the free-slot tier. Default 0.7.
 	CPUResidentScore *float64 `json:"cpuResidentScore,omitempty"`
 	// FreeSlotScore is given when the adapter is not resident but a GPU slot is free. Default 0.6.
 	FreeSlotScore *float64 `json:"freeSlotScore,omitempty"`
@@ -55,11 +58,11 @@ type Parameters struct {
 	// holds a busy or pinned adapter. Default 0.0.
 	SaturatedScore *float64 `json:"saturatedScore,omitempty"`
 	// PlacementBonus is added to the one endpoint a rendezvous hash of the adapter
-	// name selects, when the adapter is not resident there, so the first misses
-	// for an adapter converge on a single home. Default 0.05.
+	// name selects, while the adapter does not occupy a GPU slot there, so the
+	// first misses for an adapter converge on a single home. Default 0.03.
 	PlacementBonus *float64 `json:"placementBonus,omitempty"`
 	// HeadroomBonus scales with the endpoint's share of free GPU slots, breaking
-	// ties within a tier toward the endpoint with the most room. Default 0.05.
+	// ties within a tier toward the endpoint with the most room. Default 0.03.
 	HeadroomBonus *float64 `json:"headroomBonus,omitempty"`
 }
 
@@ -74,8 +77,8 @@ type scoreTable struct {
 }
 
 var defaultScores = scoreTable{
-	gpuResident: 1.0, cpuResident: 0.8, freeSlot: 0.6, evictable: 0.3, saturated: 0.0,
-	placementBonus: 0.05, headroomBonus: 0.05,
+	gpuResident: 1.0, cpuResident: 0.7, freeSlot: 0.6, evictable: 0.3, saturated: 0.0,
+	placementBonus: 0.03, headroomBonus: 0.03,
 }
 
 // budget is the score range reserved for the bonuses. Tiers are scaled into
@@ -233,7 +236,7 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 		}
 
 		score := tier * scale
-		if !resident && endpoint == preferred {
+		if endpoint == preferred && !(resident && state.Level == fwkdl.LoraLoadLevelGPU) {
 			score += s.scores.placementBonus
 		}
 		if m.MaxActiveModels > 0 && m.GPULoadedModels < m.MaxActiveModels {

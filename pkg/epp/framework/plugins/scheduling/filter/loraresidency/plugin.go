@@ -129,11 +129,13 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// Filter keeps the endpoints where the adapter is resident. When every home is
-// saturated it opens one new copy by returning the unsaturated non-resident
-// endpoints instead, unless MaxReplicas has been reached or no endpoint has
-// room, in which case the homes are kept. With no home at all, every endpoint
-// passes so the scorer can choose the first one.
+// Filter keeps the endpoints where the adapter occupies a GPU slot. A host-cache
+// copy is not a home: activating it evicts a GPU resident and, measured on
+// Qwen3-32B, costs about as much as a load from disk. When every home is
+// saturated it opens one new copy on the unsaturated endpoints, host-cache
+// copies first, unless MaxReplicas has been reached or no endpoint has room,
+// in which case the homes are kept. With no home at all, every endpoint passes
+// so the scorer can choose the first one.
 func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
 	_, span := tracing.Tracer(schedplugins.TracerScope).Start(ctx, "filter_lora_residency",
@@ -153,12 +155,15 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	}
 	span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 
-	var homes, others []fwksched.Endpoint
+	var homes, warm, cold []fwksched.Endpoint
 	for _, ep := range endpoints {
-		if _, resident := ep.GetMetrics().LoadedModels[request.TargetModel]; resident {
+		switch state, resident := ep.GetMetrics().LoadedModels[request.TargetModel]; {
+		case resident && state.Level == fwkdl.LoraLoadLevelGPU:
 			homes = append(homes, ep)
-		} else {
-			others = append(others, ep)
+		case resident:
+			warm = append(warm, ep)
+		default:
+			cold = append(cold, ep)
 		}
 	}
 	span.SetAttributes(semconv.LLMDEPPFilterStickyEndpoints(len(homes)))
@@ -174,16 +179,18 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	if p.config.MaxReplicas > 0 && len(homes) >= p.config.MaxReplicas {
 		return decide(outcomeCapBlocked, homes)
 	}
-	var spare []fwksched.Endpoint
-	for _, ep := range others {
-		if !p.saturated(ep) {
-			spare = append(spare, ep)
+	for _, candidates := range [][]fwksched.Endpoint{warm, cold} {
+		var spare []fwksched.Endpoint
+		for _, ep := range candidates {
+			if !p.saturated(ep) {
+				spare = append(spare, ep)
+			}
+		}
+		if len(spare) > 0 {
+			return decide(outcomeSpread, spare)
 		}
 	}
-	if len(spare) == 0 {
-		return decide(outcomeFleetSaturated, homes)
-	}
-	return decide(outcomeSpread, spare)
+	return decide(outcomeFleetSaturated, homes)
 }
 
 func (p *Plugin) saturated(ep fwksched.Endpoint) bool {

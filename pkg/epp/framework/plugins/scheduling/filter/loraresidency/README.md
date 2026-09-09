@@ -15,15 +15,18 @@ This filter decides *whether* a new copy is allowed; the scorer decides *where*.
 
 ## What it does
 
-For each request, candidates are split into **homes** (endpoints where the adapter is resident in
-GPU or host cache, from the residency metrics) and the rest.
+For each request, candidates are split into **homes** (endpoints where the adapter occupies a GPU
+slot, from the residency metrics), **warm** endpoints (host-cache copy only) and **cold** ones. A
+host-cache copy is not a home: activating it evicts a GPU resident and, measured on Qwen3-32B,
+costs about as much as a load from disk. Treating it as a home made popular adapters' traffic
+spread over every pod and thrash their GPU slots.
 
 | situation | kept | outcome label |
 |---|---|---|
 | no home anywhere | everything (the scorer's placement bonus picks the first home) | `no_home` |
 | at least one home has room | the homes | `sticky` |
 | every home saturated, `maxReplicas` reached | the homes | `cap_blocked` |
-| every home saturated, another endpoint has room | the non-saturated non-homes (one new copy) | `spread` |
+| every home saturated, another endpoint has room | the non-saturated warm endpoints, else the non-saturated cold ones (one new copy) | `spread` |
 | every home saturated, nothing has room | the homes | `fleet_saturated` |
 
 An endpoint is **saturated** when its waiting queue exceeds `queueThreshold` or its KV cache

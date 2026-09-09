@@ -69,7 +69,7 @@ func TestTiers(t *testing.T) {
 		expected float64
 	}{
 		{"gpu resident", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "other": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: full}, 1.0},
-		{"cpu resident, slots full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu, "a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: full}, 0.8},
+		{"cpu resident, slots full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu, "a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: full}, 0.7},
 		{"not resident, free slot", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"other": gpu}, GPULoadedModels: 1, MaxActiveModels: 2, ActiveModels: full}, 0.6},
 		{"saturated, a resident is idle", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1}}, 0.3},
 		{"saturated, every resident busy", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1, "b": 1}}, 0.0},
@@ -112,7 +112,7 @@ func TestPlacementBonusPicksOneHomeAmongEquals(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, winners, "exactly one saturated endpoint gets the placement bonus")
-	assert.InDelta(t, 0.05, first[winner], 0.0001)
+	assert.InDelta(t, 0.03, first[winner], 0.0001)
 
 	// Stable across calls and independent of candidate order.
 	reversed := []fwksched.Endpoint{fleet[3], fleet[2], fleet[1], fleet[0]}
@@ -143,7 +143,7 @@ func TestPlacementBonusPicksOneHomeAmongEquals(t *testing.T) {
 		}
 	}
 	after := score(t, nil, "adapter-x", rest...)
-	assert.InDelta(t, 0.05, after[winner], 0.0001)
+	assert.InDelta(t, 0.03, after[winner], 0.0001)
 }
 
 func TestPlacementBonusDoesNotApplyToResidentEndpoint(t *testing.T) {
@@ -153,7 +153,7 @@ func TestPlacementBonusDoesNotApplyToResidentEndpoint(t *testing.T) {
 			endpoint(name, &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "o": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
 			endpoint("other", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
 		)
-		assert.InDelta(t, 0.9, got[name], 0.0001)
+		assert.InDelta(t, 0.94, got[name], 0.0001)
 	}
 }
 
@@ -162,8 +162,8 @@ func TestHeadroomBonusPrefersRoomAmongEquals(t *testing.T) {
 		endpoint("full", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "o": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{}}),
 		endpoint("roomy", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}, GPULoadedModels: 1, MaxActiveModels: 4, ActiveModels: map[string]int{}}),
 	)
-	assert.InDelta(t, 0.9, got["full"], 0.0001)
-	assert.InDelta(t, 0.9+0.05*0.75, got["roomy"], 0.0001)
+	assert.InDelta(t, 0.94, got["full"], 0.0001)
+	assert.InDelta(t, 0.94+0.03*0.75, got["roomy"], 0.0001)
 }
 
 func TestBonusesNeverCrossATier(t *testing.T) {
@@ -188,11 +188,12 @@ func TestParameters(t *testing.T) {
 			&Parameters{CPUResidentScore: f(0.9), FreeSlotScore: f(0.15), EvictableScore: f(0.1), SaturatedScore: f(0.0), PlacementBonus: f(0.02), HeadroomBonus: f(0.02)},
 			scoreTable{gpuResident: 1.0, cpuResident: 0.9, freeSlot: 0.15, evictable: 0.1, saturated: 0.0, placementBonus: 0.02, headroomBonus: 0.02},
 		},
-		{"partial override keeps the other defaults", &Parameters{FreeSlotScore: f(0.5)}, scoreTable{1.0, 0.8, 0.5, 0.3, 0.0, 0.05, 0.05}},
+		{"partial override keeps the other defaults", &Parameters{FreeSlotScore: f(0.5)}, scoreTable{1.0, 0.7, 0.5, 0.3, 0.0, 0.03, 0.03}},
 		{"out of range falls back as a set", &Parameters{GPUResidentScore: f(1.5), FreeSlotScore: f(0.1)}, defaultScores},
 		{"tier order violation falls back as a set", &Parameters{CPUResidentScore: f(0.2), FreeSlotScore: f(0.5)}, defaultScores},
+		{"cpu tier too close to free slot for the bonuses falls back as a set", &Parameters{CPUResidentScore: f(0.64)}, defaultScores},
 		{"bonuses that could cross a tier fall back as a set", &Parameters{FreeSlotScore: f(0.35), PlacementBonus: f(0.05), HeadroomBonus: f(0.05)}, defaultScores},
-		{"equal tiers are allowed", &Parameters{EvictableScore: f(0.0)}, scoreTable{1.0, 0.8, 0.6, 0.0, 0.0, 0.05, 0.05}},
+		{"equal tiers are allowed", &Parameters{EvictableScore: f(0.0)}, scoreTable{1.0, 0.7, 0.6, 0.0, 0.0, 0.03, 0.03}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
