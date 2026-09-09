@@ -257,7 +257,9 @@ map these endpoints; they do not discover extra pods or ranks. Other discovery
 plugins feed the same renderer path; `file-discovery`, for example, can supply
 explicit render addresses and ports. All selected endpoints must serve the
 configured model and expose the render routes. Discovered URLs use HTTP;
-use `vllm.url` for an HTTPS endpoint.
+nonempty `caCertPath`, `clientCertPath`, or `clientKeyPath`, or
+`insecureSkipVerify: true`, are rejected with `endpointDiscovery` at startup.
+Use `vllm.url` for an HTTPS endpoint.
 
 Each rule's `basePort` is required and must be between 1 and 65535. An empty or
 omitted `selector` matches all endpoints, so a final catch-all rule can provide

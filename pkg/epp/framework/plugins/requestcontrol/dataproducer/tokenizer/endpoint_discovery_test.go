@@ -757,6 +757,45 @@ func TestPluginFactory_EndpointDiscoveryValidation(t *testing.T) {
 			}`,
 		},
 		{
+			name: "accepts endpoint discovery with default TLS settings",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {}, "caCertPath": "", "clientCertPath": "", "clientKeyPath": "", "insecureSkipVerify": false}
+			}`,
+		},
+		{
+			name: "rejects CA certificate with endpoint discovery",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {}, "caCertPath": "/nonexistent/ca.pem"}
+			}`,
+			wantErr: "endpointDiscovery uses HTTP and cannot be combined with TLS settings",
+		},
+		{
+			name: "rejects client certificate with endpoint discovery",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {}, "clientCertPath": "/nonexistent/client.pem"}
+			}`,
+			wantErr: "endpointDiscovery uses HTTP and cannot be combined with TLS settings",
+		},
+		{
+			name: "rejects client key with endpoint discovery",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {}, "clientKeyPath": "/nonexistent/client.key"}
+			}`,
+			wantErr: "endpointDiscovery uses HTTP and cannot be combined with TLS settings",
+		},
+		{
+			name: "rejects insecure skip verify with endpoint discovery",
+			parameters: `{
+				"modelName": "m",
+				"vllm": {"endpointDiscovery": {}, "insecureSkipVerify": true}
+			}`,
+			wantErr: "endpointDiscovery uses HTTP and cannot be combined with TLS settings",
+		},
+		{
 			name: "rejects URL with endpoint discovery",
 			parameters: `{
 				"modelName": "m",

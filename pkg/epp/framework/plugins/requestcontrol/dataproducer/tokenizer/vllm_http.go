@@ -153,6 +153,9 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 	var endpointPicker renderEndpointPicker
 	var attemptTimeout time.Duration
 	if cfg.EndpointDiscovery != nil {
+		if cfg.hasTLS() {
+			return nil, errors.New("endpointDiscovery uses HTTP and cannot be combined with TLS settings; use 'url' for HTTPS")
+		}
 		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery)
 		if err != nil {
 			return nil, err
