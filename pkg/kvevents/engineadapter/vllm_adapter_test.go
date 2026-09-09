@@ -657,6 +657,20 @@ func TestVLLMParseMessage_MapEncodedBlockStored(t *testing.T) {
 	assert.Equal(t, 0, *blockStored.GroupIdx)
 }
 
+func TestVLLMBlockStoredOrigin(t *testing.T) {
+	for _, origin := range []string{"NEW", "REUSED", "", "future-origin"} {
+		t.Run(origin, func(t *testing.T) {
+			event := map[string]any{"type": "BlockStored", "block_hashes": []uint64{42},
+				"token_ids": []uint32{1}, "block_size": 1, "origin": origin}
+			wire, err := msgpack.Marshal(event)
+			require.NoError(t, err)
+			got, err := NewVLLMAdapter().decodeVLLMEvent(wire)
+			require.NoError(t, err)
+			assert.Equal(t, origin, got.(*kvevents.BlockStoredEvent).Origin)
+		})
+	}
+}
+
 // TestVLLMParseMessage_MapEncodedBlockRemovedAndCleared covers the remaining
 // map-encoded event kinds, mixed with an array-encoded event in one batch.
 func TestVLLMParseMessage_MapEncodedBlockRemovedAndCleared(t *testing.T) {

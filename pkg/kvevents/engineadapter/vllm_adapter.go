@@ -97,10 +97,18 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 	}
 
 	var fields []any
+	var origin string
 	switch ev := decoded.(type) {
 	case []any:
 		fields = ev
 	case map[string]any:
+		if raw := ev["origin"]; raw != nil {
+			var ok bool
+			origin, ok = raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("event origin is not a string: %T", raw)
+			}
+		}
 		var err error
 		if fields, err = mapEventToFields(ev); err != nil {
 			return nil, err
@@ -123,7 +131,11 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 		return nil, fmt.Errorf("unknown vLLM event tag: %s", tag)
 	}
 
-	return converter(fields)
+	event, err := converter(fields)
+	if stored, ok := event.(*kvevents.BlockStoredEvent); ok {
+		stored.Origin = origin
+	}
+	return event, err
 }
 
 // Field-name order of map-encoded events, mirroring the converters' positional

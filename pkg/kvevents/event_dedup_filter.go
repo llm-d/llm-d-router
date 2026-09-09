@@ -85,10 +85,11 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // two sibling chunks list the same constituent block hash, so the same hash is
 // stored and removed more than once on the wire.
 //
-// The filter mirrors the wire event stream rather than the index state: every
-// BlockStored increments the count for its hashes unconditionally (duplicates
-// included), and a BlockRemoved only forwards a hash to the index once its
-// count returns to zero. Removes for never-seen hashes pass through defensively
+// The filter mirrors the wire event stream rather than the index state. New
+// stores increment reference counts, including duplicates. Reused-block reports
+// only establish a reference when none is tracked. A BlockRemoved forwards a hash
+// to the index once its count returns to zero. Untracked removes pass through
+// defensively
 // (the index treats an unknown evict as a no-op), and a count never goes
 // negative. The index may independently evict an entry (LRU/cost) without a
 // wire remove; that only makes the filter's count an over-estimate, which stays
@@ -191,4 +192,24 @@ func (f *eventDedupFilter) clear(podIdentifier string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.refs, podIdentifier)
+}
+
+// trackReport restores an untracked residency without adding a physical copy.
+func (f *eventDedupFilter) trackReport(scope blockScope, hashes []uint64) {
+	if f == nil || len(hashes) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	bucket := f.refs[scope.podIdentifier]
+	if bucket == nil {
+		bucket = make(map[dedupKey]int)
+		f.refs[scope.podIdentifier] = bucket
+	}
+	for _, hash := range hashes {
+		key := scope.key(hash)
+		if bucket[key] == 0 {
+			bucket[key] = 1
+		}
+	}
 }

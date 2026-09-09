@@ -157,6 +157,15 @@ var (
 			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
 			compbasemetrics.ALPHA),
 	}, []string{cacheKindLabel, reasonLabel})
+	// FullReportRequests counts full KV-cache report requests issued by the
+	// precise-prefix-cache producer's repair path, labeled by trigger reason
+	// ("threshold" or "integrity").
+	FullReportRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_full_report_requests_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of full KV-cache report requests issued to repair the prefix index",
+			compbasemetrics.ALPHA),
+	}, []string{reasonLabel})
 
 	// SubscriberActive tracks the number of ZMQ subscribers currently managed by
 	// the SubscriberManager. A subscriber is counted from creation until it is
@@ -212,7 +221,7 @@ func Collectors() []prometheus.Collector {
 		Admissions, Evictions,
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
-		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresSkipped, KVEventRemovalsSkipped, FullReportRequests,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
 	}

@@ -43,6 +43,7 @@ var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
+	stream         *eventStream
 	pool           *Pool
 	podIdentifier  string
 	sourceEndpoint string
@@ -185,7 +186,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			logger.Info("Detected event sequence reset, rebuilding index",
 				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
-			z.pool.resetForSource(topic, z.sourceEndpoint)
+			z.resetForSource(topic)
 			z.lastSeq = 0
 			z.hasLastSeq = false
 			z.lastReplayFailure = time.Time{}
@@ -272,6 +273,7 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
+		stream:         z.stream,
 	}
 	// carried is bound inside the branch on purpose. Taking &sc directly makes
 	// sc escape, so it heap-allocates on every message including the ones the
@@ -283,12 +285,16 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	z.pool.AddTask(msg)
 }
 
+func (z *zmqSubscriber) resetForSource(topic string) {
+	z.pool.AddTask(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true, stream: z.stream})
+}
+
 func (z *zmqSubscriber) canAttemptReplay() bool {
 	return z.lastReplayFailure.IsZero() || time.Since(z.lastReplayFailure) >= replayCooldown
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
-	z.pool.resetForSource(topic, z.sourceEndpoint)
+	z.resetForSource(topic)
 	z.lastSeq = 0
 	z.hasLastSeq = false
 	z.lastReplayFailure = time.Now()
