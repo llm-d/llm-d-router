@@ -1,0 +1,5 @@
+# HELP llm_d_epp_plugin_data_scope_violations_total [ALPHA] Total number of endpoint attribute accesses rejected because the plugin did not declare the DataKey in Produces() or Consumes(), by extension point, plugin type, plugin name and access kind (read or write). A non-zero value means a plugin's implementation has drifted from its declaration; rejected reads resolve as absent and rejected writes are dropped.
+# TYPE llm_d_epp_plugin_data_scope_violations_total counter
+llm_d_epp_plugin_data_scope_violations_total{access="read",extension_point="Filter",plugin_name="f1",plugin_type="test-filter"} 3
+llm_d_epp_plugin_data_scope_violations_total{access="write",extension_point="DataProducer",plugin_name="p1",plugin_type="test-producer"} 1
+llm_d_epp_plugin_data_scope_violations_total{access="write",extension_point="Filter",plugin_name="f1",plugin_type="test-filter"} 2

@@ -26,6 +26,21 @@ router:
     # unreachable, for active/passive resiliency.
     failOpen: true
 
+    # Priority Routing configuration for Envoy ext_proc cluster (only supported in mode: service).
+    priorityRouting:
+      enabled: false
+      primaryReplicas: 1
+      standbyReplicas: 1
+      connectTimeout: "0.250s"
+      dnsRefreshRate: "5s"
+      healthyPanicThreshold: 10.0
+
+    # Active gRPC health check configuration for the ext_proc cluster.
+    healthCheckInterval: "10s"
+    healthCheckTimeout: "2s"
+    healthCheckUnhealthyThreshold: 3
+    healthCheckHealthyThreshold: 2
+
     resources:
       requests:
         cpu: "4"
@@ -43,6 +58,7 @@ router:
           name: envoy
           data:
             envoy.yaml: |
+              {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
               admin:
                 address:
                   socket_address:
@@ -208,8 +224,32 @@ router:
                       http_header_name: x-gateway-destination-endpoint
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
+                    {{- if $isPriorityRouting }}
+                    # Short connection timeout allows Envoy to quickly detect unreachable primary pods and trigger failover.
+                    connect_timeout: {{ .Values.router.proxy.priorityRouting.connectTimeout }}
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    # Refresh DNS for headless Service endpoints regularly to discover newly scheduled EPP pods.
+                    dns_refresh_rate: {{ .Values.router.proxy.priorityRouting.dnsRefreshRate }}
+                    common_lb_config:
+                      # Avoid routing traffic to newly started hosts until their first health check passes.
+                      ignore_new_hosts_until_first_hc: true
+                      # Prevent Envoy from entering panic mode (broadcasting to all priorities) during primary ejection.
+                      healthy_panic_threshold:
+                        value: {{ .Values.router.proxy.priorityRouting.healthyPanicThreshold }}
+                    outlier_detection:
+                      # Treat local origin (connection/TCP) failures separately from HTTP errors for immediate failover.
+                      split_external_local_origin_errors: true
+                      # Eject primary endpoint immediately on the first local connection failure (e.g. pod killed).
+                      consecutive_local_origin_failure: 1
+                      enforcing_consecutive_local_origin_failure: 100
+                      # Max percentage of hosts that can be ejected via outlier detection.
+                      max_ejection_percent: 50
+                      # Hold ejection for 30s to allow replacement pod startup and avoid flapping.
+                      base_ejection_time: 30s
+                    {{- else }}
                     connect_timeout: 86400s
-                    lb_policy: LEAST_REQUEST
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    {{- end }}
                     circuit_breakers:
                       thresholds:
                         - max_connections: 40000
@@ -217,10 +257,11 @@ router:
                           max_requests: 40000
                           max_retries: 1024
                     health_checks:
-                      - timeout: 2s
-                        interval: 10s
-                        unhealthy_threshold: 3
-                        healthy_threshold: 2
+                      # Active gRPC health checking for the ext_proc cluster.
+                      - timeout: {{ .Values.router.proxy.healthCheckTimeout }}
+                        interval: {{ .Values.router.proxy.healthCheckInterval }}
+                        unhealthy_threshold: {{ .Values.router.proxy.healthCheckUnhealthyThreshold }}
+                        healthy_threshold: {{ .Values.router.proxy.healthCheckHealthyThreshold }}
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
@@ -235,7 +276,46 @@ router:
                             initial_connection_window_size: 1048576
                     load_assignment:
                       cluster_name: ext_proc
+                      {{- if $isPriorityRouting }}
+                      {{- $primaryReplicas := include "llm-d-router.priorityRouting.primaryReplicas" . | int }}
+                      # Overprovisioning factor scales traffic shifting between priority tiers.
+                      policy:
+                        overprovisioning_factor: {{ mul 100 $primaryReplicas }}
+                      {{- end }}
                       endpoints:
+                        {{- if $isPriorityRouting }}
+                        {{- $primaryReplicas := include "llm-d-router.priorityRouting.primaryReplicas" . | int }}
+                        {{- $standbyReplicas := include "llm-d-router.priorityRouting.standbyReplicas" . | int }}
+                        - locality:
+                            region: ext_proc/primary
+                          priority: 0
+                          load_balancing_weight:
+                            value: 1
+                          lb_endpoints:
+                            {{- range $i := untilStep 0 (int $primaryReplicas) 1 }}
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: 9002
+                              load_balancing_weight: 1
+                            {{- end }}
+                        - locality:
+                            region: ext_proc/standby
+                          priority: 1
+                          load_balancing_weight:
+                            value: 1
+                          lb_endpoints:
+                            {{- range $j := untilStep 0 (int $standbyReplicas) 1 }}
+                            {{- $ord := add (int $primaryReplicas) (int $j) }}
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: 9002
+                              load_balancing_weight: 1
+                            {{- end }}
+                        {{- else }}
                         - locality:
                             region: ext_proc/e2e/0
                           lb_endpoints:
@@ -245,6 +325,7 @@ router:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
                               load_balancing_weight: 1
+                        {{- end }}
         name: envoy-proxy
         image: docker.io/envoyproxy/envoy:distroless-v1.33.2
         command: "envoy"
@@ -290,7 +371,7 @@ router:
         volumes:
           - name: config
             configMap:
-              name: envoy
+              name: '{{ .Values.router.proxy.presets.envoy.configMap.name }}'
               items:
                 - key: envoy.yaml
                   path: envoy.yaml

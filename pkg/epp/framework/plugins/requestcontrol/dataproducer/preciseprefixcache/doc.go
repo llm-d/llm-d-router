@@ -14,6 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package preciseprefixcache hashes TokenizedPrompt into KV-block keys,
+// Package preciseprefixcache hashes TokenizedRequest into KV-block keys,
 // looks them up in the index, and writes per-endpoint PrefixCacheMatchInfo.
 package preciseprefixcache

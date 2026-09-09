@@ -18,6 +18,8 @@ package datalayer
 
 import (
 	"sync"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // Cloneable types support cloning of the value.
@@ -41,16 +43,22 @@ func (d *DynamicAttribute) Clone() Cloneable {
 // AttributeMap is used to store flexible metadata or traits
 // across different aspects of an inference server.
 // Stored values must be Cloneable.
+//
+// Keys are DataKey values rather than strings so that a plugin can only reach
+// an attribute through a key it holds -- the same value it names in Produces()
+// or Consumes(). This removes the raw-string escape hatch by which a plugin
+// could read or write an attribute unrelated to its declaration.
 type AttributeMap interface {
-	Put(string, Cloneable)
-	Get(string) (Cloneable, bool)
-	Keys() []string
+	Put(fwkplugin.DataKey, Cloneable)
+	Get(fwkplugin.DataKey) (Cloneable, bool)
+	Keys() []fwkplugin.DataKey
 	Clone() AttributeMap
 }
 
 // Attributes provides a goroutine-safe implementation of AttributeMap.
+// Put is the only writer, so every key in the map is a DataKey.
 type Attributes struct {
-	data sync.Map // key: attribute name (string), value: attribute value (opaque, Cloneable)
+	data sync.Map // key: DataKey, value: attribute value (opaque, Cloneable)
 }
 
 // NewAttributes returns a new instance of Attributes.
@@ -59,14 +67,14 @@ func NewAttributes() AttributeMap {
 }
 
 // Put adds or updates an attribute in the map.
-func (a *Attributes) Put(key string, value Cloneable) {
+func (a *Attributes) Put(key fwkplugin.DataKey, value Cloneable) {
 	if value != nil {
 		a.data.Store(key, value) // TODO: Clone into map to ensure isolation
 	}
 }
 
 // Get retrieves an attribute by key, returning a cloned copy (or resolving it dynamically).
-func (a *Attributes) Get(key string) (Cloneable, bool) {
+func (a *Attributes) Get(key fwkplugin.DataKey) (Cloneable, bool) {
 	val, ok := a.data.Load(key)
 	if !ok {
 		return nil, false
@@ -87,12 +95,10 @@ func (a *Attributes) Get(key string) (Cloneable, bool) {
 }
 
 // Keys returns all keys in the attribute map.
-func (a *Attributes) Keys() []string {
-	var keys []string
+func (a *Attributes) Keys() []fwkplugin.DataKey {
+	var keys []fwkplugin.DataKey
 	a.data.Range(func(key, _ any) bool {
-		if sk, ok := key.(string); ok {
-			keys = append(keys, sk)
-		}
+		keys = append(keys, key.(fwkplugin.DataKey))
 		return true
 	})
 	return keys
@@ -102,10 +108,8 @@ func (a *Attributes) Keys() []string {
 func (a *Attributes) Clone() AttributeMap {
 	clone := NewAttributes()
 	a.data.Range(func(key, value any) bool {
-		if sk, ok := key.(string); ok {
-			if v, ok := value.(Cloneable); ok {
-				clone.Put(sk, v)
-			}
+		if v, ok := value.(Cloneable); ok {
+			clone.Put(key.(fwkplugin.DataKey), v)
 		}
 		return true
 	})
@@ -114,7 +118,7 @@ func (a *Attributes) Clone() AttributeMap {
 
 // ReadAttribute retrieves attribute with the given key from AttributeMap and asserts it to type T.
 // Second return value is 'false' if the key is not found or the type assertion fails.
-func ReadAttribute[T Cloneable](attributeMap AttributeMap, key string) (T, bool) {
+func ReadAttribute[T Cloneable](attributeMap AttributeMap, key fwkplugin.DataKey) (T, bool) {
 	var zero T
 
 	raw, ok := attributeMap.Get(key)

@@ -38,7 +38,7 @@ type ParserRegistry struct {
 }
 
 // NewParserRegistry builds a central resolution table from a list of active parsers.
-// The order of the input parsers determines the priority (first match wins).
+// Resolve uses longest-suffix matching on each parser's claimed paths (longest match wins).
 func NewParserRegistry(parsers []fwkrh.Parser, logger logr.Logger) *ParserRegistry {
 	registry := &ParserRegistry{}
 	seenTypes := make(map[string]bool)
@@ -86,13 +86,21 @@ func (pr *ParserRegistry) Parsers() []fwkrh.Parser {
 }
 
 // Resolve resolves an incoming request path to the matching Parser using suffix matching.
+// When multiple parsers match, the longest matching suffix wins to ensure more-specific
+// parsers take priority regardless of registration order.
 func (pr *ParserRegistry) Resolve(path string) (fwkrh.Parser, error) {
+	var longestMatched fwkrh.Parser
+	var longestMatchLen int
 	for _, entry := range pr.entries {
 		for _, suffix := range entry.normalizedPaths {
-			if request.MatchPathSuffix(path, suffix) {
-				return entry.parser, nil
+			if request.MatchPathSuffix(path, suffix) && len(suffix) > longestMatchLen {
+				longestMatched = entry.parser
+				longestMatchLen = len(suffix)
 			}
 		}
+	}
+	if longestMatched != nil {
+		return longestMatched, nil
 	}
 	if pr.fallbackParser != nil {
 		return pr.fallbackParser, nil

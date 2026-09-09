@@ -250,3 +250,14 @@ func TestRequestHeader_CustomHeader(t *testing.T) {
 		t.Errorf("agent identity = %q, want %q (custom should win)", got2, "tenant-42")
 	}
 }
+
+// TestAgentIdentityKeyMatchesDocumentedConfig pins the published key to the
+// name session-affinity sources use in configuration ("attribute:
+// agent-identity"). A drift makes the session-affinity fallback silently
+// resolve nothing.
+func TestAgentIdentityKeyMatchesDocumentedConfig(t *testing.T) {
+	const documented = "agent-identity"
+	if got := fwkplugin.NewDataKey(documented, ""); got != AgentIdentityKey {
+		t.Errorf("config %q resolves to %s, want %s", documented, got, AgentIdentityKey)
+	}
+}

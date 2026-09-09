@@ -69,6 +69,7 @@ func TestFlowControlFeatureGateAdmissionControlWiring(t *testing.T) {
 	testCases := []struct {
 		name       string
 		configText string
+		extraGates []string
 		// wantEnabled nil means "expect whatever default the runner registered for the gate",
 		// read programmatically from the feature gates parsed out of the stanza-less config.
 		wantEnabled *bool
@@ -98,6 +99,24 @@ featureGates:
 `,
 			wantEnabled: boolPtr(false),
 		},
+		{
+			name: "flowControl gate enabled via flag without a featureGates stanza",
+			configText: `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+`,
+			extraGates:  []string{flowcontrol.FeatureGate},
+			wantEnabled: boolPtr(true),
+		},
+		{
+			name: "flag overrides the config's featureGates stanza",
+			configText: `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl=false
+`,
+			extraGates:  []string{flowcontrol.FeatureGate + "=true"},
+			wantEnabled: boolPtr(true),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -107,6 +126,7 @@ featureGates:
 
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
+			opts.FeatureGates = tc.extraGates
 			opts.PoolName = "test-pool"
 
 			r := NewRunner()
@@ -146,4 +166,25 @@ featureGates:
 			}
 		})
 	}
+}
+
+// TestFeatureGatesFlagNotDuplicatedAcrossCalls pins the r.rawConfig cache against the flag path:
+// Run calls parseConfigurationPhaseOne to choose the K8s vs file-discovery route and setup calls it
+// again, so an uncached append would grow the gate list on every call.
+func TestFeatureGatesFlagNotDuplicatedAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+
+	opts := runserver.NewOptions()
+	opts.FeatureGates = []string{flowcontrol.FeatureGate}
+
+	r := NewRunner()
+	first, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.Contains(t, first.FeatureGates, flowcontrol.FeatureGate,
+		"the flag gate must land in rawConfig, not only in the returned map")
+
+	second, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.Same(t, first, second, "the cached config should be returned")
+	require.Len(t, second.FeatureGates, 1, "the flag gate must not be appended twice")
 }

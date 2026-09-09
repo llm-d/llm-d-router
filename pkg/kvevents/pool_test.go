@@ -38,6 +38,27 @@ func newTestPool(t *testing.T, blockSize int) (
 	return pool, idx, tp
 }
 
+type recordingIndex struct {
+	kvblock.Index
+	getRequestKeyCalls int
+	evictCalls         int
+}
+
+func (i *recordingIndex) GetRequestKey(ctx context.Context, engineKey kvblock.BlockHash) (kvblock.BlockHash, error) {
+	i.getRequestKeyCalls++
+	return i.Index.GetRequestKey(ctx, engineKey)
+}
+
+func (i *recordingIndex) Evict(
+	ctx context.Context,
+	key kvblock.BlockHash,
+	keyType kvblock.KeyType,
+	entries []kvblock.PodEntry,
+) error {
+	i.evictCalls++
+	return i.Index.Evict(ctx, key, keyType, entries)
+}
+
 // makeTokens creates a token slice [1, 2, ..., n].
 func makeTokens(n int) []uint32 {
 	tokens := make([]uint32, n)
@@ -734,7 +755,7 @@ func TestBlockStoredEvent_EvictionOrderGPUThenCPU(t *testing.T) {
 	assert.Error(t, err, "engine→request mapping should be removed after full eviction")
 }
 
-func TestHMAGroupMetadataAndEntryOnBlockStored(t *testing.T) {
+func TestHMAGroupMetadataLearnedForRejectedKind(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, tp := newTestPool(t, 16)
 
@@ -772,11 +793,111 @@ func TestHMAGroupMetadataAndEntryOnBlockStored(t *testing.T) {
 	result, err := idx.Lookup(ctx, canonicalKeys, nil)
 	require.NoError(t, err)
 	for _, ck := range canonicalKeys {
-		entries := result[ck]
-		require.Len(t, entries, 1, "each canonical key should have one entry")
-		assert.True(t, entries[0].HasGroup)
-		assert.Equal(t, kvblock.GroupID(0), entries[0].GroupIdx)
+		assert.Empty(t, result[ck], "rejected group kind must not be indexed")
 	}
+}
+
+func TestHMAGroupKindFilter(t *testing.T) {
+	tests := []struct {
+		name    string
+		kind    KVCacheSpecKind
+		allowed bool
+	}{
+		{name: "full attention", kind: KVCacheSpecKindFullAttention, allowed: true},
+		{name: "MLA attention", kind: KVCacheSpecKindMlaAttention, allowed: true},
+		{name: "sink full attention", kind: KVCacheSpecKindSinkFull, allowed: true},
+		{name: "sliding window", kind: KVCacheSpecKindSlidingWindow},
+		{name: "sliding window MLA", kind: KVCacheSpecKindSlidingWindowMla},
+		{name: "mamba", kind: KVCacheSpecKindMamba},
+		{name: "chunked local attention", kind: KVCacheSpecKindChunkedLocal},
+		{name: "encoder only attention", kind: KVCacheSpecKindEncoder},
+		{name: "cross attention", kind: KVCacheSpecKindCross},
+		{name: "unknown", kind: KVCacheSpecKindUnknown},
+		{name: "missing kind"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, tp := newTestPool(t, 16)
+			groupIdx := 0
+			tokens := makeTokens(64)
+			engineKeys := makeEngineKeys(4, 900)
+
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     engineKeys,
+					Tokens:          tokens,
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: tt.kind,
+					BlockSize:       16,
+				},
+			}}, "pod-hma", "test-model")
+
+			canonicalKeys, err := tp.TokensToKVBlockKeys(
+				kvblock.EmptyBlockHash, tokens, "test-model", nil)
+			require.NoError(t, err)
+			result, err := idx.Lookup(ctx, canonicalKeys, nil)
+			require.NoError(t, err)
+			for _, key := range canonicalKeys {
+				if tt.allowed {
+					require.Len(t, result[key], 1)
+					assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
+				} else {
+					assert.Empty(t, result[key])
+				}
+			}
+		})
+	}
+}
+
+func TestHMAGroupFilterRejectsSparseFullAttentionBeforeParentLookup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 950),
+			Tokens:          makeTokens(64),
+			ParentHash:      949,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindFullAttention,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.getRequestKeyCalls)
+	_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(950))
+	assert.Error(t, err)
+}
+
+func TestHMAGroupFilterIgnoresRejectedGroupRemoval(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 1
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 980),
+			Tokens:          makeTokens(64),
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindSlidingWindowMla,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockRemovedEvent{
+			BlockHashes: makeEngineKeys(1, 980),
+			GroupIdx:    &groupIdx,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.evictCalls)
 }
 
 // TestHMAGroupLevelEviction_BlockRemoved verifies that a BlockRemoved event with GroupIdx

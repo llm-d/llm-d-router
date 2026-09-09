@@ -6,9 +6,15 @@ import (
 
 // hasMultimodalContent reports whether the tokenized prompt carries any
 // multimodal features. Detection is protocol-agnostic: it relies on the
-// token-producer plugin having populated TokenizedPrompt.MultiModalFeatures.
+// token-producer plugin having populated PromptTokens.MultiModalFeatures.
 func hasMultimodalContent(request *scheduling.InferenceRequest) bool {
-	return request != nil && request.Body != nil &&
-		request.Body.TokenizedPrompt != nil &&
-		len(request.Body.TokenizedPrompt.MultiModalFeatures) > 0
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+		return false
+	}
+	for _, p := range request.Body.TokenizedRequest.Prompts {
+		if len(p.MultiModalFeatures) > 0 {
+			return true
+		}
+	}
+	return false
 }

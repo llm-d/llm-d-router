@@ -57,6 +57,10 @@ type SessionIDSource struct {
 	Header string `json:"header"`
 	// Attribute is a request-attribute key published by an upstream plugin.
 	Attribute string `json:"attribute"`
+	// Producer names the plugin publishing the attribute. Empty addresses a
+	// producer-agnostic key such as "agent-identity"; set it to read one
+	// producer's attribute, e.g. "session-id-producer".
+	Producer string `json:"producer"`
 }
 
 // Default eviction schedule applied to a SessionIDConfig with unset fields:
@@ -184,7 +188,7 @@ func (s *SessionIDHeader) resolveSessionID(ctx context.Context, request *schedul
 			}
 			continue
 		}
-		if id, ok := attributeString(ctx, request, source.Attribute); ok {
+		if id, ok := attributeString(ctx, request, source); ok {
 			if id = strings.TrimSpace(id); id != "" {
 				return id
 			}
@@ -193,10 +197,13 @@ func (s *SessionIDHeader) resolveSessionID(ctx context.Context, request *schedul
 	return ""
 }
 
-// attributeString reads a request attribute as a string. Producers store their
-// identifier under a named string type (e.g. session.SessionID), so a plain
-// string type assertion would miss them; any value of string kind is accepted.
-func attributeString(ctx context.Context, request *scheduling.InferenceRequest, key string) (string, bool) {
+// attributeString reads a request attribute as a string. The source names the
+// attribute and its producer in separate fields, so the key is built rather
+// than parsed out of one string. Producers store their identifier under a
+// named string type (e.g. session.SessionID), so a plain string type assertion
+// would miss them; any value of string kind is accepted.
+func attributeString(ctx context.Context, request *scheduling.InferenceRequest, source SessionIDSource) (string, bool) {
+	key := plugin.NewDataKey(source.Attribute, "").WithNonEmptyProducerName(source.Producer)
 	v, ok := request.GetAttribute(key)
 	if !ok {
 		return "", false
@@ -204,7 +211,7 @@ func attributeString(ctx context.Context, request *scheduling.InferenceRequest, 
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.String {
 		log.FromContext(ctx).V(logging.DEBUG).Info("Session affinity - attribute is not a string, skipping source",
-			"attribute", key)
+			"attribute", key.String())
 		return "", false
 	}
 	return rv.String(), true

@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"net/http"
 
-	logging "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"golang.org/x/sync/errgroup"
 )
@@ -113,7 +113,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest, originalRequest)
+	reqcommon.PrimeSingleTokenRequest(encoderRequest)
 
 	return encoderRequest
 }

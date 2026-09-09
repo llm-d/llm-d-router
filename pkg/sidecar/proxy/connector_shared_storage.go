@@ -23,10 +23,13 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
-	s.logger.V(4).Info("running Shared Storage protocol", "url", prefillPodHostPort)
+	s.logger.V(logging.DEBUG).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
 	original, completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -38,17 +41,17 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
 	if cacheHitThreshold, hasCacheHitThreshold := completionRequest[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
-		s.logger.V(4).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
+		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
 		needsPrefill, err := s.tryDecode(w, decodeReq, completionRequest)
 		if err != nil {
 			return
 		}
 		if !needsPrefill {
-			s.logger.V(4).Info("decode succeeded without prefill")
+			s.logger.V(logging.DEBUG).Info("decode succeeded without prefill")
 			return
 		}
-		s.logger.V(4).Info("decode failed due to failing to meet the cache hit threshold", requestFieldCacheHitThreshold, cacheHitThreshold)
+		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", requestFieldCacheHitThreshold, cacheHitThreshold)
 	}
 
 	// we clone the completion request to avoid modifying the original request
@@ -58,7 +61,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		return
 	}
 
-	s.logger.V(4).Info("forwarding to decoder after prefill")
+	s.logger.V(logging.DEBUG).Info("forwarding to decoder after prefill")
 	completionRequest[requestFieldCacheHitThreshold] = 0
 	decodeRequestBody, err := json.Marshal(completionRequest)
 	if err != nil {
@@ -142,7 +145,7 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 	select {
 	case <-w.firstChunkReady():
 	case <-done:
-		s.logger.V(4).Info("request completed without body data")
+		s.logger.V(logging.DEBUG).Info("request completed without body data")
 	}
 
 	statusCode := w.getStatusCode()
@@ -156,13 +159,13 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 
 	// Check buffered SSE content for cache_threshold finish reason.
 	if s.checkBufferedResponseForCacheThreshold(w.buffered()) {
-		s.logger.V(4).Info("finish reason cache_threshold detected, needs prefill")
+		s.logger.V(logging.DEBUG).Info("finish reason cache_threshold detected, needs prefill")
 		return true, nil
 	}
 
 	// No cache_threshold finish reason found, flush buffer and switch to direct mode
 	// to let the rest of the response stream through.
-	s.logger.V(4).Info("first response for request shows success without cache_threshold finish reason")
+	s.logger.V(logging.DEBUG).Info("first response for request shows success without cache_threshold finish reason")
 	if err := w.flushBufferAndGoDirect(); err != nil {
 		s.logger.Error(err, "failed to flush buffer to client and switch to direct mode")
 		return false, err
@@ -200,7 +203,7 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 		jsonData := strings.TrimPrefix(line, "data: ")
 		var response map[string]any
 		if err := json.Unmarshal([]byte(jsonData), &response); err != nil {
-			s.logger.V(4).Info("skipping malformed SSE chunk", "chunk", jsonData)
+			s.logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", jsonData)
 			continue
 		}
 
@@ -214,8 +217,7 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 // prefill routes a request to a prefill node
 func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, completionRequest map[string]any) error {
 	// Prepare prefill request
-	completionRequest[requestFieldMaxTokens] = 1
-	completionRequest[requestFieldMaxCompletionTokens] = 1
+	reqcommon.PrimeSingleTokenRequest(completionRequest)
 	completionRequest[requestFieldCacheHitThreshold] = 0
 
 	pbody, err := json.Marshal(completionRequest)
@@ -236,7 +238,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	}
 
 	// send prefill request
-	s.logger.V(4).Info("sending prefill request", "to", prefillPodHostPort)
+	s.logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
 	pw := &bufferedResponseWriter{}
 	prefillHandler.ServeHTTP(pw, preq)
 
@@ -249,6 +251,6 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		return fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
 	}
 
-	s.logger.V(4).Info("prefill completed successfully")
+	s.logger.V(logging.DEBUG).Info("prefill completed successfully")
 	return nil
 }

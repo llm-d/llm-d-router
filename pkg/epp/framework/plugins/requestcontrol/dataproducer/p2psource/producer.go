@@ -81,7 +81,7 @@ type Producer struct {
 	prefixMatchDataKey  plugin.DataKey
 	minCachedTokenDelta int
 	prefillProfile      string
-	attrKeyValue        string
+	attrKeyValue        plugin.DataKey
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -111,7 +111,7 @@ func New(name string, cfg Config) *Producer {
 		prefixMatchDataKey:  attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		minCachedTokenDelta: cfg.MinCachedTokenDelta,
 		prefillProfile:      prefillProfile,
-		attrKeyValue:        fmt.Sprintf("%s/%s/best-match", PluginType, name),
+		attrKeyValue:        plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
 	}
 }
 
@@ -141,7 +141,7 @@ type bestMatchPeer struct {
 
 // attrKey returns the request-attribute key carrying the best-match peer,
 // name-bound to this plugin instance.
-func (p *Producer) attrKey() string {
+func (p *Producer) attrKey() plugin.DataKey {
 	return p.attrKeyValue
 }
 
@@ -327,7 +327,7 @@ func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
 
 // matchInfo returns the endpoint's PrefixCacheMatchInfo, or nil when absent.
 func (p *Producer) matchInfo(ep scheduling.Endpoint) *attrprefix.PrefixCacheMatchInfo {
-	raw, ok := ep.Get(p.prefixMatchDataKey.String())
+	raw, ok := ep.Get(p.prefixMatchDataKey)
 	if !ok {
 		return nil
 	}

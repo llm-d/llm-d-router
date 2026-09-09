@@ -39,13 +39,13 @@ func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64) fwks
 	}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 	if prefixMatch >= 0 {
-		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
 	}
 	if ttft >= 0 {
-		ep.Put(attrlatency.LatencyPredictionInfoDataKey.String(), attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
+		ep.Put(attrlatency.LatencyPredictionInfoDataKey, attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
 	}
 	if tokens >= 0 {
-		ep.Put(attrconcurrency.InFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Tokens: tokens})
+		ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens})
 	}
 	return ep
 }
@@ -215,9 +215,25 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 }
 
 func TestFactory_InvalidAffinityThreshold(t *testing.T) {
-	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"affinityThreshold": 1.5}`)), nil)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "affinityThreshold must be <= 1.0")
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "below zero",
+			raw:  `{"affinityThreshold": -0.1}`,
+		},
+		{
+			name: "above one",
+			raw:  `{"affinityThreshold": 1.5}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Factory("test", fwkplugin.StrictDecoder([]byte(tc.raw)), nil)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "affinityThreshold must be in [0, 1]")
+		})
+	}
 }
 
 func TestFactory_InvalidExplorationProbability(t *testing.T) {

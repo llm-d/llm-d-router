@@ -216,7 +216,7 @@ func (f *UtilizationFilter) metricValue(ctx context.Context, endpoint scheduling
 }
 
 func (f *UtilizationFilter) activeRequestCount(ctx context.Context, endpoint scheduling.Endpoint) int64 {
-	val, ok := endpoint.Get(f.inFlightLoadDataKey.String())
+	val, ok := endpoint.Get(f.inFlightLoadDataKey)
 	if !ok {
 		return 0
 	}

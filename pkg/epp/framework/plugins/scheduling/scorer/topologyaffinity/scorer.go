@@ -105,7 +105,7 @@ func (s *Scorer) Category() fwksched.ScorerCategory {
 func (s *Scorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 
-	peer, ok := topoutil.PeerTopology(request, s.dataKey.String())
+	peer, ok := topoutil.PeerTopology(request, s.dataKey)
 	if !ok {
 		for _, endpoint := range endpoints {
 			scores[endpoint] = 0
@@ -114,7 +114,7 @@ func (s *Scorer) Score(_ context.Context, request *fwksched.InferenceRequest, en
 	}
 
 	for _, endpoint := range endpoints {
-		candidate, ok := fwkdl.ReadAttribute[*attrtopology.Topology](endpoint, s.dataKey.String())
+		candidate, ok := fwkdl.ReadAttribute[*attrtopology.Topology](endpoint, s.dataKey)
 		if !ok {
 			scores[endpoint] = 0
 			continue

@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
@@ -53,7 +54,7 @@ func tokenLimitMap(req map[string]any, apiType APIType) (map[string]any, bool) {
 
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType APIType) {
 	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
-	s.logger.V(4).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
+	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "tokenLimitFields", tokenLimitFields)
 
 	original, completionRequest, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -198,8 +199,12 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// 2. Forward request to prefiller
-	s.logger.V(4).Info("sending prefill request", "to", prefillPodHostPort)
-	s.logger.V(5).Info("Prefill request", "body", string(pbody))
+	s.logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
+	// Guarded: stringifying the body allocates a copy per request even when
+	// TRACE is disabled.
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("Prefill request", "body", string(pbody))
+	}
 
 	// Retry on transient 5xx (502/503/504): these failures (e.g. connection
 	// reset → 502) are common when the prefill pod's accept queue overflows
@@ -284,7 +289,10 @@ retryLoop:
 		pCachedTokens = 0
 	}
 
-	s.logger.V(5).Info("received prefiller response", requestFieldKVTransferParams, pKVTransferParams)
+	s.logger.V(logging.TRACE).Info("received prefiller response",
+		requestFieldKVTransferParams, pKVTransferParams,
+		"cachedTokens", pCachedTokens,
+		"hasCachedTokens", hasPCachedTokens)
 
 	// Decode Stage
 
@@ -416,13 +424,15 @@ retryLoop:
 
 	// 2. Forward to local decoder.
 
-	s.logger.V(5).Info("sending request to decoder", "body", string(dbody))
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens)
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("sending request to decoder", "body", string(dbody))
+	}
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
 
 	if !dataParallelUsed {
-		s.logger.V(4).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
+		s.logger.V(logging.DEBUG).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
 		s.dispatchDecode(decodeWriter, dreq, completionRequest)
 	}
@@ -469,7 +479,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	w http.ResponseWriter, r *http.Request, original []byte,
 	completionRequest map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
 ) {
-	s.logger.V(4).Info("running NIXL protocol V2 (concurrent dispatch)",
+	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
 
 	tracer := tracing.Tracer()
@@ -576,7 +586,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	completionRequest[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill: true,
 		requestFieldDoRemoteDecode:  false,
-		requestFieldRemoteEngineID:  fmt.Sprintf("%s:%d", prefillHost, s.config.MoRIIOPrefillHandshakePort),
+		requestFieldRemoteEngineID:  net.JoinHostPort(prefillHost, strconv.Itoa(s.config.MoRIIOPrefillHandshakePort)),
 		// Empty (not nil) since decode allocates its own blocks in WRITE mode.
 		requestFieldRemoteBlockIDs:       []any{},
 		requestFieldRemoteHost:           prefillHost,
@@ -630,7 +640,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dispatchCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	pCtx, prefillSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.prefill",
+	pCtx, prefillSpan := tracer.Start(dispatchCtx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -647,7 +657,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	preq.Body = io.NopCloser(bytes.NewReader(pbody))
 	preq.ContentLength = int64(len(pbody))
 
-	dCtx, decodeSpan := tracer.Start(dispatchCtx, "llm_d.pd_proxy.decode",
+	dCtx, decodeSpan := tracer.Start(dispatchCtx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -664,8 +674,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dreq.Body = io.NopCloser(bytes.NewReader(dbody))
 	dreq.ContentLength = int64(len(dbody))
 
-	s.logger.V(5).Info("concurrent-dispatch prefill request body", "body", string(pbody))
-	s.logger.V(5).Info("concurrent-dispatch decode request body", "body", string(dbody))
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("concurrent-dispatch prefill request body", "body", string(pbody))
+		trace.Info("concurrent-dispatch decode request body", "body", string(dbody))
+	}
 
 	// Decode writes into a deferred writer that buffers everything until we
 	// commit() (prefill succeeded -> flush + stream on) or abort() (prefill

@@ -70,7 +70,7 @@ const (
 )
 
 func readTopology(ep fwkdl.Endpoint) (*attrtopology.Topology, bool) {
-	dk := attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(testPluginName).String()
+	dk := attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(testPluginName)
 	raw, ok := ep.GetAttributes().Get(dk)
 	if !ok {
 		return nil, false

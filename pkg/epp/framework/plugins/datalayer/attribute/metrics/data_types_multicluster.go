@@ -16,6 +16,8 @@ limitations under the License.
 
 package metrics
 
+import "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+
 // Pool-aggregate attribute keys, read by the multicluster scorers and written by the
 // multicluster metrics extractor. A cluster-endpoint has no per-pod metrics, so it
 // carries the pool's aggregate instead.
@@ -24,4 +26,11 @@ const (
 	MultiClusterKVCacheUtilizationKey = "llm-d.ai/multicluster-kv-cache-utilization"
 	// MultiClusterQueueSizeKey holds a pool's aggregate waiting-queue size.
 	MultiClusterQueueSizeKey = "llm-d.ai/multicluster-queue-size"
+)
+
+// The pool aggregates are addressed without a producer name: any extractor that
+// can supply the cluster-level aggregate is an acceptable source.
+var (
+	MultiClusterKVCacheUtilizationDataKey = plugin.NewDataKey(MultiClusterKVCacheUtilizationKey, "")
+	MultiClusterQueueSizeDataKey          = plugin.NewDataKey(MultiClusterQueueSizeKey, "")
 )

@@ -4,7 +4,8 @@ This package defines the data key for GPU hardware metrics collected from NVIDIA
 
 ## `GPUUtilizationDataKey`
 
-- **Key string**: `GPUUtilization/dcgm-extractor`
+- **Attribute**: `GPUUtilization`
+- **Producer**: `dcgm-extractor`
 - **Value type**: `ScalarMetricValue` (from `attribute/metrics`)
 
 For usage instructions, cluster prerequisites, and EPP config examples see

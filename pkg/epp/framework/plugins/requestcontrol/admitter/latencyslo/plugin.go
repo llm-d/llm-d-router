@@ -141,7 +141,7 @@ func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.Inferenc
 		}
 
 		// Valid prediction: both TTFT and TPOT within SLO.
-		if latencyInfoRaw, ok := endpoint.Get(p.latencyPredictionInfoDataKey.String()); ok {
+		if latencyInfoRaw, ok := endpoint.Get(p.latencyPredictionInfoDataKey); ok {
 			hasPredictions = true
 			latencyInfo := latencyInfoRaw.(*attrlatency.LatencyPredictionInfo)
 			if latencyInfo.IsValid() {

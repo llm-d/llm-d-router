@@ -18,6 +18,7 @@ package topology
 
 import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
@@ -31,7 +32,7 @@ import (
 // prefill profile; its Topology attribute (dataKey) is read directly. Scoped
 // to single-EPP deployments; coordinator deployments, where the peer's
 // topology arrives on a request header instead, are not yet supported.
-func PeerTopology(request *fwksched.InferenceRequest, dataKey string) (*attrtopology.Topology, bool) {
+func PeerTopology(request *fwksched.InferenceRequest, dataKey fwkplugin.DataKey) (*attrtopology.Topology, bool) {
 	if request == nil {
 		return nil, false
 	}

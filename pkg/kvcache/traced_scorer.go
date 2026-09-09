@@ -31,8 +31,12 @@ type tracedScorer struct {
 	next KVBlockScorer
 }
 
-// NewTracedScorer wraps a KVBlockScorer and emits OpenTelemetry traces for Score operations.
-// This encapsulates all tracing logic for the KVBlockScorer interface.
+// NewTracedScorer wraps a KVBlockScorer and emits OpenTelemetry traces for
+// Score operations.
+//
+// Deprecated: Indexer.ScoreTokens scores through Indexer.MatchBlockKeys,
+// which emits its own span. The wrapper serves callers that hold a
+// KVBlockScorer themselves.
 func NewTracedScorer(next KVBlockScorer) KVBlockScorer {
 	return &tracedScorer{next: next}
 }
@@ -46,8 +50,8 @@ func (t *tracedScorer) Score(
 	keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 ) (map[string]float64, error) {
-	tracer := tracing.Tracer("llm-d-router/pkg/kvcache")
-	_, span := tracer.Start(ctx, "llm_d.kv_cache.scorer.compute",
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "compute_scores",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

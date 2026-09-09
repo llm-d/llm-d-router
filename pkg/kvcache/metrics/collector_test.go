@@ -52,6 +52,8 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"MaxPodHitCount", MaxPodHitCount},
 		{"DedupRemovedHashesSuppressed", DedupRemovedHashesSuppressed},
 		{"DedupRemovedHashesForwarded", DedupRemovedHashesForwarded},
+		{"KVEventStoresSkipped", KVEventStoresSkipped},
+		{"KVEventRemovalsSkipped", KVEventRemovalsSkipped},
 		{"SubscriberActive", SubscriberActive},
 		{"SubscriberReconnections", SubscriberReconnections},
 		{"MessagesReceived", MessagesReceived},
@@ -72,6 +74,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	// subsystem with the kv_cache_events prefix.
 	reg := prometheus.NewRegistry()
 	kvevents := []prometheus.Collector{
+		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived,
 		ZMQErrors, PoolQueueDepth, PoolCapacity,
 	}
@@ -84,6 +87,8 @@ func TestKVEventsMetricNames(t *testing.T) {
 	SubscriberReconnections.WithLabelValues("pod-a").Inc()
 	MessagesReceived.WithLabelValues("pod-a").Inc()
 	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
+	KVEventStoresSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
+	KVEventRemovalsSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
 	PoolQueueDepth.Set(3)
 	PoolCapacity.Set(4)
 
@@ -98,12 +103,14 @@ func TestKVEventsMetricNames(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		"llm_d_router_epp_kv_cache_events_active_subscribers",
-		"llm_d_router_epp_kv_cache_events_subscriber_reconnections_total",
-		"llm_d_router_epp_kv_cache_events_messages_received_total",
-		"llm_d_router_epp_kv_cache_events_zmq_errors_total",
-		"llm_d_router_epp_kv_cache_events_pool_queue_depth",
-		"llm_d_router_epp_kv_cache_events_pool_capacity",
+		"llm_d_epp_kv_cache_events_active_subscribers",
+		"llm_d_epp_kv_cache_events_subscriber_reconnections_total",
+		"llm_d_epp_kv_cache_events_messages_received_total",
+		"llm_d_epp_kv_cache_events_zmq_errors_total",
+		"llm_d_epp_kv_cache_events_stores_skipped_total",
+		"llm_d_epp_kv_cache_events_removals_skipped_total",
+		"llm_d_epp_kv_cache_events_pool_queue_depth",
+		"llm_d_epp_kv_cache_events_pool_capacity",
 	} {
 		if !got[name] {
 			t.Errorf("expected metric %q to be registered, got names: %v", name, got)

@@ -57,7 +57,7 @@ var _ fwkplugin.ConsumerPlugin = &MultiClusterScorer{}
 func (s *MultiClusterScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			fwkplugin.NewDataKey(attrmetrics.MultiClusterKVCacheUtilizationKey, ""): attrmetrics.ScalarMetricValue(0),
+			attrmetrics.MultiClusterKVCacheUtilizationDataKey: attrmetrics.ScalarMetricValue(0),
 		},
 	}
 }
@@ -67,7 +67,7 @@ func (s *MultiClusterScorer) Consumes() fwkplugin.DataDependencies {
 func (s *MultiClusterScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, ep := range endpoints {
-		util, ok := attrmetrics.ReadScalarMetricValue(ep, attrmetrics.MultiClusterKVCacheUtilizationKey)
+		util, ok := attrmetrics.ReadScalarMetricValue(ep, attrmetrics.MultiClusterKVCacheUtilizationDataKey)
 		if !ok {
 			continue
 		}

@@ -110,7 +110,7 @@ func (d *detector) Consumes() fwkplugin.DataDependencies {
 }
 
 func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLoad {
-	if val, ok := m.Get(d.inFlightLoadDataKey.String()); ok {
+	if val, ok := m.Get(d.inFlightLoadDataKey); ok {
 		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
 			return load
 		}

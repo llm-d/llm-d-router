@@ -1375,14 +1375,24 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 
 	const pool = "test-pool"
 
-	RecordFlowControlPoolSaturation(pool, 0.5)
-	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool))
+	RecordFlowControlPoolSaturation(pool, "effective", 0.5)
+	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool))
+	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, valNew)
+
+	RecordFlowControlPoolSaturation(pool, "prefill", 0.3)
+	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "prefill"))
+	require.NoError(t, err)
+	require.Equal(t, 0.3, val)
+
+	RecordFlowControlPoolSaturation(pool, "decode", 0.7)
+	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "decode"))
+	require.NoError(t, err)
+	require.Equal(t, 0.7, val)
 }
 
 func TestFlowControlRequestsTotalMetric(t *testing.T) {
@@ -1549,5 +1559,29 @@ func TestFlowControlEvictionMetrics(t *testing.T) {
 	if got := promtestutil.CollectAndCount(llmdFlowControlRevocationConfirmationDuration,
 		"llm_d_epp_flow_control_revocation_confirmation_seconds"); got != 1 {
 		t.Errorf("confirmation duration histogram series = %d, want 1", got)
+	}
+}
+
+func TestRecordPluginDataScopeViolation(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	for i := 0; i < 2; i++ {
+		RecordPluginDataScopeViolation("Filter", "test-filter", "f1", DataScopeAccessWrite)
+	}
+	for i := 0; i < 3; i++ {
+		RecordPluginDataScopeViolation("Filter", "test-filter", "f1", DataScopeAccessRead)
+	}
+	RecordPluginDataScopeViolation("DataProducer", "test-producer", "p1", DataScopeAccessWrite)
+
+	want, err := os.Open("testdata/llm_d_plugin_data_scope_violations_total_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want,
+		"llm_d_epp_plugin_data_scope_violations_total"); err != nil {
+		t.Error(err)
 	}
 }

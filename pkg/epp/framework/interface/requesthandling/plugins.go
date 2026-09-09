@@ -83,4 +83,12 @@ type ParseResult struct {
 type ParsedResponse struct {
 	// Usage is only populate when the raw response has usage.
 	Usage *Usage
+	// StreamedEvents is how many stream data events this parse observed, zero for a non-streamed
+	// response or a parser that does not count. For servers that stream one content delta per
+	// token the count approximates the tokens in the parsed chunk, but protocol events (role
+	// deltas, finish reasons, usage-only events, Responses API lifecycle events) inflate it, a
+	// server that batches tokens into one event deflates it, and the scan recognizes only the
+	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
+	// and keep-alive data lines skew it further).
+	StreamedEvents int
 }

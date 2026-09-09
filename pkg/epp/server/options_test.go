@@ -27,6 +27,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 const (
@@ -257,6 +259,48 @@ func TestValidateDirectValues(t *testing.T) {
 		t.Errorf("Expected Validate() to fail for negative GRPCMaxSendMsgSize, but it succeeded")
 	}
 
+	opts = NewOptions()
+	opts.PoolName = testPoolName
+	opts.FairnessIDMetricLabelLimit = -1
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative FairnessIDMetricLabelLimit, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.FairnessIDMetricLabelLimit = 0
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to allow a zero FairnessIDMetricLabelLimit, got %v", err)
+	}
+}
+
+func TestFairnessIDMetricLabelLimitDefault(t *testing.T) {
+	if got := NewOptions().FairnessIDMetricLabelLimit; got != metricsutil.DefaultFairnessIDLabelLimit {
+		t.Errorf("default FairnessIDMetricLabelLimit: got %d, want %d", got, metricsutil.DefaultFairnessIDLabelLimit)
+	}
+}
+
+func TestValidateRefreshMetricsIntervalFloor(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshMetricsInterval = 10 * time.Millisecond
+	if err := opts.Validate(); err != nil {
+		t.Fatalf("Expected Validate() to clamp, not fail: %v", err)
+	}
+	if opts.RefreshMetricsInterval != MinRefreshMetricsInterval {
+		t.Errorf("Expected RefreshMetricsInterval to be clamped to %s, got %s",
+			MinRefreshMetricsInterval, opts.RefreshMetricsInterval)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshMetricsInterval = 50 * time.Millisecond
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to pass for RefreshMetricsInterval of 50ms, got %v", err)
+	}
 }
 
 func TestDrainTimeoutFlag(t *testing.T) {

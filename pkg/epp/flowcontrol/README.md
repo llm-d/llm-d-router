@@ -62,10 +62,17 @@ Tuning knobs, all under the `flowControl:` config section:
 * Per-band `maxRequests` / `maxBytes` — the shedding knobs. Lower them to reject excess load at the
   queue boundary instead of buffering it (for example, to approximate the legacy immediate-shed
   behavior for sheddable traffic).
-* `defaultRequestTTL` — the queue-wait budget, and the other way a request is shed. When the pool
-  has no endpoints the queue acts as a scale-from-zero waiting room and requests hold for the full
-  budget, so keep it under the client or gateway deadline unless you want requests to survive a cold
-  start.
+* `defaultRequestTTL` — the queue-wait budget against a pool that has endpoints, and the other way a
+  request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
+  budget you are willing to spend waiting on a saturated pool.
+* `noEndpointRequestTTL` — the queue-wait budget that replaces `defaultRequestTTL` while the pool has
+  no endpoints, where the queue acts as a scale-from-zero waiting room. Left unset it follows
+  `defaultRequestTTL`, so splitting the regimes is opt-in. Size it above pod startup (image pull plus
+  weight load) if you want requests to survive a cold start; a request shed here is reported as
+  `EvictedNoEndpoints` and returns 503 rather than 429. Which budget applies is
+  re-evaluated while a request is queued, so a pool that scales up moves its queued requests onto
+  `defaultRequestTTL`. A long budget only helps if the caller waits, so pair it with a gateway request
+  timeout at least as long.
 * The priority-holdback usage-limit policy — a gating knob, not a shedding one. It lowers the
   admission ceiling for low-priority traffic as utilization rises, so that traffic waits in queue
   rather than being rejected; it sheds only by way of the two limits above. Configure it via

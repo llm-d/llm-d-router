@@ -187,7 +187,7 @@ func (s *ActiveRequest) Score(ctx context.Context, _ *scheduling.InferenceReques
 }
 
 func (s *ActiveRequest) requestCount(ctx context.Context, endpoint scheduling.Endpoint) int64 {
-	val, ok := endpoint.Get(s.inFlightLoadDataKey.String())
+	val, ok := endpoint.Get(s.inFlightLoadDataKey)
 	if !ok {
 		return 0
 	}

@@ -49,7 +49,7 @@ func TestFactory(t *testing.T) {
 				"label": %q,
 				"allowsNoLabel": true,
 				"validValues": [%q, %q]
-			}`, RoleLabel, RoleDecode, RoleBoth),
+			}`, RoleLabel, RoleDecode, RolePrefillDecode),
 			expectErr: false,
 		},
 		{

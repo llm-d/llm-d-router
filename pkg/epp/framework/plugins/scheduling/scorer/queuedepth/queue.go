@@ -31,7 +31,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &QueueScorer{}
+var (
+	_ fwksched.Scorer          = &QueueScorer{}
+	_ fwkplugin.ConsumerPlugin = &QueueScorer{}
+)
 
 // QueueScorerFactory defines the factory function for QueueScorer.
 func QueueScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -61,10 +64,13 @@ func (s *QueueScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (s *QueueScorer) Consumes() map[string]any {
-	return map[string]any{
-		metrics.WaitingQueueSizeKey: int(0),
+// Consumes declares the scorer reads the waiting queue size from the
+// endpoint's Metrics struct, published by the core-metrics-extractor.
+func (s *QueueScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(metrics.WaitingQueueSizeKey, metrics.MetricsExtractorType): int(0),
+		},
 	}
 }
 
