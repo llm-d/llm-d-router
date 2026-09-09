@@ -200,6 +200,7 @@ cmd_classify() {
   local llmd_only=0 k8s_only=0 both=0
   local f origin creator
   while IFS= read -r f; do
+    is_generated "${f}" && continue
     creator=$(git log --follow --diff-filter=A --format=%H -- "${f}" | tail -1)
     if [[ -z "${creator}" ]]; then
       creator=$(git log --format=%H -- "${f}" | tail -1)
@@ -219,7 +220,11 @@ cmd_classify() {
       [[ "${has_k}" == 1 ]] && echo "MISATTRIBUTED(llm-d origin, k8s notice, needs human review): ${f}"
     else
       # GAIE origin: k8s-only vs both depends on whether local history added
-      # real changes beyond the mechanical import rewrite.
+      # real changes beyond the mechanical import rewrite. Any commit that is
+      # neither GAIE-marked nor in MECHANICAL_GREP counts as a local touch,
+      # including a later commit that only edits the copyright header itself,
+      # so an otherwise-untouched GAIE file can flip to NEEDS-LLMD-NOTICE
+      # after such a commit lands.
       local touches
       touches=$(comm -23 <(git log --follow --format=%H -- "${f}" | sort -u) "${notlocal_file}" | wc -l)
       if [[ "${touches}" -eq 0 ]]; then
