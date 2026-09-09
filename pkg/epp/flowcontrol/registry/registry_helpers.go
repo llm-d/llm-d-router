@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -125,6 +126,21 @@ func (fr *FlowRegistry) addPriorityBand(priority int) {
 	bandConfig := fr.config.PriorityBands[priority]
 	fr.initPriorityBand(bandConfig)
 	fr.logger.V(logging.DEFAULT).Info("Dynamically added priority band", "priority", priority)
+}
+
+func (fr *FlowRegistry) priorityBandDefaultRequestTTL(priority int) (time.Duration, bool) {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
+	bandValue, ok := fr.priorityBands.Load(priority)
+	if !ok {
+		return 0, false
+	}
+	defaultRequestTTL := bandValue.(*priorityBand).config.DefaultRequestTTL
+	if defaultRequestTTL == nil {
+		return 0, false
+	}
+	return *defaultRequestTTL, true
 }
 
 // ManagedQueue retrieves a specific `contracts.ManagedQueue` instance from the registry.

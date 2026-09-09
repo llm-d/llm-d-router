@@ -11,6 +11,10 @@
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
+      {{- if .Values.router.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: {{ .Values.router.epp.terminationGracePeriodSeconds | default 130 }}
       {{- if and .Values.router.tokenizer.enabled .Values.router.tokenizer.initContainers }}
@@ -334,10 +338,8 @@ spec:
       labels:
         {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
         {{- include "llm-d-router.modeLabels" . | nindent 8 }}
-      {{- with .Values.router.epp.podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "llm-d-epp.podAnnotations" . | nindent 8 }}
     spec:
 {{ include "llm-d-epp.deployment-pod-spec" . }}
 ---
@@ -376,10 +378,8 @@ spec:
       labels:
         {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
         {{- include "llm-d-router.modeLabels" . | nindent 8 }}
-      {{- with .Values.router.epp.podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "llm-d-epp.podAnnotations" . | nindent 8 }}
     spec:
 {{ include "llm-d-epp.deployment-pod-spec" . }}
 ---

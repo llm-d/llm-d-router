@@ -152,6 +152,10 @@ type PriorityBandConfig struct {
 	// the default; per-band limits are always bounded, unlike the optional global limits. To effectively remove
 	// the bound, set an explicit large value.
 	MaxRequests uint64
+
+	// DefaultRequestTTL bounds queue wait for requests in this band. A pointer to zero makes queue wait
+	// unbounded. Nil inherits the global default at request time.
+	DefaultRequestTTL *time.Duration
 }
 
 func (p *PriorityBandConfig) String() string {
@@ -291,6 +295,17 @@ func WithBandMaxRequests(maxRequests uint64) PriorityBandConfigOption {
 	}
 }
 
+// WithBandDefaultRequestTTL sets the default request TTL for this priority band.
+func WithBandDefaultRequestTTL(defaultRequestTTL time.Duration) PriorityBandConfigOption {
+	return func(p *PriorityBandConfig) error {
+		if defaultRequestTTL < 0 {
+			return fmt.Errorf("defaultRequestTTL cannot be negative, got %v", defaultRequestTTL)
+		}
+		p.DefaultRequestTTL = &defaultRequestTTL
+		return nil
+	}
+}
+
 // NewConfig creates a new Config populated with system defaults, applies the provided options, and enforces strict
 // validation.
 //
@@ -409,6 +424,9 @@ func (p *PriorityBandConfig) applyDefaults(defaults PriorityBandPolicyDefaults) 
 
 // validate checks the integrity of a single band's configuration.
 func (p *PriorityBandConfig) validate() error {
+	if p.DefaultRequestTTL != nil && *p.DefaultRequestTTL < 0 {
+		return fmt.Errorf("DefaultRequestTTL cannot be negative for priority band %d", p.Priority)
+	}
 	if p.OrderingPolicy == nil {
 		return fmt.Errorf("OrderingPolicy instance is missing for priority band %d", p.Priority)
 	}
@@ -465,23 +483,27 @@ func (c *Config) Clone() *Config {
 	clone := *c
 
 	if c.DefaultPriorityBand != nil {
-		val := *c.DefaultPriorityBand
-		clone.DefaultPriorityBand = &val
+		clone.DefaultPriorityBand = clonePriorityBandConfig(c.DefaultPriorityBand)
 	}
 
 	if c.DefaultNegativePriorityBand != nil {
-		val := *c.DefaultNegativePriorityBand
-		clone.DefaultNegativePriorityBand = &val
+		clone.DefaultNegativePriorityBand = clonePriorityBandConfig(c.DefaultNegativePriorityBand)
 	}
 
 	if c.PriorityBands != nil {
 		clone.PriorityBands = make(map[int]*PriorityBandConfig, len(c.PriorityBands))
 		for prio, band := range c.PriorityBands {
-			// Dereference the pointer to copy the struct value, then take the address of the new value.
-			// This ensures 'clone' points to a new memory address.
-			b := *band
-			clone.PriorityBands[prio] = &b
+			clone.PriorityBands[prio] = clonePriorityBandConfig(band)
 		}
+	}
+	return &clone
+}
+
+func clonePriorityBandConfig(config *PriorityBandConfig) *PriorityBandConfig {
+	clone := *config
+	if config.DefaultRequestTTL != nil {
+		defaultRequestTTL := *config.DefaultRequestTTL
+		clone.DefaultRequestTTL = &defaultRequestTTL
 	}
 	return &clone
 }

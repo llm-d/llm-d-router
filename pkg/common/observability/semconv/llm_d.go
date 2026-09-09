@@ -38,6 +38,19 @@ const (
 	// LLMDEPPScorerEndpointsScoredKey is the attribute key for total endpoints scored.
 	LLMDEPPScorerEndpointsScoredKey = attribute.Key("llm_d.epp.scorer.endpoints_scored")
 
+	// LLMDEPPFilterDecisionKey is the attribute key for the outcome a filter decided on.
+	LLMDEPPFilterDecisionKey = attribute.Key("llm_d.epp.filter.decision")
+	// LLMDEPPFilterCandidateEndpointsKey is the attribute key for the endpoint count a filter received.
+	LLMDEPPFilterCandidateEndpointsKey = attribute.Key("llm_d.epp.filter.candidate_endpoints")
+	// LLMDEPPFilterFilteredEndpointsKey is the attribute key for the endpoint count a filter returned.
+	LLMDEPPFilterFilteredEndpointsKey = attribute.Key("llm_d.epp.filter.filtered_endpoints")
+	// LLMDEPPFilterStickyEndpointsKey is the attribute key for the endpoint count meeting the affinity threshold.
+	LLMDEPPFilterStickyEndpointsKey = attribute.Key("llm_d.epp.filter.sticky_endpoints")
+	// LLMDEPPFilterAffinityThresholdKey is the attribute key for the configured prefix cache affinity threshold.
+	LLMDEPPFilterAffinityThresholdKey = attribute.Key("llm_d.epp.filter.affinity_threshold")
+	// LLMDEPPFilterTTFTPenaltyMsKey is the attribute key for the TTFT penalty the load gate measured, in milliseconds.
+	LLMDEPPFilterTTFTPenaltyMsKey = attribute.Key("llm_d.epp.filter.ttft_penalty_ms")
+
 	// LLMDEPPDisaggReasonKey is the attribute key for disaggregation reason.
 	LLMDEPPDisaggReasonKey = attribute.Key("llm_d.epp.disagg.reason")
 	// LLMDEPPPDReasonKey is the attribute key for prefill/decode disaggregation reason.
@@ -111,6 +124,36 @@ func LLMDEPPScorerScoreAvg(score float64) attribute.KeyValue {
 // LLMDEPPScorerEndpointsScored returns an attribute for the number of endpoints scored.
 func LLMDEPPScorerEndpointsScored(count int) attribute.KeyValue {
 	return LLMDEPPScorerEndpointsScoredKey.Int(count)
+}
+
+// LLMDEPPFilterDecision returns an attribute for the outcome a filter decided on.
+func LLMDEPPFilterDecision(decision string) attribute.KeyValue {
+	return LLMDEPPFilterDecisionKey.String(decision)
+}
+
+// LLMDEPPFilterCandidateEndpoints returns an attribute for the number of endpoints a filter received.
+func LLMDEPPFilterCandidateEndpoints(count int) attribute.KeyValue {
+	return LLMDEPPFilterCandidateEndpointsKey.Int(count)
+}
+
+// LLMDEPPFilterFilteredEndpoints returns an attribute for the number of endpoints a filter returned.
+func LLMDEPPFilterFilteredEndpoints(count int) attribute.KeyValue {
+	return LLMDEPPFilterFilteredEndpointsKey.Int(count)
+}
+
+// LLMDEPPFilterStickyEndpoints returns an attribute for the number of endpoints meeting the affinity threshold.
+func LLMDEPPFilterStickyEndpoints(count int) attribute.KeyValue {
+	return LLMDEPPFilterStickyEndpointsKey.Int(count)
+}
+
+// LLMDEPPFilterAffinityThreshold returns an attribute for the configured prefix cache affinity threshold.
+func LLMDEPPFilterAffinityThreshold(threshold float64) attribute.KeyValue {
+	return LLMDEPPFilterAffinityThresholdKey.Float64(threshold)
+}
+
+// LLMDEPPFilterTTFTPenaltyMs returns an attribute for the TTFT penalty the load gate measured, in milliseconds.
+func LLMDEPPFilterTTFTPenaltyMs(penalty float64) attribute.KeyValue {
+	return LLMDEPPFilterTTFTPenaltyMsKey.Float64(penalty)
 }
 
 // LLMDEPPProfileHandlerDecision returns an attribute for the profile handler decision.
