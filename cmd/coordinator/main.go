@@ -18,11 +18,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -32,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/version"
 
@@ -47,9 +50,12 @@ import (
 // Scrapes are short; a small budget is enough and keeps process exit prompt.
 const metricsShutdownTimeout = 5 * time.Second
 
+var errMetricsTLS = errors.New("metrics TLS")
+
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
 	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port (default 9090).")
+	metricsCertPath := pflag.String("metrics-cert-path", "", "directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over HTTP. Overrides server.metrics_cert_path.")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)
@@ -74,6 +80,10 @@ func main() {
 	// CLI --metrics-port wins over config server.metrics_port.
 	if f := pflag.CommandLine.Lookup("metrics-port"); f != nil && f.Changed {
 		cfg.Server.MetricsPort = *metricsPort
+	}
+	// CLI --metrics-cert-path wins over server.metrics_cert_path.
+	if f := pflag.CommandLine.Lookup("metrics-cert-path"); f != nil && f.Changed {
+		cfg.Server.MetricsCertPath = *metricsCertPath
 	}
 	if err := logOpts.Validate(); err != nil {
 		log.Error(err, "invalid logging options")
@@ -116,7 +126,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("starting coordinator", "addr", cfg.Server.ListenAddr, "metrics_port", cfg.Server.MetricsPort)
+	log.Info("starting coordinator",
+		"addr", cfg.Server.ListenAddr,
+		"metrics_port", cfg.Server.MetricsPort,
+		"metrics_tls", cfg.Server.MetricsCertPath != "")
 	if cfg.Server.MetricsPort <= 0 {
 		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
 	}
@@ -162,27 +175,35 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error
 
 	if cfg.MetricsPort > 0 {
 		g.Go(func() error {
-			return serveMetrics(gctx, cfg.MetricsPort)
+			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertPath)
 		})
 	}
 
 	return g.Wait()
 }
 
-// serveMetrics stands up a Prometheus /metrics HTTP server on port and blocks
+// serveMetrics stands up a Prometheus /metrics server on port and blocks
 // until ctx is cancelled or the underlying ListenAndServe returns
 // unexpectedly. On ctx cancellation the server is drained via Shutdown
 // bounded by metricsShutdownTimeout. Uses the shared controller-runtime
 // registry so every package that registers against it (this coordinator's
 // metrics, controller-runtime's process collectors) is exposed on the same
-// endpoint.
-func serveMetrics(ctx context.Context, port int) error {
+// endpoint. A non-empty certPath enables HTTPS with tls.crt and tls.key.
+func serveMetrics(ctx context.Context, port int, certPath string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+	serveTLS := certPath != ""
+	if serveTLS {
+		tlsConfig, err := metricsTLSConfig(ctx, certPath)
+		if err != nil {
+			return err
+		}
+		srv.TLSConfig = tlsConfig
 	}
 
 	// Shutdown fires when ctx cancels (normal path) or when the local
@@ -199,7 +220,12 @@ func serveMetrics(ctx context.Context, port int) error {
 		_ = srv.Shutdown(graceCtx)
 	}()
 
-	err := srv.ListenAndServe()
+	var err error
+	if serveTLS {
+		err = srv.ListenAndServeTLS("", "")
+	} else {
+		err = srv.ListenAndServe()
+	}
 	cancel()
 	<-shutdownDone
 
@@ -207,4 +233,26 @@ func serveMetrics(ctx context.Context, port int) error {
 		return fmt.Errorf("metrics server: %w", err)
 	}
 	return nil
+}
+
+// metricsTLSConfig loads and reloads the certificate used by the metrics server.
+func metricsTLSConfig(ctx context.Context, certPath string) (*tls.Config, error) {
+	certFile := filepath.Join(certPath, "tls.crt")
+	keyFile := filepath.Join(certPath, "tls.key")
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load key pair from cert %q and key %q: %w", errMetricsTLS, certFile, keyFile, err)
+	}
+
+	reloader, err := common.NewCertReloader(ctx, certPath, &cert)
+	if err != nil {
+		return nil, fmt.Errorf("%w: start certificate reloader: %w", errMetricsTLS, err)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return reloader.Get(), nil
+		},
+	}, nil
 }

@@ -30,6 +30,13 @@ server:
   # env: COORDINATOR_SERVER_METRICS_PORT
   # metrics_port: 9090
 
+  # metrics_cert_path is the directory containing tls.crt and tls.key for the
+  # metrics endpoint. Empty serves metrics over HTTP. If set, missing or invalid
+  # files stop the coordinator. The metrics listener does not fall back to HTTP.
+  # The --metrics-cert-path CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_METRICS_CERT_PATH
+  # metrics_cert_path: ""
+
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
   read_timeout: 30s
