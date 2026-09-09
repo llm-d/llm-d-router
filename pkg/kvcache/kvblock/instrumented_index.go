@@ -34,9 +34,8 @@ type instrumentedWalker struct {
 
 // NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict,
 // Lookup, and WalkKeys. The wrapper is a KeyWalker exactly when next is one.
-// Read metrics cover the storage operation (requests and latency); the
-// contiguous-chain hit metrics describe the prefix match and are recorded by
-// the kvcache matcher.
+// Read metrics count and time Lookup and WalkKeys calls; contiguous-chain
+// hit metrics are recorded by the kvcache matcher.
 func NewInstrumentedIndex(next Index) Index {
 	m := &instrumentedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {

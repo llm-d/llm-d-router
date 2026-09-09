@@ -124,9 +124,9 @@ var (
 	// MaxPodHitCount.
 	LookupHits = newDualCounter("index", "lookup_hits_total",
 		"kv_cache_index_lookup_hits_total", "Contiguous prefix blocks matched by the best pod per lookup")
-	// LookupLatency logs latency of lookup calls.
 	LookupLatency = newDualHistogram("index", "lookup_latency_seconds",
-		"kv_cache_index_lookup_latency_seconds", "Latency of Lookup calls in seconds", prometheus.DefBuckets)
+		"kv_cache_index_lookup_latency_seconds",
+		"Duration of Lookup and WalkKeys calls in seconds, including WalkKeys callbacks", prometheus.DefBuckets)
 
 	// DedupRemovedHashesSuppressed counts individual block hashes whose removal
 	// was suppressed by the kvevents reference-count dedup filter because another

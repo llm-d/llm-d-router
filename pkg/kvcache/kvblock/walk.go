@@ -52,7 +52,8 @@ type EntryRef struct {
 //     until visit returns, after which the index may reorder or overwrite its
 //     backing array. Consumers copy what they keep.
 //   - visit must not call back into the index; the generation's lock is held
-//     for the duration of the call.
+//     for the duration of the call. If visit panics, the lock is released
+//     and the panic propagates to the caller.
 //   - A visit sees an internally consistent generation, exclusive of writers
 //     and other visits using that generation. Capacity eviction may detach it
 //     and a later Add may install a new generation of the same key while
@@ -93,14 +94,17 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 			continue
 		}
 		visited = pos + 1
-		pc.mu.Lock()
-		more := visit(pos, true, pc.entries)
-		pc.mu.Unlock()
-		if !more {
+		if !pc.visitEntries(pos, visit) {
 			return ctx.Err()
 		}
 	}
 	return ctx.Err()
+}
+
+func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool) bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return visit(pos, true, pc.entries)
 }
 
 // interner assigns dense uint32 ordinals to strings, stable for its lifetime

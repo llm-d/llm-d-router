@@ -385,13 +385,17 @@ func TestWalkKeysConcurrentReadersAndWriters(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range iterations {
+				var visitErr error
 				err := index.WalkKeys(ctx, keys, func(pos int, found bool, entries []EntryRef) bool {
 					if !found || len(entries) != numPods {
-						errCh <- fmt.Errorf("position %d: found=%v entries=%d, want %d", pos, found, len(entries), numPods)
+						visitErr = fmt.Errorf("position %d: found=%v entries=%d, want %d", pos, found, len(entries), numPods)
 						return false
 					}
 					return true
 				})
+				if err == nil {
+					err = visitErr
+				}
 				if err != nil {
 					errCh <- err
 					return

@@ -35,7 +35,9 @@ indexer owns block-key computation, index lookup, and prefix matching.
 - **Scoring.** `ScoreTokens` reports each pod's weighted score, so a pod that
   holds a longer contiguous prefix ranks higher.
 - **Tracing.** Index operations and the matcher emit OpenTelemetry spans,
-  no-ops when tracing is not configured.
+  no-ops when tracing is not configured. The `match_block_keys` span emits
+  `key_count`, `pod_filter_count`, `walked`, `pods_matched`, and `longest_chain`
+  under the `llm_d.kv_cache.prefix_match` attribute prefix.
 
 ## Key Types
 

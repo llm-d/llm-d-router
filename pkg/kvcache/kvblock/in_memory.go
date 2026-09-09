@@ -42,6 +42,7 @@ type InMemoryIndexConfig struct {
 	// Size is the maximum number of keys that can be stored in the index.
 	Size int `json:"size"`
 	// PodCacheSize is the maximum number of pod entries per key.
+	// A non-positive value selects defaultPodsPerKey.
 	PodCacheSize int `json:"podCacheSize"`
 }
 
@@ -58,8 +59,6 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 	if cfg == nil {
 		cfg = DefaultInMemoryIndexConfig()
 	}
-	// Apply the default for an omitted field so partial configs (e.g. only
-	// size set) work correctly.
 	podCacheSize := cfg.PodCacheSize
 	if podCacheSize <= 0 {
 		podCacheSize = defaultPodsPerKey
@@ -476,6 +475,8 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 // evictPodsFromRequestKey for race-safe removal, and holds no global lock — only
 // each PodCache's mu, briefly — so it does not stall Lookup.
 //
+// Context cancellation does not interrupt Clear.
+//
 // The engineKey->requestKey mapping (engineToRequestKeys) is intentionally left
 // untouched: it is LRU-bounded, self-heals when the pod re-Adds the same prefixes,
 // and any stale mapping resolves to an emptied request key that correctly breaks
@@ -483,10 +484,7 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Clear")
 
-	for idx, requestKey := range m.data.Keys() {
-		if idx&cancellationCheckMask == 0 && ctx.Err() != nil {
-			return ctx.Err()
-		}
+	for _, requestKey := range m.data.Keys() {
 		// Peek so a clear does not promote LRU recency on keys it scans.
 		podCache, found := m.data.Peek(requestKey)
 		if !found || podCache == nil {
