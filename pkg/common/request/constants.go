@@ -18,6 +18,12 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// RevisionDecisionIDHeaderKey identifies requests that belong to the same
+	// rollout decision. This is needed only for roles such as encode that create
+	// several parallel subrequests from one user request (for example, one per
+	// image). The coordinator must give every subrequest the same value so they
+	// use the same revision.
+	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"

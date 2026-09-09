@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -38,6 +39,7 @@ var (
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		reqcommon.RevisionDecisionIDHeaderKey,
 	)
 
 	// OutputInjectionHeaders are headers EPP injects for the backend.

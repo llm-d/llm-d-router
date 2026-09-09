@@ -97,15 +97,23 @@ request. Once both revisions are covered, decode is the globally largest role.
 
 ## Request Lifecycle
 
-For every Pod notification, the plugin caches the Ready Pod count by revision
-and role. For a request without a strict revision header, it then:
+For every Pod notification, the plugin tracks each labeled Pod's revision, role,
+and readiness. Only Ready Pods contribute to the traffic distribution. A
+NotReady Pod from a second revision enables revision-decision coordination
+before that revision can receive traffic. For a request without a strict
+revision header, the plugin then:
 
 1. Removes every revision that has no Ready Pod for any required role, because
    a revision missing one role cannot serve the request.
 2. Computes a weight for each remaining revision.
-3. Randomly chooses one revision using those weights.
-4. Exposes only that revision's endpoints to all scheduling profiles.
-5. Stamps the selected endpoint's revision into the configured response header.
+3. Randomly chooses one candidate revision using those weights.
+4. When Pods from multiple revisions are observed and `disableCoordination` is
+   false, atomically stores or reads the revision decision through the
+   configured `CrossReplicaSyncer`, keyed by `x-llm-d-revision-decision-id` or
+   its `x-request-id` fallback. Without a syncer, it stores the decision in the
+   local EPP process. A single observed revision requires no coordination.
+5. Exposes only the resulting revision's endpoints to all scheduling profiles.
+6. Stamps the selected endpoint's revision into the configured response header.
 
 ```text
 Ready Pod counts
@@ -125,24 +133,59 @@ When a strict revision header is already present, the plugin does not make a
 new weighted choice. It checks that the requested revision has all required
 roles and keeps only endpoints with that revision.
 
-### Two EPPs
+Coordination is enabled by default and does not add a syncer round trip during
+normal operation. The plugin calls `GetOrSet` only while it observes Pods from
+multiple revisions, including NotReady Pods for a revision that is starting.
+With one observed revision, every request has the same possible revision and
+the plugin uses it directly. A same-host Redis `GetOrSet` benchmark measured
+~0.2 ms P50 at 1,000 requests per second, so the rollout-only overhead is
+typically negligible compared with model-serving latency. Network topology,
+authentication, and TLS can change this measurement.
 
-The plugin protocol can support separate prefill and decode EPPs only when the
-coordinator copies the stamped headers from the prefill response into the
-decode request. The current llm-d coordinator does not perform that forwarding,
-so this topology is not yet supported end to end. A follow-up coordinator PR
-will add it.
+### Separate Prefill and Decode EPPs (P/D)
 
-With that forwarding in place, the prefill EPP chooses a covered revision and
-stamps it when the selected prefill begins responding. The decode EPP then
-applies the forwarded revision strictly:
+Prefill first chooses a covered revision and stamps it into the
+`x-llm-d-disagg-revision` response header. The coordinator must copy that header into
+the decode request. Decode treats it as a strict constraint and never calls
+`GetOrSet`, so the prefill and decode EPPs do not need to share a
+`CrossReplicaSyncer`:
 
 ```text
-prefill request -> choose revision A -> stamp revision A
+prefill request -> choose revision B -> x-llm-d-disagg-revision: B
                                              |
                                              v
-decode request with revision A -> keep only revision A decodes
+decode request  -> strict revision B -> no GetOrSet
 ```
+
+A decode request without the forwarded `x-llm-d-disagg-revision` does not implement
+the supported P/D protocol. Do not rely on `GetOrSet` to coordinate separate
+prefill and decode EPPs.
+
+For this sequential P/D protocol, coordination can be disabled. Each
+logical request makes one unpinned revision choice in prefill, and the forwarded
+header pins decode to that choice:
+
+```yaml
+revisionGating:
+  disableCoordination: true
+```
+
+Disabling coordination is an optional optimization. Use it only when the
+deployment cannot issue parallel E/P/D requests. When the serving topology is
+uncertain, leave `disableCoordination` unset.
+
+### Parallel Encode Requests (E/P/D)
+
+Parallel encode requests cannot wait for an earlier response to provide
+`x-llm-d-disagg-revision`. The coordinator gives them the same
+`x-llm-d-revision-decision-id`, and atomic `GetOrSet` makes the first proposed
+covered revision authoritative for that logical request. This prevents
+parallel encode requests reaching different EPP replicas from selecting
+different rollout revisions. E/P/D configurations must keep
+`disableCoordination: false` and must share a `CrossReplicaSyncer` across EPP
+replicas. A single EPP process can use the local fallback. As soon as a phase
+response supplies `x-llm-d-disagg-revision`, the coordinator forwards that
+header to later requests, which use strict filtering instead of `GetOrSet`.
 
 ### One EPP
 
@@ -175,7 +218,7 @@ traffic: A 90%, B 10%
 
 The dominant role is selected once for the whole distribution. It cannot be
 prefill for one revision and decode for another. If role totals are equal, the
-first role in `revisionGating.requireRoles.values` wins the tie.
+first role in `revisionGating.requiredRoles` wins the tie.
 
 This mode is useful for a stable, intentionally asymmetric role ratio such as
 2P:10D or 10P:2D. It assumes that the more numerous role is a reasonable proxy
@@ -212,39 +255,27 @@ counts.
 ### `disabled`
 
 This mode disables revision coverage checks and weighted revision selection.
-It does **not** disable header selectors or response-header stamping:
+Strict revision selection and response-header stamping remain enabled:
 
 - With no revision header, all located candidates continue to filters,
   scorers, and the picker.
-- The selected endpoint's configured labels are still stamped on the response.
-- With a revision header, a `strict` selector still keeps only matching
-  endpoints and fails if none match.
+- The selected endpoint's revision is still stamped on the response.
+- With a revision header, only matching endpoints remain. No match fails
+  closed.
 
-This mode supports the protocol for a two-EPP flow only when the coordinator
-reliably forwards the stamped prefill revision to the decode EPP. The current
-llm-d coordinator requires the follow-up change described above. Because
-coverage is disabled, selecting a prefill revision with no matching Ready
-decode causes the later strict decode request to fail rather than cross
-revisions.
+This mode does not make a revision decision. It cannot keep separate EPPs, or
+the profiles of a single EPP, on one revision.
 
-`disabled` alone does not keep the profiles of a single EPP on one revision.
-There is no response-header boundary between its profile executions, so the
-profiles need revision gating to receive the same candidate set.
+## Revision Header
 
-## Header Selectors
+The revision header is always strict. When a request supplies it, the Screener
+keeps only endpoints whose revision label has the requested value. With an
+active gating mode, that revision must also have a Ready Pod for every required
+role. No match fails closed.
 
-| Mode | Behavior |
-|---|---|
-| `strict` | Keeps only endpoints whose label equals the request header. No match fails closed. |
-| `prefer` | Stamps the selected label without screening candidates. Configure a [`header-label-affinity-scorer`](../../../scheduling/scorer/headerlabelaffinity/README.md) to apply the soft preference. |
-
-Every selector also stamps its configured response header from the endpoint
-that served the request. The mode identifies whether the Screener applies a
-hard constraint or only stamps the label. Stamping is independent of the
-revision gating mode.
-
-The generic scorer repeats the `headerName` and `labelKey` mapping. Keeping its
-configuration independent allows each preference to use a different weight.
+The Screener stamps the selected endpoint's revision into the same response
+header. Other label affinities, such as slice affinity, belong in a
+[`header-label-affinity-scorer`](../../../scheduling/scorer/headerlabelaffinity/README.md).
 
 ## Configuration
 
@@ -257,19 +288,12 @@ plugins:
   parameters:
     scope:
       labelSelector: "disaggregatedset.x-k8s.io/name=my-set"
-    headerSelectors:
-    - name: revision
-      headerName: x-disagg-revision
-      labelKey: disaggregatedset.x-k8s.io/revision
-      mode: strict
-    - name: slice
-      headerName: x-disagg-slice
-      labelKey: disaggregatedset.x-k8s.io/slice
-      mode: prefer
     revisionGating:
+      revisionHeaderName: x-llm-d-disagg-revision
+      revisionLabelKey: disaggregatedset.x-k8s.io/revision
+      roleLabelKey: disaggregatedset.x-k8s.io/role
       mode: max-role
-      requireRoles:
-        values: [prefill, decode]
+      requiredRoles: [prefill, decode]
 - type: header-label-affinity-scorer
   name: slice-affinity
   parameters:
@@ -294,21 +318,13 @@ request. Do not add it to a scheduling profile.
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `scope.labelSelector` | string | Yes | | Selects the Pods observed for cross-role revision coverage. |
-| `headerSelectors` | array | No | `[]` | Header-to-label mappings used for strict screening and response-header stamping. |
-| `revisionGating` | object | Yes | | Revision screening configuration. Use `mode: disabled` to retain selectors and response-header stamping without revision coverage or weighted selection. |
+| `revisionGating` | object | Yes | | Revision screening configuration. |
 | `revisionGating.mode` | string | Yes | | `sum`, `max-role`, or `disabled`. |
-| `revisionGating.requireRoles.values` | array | Yes for `sum` and `max-role` | | Roles that must each have a Ready Pod for a revision to receive traffic. |
+| `revisionGating.requiredRoles` | array | Yes for `sum` and `max-role` | | Roles that must each have a Ready Pod for a revision to receive traffic. List order breaks a `max-role` tie. |
+| `revisionGating.revisionHeaderName` | string | No | `x-llm-d-disagg-revision` | Request and response header carrying the rollout revision. A supplied value is a strict constraint. |
 | `revisionGating.revisionLabelKey` | string | No | `disaggregatedset.x-k8s.io/revision` | Label identifying a rollout revision. |
 | `revisionGating.roleLabelKey` | string | No | `disaggregatedset.x-k8s.io/role` | Label identifying a Pod role. |
-
-Each `headerSelectors` entry has:
-
-| Name | Type | Description |
-|---|---|---|
-| `name` | string | Stable selector identifier, used as a metric label for strict selectors. |
-| `headerName` | string | Request and response header carrying the selected label value. |
-| `labelKey` | string | Kubernetes Pod label whose value is compared with the request header and copied from the selected endpoint into the response header. |
-| `mode` | string | `strict` screens candidates globally; `prefer` only stamps the selected value and leaves scoring to a separate plugin. |
+| `revisionGating.disableCoordination` | boolean | No | `false` | Disables coordination of rollout revisions across parallel requests. Set only for known sequential P/D deployments; E/P/D requires coordination. |
 
 ## DisaggregatedSet Slice Affinity
 
@@ -317,6 +333,13 @@ A `DisaggregatedSet` slice groups cooperating role replicas through the
 within one NVL72 NVLink domain. Preferring the same slice can avoid a slower
 cross-domain KV-cache transfer while retaining fallback capacity when that
 slice is unavailable or overloaded.
+
+Strict revision selection is supported in P/D by forwarding
+`x-llm-d-disagg-revision`. E/P/D uses the shared decision ID only for parallel
+requests that start before that header exists. Slice selection is a soft
+preference, so KV-cache and load-aware scoring can select another slice when it
+is a better candidate. The affinity scorer returns the actually selected slice
+to the coordinator by default.
 
 The scorer weight represents how preferable the same NVL72 domain is relative
 to the other scorers in the profile. Benchmark same-slice and cross-slice KV
@@ -349,7 +372,7 @@ never silently substitutes another revision or crosses revisions.
 
 ## Metrics
 
-- `llm_d_epp_disaggregatedset_strict_header_no_match_total`: strict header
+- `llm_d_epp_disaggregatedset_strict_revision_no_match_total`: strict revision
   selections that matched no endpoint and failed closed.
 - `llm_d_epp_disaggregatedset_revision_gating_share`: current weighted share
   from `0` to `1` for each observed revision. Incomplete revisions report `0`.

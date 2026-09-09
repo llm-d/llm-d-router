@@ -18,6 +18,8 @@ package plugin
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,6 +194,69 @@ func TestPluginState_ReadWrite(t *testing.T) {
 	td, ok = readData.(*pluginTestData)
 	assert.True(t, ok, "should be able to cast to pluginTestData")
 	assert.Equal(t, data1, td.value)
+}
+
+func TestPluginState_ReadOrWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	requestID := "req-read-or-write"
+	key := StateKey("key")
+	first := &pluginTestData{value: "first"}
+	second := &pluginTestData{value: "second"}
+
+	actual, existed := state.ReadOrWrite(requestID, key, first)
+	assert.False(t, existed)
+	assert.Same(t, first, actual)
+
+	actual, existed = state.ReadOrWrite(requestID, key, second)
+	assert.True(t, existed)
+	assert.Same(t, first, actual)
+}
+
+func TestPluginState_ReadOrWriteIsAtomic(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	const callers = 32
+	const requestID = "req-read-or-write-atomic"
+	results := make(chan StateData, callers)
+	created := make(chan bool, callers)
+	var group sync.WaitGroup
+	for i := range callers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			actual, existed := state.ReadOrWrite(
+				requestID,
+				StateKey("key"),
+				&pluginTestData{value: fmt.Sprintf("candidate-%d", i)},
+			)
+			results <- actual
+			created <- !existed
+		}()
+	}
+	group.Wait()
+	close(results)
+	close(created)
+
+	winner := ""
+	for result := range results {
+		value := result.(*pluginTestData).value
+		if winner == "" {
+			winner = value
+		}
+		assert.Equal(t, winner, value)
+	}
+	createdCount := 0
+	for wasCreated := range created {
+		if wasCreated {
+			createdCount++
+		}
+	}
+	assert.Equal(t, 1, createdCount)
 }
 
 // TestReadPluginStateKey tests the generic helper function ReadPluginStateKey which provides
