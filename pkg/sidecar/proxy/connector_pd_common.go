@@ -41,6 +41,8 @@ func (s *Server) runConcurrentPD(
 	r *http.Request,
 	prefillBody, decodeBody []byte,
 	prefillHost, connector string,
+	// prepareRequests lets a connector mutate the cloned requests before dispatch,
+	// e.g. Mooncake sets a DP-rank header so prefill lands on the same rank decode reads from.
 	prepareRequests func(prefillReq, decodeReq *http.Request),
 ) {
 	tracer := tracing.Tracer(tracerScope)
