@@ -40,9 +40,9 @@ func init() {
 }
 
 type DecodeStep struct {
-	engine   vllm.Engine
-	gwClient *gateway.Client
-	kv       kv.Connector
+	useOpenAIFormat bool
+	gwClient        *gateway.Client
+	kv              kv.Connector
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -53,7 +53,6 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	selectedEngine := vllm.New(useOpenAI)
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
@@ -62,7 +61,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{engine: selectedEngine, gwClient: gwClient, kv: kvConn}, nil
+	return &DecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -70,12 +69,11 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
-	prepared := s.engine.PrepareDecode(reqCtx, kvParams)
+	s.prepareDecodeBody(ctx, reqCtx)
 
-	logger.V(logutil.DEFAULT).Info("sending request", "path", prepared.Path, "stream", reqCtx.Stream)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, prepared.Body, nil)
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
 	if err != nil {
 		return err
 	}
@@ -90,4 +88,19 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: out.Status}
 	}
 	return nil
+}
+
+// prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
+// prefill and conditional-decode). decode is the terminal pipeline step: its body
+// is streamed straight to the client and no later step reads reqCtx.Body. A clone
+// would also be insufficient, since injectUUIDs mutates nested values that a shallow
+// maps.Clone would still share. This is sound only while the pipeline runs steps
+// sequentially; if it ever goes concurrent, decode must copy like the others.
+func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
+	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
+	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	if format == gateway.FormatCompletions && len(reqCtx.TokenIDs) > 0 {
+		reqCtx.Body["prompt"] = reqCtx.TokenIDs
+	}
+	vllm.PrepareDecode(reqCtx, kvParams, format)
 }

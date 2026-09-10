@@ -18,82 +18,53 @@ package vllm
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-// PreparePrefill builds a non-streaming, single-token request with the supplied
-// KV and encoder-cache transfer parameters.
-func (e Engine) PreparePrefill(reqCtx *pipeline.RequestContext, kvParams, ecParams map[string]any) (engine.Request, error) {
+// PreparePrefill adds vLLM token, feature and transfer fields to a prefill body.
+func PreparePrefill(reqCtx *pipeline.RequestContext, body, kvParams, ecParams map[string]any, format gateway.RequestFormat) {
 	features := buildMMFeatures(reqCtx.MultimodalEntries, true)
-	format := resolveFormat(e.useOpenAIFormat, reqCtx.OriginalPath)
-	var body map[string]any
 	switch format {
 	case gateway.FormatChatCompletions:
-		body = reqcommon.SingleTokenChatRequest(reqCtx.Body)
-		tokens := map[string]any{
-			"token_ids": reqCtx.TokenIDs,
-		}
+		tokens := map[string]any{"token_ids": reqCtx.TokenIDs}
 		if features != nil {
-			tokensFeatures := map[string]any{
+			tokens["features"] = map[string]any{
 				"mm_hashes":       features["mm_hashes"],
 				"mm_placeholders": features["mm_placeholders"],
 			}
-			tokens["features"] = tokensFeatures
 		}
 		body["tokens"] = tokens
-		body[reqcommon.FieldKVTransferParams] = kvParams
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-
 	case gateway.FormatCompletions:
-		prompt := reqCtx.Body["prompt"]
-		if len(reqCtx.TokenIDs) > 0 {
-			prompt = reqCtx.TokenIDs
-		}
-		body = reqcommon.SingleTokenCompletionRequest(reqCtx.Model, prompt)
 		body["request_id"] = reqCtx.RequestID
-		body[reqcommon.FieldKVTransferParams] = kvParams
 		if features != nil {
 			body["features"] = features
 		}
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-
 	case gateway.FormatGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
 		sampling := map[string]any{reqcommon.FieldMaxTokens: 1}
 		setGenerateTransferParams(sampling, kvParams, ecParams)
-		body = map[string]any{
-			"request_id":                  reqCtx.RequestID,
-			"token_ids":                   reqCtx.TokenIDs,
-			"model":                       reqCtx.Model,
-			reqcommon.FieldSamplingParams: sampling,
-		}
-		capSingleTokenOutput(body, format)
+		body["request_id"] = reqCtx.RequestID
+		body["token_ids"] = reqCtx.TokenIDs
+		body[reqcommon.FieldSamplingParams] = sampling
 		if features != nil {
 			body["features"] = features
 		}
-	default:
-		return engine.Request{}, fmt.Errorf("prefill: unsupported request format %v", format)
+		return
 	}
-
-	return engine.Request{Path: gateway.PathForFormat(format), Body: body}, nil
+	body[reqcommon.FieldKVTransferParams] = kvParams
+	if len(ecParams) > 0 {
+		body[reqcommon.FieldECTransferParams] = ecParams
+	}
 }
 
 // ReadPrefillResponse extracts KV transfer parameters from a JSON response.
-func (Engine) ReadPrefillResponse(body io.Reader) (any, error) {
+func ReadPrefillResponse(body io.Reader) (any, error) {
 	var response prefillResponse
 	if err := json.NewDecoder(body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("prefill: decode response: %w", err)
+		return nil, err
 	}
 	return response.KVTransferParams, nil
 }

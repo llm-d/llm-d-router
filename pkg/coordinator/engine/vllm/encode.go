@@ -20,33 +20,28 @@ import (
 	"encoding/json"
 	"io"
 
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-// PrepareEncode returns a per-image request builder, or nil to skip separate encoding.
-func (e Engine) PrepareEncode(reqCtx *pipeline.RequestContext) func(pipeline.MultimodalEntry) engine.Request {
-	// The generate endpoint encodes kwargs_data inline on the prefill worker.
-	// https://github.com/vllm-project/vllm/issues/46722
-	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
-		return nil
+// PrepareEncode adds vLLM token and multimodal fields to a per-image request.
+func PrepareEncode(reqCtx *pipeline.RequestContext, body map[string]any, entry pipeline.MultimodalEntry, format gateway.RequestFormat) {
+	tokenIDs := buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
+	features := map[string]any{
+		"mm_hashes":       map[string][]string{modalityImage: {entry.Hash}},
+		"mm_placeholders": map[string][]any{modalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 	}
-	format := resolveFormat(e.useOpenAIFormat, reqCtx.OriginalPath)
-	var imageParts []map[string]any
 	if format == gateway.FormatChatCompletions {
-		imageParts = reqcommon.ImageParts(reqCtx.Body)
-	}
-	return func(entry pipeline.MultimodalEntry) engine.Request {
-		tokenIDs := e.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
-		body := e.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
-		return engine.Request{Path: gateway.PathForFormat(format), Body: body}
+		body["tokens"] = map[string]any{"token_ids": tokenIDs, "features": features}
+	} else {
+		features["kwargs_data"] = mmKwargsField([]string{entry.KwargsData})
+		body["token_ids"] = tokenIDs
+		body["features"] = features
 	}
 }
 
 // ReadEncodeResponse extracts encoder-cache transfer parameters from a JSON response.
-func (Engine) ReadEncodeResponse(body io.Reader) (any, error) {
+func ReadEncodeResponse(body io.Reader) (any, error) {
 	var response encodeResponse
 	if err := json.NewDecoder(body).Decode(&response); err != nil {
 		return nil, err
@@ -54,7 +49,7 @@ func (Engine) ReadEncodeResponse(body io.Reader) (any, error) {
 	return response.ECTransferParams, nil
 }
 
-func (e Engine) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {
+func buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {
 	bos := 1
 	placeholderTokenID := 0
 	if len(fullTokenIDs) > 0 {
@@ -74,33 +69,6 @@ func (e Engine) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Multimoda
 		tokenIDs[j] = placeholderTokenID
 	}
 	return tokenIDs
-}
-
-func (e Engine) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
-	switch format {
-	case gateway.FormatChatCompletions:
-		body := reqcommon.SingleImageChatRequest(reqCtx.Model, imageParts, entry.Index)
-		body["tokens"] = map[string]any{
-			"token_ids": tokenIDs,
-			"features": map[string]any{
-				"mm_hashes":       map[string][]string{modalityImage: {entry.Hash}},
-				"mm_placeholders": map[string][]any{modalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-			},
-		}
-		return body
-	default:
-		body := map[string]any{
-			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
-			"features": map[string]any{
-				"mm_hashes":       map[string][]string{modalityImage: {entry.Hash}},
-				"mm_placeholders": map[string][]any{modalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
-			},
-		}
-		capSingleTokenOutput(body, format)
-		return body
-	}
 }
 
 type encodeResponse struct {

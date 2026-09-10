@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,8 +39,8 @@ func init() {
 }
 
 type ConditionalDecodeStep struct {
-	engine   vllm.Engine
-	gwClient *gateway.Client
+	useOpenAIFormat bool
+	gwClient        *gateway.Client
 }
 
 func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -50,8 +51,7 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 	if err != nil {
 		return nil, err
 	}
-	selectedEngine := vllm.New(useOpenAI)
-	return &ConditionalDecodeStep{engine: selectedEngine, gwClient: gwClient}, nil
+	return &ConditionalDecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient}, nil
 }
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
@@ -59,11 +59,12 @@ func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
-	prepared := s.engine.PrepareConditionalDecode(reqCtx)
+	body := maps.Clone(reqCtx.Body)
+	s.prepareBody(reqCtx, body)
 
-	logger.V(logutil.DEFAULT).Info("sending request", "path", prepared.Path)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, prepared.Body, map[string]string{"Prefer": "if-available"})
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, map[string]string{"Prefer": "if-available"})
 	if err != nil {
 		return err
 	}
@@ -101,4 +102,12 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 
 	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")
 	return pipeline.ErrPipelineDone
+}
+
+func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any) {
+	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	if format == gateway.FormatCompletions && len(reqCtx.TokenIDs) > 0 {
+		body["prompt"] = reqCtx.TokenIDs
+	}
+	vllm.PrepareConditionalDecode(reqCtx, body, format)
 }

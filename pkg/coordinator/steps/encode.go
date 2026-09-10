@@ -44,10 +44,10 @@ func init() {
 }
 
 type EncodeStep struct {
-	engine      vllm.Engine
-	maxParallel int
-	gwClient    *gateway.Client
-	ec          ec.Connector
+	useOpenAIFormat bool
+	maxParallel     int
+	gwClient        *gateway.Client
+	ec              ec.Connector
 }
 
 func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -58,7 +58,6 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("encode: %w", err)
 	}
-	selectedEngine := vllm.New(useOpenAI)
 	maxParallel := 8
 	if v, ok, err := paramInt(params, "max_parallel"); err != nil {
 		return nil, err
@@ -77,10 +76,10 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 		return nil, fmt.Errorf("encode: %w", err)
 	}
 	return &EncodeStep{
-		engine:      selectedEngine,
-		maxParallel: maxParallel,
-		gwClient:    gwClient,
-		ec:          ecConn,
+		useOpenAIFormat: useOpenAI,
+		maxParallel:     maxParallel,
+		gwClient:        gwClient,
+		ec:              ecConn,
 	}, nil
 }
 
@@ -93,8 +92,11 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger := log.FromContext(ctx).WithName(EncodeStepName)
 
-	prepare := s.engine.PrepareEncode(reqCtx)
-	if prepare == nil {
+	// On the generate path the prefill worker runs the vision encoder inline from
+	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
+	// avoids shipping the oversized preprocessed pixel tensor a second time
+	// (see https://github.com/vllm-project/vllm/issues/46722).
+	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
 		return nil
 	}
@@ -104,16 +106,24 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
 
+	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	var imageParts []map[string]any
+	if format == gateway.FormatChatCompletions {
+		imageParts = collectImageParts(reqCtx.Body)
+	}
+
 	for i, entry := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			prepared := prepare(entry)
-			bodyBytes, err := json.Marshal(prepared.Body)
+			body := s.buildEncodeBody(reqCtx, entry, format, imageParts)
+
+			bodyBytes, err := json.Marshal(body)
 			if err != nil {
 				err = fmt.Errorf("encode[%d]: marshal: %w", i, err)
 				logger.Error(err, "encode fanout marshal", "index", i)
 				return err
 			}
-			path := prepared.Path
+
+			path := gateway.PathForFormat(format)
 			logger.V(logutil.DEFAULT).Info("sending sub-request", "index", i, "path", path)
 
 			headers := reqCtx.ForwardedHeaders()
@@ -141,7 +151,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				return err
 			}
 
-			params, err := s.engine.ReadEncodeResponse(resp.Body)
+			params, err := vllm.ReadEncodeResponse(resp.Body)
 			if err != nil {
 				err = fmt.Errorf("encode[%d]: decode response: %w", i, err)
 				logger.Error(err, "encode fanout decode", "index", i)
@@ -163,4 +173,61 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("all sub-requests complete", "count", len(results))
 	return nil
+}
+
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
+	body := map[string]any{"model": reqCtx.Model}
+	if format == gateway.FormatChatCompletions {
+		imageContent := buildSingleImageContent(imageParts, entry.Index)
+		body["messages"] = []any{
+			map[string]any{
+				"role":    "user",
+				"content": []any{imageContent},
+			},
+		}
+	}
+	vllm.PrepareEncode(reqCtx, body, entry, format)
+	capSingleTokenOutput(body, format)
+	return body
+}
+
+// collectImageParts walks the request messages once and returns the image_url
+// parts in order, so the fan-out loop can index by position instead of
+// re-walking all parts per image (O(N*M) -> O(N+M)).
+func collectImageParts(body map[string]any) []map[string]any {
+	messages, _ := body["messages"].([]any)
+	var parts []map[string]any
+	for _, msg := range messages {
+		msgMap, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msgMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, part := range content {
+			partMap, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if partMap["type"] == imageURLPartType {
+				parts = append(parts, partMap)
+			}
+		}
+	}
+	return parts
+}
+
+func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
+	if index >= 0 && index < len(imageParts) {
+		return map[string]any{
+			"type":      imageURLPartType,
+			"image_url": imageParts[index][imageURLPartType],
+		}
+	}
+	return map[string]any{
+		"type":      imageURLPartType,
+		"image_url": map[string]any{"url": ""},
+	}
 }

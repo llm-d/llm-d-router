@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -44,10 +45,10 @@ func init() {
 }
 
 type PrefillStep struct {
-	engine   vllm.Engine
-	gwClient *gateway.Client
-	kv       kv.Connector
-	ec       ec.Connector
+	useOpenAIFormat bool
+	gwClient        *gateway.Client
+	kv              kv.Connector
+	ec              ec.Connector
 }
 
 func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -58,7 +59,6 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	selectedEngine := vllm.New(useOpenAI)
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
@@ -75,7 +75,7 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	return &PrefillStep{engine: selectedEngine, gwClient: gwClient, kv: kvConn, ec: ecConn}, nil
+	return &PrefillStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn, ec: ecConn}, nil
 }
 
 func (s *PrefillStep) Name() string { return PrefillStepName }
@@ -83,20 +83,18 @@ func (s *PrefillStep) Name() string { return PrefillStepName }
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
-	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
+	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	body, err := s.buildPrefillBody(ctx, reqCtx, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)
 	}
-	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
-	prepared, err := s.engine.PreparePrefill(reqCtx, kvParams, ecParams)
-	if err != nil {
-		return err
-	}
-	bodyBytes, err := json.Marshal(prepared.Body)
+
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("prefill: marshal: %w", err)
 	}
-	path := prepared.Path
+
+	path := gateway.PathForFormat(format)
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
 	headers := reqCtx.ForwardedHeaders()
@@ -120,12 +118,40 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		return upstreamError(PrefillStepName, resp.StatusCode, respBody)
 	}
 
-	params, err := s.engine.ReadPrefillResponse(resp.Body)
+	params, err := vllm.ReadPrefillResponse(resp.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("prefill: decode response: %w", err)
 	}
+
 	reqCtx.KVTransferParams = coerceParamsMap(logger, params, "kv_transfer_params")
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
+}
+
+func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format gateway.RequestFormat) (map[string]any, error) {
+	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
+	if err != nil {
+		return nil, err
+	}
+	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
+
+	var body map[string]any
+	switch format {
+	case gateway.FormatChatCompletions:
+		body = maps.Clone(reqCtx.Body)
+	case gateway.FormatCompletions:
+		prompt := reqCtx.Body["prompt"]
+		if len(reqCtx.TokenIDs) > 0 {
+			prompt = reqCtx.TokenIDs
+		}
+		body = map[string]any{"model": reqCtx.Model, "prompt": prompt}
+	case gateway.FormatGenerate:
+		body = map[string]any{"model": reqCtx.Model}
+	default:
+		return nil, fmt.Errorf("prefill: unsupported request format %v", format)
+	}
+	vllm.PreparePrefill(reqCtx, body, kvParams, ecParams, format)
+	capSingleTokenOutput(body, format)
+	return body, nil
 }

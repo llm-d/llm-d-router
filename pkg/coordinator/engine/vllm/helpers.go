@@ -14,60 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package vllm prepares coordinator payloads for the vLLM inference protocol.
 package vllm
 
 import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 const modalityImage = "image"
-
-// resolveFormat maps a request path to the wire format a step emits. Completions
-// is always honored; otherwise OpenAI formats collapse to FormatGenerate unless
-// useOpenAIFormat is set.
-func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
-	detected := gateway.DetectFormat(path)
-	if detected == gateway.FormatCompletions {
-		return gateway.FormatCompletions
-	}
-	if !useOpenAIFormat {
-		return gateway.FormatGenerate
-	}
-	return detected
-}
-
-// capSingleTokenOutput rewrites body into a single-output-token, non-streaming
-// request for the synthetic prefill and encode legs.
-//
-// Chat-completions and completions bodies carry max_tokens/max_completion_tokens/
-// stream/stream_options at the top level, same as the sidecar's synthetic
-// requests, so they share reqcommon.PrimeSingleTokenRequest verbatim. The
-// generate format's token-limit fields live under sampling_params instead
-// (vLLM's GenerateRequest schema); stream/stream_options stay top-level there
-// too, and generate has no max_completion_tokens-equivalent field, so only the
-// max_tokens/min_tokens capping (reqcommon.CapMaxTokensField) is reusable for it.
-//
-// TODO: max_output_tokens is another client-supplied output cap (Responses
-// API) that a client can send instead of max_tokens/max_completion_tokens; it
-// should be capped to 1 here as well so the synthetic legs stay single-token.
-func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
-	if format != gateway.FormatGenerate {
-		reqcommon.PrimeSingleTokenRequest(body)
-		return
-	}
-
-	sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any)
-	if !ok {
-		sp = map[string]any{}
-		body[reqcommon.FieldSamplingParams] = sp
-	}
-	reqcommon.CapMaxTokensField(sp)
-
-	body[reqcommon.FieldStream] = false
-	delete(body, reqcommon.FieldStreamOptions)
-}
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
 // and optionally kwargs_data) from the request's multimodal entries. It returns
