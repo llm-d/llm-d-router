@@ -10,7 +10,7 @@ plugins:
 - name: ${INF_ROLE}-maxScore
   type: max-score-picker
   parameters:
-    maxNumOfEndpoints: 2
+    maxNumOfEndpoints: ${INF_REPLICA_COUNT}
 - name: passthroughParser
   type: passthrough-parser
 - type: label-selector-filter
