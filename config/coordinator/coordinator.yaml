@@ -45,6 +45,9 @@ server:
   # max_request_body_size caps the request body in megabytes. The default is
   # sized for multimodal requests that inline images as data: URIs, which land
   # in the body verbatim and are not subject to replace-media-urls.max_download_size.
+  # Deployments that also accept inline audio or video (input_audio parts or
+  # data:audio/data:video URIs in audio_url/video_url slots) may need a much
+  # higher value: a 100 MB video inlines as ~135 MB of base64 in the body.
   # A text-only deployment can set a much smaller value. Megabytes; default 64.
   # env: COORDINATOR_SERVER_MAX_REQUEST_BODY_SIZE
   # max_request_body_size: 64
@@ -101,36 +104,154 @@ pipeline:
 
   steps:
     # -------------------------------------------------------------------
-    # replace-media-urls: first step. Downloads any http(s) image_url
-    # references, base64-inlines them as data: URIs, and seeds
-    # MultimodalEntries on the request context.
+    # replace-media-urls: first step. Downloads http(s) URLs from image_url,
+    # audio_url, and video_url content parts (base64-inlining them as data:
+    # URIs), validates input_audio inline items, and seeds MultimodalEntries
+    # for every recognized media part. All modalities feed into the encode
+    # step's fanout. The encoder pod must accept audio/video content-part
+    # types.
     # -------------------------------------------------------------------
     - type: replace-media-urls
       params:
-        # download_timeout caps each individual image download.
+        # download_timeout caps each individual media download.
         download_timeout: 10s
 
         # max_concurrent_downloads bounds the errgroup that fans out
-        # downloads. Useful when a single request references many images.
+        # downloads. Useful when a single request references many media items.
         max_concurrent_downloads: 10
 
-        # max_multimodal_entries rejects requests with more than N image_url
-        # parts BEFORE any download happens. Cheapest admission gate.
-        # 0 (or omitted) = unlimited.
-        # max_multimodal_entries: 8
+        # max_multimodal_entries rejects requests with more than N media
+        # parts (image_url + audio_url + video_url + input_audio combined)
+        # BEFORE any download happens. Cheapest admission gate, and the only
+        # thing bounding how many bytes one request can pull into memory --
+        # see max_download_size for why raising any per-modality cap means
+        # raising this one too.
+        #
+        # 0 (or omitted) = unlimited, which lets a request body of a few KB
+        # name hundreds of URLs and turn each one into a download. Set it.
+        max_multimodal_entries: 8
 
-        # max_download_size caps the megabytes read per image download. A response
+        # max_download_size caps the megabytes read per media download. A response
         # whose Content-Length or body exceeds the cap is rejected as a client
-        # error (4xx). Bounds peak memory together with the two limits above:
-        # roughly max_concurrent_downloads x max_download_size x ~2.3 MB.
-        # data: URIs do not hit the network and are unaffected. Default 10 MB.
+        # error (4xx).
+        #
+        # Peak memory is per REQUEST, not per concurrent download. Every
+        # downloaded payload is retained until the step returns, so what this
+        # step alone holds is
+        #
+        #   (media parts in the request) x (that modality's cap) x ~1.4
+        #
+        # where the 1.4 is the base64 form the payload is inlined as, plus up to
+        # max_concurrent_downloads x cap x ~2.4 for the downloads still in
+        # flight. max_concurrent_downloads throttles how fast bytes arrive; it
+        # does not cap how many are held at once.
+        #
+        # That figure is a floor for the pod, well under the peak. The payloads
+        # stay on the request body, and each later step that sends the body
+        # serializes them again into its own buffer: render, prefill, and decode
+        # each hold another full copy while their upstream call is in flight, and
+        # the encode fanout holds one media part per concurrent sub-request (up
+        # to the encode step's max_parallel). Size the memory limit for several
+        # times the number above.
+        #
+        # That makes max_multimodal_entries the limit that actually bounds this.
+        # 8 parts x 10 MB is ~110 MB in this step; 8 parts at
+        # max_video_download_size: 200 is ~2.2 GB in this step and multiples of
+        # that across the pipeline. Raise a per-modality cap below only together
+        # with max_multimodal_entries.
+        #
+        # This value is the global default; each modality below may override
+        # it. Default 10 MB.
+        #
+        # Which payloads each cap covers differs by modality:
+        #
+        #   image  http(s) downloads only. An image data: URI is not
+        #          size-checked; server.max_request_body_size bounds it.
+        #   audio  http(s) downloads, audio_url data: URIs, and input_audio
+        #          inline payloads.
+        #   video  http(s) downloads and video_url data: URIs.
+        #
+        # Inline payloads are bounded on their base64 length, before any
+        # decode, so an oversized item is rejected without being allocated.
         # max_download_size: 10
+
+        # max_image_download_size overrides max_download_size for image_url
+        # items. Same units (MB), same overflow validation.
+        # max_image_download_size: 10
+
+        # max_audio_download_size overrides max_download_size for audio_url
+        # items. Audio codec decoders historically carry more CVEs than image
+        # decoders; keep this cap tight until your security team has reviewed
+        # the audio decode path end-to-end.
+        # max_audio_download_size: 60
+
+        # max_video_download_size overrides max_download_size for video_url
+        # items. Videos routinely need 100+ MB per clip; leave commented out
+        # only if your deployment truly does not accept video. The codec-CVE
+        # caveat on max_audio_download_size applies here too.
+        # max_video_download_size: 200
+
+        # allowed_{image,audio,video}_content_types below each REPLACE the
+        # built-in allowlist for that modality when set to a non-empty
+        # list. Set to an empty list to accept any content type for that
+        # modality, matching allowed_domains's "empty means unrestricted"
+        # convention.
+        #
+        # Write the key with a value or leave it out entirely. A key with
+        # nothing after it is a null value, not an empty list, and the
+        # coordinator refuses to start rather than guess which was meant.
+        # A template that renders one of these from an unset variable
+        # produces exactly that shape.
+
+        # allowed_image_content_types overrides the built-in image MIME
+        # allowlist. When set to a non-empty list, ONLY these types are
+        # accepted -- for image_url data URIs AND for the Content-Type an
+        # http(s) image_url origin returns. An empty list accepts any type.
+        #
+        # Leaving this unset differs from listing the defaults: the built-in
+        # default is enforced on data URIs only, because plenty of origins
+        # serve a valid image as application/octet-stream or with no
+        # Content-Type at all. Setting the param is read as a deliberate
+        # lockdown and covers both paths. Audio and video downloads are
+        # always checked; see max_audio_download_size for why they are
+        # treated more strictly.
+        # Default: image/jpeg, image/png, image/gif, image/webp.
+        # allowed_image_content_types:
+        #   - image/jpeg
+        #   - image/png
+
+        # allowed_audio_content_types overrides the built-in audio MIME
+        # allowlist. Applies to audio_url data URIs, to the Content-Type an
+        # http(s) audio_url origin returns, and to input_audio parts. Unlike
+        # image, the download path is checked whether or not this param is set.
+        # Default: audio/wav, audio/x-wav, audio/mpeg, audio/mp3, audio/flac,
+        # audio/x-flac, audio/ogg, audio/opus, audio/webm.
+        #
+        # An input_audio part carries a format name. Each format is checked
+        # against one canonical MIME type; audioFormatMIME in
+        # pkg/coordinator/steps/replace_media_urls.go lists the pairs.
+        # Narrowing this param to a list that omits a format's canonical type
+        # rejects input_audio parts of that format: audio/mp3 alone does not
+        # admit format "mp3"; audio/mpeg does. The aliases in the default list
+        # (audio/x-wav, audio/mp3, audio/x-flac) only ever match a data URI or
+        # a download's Content-Type.
+        # allowed_audio_content_types:
+        #   - audio/wav
+        #   - audio/mpeg
+
+        # allowed_video_content_types overrides the built-in video MIME
+        # allowlist. Applies to video_url data URIs and to the Content-Type an
+        # http(s) video_url origin returns; as with audio, the download path is
+        # checked whether or not this param is set.
+        # Default: video/mp4, video/webm, video/quicktime, video/mpeg, video/ogg.
+        # allowed_video_content_types:
+        #   - video/mp4
 
         # allow_private_networks permits downloads whose resolved IP falls in
         # an RFC1918 private range (10/8, 172.16/12, 192.168/16). Loopback,
         # link-local (including the 169.254.169.254 cloud metadata endpoint),
         # CGNAT, and unique-local addresses stay blocked regardless. Enable
-        # only when image origins are inside the cluster network.
+        # only when media origins are inside the cluster network.
         # Default false.
         # allow_private_networks: false
 

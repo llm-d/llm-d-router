@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -69,6 +70,10 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
+	if err := validateEntryModalities(reqCtx.MultimodalEntries); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+
 	s.prepareDecodeBody(ctx, reqCtx)
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
@@ -97,8 +102,9 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
+	logger := log.FromContext(ctx).WithName(DecodeStepName)
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
-	s.injectUUIDs(reqCtx)
+	s.injectUUIDs(reqCtx, logger)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
@@ -134,13 +140,25 @@ func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
 	reqCtx.Body["tokens"] = tokens
 }
 
-func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
+// injectUUIDs tags each media content part with the uuid the decode
+// backend uses for prefix-cache keying. See mediaPartIsWellFormed for
+// how each part is matched with its MultimodalEntry. Non-media parts
+// (text, tool_use, unknown types) are skipped.
+func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext, logger logr.Logger) {
 	messages, ok := reqCtx.Body["messages"].([]any)
 	if !ok {
 		return
 	}
 
-	hashIdx := 0
+	// Group hashes by modality in entry order so the walker below can
+	// index into hashesByMod[modality] at the per-modality position for
+	// O(1) lookup per part. Build is O(n).
+	hashesByMod := make(map[string][]string)
+	for _, entry := range reqCtx.MultimodalEntries {
+		hashesByMod[entry.Modality] = append(hashesByMod[entry.Modality], entry.Hash)
+	}
+
+	modCounter := make(map[string]int)
 	for _, msg := range messages {
 		msgMap, ok := msg.(map[string]any)
 		if !ok {
@@ -155,13 +173,31 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" {
+			partType, _ := partMap["type"].(string)
+			modality, isMedia := partTypeModality[partType]
+			if !isMedia {
 				continue
 			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
-				hashIdx++
+			// Same predicate as replace_media_urls (see mediaPartIsWellFormed).
+			if !mediaPartIsWellFormed(partMap, partType) {
+				continue
 			}
+			localIdx := modCounter[modality]
+			modCounter[modality]++
+			hashes := hashesByMod[modality]
+			if localIdx < len(hashes) {
+				partMap["uuid"] = hashes[localIdx]
+				continue
+			}
+			// A miss means entries and parts got out of line upstream
+			// (see mediaPartIsWellFormed). The part still goes to the
+			// backend without its uuid, so this costs a cache lookup
+			// rather than the request. Log at DEBUG so the mismatch is
+			// visible when someone looks.
+			logger.V(logutil.DEBUG).Info("no MultimodalEntry for well-formed media part",
+				"modality", modality,
+				"local_index", localIdx,
+				"modality_entry_count", len(hashes))
 		}
 	}
 }

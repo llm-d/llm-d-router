@@ -130,7 +130,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: ModalityImage, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
 			{"hash-1": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},

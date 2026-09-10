@@ -81,8 +81,8 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 		Model:        "test-model",
 		Body:         map[string]any{"model": "test-model"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0},
-			{Index: 1},
+			{Modality: ModalityImage},
+			{Modality: ModalityImage},
 		},
 	}
 

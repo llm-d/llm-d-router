@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,8 +71,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		Model:     "llama-3",
 		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+			{Modality: ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: ModalityImage, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
 			{"hash-a": map[string]any{"peer_port": 5501, "size_bytes": 1228800, "nixl_agent_metadata_b64": "bml4..."}},
@@ -318,7 +319,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 			},
 		},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29y", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29y", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
 			{"hash-a": map[string]any{"peer_port": 5501, "size_bytes": 1228800, "nixl_agent_metadata_b64": "bml4..."}},
@@ -632,7 +633,7 @@ func TestPrefillStep_ConflictingECParams_RejectsRequest(t *testing.T) {
 		Model:     "test-model",
 		TokenIDs:  []int{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: ModalityImage, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
 		ECTransferParams: []map[string]any{
 			{"hash-a": map[string]any{"peer_port": 5501}},
@@ -665,7 +666,7 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 		Model:     "test",
 		TokenIDs:  []int{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: ModalityImage, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
 		ECTransferParams: []map[string]any{
 			{"h1": map[string]any{"peer_port": 5501, "size_bytes": 1228800, "nixl_agent_metadata_b64": "bml4..."}},
@@ -727,5 +728,46 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 				t.Fatalf("expected no kv_transfer_params recorded, got %v", reqCtx.KVTransferParams)
 			}
 		})
+	}
+}
+
+// TestPrefillStep_EntryWithoutModalityFails covers the invariant guard at a step
+// boundary. An entry with no Modality fails the request instead of being grouped
+// under a default modality, which would pair it with another entry's slot and
+// shift the local index of every later entry sharing that label.
+//
+// The upstream handler fails the test if it runs: the guard has to reject before
+// the prefill call, not after the engine has been handed a body built on a guess.
+func TestPrefillStep_EntryWithoutModalityFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("prefill must not reach the upstream with an untagged entry")
+	}))
+	defer server.Close()
+
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test-model",
+		TokenIDs:  []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected an error for an entry with no modality")
+	}
+	// A coordinator-side invariant break, so a 5xx rather than blaming the client.
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("expected a non-ErrBadRequest failure, got %v", err)
 	}
 }

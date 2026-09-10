@@ -88,12 +88,16 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	if len(reqCtx.MultimodalEntries) == 0 {
 		return nil
 	}
+	if err := validateEntryModalities(reqCtx.MultimodalEntries); err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
 
 	logger := log.FromContext(ctx).WithName(EncodeStepName)
 
-	// On the generate path the prefill worker runs the vision encoder inline from
-	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
-	// avoids shipping the oversized preprocessed pixel tensor a second time
+	// On the generate path the prefill worker runs the encoder inline from
+	// kwargs_data (image pixel tensors, audio spectrograms, video frames all
+	// take this path), so the encode fanout and EC handoff would be redundant.
+	// Skipping avoids shipping the preprocessed tensor a second time
 	// (see https://github.com/vllm-project/vllm/issues/46722).
 	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
@@ -106,16 +110,37 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	var imageParts []map[string]any
+	var partsByMod map[string][]map[string]any
 	if format == gateway.FormatChatCompletions {
-		imageParts = collectImageParts(reqCtx.Body)
+		partsByMod = collectMediaParts(reqCtx.Body)
 	}
 
+	// Per-modality running counter: entry i's local index is the number
+	// of earlier entries sharing its modality. See mediaPartIsWellFormed
+	// for how entries and parts stay lined up.
+	modCounter := make(map[string]int)
 	for i, entry := range reqCtx.MultimodalEntries {
+		mod := entry.Modality
+		localIdx := modCounter[mod]
+		modCounter[mod]++
 		g.Go(func() error {
 			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
 
-			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
+			body, err := s.buildEncodeBody(reqCtx, tokenIDs, entry, mod, localIdx, format, partsByMod)
+			if err != nil {
+				// Entries and parts got out of line upstream (see
+				// mediaPartIsWellFormed). Both are built from the same
+				// request by the same rule, so reaching here means the
+				// coordinator has a bug. Fail rather than send the encoder
+				// a request already known to be wrong.
+				err = fmt.Errorf("encode[%d]: %w", i, err)
+				logger.Error(err, "encode fanout entry has no media part",
+					"index", i,
+					"modality", mod,
+					"local_index", localIdx,
+					"parts_available", len(partsByMod[mod]))
+				return err
+			}
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
@@ -198,49 +223,60 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
+// buildEncodeBody builds one fanout sub-request. mod and localIdx are the
+// entry's pairing coordinates, both resolved by Execute: mod is the entry's
+// modality, localIdx its position among the entries sharing that modality.
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, mod string, localIdx int, format gateway.RequestFormat, partsByMod map[string][]map[string]any) (map[string]any, error) {
+	placeholder := map[string]any{"offset": 1, "length": entry.Placeholder.Length}
 	switch format {
 	case gateway.FormatChatCompletions:
-		imageContent := buildSingleImageContent(imageParts, entry.Index)
+		mediaContent, err := buildSingleMediaContent(partsByMod, mod, localIdx)
+		if err != nil {
+			return nil, err
+		}
 		body := map[string]any{
 			"model": reqCtx.Model,
 			"messages": []any{
 				map[string]any{
 					"role":    "user",
-					"content": []any{imageContent},
+					"content": []any{mediaContent},
 				},
 			},
 			"tokens": map[string]any{
 				"token_ids": tokenIDs,
 				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
+					"mm_hashes":       map[string][]string{mod: {entry.Hash}},
+					"mm_placeholders": map[string][]any{mod: {placeholder}},
 				},
 			},
 		}
 		capSingleTokenOutput(body, format)
-		return body
+		return body, nil
 	default:
 		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": tokenIDs,
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
+				"mm_hashes":       map[string][]string{mod: {entry.Hash}},
+				"mm_placeholders": map[string][]any{mod: {placeholder}},
+				"kwargs_data":     singleEntryKwargs(mod, entry.KwargsData),
 			},
 		}
 		capSingleTokenOutput(body, format)
-		return body
+		return body, nil
 	}
 }
 
-// collectImageParts walks the request messages once and returns the image_url
-// parts in order, so the fan-out loop can index by position instead of
-// re-walking all parts per image (O(N*M) -> O(N+M)).
-func collectImageParts(body map[string]any) []map[string]any {
+// collectMediaParts walks the request messages once and returns the media
+// parts grouped by modality, each per-modality list in the order they
+// appeared in the request. Non-media parts (text, tool_use, etc.) are
+// skipped, and so are parts that fail mediaPartIsWellFormed. See that
+// function for how the grouping stays lined up with MultimodalEntries.
+// Uses partTypeModality as the authoritative list of recognized media
+// part types.
+func collectMediaParts(body map[string]any) map[string][]map[string]any {
 	messages, _ := body["messages"].([]any)
-	var parts []map[string]any
+	partsByMod := make(map[string][]map[string]any)
 	for _, msg := range messages {
 		msgMap, ok := msg.(map[string]any)
 		if !ok {
@@ -255,25 +291,40 @@ func collectImageParts(body map[string]any) []map[string]any {
 			if !ok {
 				continue
 			}
-			if partMap["type"] == imageURLPartType {
-				parts = append(parts, partMap)
+			partType, _ := partMap["type"].(string)
+			modality, isMedia := partTypeModality[partType]
+			if !isMedia {
+				continue
 			}
+			if !mediaPartIsWellFormed(partMap, partType) {
+				continue
+			}
+			partsByMod[modality] = append(partsByMod[modality], partMap)
 		}
 	}
-	return parts
+	return partsByMod
 }
 
-func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
-	if index >= 0 && index < len(imageParts) {
-		return map[string]any{
-			"type":      imageURLPartType,
-			"image_url": imageParts[index][imageURLPartType],
-		}
+// buildSingleMediaContent returns the OpenAI content-part representing the
+// entry at (modality, localIdx) in the per-modality parts map. It emits
+// the part verbatim in its native shape, {type: <partType>, <partType>:
+// <innerMap>}, so a caller can drop the returned map directly into an
+// encode sub-request's messages[0].content slice.
+//
+// An out-of-range localIdx means entries and parts got out of line (see
+// mediaPartIsWellFormed) and returns an error, since the part holds the bytes
+// the encoder is being asked to encode.
+func buildSingleMediaContent(partsByMod map[string][]map[string]any, modality string, localIdx int) (map[string]any, error) {
+	parts := partsByMod[modality]
+	if localIdx < 0 || localIdx >= len(parts) {
+		return nil, fmt.Errorf("no %s media part at index %d, request has %d", modality, localIdx, len(parts))
 	}
+	p := parts[localIdx]
+	partType, _ := p["type"].(string)
 	return map[string]any{
-		"type":      imageURLPartType,
-		"image_url": map[string]any{"url": ""},
-	}
+		"type":   partType,
+		partType: p[partType],
+	}, nil
 }
 
 type encodeResponse struct {
