@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parsers "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
@@ -80,6 +81,7 @@ const (
 var (
 	_ fwkrh.Parser            = &OpenAIParser{}
 	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
+	_ fwkrh.PriorityRewriter  = &OpenAIParser{}
 )
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
@@ -194,6 +196,14 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 	}
 	m["model"] = model
 	return m, nil
+}
+
+// RewritePriority removes any client-supplied priority from the
+// OpenAI-compatible request payload and writes the resolved EPP priority. The
+// director only calls this when priority propagation is enabled; see
+// parsers.RewritePriority for the cross-backend priority semantics.
+func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 // maxOutputTokensForAPI normalizes the per-API output-token cap field into a

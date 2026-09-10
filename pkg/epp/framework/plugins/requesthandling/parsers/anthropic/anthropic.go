@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parsers "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
@@ -48,6 +49,7 @@ const (
 var (
 	_ fwkrh.Parser            = &AnthropicParser{}
 	_ fwkrh.ModelNameRewriter = &AnthropicParser{}
+	_ fwkrh.PriorityRewriter  = &AnthropicParser{}
 )
 
 type AnthropicParser struct {
@@ -135,6 +137,14 @@ func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, mod
 	}
 	m["model"] = model
 	return m, nil
+}
+
+// RewritePriority removes any client-supplied priority from the Anthropic
+// messages payload and writes the resolved EPP priority. The director only calls
+// this when priority propagation is enabled; see parsers.RewritePriority for the
+// cross-backend priority semantics.
+func (p *AnthropicParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {

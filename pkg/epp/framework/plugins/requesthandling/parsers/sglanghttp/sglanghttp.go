@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parsers "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 )
 
 const (
@@ -48,7 +49,8 @@ const (
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser = &SGLangHTTPParser{}
+	_ fwkrh.Parser           = &SGLangHTTPParser{}
+	_ fwkrh.PriorityRewriter = &SGLangHTTPParser{}
 )
 
 // SGLangHTTPParser implements fwkrh.Parser for SGLang's native /generate
@@ -133,12 +135,27 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
+	// Keep the full body as a map so priority can be injected; when nothing is
+	// mutated, repackage still forwards the original bytes unchanged.
+	bodyMap := make(map[string]any)
+	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+		return nil, fmt.Errorf("invalid generate request: %w", err)
+	}
+
 	return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{
 		Generate:        &fwkrh.GenerateRequest{TokenIDs: tokenIDs, CacheSalt: cacheSalt},
-		Payload:         fwkrh.RawPayload(rawBody),
+		Payload:         fwkrh.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
 	}, SkipResponseProcessing: false}, nil
+}
+
+// RewritePriority removes any client-supplied priority from the SGLang /generate
+// payload and writes the resolved EPP priority. The director only calls this when
+// priority propagation is enabled; see parsers.RewritePriority for the
+// cross-backend priority semantics.
+func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 func hasJSONValue(data json.RawMessage) bool {

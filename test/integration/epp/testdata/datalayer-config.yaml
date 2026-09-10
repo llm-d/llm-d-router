@@ -15,6 +15,7 @@ schedulingProfiles:
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
 requestHandler:
+  propagatePriority: true
   parsers:
   - pluginRef: openai-parser
 dataLayer:
