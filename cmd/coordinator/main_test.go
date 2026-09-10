@@ -264,7 +264,7 @@ func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
 		ReadTimeout:     time.Second,
 		WriteTimeout:    time.Second,
 		MetricsPort:     metricsPort,
-		MetricsCertPath: t.TempDir(),
+		MetricsCertDir:  t.TempDir(),
 	}
 	srv := newTestServer(t, listenAddr)
 

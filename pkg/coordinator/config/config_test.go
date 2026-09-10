@@ -48,7 +48,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"log_level", cfg.LogLevel, 2},
 		{"server.listen_addr", cfg.Server.ListenAddr, ":8080"},
 		{"server.metrics_port", cfg.Server.MetricsPort, 9090},
-		{"server.metrics_cert_path", cfg.Server.MetricsCertPath, ""},
+		{"server.metrics_cert_dir", cfg.Server.MetricsCertDir, ""},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
 		{"server.write_timeout", cfg.Server.WriteTimeout, 120 * time.Second},
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},
@@ -90,9 +90,9 @@ func TestLoadEnvOverride(t *testing.T) {
 		},
 		{
 			name:   "metrics certificate path",
-			envKey: "COORDINATOR_SERVER_METRICS_CERT_PATH",
+			envKey: "COORDINATOR_SERVER_METRICS_CERT_DIR",
 			envVal: "/etc/coordinator-metrics",
-			check:  func(c *Config) (any, any) { return c.Server.MetricsCertPath, "/etc/coordinator-metrics" },
+			check:  func(c *Config) (any, any) { return c.Server.MetricsCertDir, "/etc/coordinator-metrics" },
 		},
 	}
 	for _, tt := range tests {
@@ -109,13 +109,13 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoadMetricsCertPath(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "server:\n  metrics_cert_path: /etc/coordinator-metrics\n"))
+func TestLoadMetricsCertDir(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "server:\n  metrics_cert_dir: /etc/coordinator-metrics\n"))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got, want := cfg.Server.MetricsCertPath, "/etc/coordinator-metrics"; got != want {
-		t.Errorf("server.metrics_cert_path = %q, want %q", got, want)
+	if got, want := cfg.Server.MetricsCertDir, "/etc/coordinator-metrics"; got != want {
+		t.Errorf("server.metrics_cert_dir = %q, want %q", got, want)
 	}
 }
 

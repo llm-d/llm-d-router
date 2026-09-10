@@ -87,7 +87,7 @@ func TestServeMetrics_TLS(t *testing.T) {
 
 	s := &Server{
 		logger: logr.Discard(),
-		config: Config{MetricsCertPath: certDir},
+		config: Config{MetricsCertDir: certDir},
 	}
 	addr := freeAddr(t)
 
@@ -120,7 +120,7 @@ func TestServeMetrics_TLS(t *testing.T) {
 	require.NoError(t, <-errCh)
 }
 
-// TestServeMetrics_TLSMissingCert checks three invalid --metrics-cert-path
+// TestServeMetrics_TLSMissingCert checks three invalid --metrics-cert-dir
 // directories. The metrics server rejects each case, while the data-plane
 // proxy continues running without a /metrics endpoint.
 func TestServeMetrics_TLSMissingCert(t *testing.T) {
@@ -154,7 +154,7 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 
 			s := &Server{
 				logger: logr.Discard(),
-				config: Config{MetricsPort: mustFreePort(t), MetricsCertPath: certDir},
+				config: Config{MetricsPort: mustFreePort(t), MetricsCertDir: certDir},
 			}
 
 			// serveMetrics itself must detect this specific broken input.

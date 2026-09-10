@@ -140,7 +140,7 @@ endpoint, and any positive port serves metrics at `/metrics` on that port. The
 `MORIIO_METRICS_ADDR` env var remains as a backward-compatible fallback and is
 only consulted when `--metrics-port` is unset.
 
-The endpoint serves plain HTTP by default. Set **`--metrics-cert-path`** to a
+The endpoint serves plain HTTP by default. Set **`--metrics-cert-dir`** to a
 directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
 There is no self-signed fallback. This flag is independent of
 `--secure-proxy`/`--cert-path`, which secure the data-plane listener. If

@@ -55,7 +55,7 @@ var errMetricsTLS = errors.New("metrics TLS")
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
 	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port (default 9090).")
-	metricsCertPath := pflag.String("metrics-cert-path", "", "directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over HTTP. Overrides server.metrics_cert_path.")
+	metricsCertDir := pflag.String("metrics-cert-dir", "", "directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over HTTP. Overrides server.metrics_cert_dir.")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)
@@ -81,9 +81,9 @@ func main() {
 	if f := pflag.CommandLine.Lookup("metrics-port"); f != nil && f.Changed {
 		cfg.Server.MetricsPort = *metricsPort
 	}
-	// CLI --metrics-cert-path wins over server.metrics_cert_path.
-	if f := pflag.CommandLine.Lookup("metrics-cert-path"); f != nil && f.Changed {
-		cfg.Server.MetricsCertPath = *metricsCertPath
+	// CLI --metrics-cert-dir wins over server.metrics_cert_dir.
+	if f := pflag.CommandLine.Lookup("metrics-cert-dir"); f != nil && f.Changed {
+		cfg.Server.MetricsCertDir = *metricsCertDir
 	}
 	if err := logOpts.Validate(); err != nil {
 		log.Error(err, "invalid logging options")
@@ -129,7 +129,7 @@ func main() {
 	log.Info("starting coordinator",
 		"addr", cfg.Server.ListenAddr,
 		"metrics_port", cfg.Server.MetricsPort,
-		"metrics_tls", cfg.Server.MetricsCertPath != "")
+		"metrics_tls", cfg.Server.MetricsCertDir != "")
 	if cfg.Server.MetricsPort <= 0 {
 		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
 	}
@@ -175,7 +175,7 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error
 
 	if cfg.MetricsPort > 0 {
 		g.Go(func() error {
-			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertPath)
+			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertDir)
 		})
 	}
 
@@ -188,8 +188,8 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error
 // bounded by metricsShutdownTimeout. Uses the shared controller-runtime
 // registry so every package that registers against it (this coordinator's
 // metrics, controller-runtime's process collectors) is exposed on the same
-// endpoint. A non-empty certPath enables HTTPS with tls.crt and tls.key.
-func serveMetrics(ctx context.Context, port int, certPath string) error {
+// endpoint. A non-empty certDir enables TLS with tls.crt and tls.key.
+func serveMetrics(ctx context.Context, port int, certDir string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	srv := &http.Server{
@@ -197,9 +197,9 @@ func serveMetrics(ctx context.Context, port int, certPath string) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	serveTLS := certPath != ""
+	serveTLS := certDir != ""
 	if serveTLS {
-		tlsConfig, err := metricsTLSConfig(ctx, certPath)
+		tlsConfig, err := metricsTLSConfig(ctx, certDir)
 		if err != nil {
 			return err
 		}
@@ -236,15 +236,15 @@ func serveMetrics(ctx context.Context, port int, certPath string) error {
 }
 
 // metricsTLSConfig loads and reloads the certificate used by the metrics server.
-func metricsTLSConfig(ctx context.Context, certPath string) (*tls.Config, error) {
-	certFile := filepath.Join(certPath, "tls.crt")
-	keyFile := filepath.Join(certPath, "tls.key")
+func metricsTLSConfig(ctx context.Context, certDir string) (*tls.Config, error) {
+	certFile := filepath.Join(certDir, "tls.crt")
+	keyFile := filepath.Join(certDir, "tls.key")
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("%w: load key pair from cert %q and key %q: %w", errMetricsTLS, certFile, keyFile, err)
 	}
 
-	reloader, err := common.NewCertReloader(ctx, certPath, &cert)
+	reloader, err := common.NewCertReloader(ctx, certDir, &cert)
 	if err != nil {
 		return nil, fmt.Errorf("%w: start certificate reloader: %w", errMetricsTLS, err)
 	}

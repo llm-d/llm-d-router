@@ -28,9 +28,9 @@ process on the metrics port (default 9090, configurable with `--metrics-port`), 
 carrying the inference paths and `/healthz` and `/readyz`. A non-positive port disables the
 endpoint.
 
-The endpoint serves HTTP when no certificate path is set. Set `--metrics-cert-path` or
-`server.metrics_cert_path` to a directory containing `tls.crt` and `tls.key` to serve HTTPS.
-If a certificate path is set, missing or invalid files stop the coordinator. The metrics listener does not fall back to HTTP.
+The endpoint serves HTTP when no certificate directory is set. Set `--metrics-cert-dir` or
+`server.metrics_cert_dir` to a directory containing `tls.crt` and `tls.key` to serve HTTPS.
+If a certificate directory is set, missing or invalid files stop the coordinator. The metrics listener does not fall back to HTTP.
 Valid certificate changes take effect without restarting the coordinator.
 
 The endpoint serves the shared controller-runtime registry, so controller-runtime's process
