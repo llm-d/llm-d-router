@@ -197,6 +197,7 @@ func (s *LoraLoadStateScorer) Consumes() fwkplugin.DataDependencies {
 		Required: map[fwkplugin.DataKey]any{
 			fwkplugin.NewDataKey(metrics.LoadedModelsKey, metrics.MetricsExtractorType):    map[string]fwkdl.LoraLoadState{},
 			fwkplugin.NewDataKey(metrics.GPULoadedModelsKey, metrics.MetricsExtractorType): int(0),
+			fwkplugin.NewDataKey(metrics.BaseModelKey, metrics.MetricsExtractorType):       string(""),
 			fwkplugin.NewDataKey(metrics.ActiveModelsKey, metrics.MetricsExtractorType):    map[string]int{},
 		},
 	}
@@ -214,8 +215,14 @@ func (s *LoraLoadStateScorer) WithName(name string) *LoraLoadStateScorer {
 // endpoint and so leave the decision to the other scorers.
 func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	preferred := rendezvous(request.TargetModel, endpoints)
 	scale := 1 - s.scores.budget()
+	if isBaseModelRequest(request, endpoints) {
+		for _, endpoint := range endpoints {
+			scores[endpoint] = s.scores.gpuResident * scale
+		}
+		return scores
+	}
+	preferred := rendezvous(request.TargetModel, endpoints)
 
 	for _, endpoint := range endpoints {
 		m := endpoint.GetMetrics()
@@ -236,7 +243,7 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 		}
 
 		score := tier * scale
-		if endpoint == preferred && !(resident && state.Level == fwkdl.LoraLoadLevelGPU) {
+		if endpoint == preferred && (!resident || state.Level != fwkdl.LoraLoadLevelGPU) {
 			score += s.scores.placementBonus
 		}
 		if m.MaxActiveModels > 0 && m.GPULoadedModels < m.MaxActiveModels {
@@ -246,6 +253,18 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 	}
 
 	return scores
+}
+
+// isBaseModelRequest reports whether the request targets the served base
+// model rather than an adapter, in which case residency is irrelevant and
+// every endpoint scores the same.
+func isBaseModelRequest(request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
+	for _, endpoint := range endpoints {
+		if base := endpoint.GetMetrics().BaseModel; base != "" && base == request.TargetModel {
+			return true
+		}
+	}
+	return false
 }
 
 // hasIdleResident reports whether an unpinned GPU-resident adapter has no

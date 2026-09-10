@@ -44,6 +44,7 @@ const (
 	WaitingModelsKey       = "WaitingModels"
 	LoadedModelsKey        = "LoadedModels"
 	GPULoadedModelsKey     = "GPULoadedModels"
+	BaseModelKey           = "BaseModel"
 
 	// LoRA metrics based on MSP
 	LoraInfoRunningAdaptersMetricName = "running_lora_adapters"
@@ -54,6 +55,8 @@ const (
 	LoraLoadedAdapterNameLabel = "adapter_name"
 	LoraLoadedLevelLabel       = "level"
 	LoraLoadedPinnedLabel      = "pinned"
+	// Label every vLLM metric carries with the served base model.
+	LoraModelNameLabel = "model_name"
 
 	CacheConfigBlockSizeInfoMetricName   = "block_size"
 	CacheConfigNumGPUBlocksMetricName    = "num_gpu_blocks"
@@ -110,6 +113,7 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
 		fwkplugin.NewDataKey(LoadedModelsKey, MetricsExtractorType):        map[string]fwkdl.LoraLoadState{},
 		fwkplugin.NewDataKey(GPULoadedModelsKey, MetricsExtractorType):     int(0),
+		fwkplugin.NewDataKey(BaseModelKey, MetricsExtractorType):           string(""),
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
@@ -310,6 +314,7 @@ func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sour
 	if loadedFamily == nil && countFamily == nil {
 		clone.LoadedModels = nil
 		clone.GPULoadedModels = 0
+		clone.BaseModel = ""
 		return false
 	}
 
@@ -345,10 +350,17 @@ func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sour
 	}
 
 	gpuLoaded := 0
+	baseModel := ""
 	if countFamily != nil {
 		for _, metric := range countFamily.GetMetric() {
-			if mapping.LoraGPULoaded.labelsMatch(metric.GetLabel()) {
-				gpuLoaded = max(gpuLoaded, int(extractValue(metric)))
+			if !mapping.LoraGPULoaded.labelsMatch(metric.GetLabel()) {
+				continue
+			}
+			gpuLoaded = max(gpuLoaded, int(extractValue(metric)))
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == LoraModelNameLabel {
+					baseModel = label.GetValue()
+				}
 			}
 		}
 	} else {
@@ -361,6 +373,7 @@ func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sour
 
 	clone.LoadedModels = loaded
 	clone.GPULoadedModels = gpuLoaded
+	clone.BaseModel = baseModel
 	return true
 }
 

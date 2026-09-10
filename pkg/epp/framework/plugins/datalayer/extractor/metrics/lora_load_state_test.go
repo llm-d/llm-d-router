@@ -50,7 +50,10 @@ func loadedSeries(engine, adapter, level, pinned string, value float64) *dto.Met
 
 func countSeries(engine string, value float64) *dto.Metric {
 	return &dto.Metric{
-		Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String(engine)}},
+		Label: []*dto.LabelPair{
+			{Name: proto.String("engine"), Value: proto.String(engine)},
+			{Name: proto.String(LoraModelNameLabel), Value: proto.String("base")},
+		},
 		Gauge: &dto.Gauge{Value: ptr.To(value)},
 	}
 }
@@ -81,6 +84,7 @@ func TestExtractorLoraLoadState(t *testing.T) {
 		families    sourcemetrics.PrometheusMetricMap
 		wantLoaded  map[string]fwkdl.LoraLoadState
 		wantGPU     int
+		wantBase    string
 		wantUpdated bool
 	}{
 		{
@@ -103,6 +107,7 @@ func TestExtractorLoraLoadState(t *testing.T) {
 				"carol": gpu,
 			},
 			wantGPU:     2,
+			wantBase:    "base",
 			wantUpdated: true,
 		},
 		{
@@ -114,6 +119,7 @@ func TestExtractorLoraLoadState(t *testing.T) {
 			},
 			wantLoaded:  map[string]fwkdl.LoraLoadState{},
 			wantGPU:     0,
+			wantBase:    "base",
 			wantUpdated: true,
 		},
 		{
@@ -153,6 +159,7 @@ func TestExtractorLoraLoadState(t *testing.T) {
 			},
 			wantLoaded:  map[string]fwkdl.LoraLoadState{"carol": gpu},
 			wantGPU:     1,
+			wantBase:    "base",
 			wantUpdated: true,
 		},
 		{
@@ -165,6 +172,7 @@ func TestExtractorLoraLoadState(t *testing.T) {
 			},
 			wantLoaded:  map[string]fwkdl.LoraLoadState{},
 			wantGPU:     1,
+			wantBase:    "base",
 			wantUpdated: true,
 		},
 	}
@@ -186,6 +194,7 @@ func TestExtractorLoraLoadState(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantLoaded, after.LoadedModels)
 			assert.Equal(t, tt.wantGPU, after.GPULoadedModels)
+			assert.Equal(t, tt.wantBase, after.BaseModel)
 		})
 	}
 }

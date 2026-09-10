@@ -200,6 +200,18 @@ func TestFilterWithoutTargetModelPassesThrough(t *testing.T) {
 	assert.Equal(t, 1.0, outcomeCount(outcomeNotApplicable))
 }
 
+func TestFilterBaseModelRequestPassesThrough(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+	eps := fleet(ep{"a", true, 0, 0, ""}, ep{"b", false, 0, 0, ""})
+	for _, e := range eps {
+		e.GetMetrics().BaseModel = "target"
+	}
+	got := New("test", DefaultConfig).Filter(context.Background(), &fwksched.InferenceRequest{TargetModel: "target"}, eps)
+	assert.Equal(t, []string{"a", "b"}, names(got))
+	assert.Equal(t, 1.0, outcomeCount(outcomeNotApplicable))
+}
+
 func TestFactory(t *testing.T) {
 	plugin, err := Factory("lora-homes", json.NewDecoder(strings.NewReader(`{"maxReplicas": 2, "queueThreshold": 4, "kvCacheThreshold": 0.9}`)), nil)
 	require.NoError(t, err)
@@ -207,7 +219,7 @@ func TestFactory(t *testing.T) {
 	assert.Equal(t, Config{MaxReplicas: 2, QueueThreshold: 4, KVCacheThreshold: 0.9}, p.config)
 	assert.Equal(t, PluginType, p.TypedName().Type)
 	assert.Equal(t, "lora-homes", p.TypedName().Name)
-	assert.Len(t, p.Consumes().Required, 3)
+	assert.Len(t, p.Consumes().Required, 4)
 
 	plugin, err = Factory("defaults", nil, nil)
 	require.NoError(t, err)

@@ -221,6 +221,19 @@ func TestFactory(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestBaseModelRequestScoresEveryEndpointTheSame(t *testing.T) {
+	resident := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}}
+	empty := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 0, LoadedModels: map[string]fwkdl.LoraLoadState{}}
+	full := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
+	got := score(t, nil, "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
+	assert.Equal(t, got["resident"], got["empty"])
+	assert.Equal(t, got["resident"], got["full"])
+
+	got = score(t, nil, "target", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
+	assert.Greater(t, got["resident"], got["empty"])
+	assert.Greater(t, got["empty"], got["full"])
+}
+
 func TestNoEndpoints(t *testing.T) {
 	assert.Empty(t, score(t, nil, "target"))
 }

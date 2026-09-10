@@ -56,7 +56,11 @@ type Metrics struct {
 	LoadedModels map[string]LoraLoadState
 	// GPULoadedModels is the number of adapters occupying GPU slots, out of
 	// MaxActiveModels.
-	GPULoadedModels         int
+	GPULoadedModels int
+	// BaseModel is the model name the server stamps on its metrics
+	// (model_name). A request targeting it needs no adapter. Empty when
+	// the server does not report residency.
+	BaseModel               string
 	RunningRequestsSize     int
 	WaitingQueueSize        int
 	KVCacheUsagePercent     float64
@@ -107,6 +111,7 @@ func (m *Metrics) Clone() *Metrics {
 		MaxActiveModels:         m.MaxActiveModels,
 		LoadedModels:            loadedModels,
 		GPULoadedModels:         m.GPULoadedModels,
+		BaseModel:               m.BaseModel,
 		RunningRequestsSize:     m.RunningRequestsSize,
 		WaitingQueueSize:        m.WaitingQueueSize,
 		KVCacheUsagePercent:     m.KVCacheUsagePercent,
