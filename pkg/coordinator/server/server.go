@@ -78,6 +78,17 @@ func logRequestResponse(next http.Handler) http.Handler {
 	})
 }
 
+// RouteRegistrar is implemented by pipeline steps that serve auxiliary HTTP
+// endpoints from the coordinator listener, beyond the built-in inference
+// routes (for example, result retrieval for a queueing step). RegisterRoutes
+// is called once per implementing step at server construction, after the
+// built-in routes are registered. chi keeps the last handler registered for
+// a pattern, so a step registering a path the server already owns would
+// silently take over that route: steps must use paths of their own.
+type RouteRegistrar interface {
+	RegisterRoutes(r chi.Router)
+}
+
 type Server struct {
 	httpServer         *http.Server
 	pipeline           *pipeline.Pipeline
@@ -124,6 +135,12 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
+
+	for _, step := range p.Steps() {
+		if rr, ok := step.(RouteRegistrar); ok {
+			rr.RegisterRoutes(r)
+		}
+	}
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,

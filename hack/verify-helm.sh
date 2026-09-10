@@ -120,6 +120,24 @@ if grep -q -- '^kind: PodMonitoring$' "${gke_monitoring_render_output}"; then
   echo "GKE Gateway monitoring unexpectedly rendered PodMonitoring when the monitoring provider was unset"
   exit 1
 fi
+if grep -Eq -- '^kind: ClusterRole(Binding)?$' "${gke_monitoring_render_output}"; then
+  echo "GKE Gateway monitoring unexpectedly rendered cluster RBAC when Prometheus authentication was disabled"
+  exit 1
+fi
+
+echo "Verifying Prometheus authentication renders cluster RBAC..."
+prometheus_auth_render_output="${TEMP_DIR}/llm-d-router-gateway-prometheus-auth-render.yaml"
+prometheus_auth_render_command="${HELM} template prometheus-auth ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=true > ${prometheus_auth_render_output}"
+echo "Executing: ${prometheus_auth_render_command}"
+eval "${prometheus_auth_render_command}"
+if ! grep -q -- '^kind: ClusterRole$' "${prometheus_auth_render_output}"; then
+  echo "Prometheus authentication did not render a ClusterRole"
+  exit 1
+fi
+if ! grep -q -- '^kind: ClusterRoleBinding$' "${prometheus_auth_render_output}"; then
+  echo "Prometheus authentication did not render a ClusterRoleBinding"
+  exit 1
+fi
 
 echo "Verifying explicit GMP monitoring renders PodMonitoring..."
 gmp_monitoring_render_output="${TEMP_DIR}/llm-d-router-gateway-gmp-monitoring-render.yaml"

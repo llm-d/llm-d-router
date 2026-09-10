@@ -22,13 +22,15 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/jellydator/ttlcache/v3 v3.4.1
+	github.com/llm-d/llm-d-async/api v0.9.0
+	github.com/llm-d/llm-d-async/producer v0.9.0
 	github.com/onsi/ginkgo/v2 v2.28.3
 	github.com/onsi/gomega v1.40.0
 	github.com/openai/openai-go v1.12.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.3
 	github.com/prometheus/common v0.67.5
-	github.com/redis/go-redis/v9 v9.20.1
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1

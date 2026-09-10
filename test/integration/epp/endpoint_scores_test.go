@@ -34,8 +34,10 @@ import (
 func TestEndpointScoresMetadata(t *testing.T) {
 	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithEmitEndpointScores()).WithBaseResources()
 
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 5, 0.5, modelMyModelTarget)}
-	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+	// Both pods stay strictly below the utilization-detector limits (queue < 5, KV < 0.8)
+	// so the default filter drops neither and the scheduler scores both.
+	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 4, 0.5, modelMyModelTarget)}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
 	envoyLb := requestHeaderEnvoyLbMetadata(t, h)
 
