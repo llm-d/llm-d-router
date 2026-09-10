@@ -269,7 +269,7 @@ for def in "${POOL_DEFS[@]}"; do
 
   export INF_APP_NAME EPP_NAME EPP_CONFIG INF_SERVED_MODEL_NAME INF_DEPLOYMENT_NAME
 
-  echo "INFO: Deploying pool '${INF_APP_NAME}' (EPP: ${EPP_NAME}, served-model-name: ${INF_SERVED_MODEL_NAME})"
+  echo "INFO: Deploying pool '${INF_APP_NAME}'"
 
   # Re-expand templates with the per-pool variables now set
   POOL_TMP=$(mktemp -d)
@@ -320,16 +320,33 @@ Multi-pool deployment to namespace ${NAMESPACE} completed!
 Shared workers:
   pre:  deployment/${PRE_DEPLOYMENT_NAME}
   post: deployment/${POST_DEPLOYMENT_NAME}
-  served-model-name: ${SHARED_SERVED_MODEL_NAME}
+  served-model-name:
+${SHARED_SERVED_MODEL_NAME}
 
 Pools:
 EOF
+
+# Accumulate per-pool resource names for the teardown section.
+_del_deployments="${PRE_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME}"
+_del_services=""
+_del_configmaps="envoy"
+_del_serviceaccounts=""
+_del_roles=""
+_del_rolebindings=""
 
 for def in "${POOL_DEFS[@]}"; do
   INF_APP_NAME="$(echo "$def" | cut -d: -f1)"
   EPP_NAME="$(echo "$def"     | cut -d: -f2)"
   INF_SERVED_MODEL_NAME="$(echo "$def" | cut -d: -f4)"
   INF_DEPLOYMENT_NAME="vllm-inf-${INF_APP_NAME}"
+
+  _del_deployments="${_del_deployments} ${INF_DEPLOYMENT_NAME} ${EPP_NAME}"
+  _del_services="${_del_services} ${INF_DEPLOYMENT_NAME} ${EPP_NAME}"
+  _del_configmaps="${_del_configmaps} ${EPP_NAME}-config"
+  _del_serviceaccounts="${_del_serviceaccounts} ${EPP_NAME}"
+  _del_roles="${_del_roles} ${EPP_NAME}"
+  _del_rolebindings="${_del_rolebindings} ${EPP_NAME}-binding"
+
   cat <<EOF
   pool: ${INF_APP_NAME}
     inference:  deployment/${INF_DEPLOYMENT_NAME}
@@ -347,4 +364,26 @@ for def in "${POOL_DEFS[@]}"; do
 EOF
 done
 
-echo "-----------------------------------------"
+cat <<EOF
+Resources created in namespace ${NAMESPACE}:
+
+  Deployments:       ${_del_deployments# }
+  Services:          ${_del_services# }
+  ConfigMaps:        ${_del_configmaps}
+  ServiceAccounts:   ${_del_serviceaccounts# }
+  Roles:             ${_del_roles# }
+  RoleBindings:      ${_del_rolebindings# }
+  PVC:               disagg-data-pvc
+
+To delete all of the above:
+
+  kubectl -n ${NAMESPACE} delete deployment ${_del_deployments# }
+  kubectl -n ${NAMESPACE} delete service ${_del_services# }
+  kubectl -n ${NAMESPACE} delete configmap ${_del_configmaps}
+  kubectl -n ${NAMESPACE} delete serviceaccount ${_del_serviceaccounts# }
+  kubectl -n ${NAMESPACE} delete role ${_del_roles# }
+  kubectl -n ${NAMESPACE} delete rolebinding ${_del_rolebindings# }
+  kubectl -n ${NAMESPACE} delete pvc disagg-data-pvc
+
+-----------------------------------------
+EOF
