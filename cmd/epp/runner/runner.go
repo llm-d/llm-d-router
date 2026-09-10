@@ -171,6 +171,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/requestidaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/runningrequests"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/tokenload"
@@ -722,6 +723,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(loadaware.LoadAwareType, fwkplugin.StabilityBeta, loadaware.Factory)
 	fwkplugin.Register(contextlengthaware.ContextLengthAwareType, fwkplugin.StabilityBeta, contextlengthaware.Factory)
+	fwkplugin.Register(requestidaffinity.ScorerType, requestidaffinity.Factory)
 	// Alpha
 	fwkplugin.Register(sessionaffinity.SessionAffinityType, fwkplugin.StabilityAlpha, sessionaffinity.Factory)
 	fwkplugin.Register(headerlabelaffinity.PluginType, fwkplugin.StabilityAlpha, headerlabelaffinity.Factory)
