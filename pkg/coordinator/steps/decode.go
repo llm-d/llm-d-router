@@ -25,9 +25,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -40,9 +40,8 @@ func init() {
 }
 
 type DecodeStep struct {
-	useOpenAIFormat bool
-	gwClient        *gateway.Client
-	kv              kv.Connector
+	prepare  engine.DecodeRequest
+	gwClient *gateway.Client
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -53,15 +52,16 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
+	selectedEngine := vllm.New(useOpenAI, engine.Limits{})
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	kvConn, err := kv.Build(kvName)
+	prepare, err := selectedEngine.NewDecoder(kvName)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn}, nil
+	return &DecodeStep{prepare: prepare, gwClient: gwClient}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -69,11 +69,11 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	s.prepareDecodeBody(ctx, reqCtx)
+	prepared := s.prepare(ctx, reqCtx)
 
-	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", prepared.Path, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, prepared.Body, nil)
 	if err != nil {
 		return err
 	}
@@ -88,80 +88,4 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: out.Status}
 	}
 	return nil
-}
-
-// prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
-// prefill and conditional-decode). decode is the terminal pipeline step: its body
-// is streamed straight to the client and no later step reads reqCtx.Body. A clone
-// would also be insufficient, since injectUUIDs mutates nested values that a shallow
-// maps.Clone would still share. This is sound only while the pipeline runs steps
-// sequentially; if it ever goes concurrent, decode must copy like the others.
-func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
-	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
-	s.injectUUIDs(reqCtx)
-
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	switch format {
-	case gateway.FormatChatCompletions:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
-		s.injectTokensField(reqCtx)
-	case gateway.FormatCompletions:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
-		if len(reqCtx.TokenIDs) > 0 {
-			reqCtx.Body["prompt"] = reqCtx.TokenIDs
-		}
-	case gateway.FormatGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
-		// so the decode worker never pulls the prefill KV over NIXL. Merge into
-		// the client's sampling_params to preserve max_tokens and other fields.
-		sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
-		if !ok {
-			sampling = map[string]any{}
-			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
-		}
-		setGenerateTransferParams(sampling, kvParams, nil)
-	}
-}
-
-func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
-	tokens := map[string]any{
-		"token_ids": reqCtx.TokenIDs,
-	}
-	if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
-		tokens["features"] = features
-	}
-	reqCtx.Body["tokens"] = tokens
-}
-
-func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return
-	}
-
-	hashIdx := 0
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] != "image_url" {
-				continue
-			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
-				hashIdx++
-			}
-		}
-	}
 }

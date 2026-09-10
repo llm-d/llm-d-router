@@ -14,23 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package steps
+// Package vllm prepares coordinator requests for the vLLM inference protocol.
+package vllm
 
 import (
-	"strings"
-	"testing"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 )
 
-func TestReadErrorBody_CapsOversizedBody(t *testing.T) {
-	body := readErrorBody(strings.NewReader(strings.Repeat("a", maxErrorBodySize*4)))
-	if len(body) != maxErrorBodySize {
-		t.Fatalf("expected body capped to %d bytes, got %d", maxErrorBodySize, len(body))
-	}
+// Engine implements vLLM request preparation and response parsing.
+type Engine struct {
+	useOpenAIFormat bool
+	limits          engine.Limits
 }
 
-func TestReadErrorBody_ReturnsSmallBodyVerbatim(t *testing.T) {
-	body := readErrorBody(strings.NewReader("overloaded"))
-	if string(body) != "overloaded" {
-		t.Fatalf("expected %q, got %q", "overloaded", string(body))
-	}
+// New constructs a vLLM engine using the configured wire format and input limits.
+func New(useOpenAIFormat bool, limits engine.Limits) Engine {
+	return Engine{useOpenAIFormat: useOpenAIFormat, limits: limits}
 }
