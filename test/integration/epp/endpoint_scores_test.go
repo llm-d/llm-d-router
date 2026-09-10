@@ -24,7 +24,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // TestEndpointScoresMetadata verifies the opt-in request-path dynamic metadata contract: with

@@ -423,6 +423,7 @@ Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declarin
 
 - `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
 - `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
+- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads for both the disaggregation decision and the conditional-decode 412 gate. If unspecified, the `approx-prefix-cache-producer` is used.
 
 **Conditional-decode 412 gate**
 
@@ -684,6 +685,8 @@ batches are unchanged.
 |---|---|---|---|---|
 | `--enable-tls` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Enable TLS for the specified stages. Example: `--enable-tls=prefiller,decoder` |
 | `--tls-insecure-skip-verify` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Skip TLS certificate verification for the specified stages. Example: `--tls-insecure-skip-verify=prefiller` |
+| `--tls-min-version` | — | `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | Set the minimum TLS version accepted by the sidecar's secure proxy. |
+| `--tls-cipher-suites` | — | Go `crypto/tls` cipher suite names (comma-separated or repeated) | existing secure suite set | Set the TLS cipher suites accepted by the sidecar's secure proxy. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. |
 | `--enable-prefiller-sampling` | `ENABLE_PREFILLER_SAMPLING` | `true` / `false` | `false` | If true, the prefill instance is selected randomly from the provided prefill host values. |
 | `--enable-ssrf-protection` | — | `true` / `false` | `false` | Enable SSRF protection using InferencePool allowlisting. |
 

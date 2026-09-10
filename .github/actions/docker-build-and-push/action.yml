@@ -41,6 +41,10 @@ inputs:
     required: false
     description: Additional image tags to push
     default: ''
+outputs:
+  digest:
+    description: Digest of the pushed image index
+    value: ${{ steps.build.outputs.digest }}
 runs:
   using: "composite"
   steps:
@@ -56,10 +60,14 @@ runs:
         password: ${{ inputs.github-token }}
 
     - name: Build image
+      id: build
       uses: docker/build-push-action@v6
       with:
         file: ${{ inputs.docker-file }}
         push: ${{ inputs.push == 'true' }}
+        # SBOM attestations turn the image into a manifest list which the
+        # docker exporter used by the no-push scan pass cannot write.
+        sbom: ${{ inputs.push == 'true' }}
         outputs: ${{ inputs.buildx-outputs }}
         platforms: ${{ inputs.push != 'true' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
         tags: |

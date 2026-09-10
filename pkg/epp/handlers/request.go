@@ -19,6 +19,7 @@ package handlers
 import (
 	"context"
 	"maps"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -29,7 +30,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
@@ -62,7 +63,7 @@ func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *
 	if endpoint == nil {
 		return errcommon.Error{Code: errcommon.Internal, Msg: "no pods available in datastore"}
 	}
-	reqCtx.TargetEndpoint = endpoint.GetIPAddress() + ":" + endpoint.GetPort()
+	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
 	reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 

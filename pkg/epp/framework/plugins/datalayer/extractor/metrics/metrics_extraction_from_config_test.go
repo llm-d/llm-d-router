@@ -166,6 +166,55 @@ func TestMetricsExtractionDefaultConfig(t *testing.T) {
 	assert.Equal(t, 512, m.CacheNumBlocks, "CacheNumBlocks")
 }
 
+// TestMetricsExtractionCPUBackendVLLM verifies the RHAI-195 contract for a
+// CPU-backed vLLM endpoint. CPU vLLM exposes the same scheduling metric names
+// as GPU vLLM and currently retains the num_gpu_blocks label on
+// vllm:cache_config_info even though those blocks are CPU-resident.
+//
+// The LoRA family is intentionally absent: a CPU deployment without LoRA
+// adapters must still be scrapeable and usable by the EPP.
+func TestMetricsExtractionCPUBackendVLLM(t *testing.T) {
+	srv := createMockServer([]MetricMock{
+		{Name: WaitingMetric, Value: 6},
+		{Name: RunningMetric, Value: 2},
+		{Name: KVCacheMetric, Value: 0.42},
+		{
+			Name:  CacheConfigMetric,
+			Value: 1,
+			Labels: map[string]string{
+				CacheConfigBlockSizeInfoMetricName: "16",
+				CacheConfigNumGPUBlocksMetricName:  "2048",
+			},
+		},
+	})
+	defer srv.Close()
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+		// The extractor must not make a GPU-specific decision based on this
+		// label; CPU and GPU vLLM use the same default metric mapping.
+		"accelerator": "cpu",
+	})
+
+	data, err := p.source.Poll(context.Background(), ep)
+	require.NoError(t, err)
+	require.NoError(t, p.ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Payload:  data,
+		Endpoint: ep,
+	}))
+
+	m := ep.GetMetrics()
+	assert.Equal(t, 6, m.WaitingQueueSize, "WaitingQueueSize")
+	assert.Equal(t, 2, m.RunningRequestsSize, "RunningRequestsSize")
+	assert.InDelta(t, 0.42, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
+	assert.Equal(t, 16, m.CacheBlockSize, "CacheBlockSize")
+	assert.Equal(t, 2048, m.CacheNumBlocks, "CPU KV cache block count")
+	assert.Empty(t, m.ActiveModels, "CPU vLLM without LoRA must have no active adapters")
+}
+
 // TestMetricsExtractionLoRADisabledViaConfig verifies the "disable a specific metric"
 // pattern: with loraSpec: "", the extractor skips LoRA entirely — no extraction attempt,
 // no error for the missing/present family, and ActiveModels stays at its zero value.
@@ -544,4 +593,41 @@ func TestMetricsExtractionMultipleExtractors(t *testing.T) {
 	assert.Zero(t, mB.WaitingQueueSize, "extractor B: queue should not be extracted")
 	assert.Equal(t, 8, mB.MaxActiveModels, "extractor B: MaxActiveModels")
 	assert.Contains(t, mB.ActiveModels, "adapter-x", "extractor B: ActiveModels")
+}
+
+// TestMetricsExtractionSGLangDefaultConfig verifies that the built-in SGLang
+// engine config reads cache capacity from the dedicated sglang:page_size and
+// sglang:num_pages gauges, and that a payload carrying no cache-config info
+// gauge extracts without error.
+func TestMetricsExtractionSGLangDefaultConfig(t *testing.T) {
+	srv := createMockServer([]MetricMock{
+		{Name: "sglang:num_queue_reqs", Value: 6},
+		{Name: "sglang:num_running_reqs", Value: 2},
+		{Name: "sglang:token_usage", Value: 0.42},
+		{Name: "sglang:page_size", Value: 64},
+		{Name: "sglang:num_pages", Value: 11147},
+	})
+	defer srv.Close()
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "sglang",
+	})
+
+	// Drive Poll + Extract directly: the dispatcher swallows extractor errors
+	// into DataLayerExtractErrorsTotal, and a spurious per-scrape error is
+	// part of what this test guards against.
+	data, err := p.source.Poll(ctx, ep)
+	require.NoError(t, err)
+	require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
+
+	m := ep.GetMetrics()
+	assert.Equal(t, 6, m.WaitingQueueSize, "WaitingQueueSize")
+	assert.Equal(t, 2, m.RunningRequestsSize, "RunningRequestsSize")
+	assert.InDelta(t, 0.42, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
+	assert.Equal(t, 64, m.CacheBlockSize, "CacheBlockSize")
+	assert.Equal(t, 11147, m.CacheNumBlocks, "CacheNumBlocks")
 }

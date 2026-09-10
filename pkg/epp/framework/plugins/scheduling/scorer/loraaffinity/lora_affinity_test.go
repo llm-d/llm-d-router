@@ -51,7 +51,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 			},
 		},
 		{
-			name:    "Target model is waiting",
+			name:    "Target model is waiting, adapter slots saturated",
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
@@ -67,7 +67,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 			},
 		},
 		{
-			name:    "Endpoints have no space for new model",
+			name:    "Target model not active or waiting",
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
@@ -136,6 +136,46 @@ func TestLoraAffinityScorer(t *testing.T) {
 				"pod3": 0.8,
 				"pod4": 0.6,
 				"pod5": 0.0,
+			},
+		},
+		{
+			name:    "vLLM-shaped: target in both maps scores active",
+			request: &fwksched.InferenceRequest{TargetModel: "adapter-a"},
+			endpoints: []fwksched.Endpoint{
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.Metrics{
+						ActiveModels:    map[string]int{"adapter-a": 1, "adapter-b": 1},
+						WaitingModels:   map[string]int{"adapter-a": 1, "adapter-b": 1},
+						MaxActiveModels: 4,
+					}, nil),
+			},
+			expectedScoresEndpoint: map[string]float64{
+				"pod1": 1.0,
+			},
+		},
+		{
+			name:    "vLLM-shaped: target not in maps, capacity available vs saturated",
+			request: &fwksched.InferenceRequest{TargetModel: "target-adapter"},
+			endpoints: []fwksched.Endpoint{
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+					&fwkdl.Metrics{
+						ActiveModels:    map[string]int{"adapter-a": 1, "adapter-b": 1},
+						WaitingModels:   map[string]int{"adapter-a": 1, "adapter-b": 1},
+						MaxActiveModels: 4,
+					}, nil),
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
+					&fwkdl.Metrics{
+						ActiveModels:    map[string]int{"adapter-a": 1, "adapter-b": 1, "adapter-c": 1, "adapter-d": 1},
+						WaitingModels:   map[string]int{"adapter-a": 1, "adapter-b": 1, "adapter-c": 1, "adapter-d": 1},
+						MaxActiveModels: 4,
+					}, nil),
+			},
+			expectedScoresEndpoint: map[string]float64{
+				"pod1": 0.8,
+				"pod2": 0.0,
 			},
 		},
 		{

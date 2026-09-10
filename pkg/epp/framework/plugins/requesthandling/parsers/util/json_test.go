@@ -70,3 +70,72 @@ func TestUnmarshalRejectsTrailingData(t *testing.T) {
 		})
 	}
 }
+
+func TestUnmarshalMapWithRawField(t *testing.T) {
+	const (
+		input    = `{"model":"test","token_ids":[[1.0, 2e0], [3,4]],"seed":9007199254740993,"nested":{"value":1.5}}`
+		rawField = "token_ids"
+		wantRaw  = `[[1.0, 2e0], [3,4]]`
+	)
+
+	var want map[string]any
+	if err := Unmarshal([]byte(input), &want); err != nil {
+		t.Fatalf("full decode error = %v", err)
+	}
+
+	got, err := UnmarshalMapWithRawField([]byte(input), rawField)
+	if err != nil {
+		t.Fatalf("UnmarshalMapWithRawField() error = %v", err)
+	}
+
+	raw, ok := got[rawField].(json.RawMessage)
+	if !ok {
+		t.Fatalf("%s type = %T, want json.RawMessage", rawField, got[rawField])
+	}
+	if string(raw) != wantRaw {
+		t.Fatalf("%s = %s, want %s", rawField, raw, wantRaw)
+	}
+
+	var decoded any
+	if err := Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("raw field decode error = %v", err)
+	}
+	got[rawField] = decoded
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("UnmarshalMapWithRawField() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestUnmarshalMapWithRawFieldRejectsInvalidJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr error
+	}{
+		{
+			name:  "malformed raw field",
+			input: `{"token_ids":[1,2,]}`,
+		},
+		{
+			name:    "trailing value",
+			input:   `{"token_ids":[1,2]} true`,
+			wantErr: ErrTrailingData,
+		},
+		{
+			name:  "non-object",
+			input: `[1,2]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := UnmarshalMapWithRawField([]byte(tt.input), "token_ids")
+			if err == nil {
+				t.Fatal("UnmarshalMapWithRawField() unexpectedly succeeded")
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("UnmarshalMapWithRawField() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}

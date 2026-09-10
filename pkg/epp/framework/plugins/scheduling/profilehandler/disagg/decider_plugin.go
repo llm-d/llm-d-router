@@ -13,3 +13,10 @@ type deciderPlugin interface {
 	plugin.Plugin
 	disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool
 }
+
+// prefixMatchInfoConsumer is implemented by deciders that read PrefixCacheMatchInfo
+// from endpoint attributes. The profile handler declares the decider's key in its own
+// Consumes() so the data layer wires the producer the decider reads.
+type prefixMatchInfoConsumer interface {
+	prefixMatchInfoDataKey() plugin.DataKey
+}
