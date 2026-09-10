@@ -42,9 +42,9 @@ func endpoint(name string, m *fwkdl.Metrics) fwksched.Endpoint {
 	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, m, nil)
 }
 
-func score(t *testing.T, params *Parameters, target string, endpoints ...fwksched.Endpoint) map[string]float64 {
+func score(t *testing.T, target string, endpoints ...fwksched.Endpoint) map[string]float64 {
 	t.Helper()
-	scores := NewLoraLoadStateScorer(context.Background(), params).Score(context.Background(), &fwksched.InferenceRequest{TargetModel: target}, endpoints)
+	scores := NewLoraLoadStateScorer(context.Background(), nil).Score(context.Background(), &fwksched.InferenceRequest{TargetModel: target}, endpoints)
 	require.Len(t, scores, len(endpoints))
 	byName := map[string]float64{}
 	for ep, s := range scores {
@@ -74,14 +74,14 @@ func TestTiers(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := score(t, nil, "target", endpoint("pod", test.metrics))
+			got := score(t, "target", endpoint("pod", test.metrics))
 			assert.InDelta(t, test.expected, got["pod"], 0.0001)
 		})
 	}
 }
 
 func TestIdleResidentBeatsBusyOneAndFreeSlotBeatsBoth(t *testing.T) {
-	got := score(t, nil, "target",
+	got := score(t, "target",
 		endpoint("free", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu}, GPULoadedModels: 1, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1}}),
 		endpoint("idle-victim", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1}}),
 		endpoint("all-busy", &fwkdl.Metrics{LoadedModels: map[string]fwkdl.LoraLoadState{"a": gpu, "b": gpu}, GPULoadedModels: 2, MaxActiveModels: 2, ActiveModels: map[string]int{"a": 1, "b": 1}}),
@@ -141,14 +141,14 @@ func TestBaseModelRequestPrefersEndpointsNotServingAdapters(t *testing.T) {
 	idle := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}}
 	half := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1}}
 	full := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
-	got := score(t, nil, "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("idle", idle), endpoint("half", half), endpoint("full", full))
+	got := score(t, "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("idle", idle), endpoint("half", half), endpoint("full", full))
 	assert.Equal(t, 1.0, got["empty"])
 	assert.Equal(t, 1.0, got["idle"], "resident but idle adapters cost the base model nothing")
 	assert.Equal(t, 0.5, got["half"])
 	assert.Equal(t, 0.0, got["full"])
 	assert.Equal(t, got["full"], got["resident"], "which adapters are busy is irrelevant to a base-model request")
 
-	got = score(t, nil, "target", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
+	got = score(t, "target", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
 	assert.Greater(t, got["resident"], got["empty"])
 	assert.Greater(t, got["empty"], got["full"])
 }
@@ -157,12 +157,12 @@ func TestBaseModelRequestIsNeutralWhenEveryEndpointIsFull(t *testing.T) {
 	a := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
 	b := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"p": gpu, "q": gpu, "r": cpu}, ActiveModels: map[string]int{"p": 1, "q": 1, "r": 1}}
 	unreported := &fwkdl.Metrics{BaseModel: "base"}
-	got := score(t, nil, "base", endpoint("a", a), endpoint("b", b))
+	got := score(t, "base", endpoint("a", a), endpoint("b", b))
 	assert.Equal(t, got["a"], got["b"])
-	got = score(t, nil, "base", endpoint("a", a), endpoint("unreported", unreported))
+	got = score(t, "base", endpoint("a", a), endpoint("unreported", unreported))
 	assert.Greater(t, got["unreported"], got["a"], "an endpoint with no adapter slots is the best place for base traffic")
 }
 
 func TestNoEndpoints(t *testing.T) {
-	assert.Empty(t, score(t, nil, "target"))
+	assert.Empty(t, score(t, "target"))
 }
