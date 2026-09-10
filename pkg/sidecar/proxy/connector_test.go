@@ -71,9 +71,8 @@ const generateRequestBodyWithTokenLimits = `{
 // carrying client token limits, and asserts the generate-API token-limit
 // contract on the two legs the connector produces: the prefill leg is capped to
 // a single output token inside sampling_params, and the decode leg still carries
-// the client's own limits. The connectors copy the client body one level deep,
-// so the two legs share that nested map; a cap written through it instead of
-// replacing it takes the client's limits with it.
+// the client's own limits. It is the regression test for the sampling_params
+// sharing that reqcommon.APIType.tokenLimitMap documents.
 func expectGenerateLegTokenLimits(testInfo *sidecarTestInfo) {
 	GinkgoHelper()
 
@@ -277,9 +276,9 @@ var _ = Describe("Common Connector tests", func() {
 				<-testInfo.stoppedCh
 			})
 
-			// Regression test: a client min_tokens above the prefill leg's
-			// max_tokens=1 cap trips vLLM's min_tokens<=max_tokens validation.
-			It("should cap min_tokens in prefill and restore original value in decode", func() {
+			// Regression test for stripping min_tokens from the prefill leg;
+			// reqcommon.CapSingleToken documents why.
+			It("should strip min_tokens in prefill and restore original value in decode", func() {
 				testInfo := sidecarConnectionTestSetup(connector)
 
 				By("starting the proxy")

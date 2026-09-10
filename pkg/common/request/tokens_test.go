@@ -22,10 +22,8 @@ import (
 	"testing"
 )
 
-// The sidecar connectors copy the client body one level deep, cap the copy for
-// the prefill leg, and marshal the original for the decode leg. Capping the
-// generate API writes inside sampling_params, which a one-level copy shares, so
-// CapSingleToken must replace that map rather than write through it.
+// Regression test for the sampling_params sharing that APIType.tokenLimitMap
+// documents.
 func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	client := map[string]any{
 		"token_ids":         []any{1, 2, 3},
@@ -190,7 +188,7 @@ func TestCapSingleToken(t *testing.T) {
 		{
 			// max_tokens and max_completion_tokens are not Responses fields, so
 			// tokenLimitFields does not name them and they are left as sent.
-			// min_tokens is a floor and is stripped for every API.
+			// min_tokens is stripped for every API; see CapSingleToken.
 			name:    "responses leaves fields the API does not use",
 			apiType: APITypeResponses,
 			body:    map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5, "max_output_tokens": 800},

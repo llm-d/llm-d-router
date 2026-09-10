@@ -487,11 +487,11 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 	}
 }
 
-// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens is a regression
-// test for the one coordinator path where a client-supplied min_tokens survives
-// into the capped body: chat-completions clones reqCtx.Body, so a client
-// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the leg.
-// The generate and completions legs build fresh bodies that never carry it.
+// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens covers the one
+// coordinator path where a client-supplied min_tokens reaches the capped body:
+// chat-completions clones reqCtx.Body, while the generate and completions legs
+// build fresh bodies that never carry it. reqcommon.CapSingleToken documents why
+// min_tokens is stripped.
 func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 	var prefillBody map[string]any
 

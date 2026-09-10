@@ -137,8 +137,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 					for _, field := range tt.tokenFields {
 						limits[field] = float64(1)
 					}
-					// min_tokens is a floor, so the prefill leg drops it instead
-					// of capping it.
+					// The prefill leg drops min_tokens; see reqcommon.CapSingleToken.
 					delete(limits, requestFieldMinTokens)
 					wantPrefill["stream"] = false
 					wantPrefill["cache_hit_threshold"] = float64(0)

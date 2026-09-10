@@ -105,8 +105,6 @@ func TestAPIType_tokenLimitMap(t *testing.T) {
 		}
 	})
 
-	// A generate body may share sampling_params with the body it was cloned from,
-	// so the caller gets a copy the body owns and the original stays intact.
 	t.Run("generate copies an existing sampling_params", func(t *testing.T) {
 		sp := map[string]any{FieldMaxTokens: 100}
 		body := map[string]any{FieldSamplingParams: sp}

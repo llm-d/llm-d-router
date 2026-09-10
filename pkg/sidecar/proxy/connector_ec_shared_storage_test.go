@@ -240,9 +240,9 @@ func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
 	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
 }
 
-// TestBuildEncoderRequest_MinTokens is a regression test: a client-supplied
-// min_tokens above the encoder leg's max_tokens=1 cap trips vLLM's
-// min_tokens<=max_tokens validation.
+// TestBuildEncoderRequest_MinTokens is a regression test for stripping a
+// client-supplied min_tokens from the encoder leg; reqcommon.CapSingleToken
+// documents why.
 func TestBuildEncoderRequest_MinTokens(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",

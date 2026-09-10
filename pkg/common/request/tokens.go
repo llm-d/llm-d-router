@@ -28,8 +28,7 @@ package request
 // SamplingParams rejects min_tokens > max_tokens).
 //
 // body is rewritten in place, so the caller passes its own copy. A one-level
-// copy is enough: APIType.tokenLimitMap never writes through a nested
-// sampling_params the copy still shares with the decode leg.
+// copy is enough; APIType.tokenLimitMap documents why.
 func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	limits := apiType.tokenLimitMap(body)
 	for _, field := range apiType.tokenLimitFields() {
