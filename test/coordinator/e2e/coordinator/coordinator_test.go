@@ -388,7 +388,7 @@ func fetchCoordinatorLogs(nsName string) string {
 // verifyTokenLimits asserts the pipeline's token-limit contract: the decode leg
 // forwards the client's limits unchanged, while the synthetic prefill and encode
 // legs (capLegs) cap output to a single token and strip min_tokens. CapSingleToken
-// writes every field of the leg format's TokenLimitFields, so a chat leg always
+// writes every output cap field the leg format defines, so a chat leg always
 // carries max_completion_tokens=1 and a generate leg never carries the field at
 // all, whatever the client sent. Leg request bodies surface only at TRACE, so this
 // relies on the coordinator running at log_level 5.

@@ -170,7 +170,7 @@ func TestCapSingleToken(t *testing.T) {
 		},
 		{
 			// max_tokens and max_completion_tokens are not Responses fields, so
-			// TokenLimitFields does not name them and they are left as sent.
+			// tokenLimitFields does not name them and they are left as sent.
 			// min_tokens is a floor and is stripped for every API.
 			name:    "responses leaves fields the API does not use",
 			apiType: APITypeResponses,

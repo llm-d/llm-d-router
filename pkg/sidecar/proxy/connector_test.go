@@ -93,23 +93,38 @@ func expectGenerateLegTokenLimits(testInfo *sidecarTestInfo) {
 		Fail(string(bp))
 	}
 
+	expectGenerateLegTokenLimitsOn(testInfo.prefillHandler, testInfo.decodeHandler)
+}
+
+// expectGenerateLegTokenLimitsOn asserts that contract on the legs captured by
+// the two mock backends, for a client body carrying max_tokens 100 and
+// min_tokens 5 under sampling_params. The top-level assertions pin the caps to
+// the API the client spoke: a leg builder that names the chat fields regardless
+// of the API type writes max_tokens beside sampling_params instead of inside it,
+// where the engine never reads it.
+func expectGenerateLegTokenLimitsOn(prefillHandler, decodeHandler *mock.ChatCompletionHandler) {
+	GinkgoHelper()
+
 	// Eventually covers the connectors that dispatch prefill asynchronously and
 	// is already satisfied for the synchronous ones.
-	Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
-	Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(1))
+	Eventually(func() int { return len(prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+	Eventually(func() int { return len(decodeHandler.GetCompletionRequests()) }).Should(Equal(1))
 
-	prefillReq := testInfo.prefillHandler.GetCompletionRequests()[0]
-	decodeReq := testInfo.decodeHandler.GetCompletionRequests()[0]
+	prefillReq := prefillHandler.GetCompletionRequests()[0]
+	decodeReq := decodeHandler.GetCompletionRequests()[0]
 
 	prefillSP, ok := prefillReq[requestFieldSamplingParams].(map[string]any)
 	Expect(ok).To(BeTrue())
 	Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
 	Expect(prefillSP).ToNot(HaveKey(requestFieldMinTokens))
+	Expect(prefillReq).ToNot(HaveKey(requestFieldMaxTokens))
+	Expect(prefillReq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
 
 	decodeSP, ok := decodeReq[requestFieldSamplingParams].(map[string]any)
 	Expect(ok).To(BeTrue())
 	Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
 	Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+	Expect(decodeReq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
 }
 
 type sidecarTestInfo struct {

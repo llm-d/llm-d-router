@@ -32,7 +32,9 @@ const (
 )
 
 // APIType is the inference API a request speaks. It selects the JSON field
-// names a request carries and the path a synthesized request is sent to.
+// names a request carries and the path a synthesized request is sent to. A
+// value outside the constants below degrades to APITypeGenerate, the same
+// fallback DetectAPIType applies to an unrecognized path.
 type APIType int
 
 const (
@@ -97,39 +99,44 @@ func DetectAPIType(path string) APIType {
 	}
 }
 
-// JSON request field names that cap output tokens, by API. The Completions and
-// generate APIs share a list: neither defines max_completion_tokens, so capping
-// it would put a field on the wire that a strict server is free to reject.
+// JSON request field names that cap output tokens, by API. Chat completions caps
+// both max_tokens and max_completion_tokens: vLLM and SGLang accept the two
+// together and prefer max_completion_tokens, so capping both bounds the request
+// regardless of which field the engine consults. The Completions and generate
+// APIs share a list: neither defines max_completion_tokens, so capping it would
+// put a field on the wire that a strict server is free to reject.
 var (
 	chatCompletionTokenLimitFields = []string{FieldMaxTokens, FieldMaxCompletionTokens}
 	maxTokensOnlyTokenLimitFields  = []string{FieldMaxTokens}
 	responsesTokenLimitFields      = []string{FieldMaxOutputTokens}
 )
 
-// TokenLimitFields returns the output token cap field names the API uses.
+// tokenLimitFields returns the output token cap field names the API uses.
 // The returned slices are shared package-level vars; callers must not mutate them.
-func (a APIType) TokenLimitFields() []string {
+func (a APIType) tokenLimitFields() []string {
 	switch a {
-	case APITypeCompletions, APITypeGenerate:
-		return maxTokensOnlyTokenLimitFields
+	case APITypeChatCompletions:
+		return chatCompletionTokenLimitFields
 	case APITypeResponses:
 		return responsesTokenLimitFields
 	default:
-		return chatCompletionTokenLimitFields
+		return maxTokensOnlyTokenLimitFields
 	}
 }
 
-// TokenLimitMap returns the map inside body that holds the token limit fields:
+// tokenLimitMap returns the map inside body that holds the token limit fields:
 // sampling_params for the generate API, body itself otherwise. The generate map
 // is always replaced with one body owns, so a caller that writes into the result
 // never reaches a nested map the body was cloned from.
-func (a APIType) TokenLimitMap(body map[string]any) map[string]any {
-	if a != APITypeGenerate {
+func (a APIType) tokenLimitMap(body map[string]any) map[string]any {
+	switch a {
+	case APITypeChatCompletions, APITypeCompletions, APITypeResponses:
 		return body
+	default:
+		sp, _ := body[FieldSamplingParams].(map[string]any)
+		owned := make(map[string]any, len(sp)+1)
+		maps.Copy(owned, sp)
+		body[FieldSamplingParams] = owned
+		return owned
 	}
-	sp, _ := body[FieldSamplingParams].(map[string]any)
-	owned := make(map[string]any, len(sp)+1)
-	maps.Copy(owned, sp)
-	body[FieldSamplingParams] = owned
-	return owned
 }

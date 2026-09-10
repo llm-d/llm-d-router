@@ -1104,7 +1104,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 		})
-		env.sendBody(`{
+		env.sendTo(ChatCompletionsPath, `{
 				"model": "Qwen/Qwen2-0.5B",
 				"messages": [
 				  {"role": "user", "content": "Hello"}
@@ -1120,6 +1120,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		decodeReq := env.decodeHandler.GetCompletionRequests()[0]
 		Expect(decodeReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
 		Expect(decodeReq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+	})
+
+	// The same path on a non-chat API: concurrent dispatch stages its own prefill
+	// body, so it caps the fields the client's API defines on its own rather than
+	// through the serial path.
+	It("concurrent WRITE-mode dispatch caps the generate API inside sampling_params", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIOParallelDispatch = true
+		})
+		env.sendTo(GeneratePath, generateRequestBodyWithTokenLimits)
+
+		expectGenerateLegTokenLimitsOn(env.prefillHandler, env.decodeHandler)
 	})
 
 	// 1P1D DP=8, serial dispatch: the prefill leg sets the DP-rank header and
@@ -1262,12 +1274,12 @@ func startMoRIProxy(mutate func(cfg *Config)) *moriProxyEnv {
 // sequential in the serial path) by the time this returns, so the captured
 // requests / headers are safe to read afterwards.
 func (env *moriProxyEnv) send() {
-	env.sendBody(chatCompletionsRequestBody)
+	env.sendTo(ChatCompletionsPath, chatCompletionsRequestBody)
 }
 
-// sendBody sends a caller-supplied request body.
-func (env *moriProxyEnv) sendBody(body string) {
-	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, strings.NewReader(body))
+// sendTo sends a caller-supplied body to one of the proxy's inference paths.
+func (env *moriProxyEnv) sendTo(path, body string) {
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+path, strings.NewReader(body))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, env.prefillBackend.URL[len("http://"):])
 

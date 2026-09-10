@@ -480,9 +480,6 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 
 	// ---------- Build decode body ----------
-	// body still carries the client's streaming flags and token limits: only the
-	// copy above was capped.
-
 	// Synthesise decode-leg kv_transfer_params that the serial path would
 	// otherwise read from the prefill response. do_remote_prefill must be true:
 	// it gates the decode-side send_notify_block that prefill's RDMA Write waits on.

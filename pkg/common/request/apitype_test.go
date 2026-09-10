@@ -64,29 +64,41 @@ func TestDetectAPIType(t *testing.T) {
 	}
 }
 
-func TestAPIType_TokenLimitFields(t *testing.T) {
+func TestAPIType_tokenLimitFields(t *testing.T) {
 	cases := map[APIType][]string{
 		APITypeChatCompletions: {FieldMaxTokens, FieldMaxCompletionTokens},
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
 		APITypeGenerate:        {FieldMaxTokens},
+		APIType(7):             {FieldMaxTokens},
 	}
 	for apiType, want := range cases {
-		if got := apiType.TokenLimitFields(); !reflect.DeepEqual(got, want) {
-			t.Errorf("APIType(%d).TokenLimitFields() = %v, want %v", int(apiType), got, want)
+		if got := apiType.tokenLimitFields(); !reflect.DeepEqual(got, want) {
+			t.Errorf("APIType(%d).tokenLimitFields() = %v, want %v", int(apiType), got, want)
 		}
 	}
 }
 
-func TestAPIType_TokenLimitMap(t *testing.T) {
+func TestAPIType_tokenLimitMap(t *testing.T) {
 	t.Run("non-generate returns the body itself", func(t *testing.T) {
 		body := map[string]any{"model": "m"}
-		got := APITypeChatCompletions.TokenLimitMap(body)
+		got := APITypeChatCompletions.tokenLimitMap(body)
 		if !reflect.DeepEqual(got, body) {
 			t.Errorf("got %v, want the body %v", got, body)
 		}
 		if _, ok := body[FieldSamplingParams]; ok {
 			t.Error("sampling_params was added to a non-generate body")
+		}
+	})
+
+	t.Run("an unrecognized API is treated as generate", func(t *testing.T) {
+		body := map[string]any{"model": "m"}
+
+		got := APIType(7).tokenLimitMap(body)
+
+		got[FieldMaxTokens] = 1
+		if sp, ok := body[FieldSamplingParams].(map[string]any); !ok || sp[FieldMaxTokens] != 1 {
+			t.Errorf("body sampling_params = %v, want the returned map", body[FieldSamplingParams])
 		}
 	})
 
@@ -96,7 +108,7 @@ func TestAPIType_TokenLimitMap(t *testing.T) {
 		sp := map[string]any{FieldMaxTokens: 100}
 		body := map[string]any{FieldSamplingParams: sp}
 
-		got := APITypeGenerate.TokenLimitMap(body)
+		got := APITypeGenerate.tokenLimitMap(body)
 
 		if !reflect.DeepEqual(got, sp) {
 			t.Errorf("got %v, want the entries of %v", got, sp)
@@ -117,7 +129,7 @@ func TestAPIType_TokenLimitMap(t *testing.T) {
 				body[FieldSamplingParams] = value
 			}
 
-			got := APITypeGenerate.TokenLimitMap(body)
+			got := APITypeGenerate.tokenLimitMap(body)
 
 			if len(got) != 0 {
 				t.Errorf("got %v, want an empty map", got)
