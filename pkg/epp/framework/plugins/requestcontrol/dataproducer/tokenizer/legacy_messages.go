@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -33,23 +34,80 @@ import (
 )
 
 const (
+	messagesRenderModeAuto   = "auto"
 	messagesRenderModeLegacy = "legacy"
 	messagesRenderModeNative = "native"
 )
 
-func configureLegacyMessages(ctx context.Context, name, mode string) (bool, error) {
+type legacyMessagesMode struct {
+	name      string
+	mode      string
+	discovery chan struct{}
+}
+
+func configureLegacyMessages(ctx context.Context, name, mode string) (*legacyMessagesMode, error) {
 	switch mode {
-	case "", messagesRenderModeLegacy:
-		log.FromContext(ctx).Info(
-			"vllm.messagesRenderMode=legacy is deprecated and does not guarantee token parity; use native with a renderer supporting /v1/messages/render",
-			"pluginName", name,
-		)
-		return true, nil
+	case "", messagesRenderModeAuto:
+		return &legacyMessagesMode{name: name, discovery: make(chan struct{}, 1)}, nil
+	case messagesRenderModeLegacy:
+		warnLegacyMessages(ctx, name)
+		return &legacyMessagesMode{mode: mode}, nil
 	case messagesRenderModeNative:
-		return false, nil
+		return nil, nil //nolint:nilnil // Native rendering needs no compatibility state.
 	default:
-		return false, fmt.Errorf("invalid vllm.messagesRenderMode %q: must be %q or %q", mode, messagesRenderModeLegacy, messagesRenderModeNative)
+		return nil, fmt.Errorf("invalid vllm.messagesRenderMode %q: must be %q, %q or %q", mode, messagesRenderModeAuto, messagesRenderModeLegacy, messagesRenderModeNative)
 	}
+}
+
+func warnLegacyMessages(ctx context.Context, name string) {
+	log.FromContext(ctx).Info(
+		"vllm.messagesRenderMode=legacy is deprecated and does not guarantee token parity; use native with a renderer supporting /v1/messages/render",
+		"pluginName", name,
+	)
+}
+
+func (m *legacyMessagesMode) useLegacy(ctx context.Context, tk tokenizer, model string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if m.discovery == nil {
+		return m.mode == messagesRenderModeLegacy, nil
+	}
+	// A waiting request must be able to cancel while another caller probes.
+	select {
+	case m.discovery <- struct{}{}:
+		defer func() { <-m.discovery }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	if m.mode == "" {
+		probe := fwkrh.PayloadMap{
+			"model": model, "max_tokens": 1,
+			"messages": []any{map[string]any{"role": "user", "content": "warmup"}},
+		}
+		mode := messagesRenderModeNative
+		tokens, _, err := tk.RenderMessages(ctx, probe)
+		if err != nil {
+			var status *renderStatusError
+			if !errors.As(err, &status) || (status.StatusCode != http.StatusNotFound && status.StatusCode != http.StatusMethodNotAllowed) {
+				return false, fmt.Errorf("discover Messages rendering: %w", err)
+			}
+			// Confirm that the same model can render before selecting conversion.
+			mode = messagesRenderModeLegacy
+			tokens, _, err = tk.RenderChat(ctx, probe)
+			if err != nil {
+				return false, fmt.Errorf("discover legacy Messages rendering: %w", err)
+			}
+		}
+		if len(tokens) == 0 {
+			return false, errors.New("messages render discovery returned no tokens")
+		}
+		m.mode = mode
+		if mode == messagesRenderModeLegacy {
+			warnLegacyMessages(ctx, m.name)
+		}
+	}
+	return m.mode == messagesRenderModeLegacy, nil
 }
 
 func (b renderBackend) renderLegacyMessages(ctx context.Context, msg *fwkrh.MessagesRequest) (*fwkrh.TokenizedRequest, error) {

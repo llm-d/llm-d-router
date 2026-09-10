@@ -69,7 +69,10 @@ type warmer interface {
 func (b renderBackend) warmup(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	for i := 0; i < warmupAttempts; i++ {
-		_, err := b.produce(ctx, warmupChat(b.modelName))
+		_, err := b.legacyMessages.useLegacy(ctx, b.tk, b.modelName)
+		if err == nil {
+			_, err = b.produce(ctx, warmupChat(b.modelName))
+		}
 		if err == nil {
 			_, _ = b.produce(ctx, warmupChat(b.modelName, warmupImage))
 			logger.V(logutil.DEBUG).Info("token-producer backend warmed up", "attempts", i+1)
@@ -110,7 +113,7 @@ func warmupChat(model string, imageURLs ...string) *fwkrh.InferenceRequestBody {
 type renderBackend struct {
 	tk             tokenizer
 	modelName      string
-	legacyMessages bool
+	legacyMessages *legacyMessagesMode
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
@@ -127,7 +130,11 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
 	case body.Messages != nil:
-		if b.legacyMessages {
+		legacy, err := b.legacyMessages.useLegacy(ctx, b.tk, b.modelName)
+		if err != nil {
+			return nil, err
+		}
+		if legacy {
 			return b.renderLegacyMessages(ctx, body.Messages)
 		}
 		tokenIDs, mmFeatures, err := b.tk.RenderMessages(ctx, body.WirePayload())

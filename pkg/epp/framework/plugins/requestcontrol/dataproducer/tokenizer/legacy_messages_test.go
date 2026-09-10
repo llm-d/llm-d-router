@@ -23,9 +23,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
@@ -48,9 +52,10 @@ func TestMessagesRenderMode(t *testing.T) {
 		name, params string
 		legacy       bool
 	}{
-		{"model only defaults to legacy", `{"modelName":"configured-model"}`, true},
-		{"empty config defaults to legacy", `{"modelName":"configured-model","vllm":{}}`, true},
-		{"empty mode defaults to legacy", `{"modelName":"configured-model","vllm":{"messagesRenderMode":""}}`, true},
+		{"model only defaults to auto", `{"modelName":"configured-model"}`, false},
+		{"empty config defaults to auto", `{"modelName":"configured-model","vllm":{}}`, false},
+		{"empty mode defaults to auto", `{"modelName":"configured-model","vllm":{"messagesRenderMode":""}}`, false},
+		{"explicit auto", `{"modelName":"configured-model","vllm":{"messagesRenderMode":"auto"}}`, false},
 		{"explicit legacy", `{"modelName":"configured-model","vllm":{"messagesRenderMode":"legacy"}}`, true},
 		{"explicit native", `{"modelName":"configured-model","vllm":{"messagesRenderMode":"native"}}`, false},
 	} {
@@ -67,6 +72,7 @@ func TestMessagesRenderMode(t *testing.T) {
 			got, err := PluginFactory("messages", plugin.StrictDecoder(json.RawMessage(tc.params)), plugin.NewEppHandle(ctx, nil))
 			require.NoError(t, err)
 			p := got.(*Plugin)
+			auto := p.backend.(renderBackend).legacyMessages != nil && !tc.legacy
 
 			const raw = ` {"model":"adapter","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"cache_salt":"tenant-a","unknown":{"z":1,"a":2}} `
 			calls := 0
@@ -75,6 +81,12 @@ func TestMessagesRenderMode(t *testing.T) {
 				body, err := io.ReadAll(r.Body)
 				require.NoError(t, err)
 				require.Equal(t, "Bearer secret", r.Header.Get("Authorization"))
+				if auto && calls == 1 {
+					require.Equal(t, messagesRenderPath, r.URL.Path)
+					require.JSONEq(t, `{"model":"configured-model","max_tokens":1,"messages":[{"role":"user","content":"warmup"}]}`, string(body))
+					_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+					return
+				}
 				if tc.legacy {
 					require.Equal(t, chatRenderPath, r.URL.Path)
 					require.JSONEq(t, `{"model":"configured-model","messages":[{"role":"user","content":"hi"}]}`, string(body))
@@ -109,7 +121,11 @@ func TestMessagesRenderMode(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, projection, unchanged)
 			}
-			require.Equal(t, 2, calls)
+			wantCalls := 2
+			if auto {
+				wantCalls++
+			}
+			require.Equal(t, wantCalls, calls)
 			mu.Lock()
 			defer mu.Unlock()
 			if tc.legacy {
@@ -126,7 +142,7 @@ func TestMessagesRenderMode(t *testing.T) {
 }
 
 func TestMessagesRenderModeRejectsInvalidValue(t *testing.T) {
-	for _, mode := range []string{"auto", "NATIVE", "legacy "} {
+	for _, mode := range []string{"unknown", "NATIVE", "legacy "} {
 		t.Run(mode, func(t *testing.T) {
 			params := `{"modelName":"m","vllm":{"messagesRenderMode":"` + mode + `"}}`
 			ctx, cancel := context.WithCancel(context.Background())
@@ -136,6 +152,49 @@ func TestMessagesRenderModeRejectsInvalidValue(t *testing.T) {
 			require.ErrorContains(t, err, `"legacy"`)
 			require.ErrorContains(t, err, `"native"`)
 			require.Nil(t, p)
+		})
+	}
+}
+
+func TestMessagesRenderModeChatOnlyRenderer(t *testing.T) {
+	for _, mode := range []string{messagesRenderModeNative, messagesRenderModeLegacy} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			params := fmt.Sprintf(`{"modelName":"configured-model","vllm":{"messagesRenderMode":%q}}`, mode)
+			got, err := PluginFactory("messages", plugin.StrictDecoder(json.RawMessage(params)), plugin.NewEppHandle(ctx, nil))
+			require.NoError(t, err)
+			p := got.(*Plugin)
+			var paths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				if r.URL.Path != chatRenderPath {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = io.WriteString(w, `{"token_ids":[1,2,3]}`)
+			}))
+			defer srv.Close()
+			backend := p.backend.(renderBackend)
+			backend.tk = newHTTPRenderer(t, srv)
+			p.backend = backend
+			const raw = `{"model":"adapter","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(context.Background(), []byte(raw), map[string]string{":path": "/v1/messages"})
+			require.NoError(t, err)
+			req := &scheduling.InferenceRequest{Body: parsed.Body}
+			err = p.Produce(context.Background(), req, nil)
+			if mode == messagesRenderModeLegacy {
+				require.NoError(t, err)
+				require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+				require.Equal(t, []string{chatRenderPath}, paths)
+			} else {
+				var statusErr *renderStatusError
+				require.ErrorAs(t, err, &statusErr)
+				require.Equal(t, http.StatusNotFound, statusErr.StatusCode)
+				require.Nil(t, req.Body.TokenizedRequest)
+				require.Equal(t, []string{messagesRenderPath}, paths)
+			}
+			require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
 		})
 	}
 }
@@ -184,7 +243,9 @@ func TestMessagesRenderModeDoesNotFallback(t *testing.T) {
 				require.NoError(t, err)
 				renderer := newHTTPRenderer(t, srv)
 				p := newTestPlugin(renderer)
-				p.backend = renderBackend{tk: renderer, modelName: "configured-model", legacyMessages: legacy}
+				selection, err := configureLegacyMessages(context.Background(), "test", mode)
+				require.NoError(t, err)
+				p.backend = renderBackend{tk: renderer, modelName: "configured-model", legacyMessages: selection}
 				req := &scheduling.InferenceRequest{Body: parsed.Body}
 				err = p.Produce(context.Background(), req, nil)
 				if tc.wantErr {
@@ -200,11 +261,7 @@ func TestMessagesRenderModeDoesNotFallback(t *testing.T) {
 }
 
 func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		mode := "native"
-		if legacy {
-			mode = "legacy"
-		}
+	for _, mode := range []string{"auto", "native", "legacy"} {
 		for _, tc := range []struct {
 			name, path, raw, renderPath string
 			parser                      fwkrh.Parser
@@ -235,7 +292,9 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 				defer srv.Close()
 				renderer := newHTTPRenderer(t, srv)
 				p := newTestPlugin(renderer)
-				p.backend = renderBackend{tk: renderer, modelName: "configured-model", legacyMessages: legacy}
+				selection, err := configureLegacyMessages(context.Background(), "test", mode)
+				require.NoError(t, err)
+				p.backend = renderBackend{tk: renderer, modelName: "configured-model", legacyMessages: selection}
 				parsed, err := tc.parser.ParseRequest(context.Background(), []byte(tc.raw), map[string]string{":path": tc.path})
 				require.NoError(t, err)
 				before, err := json.Marshal(parsed.Body.Payload)
@@ -263,7 +322,7 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 
 func TestLegacyMessagesPreservesPrepopulatedTokens(t *testing.T) {
 	p := newTestPlugin(&mockTokenizer{})
-	p.backend = renderBackend{tk: &mockTokenizer{}, legacyMessages: true}
+	p.backend = renderBackend{tk: &mockTokenizer{}, legacyMessages: &legacyMessagesMode{mode: messagesRenderModeLegacy}}
 	tokens := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}}
 	req := &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{
 		Messages:         &fwkrh.MessagesRequest{CacheSalt: "tenant-a"},
@@ -283,6 +342,352 @@ func TestLegacyMessagesPayloadWire(t *testing.T) {
 	got, err := legacyMessagesPayload(&msg).Marshal()
 	require.NoError(t, err)
 	require.Equal(t, want, string(got))
+}
+
+func TestAutoMessagesRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		nativeStatus int
+		nativeBody   string
+		chatStatus   int
+		chatBody     string
+		userStatus   int
+		legacy       bool
+		discoveryErr bool
+	}{
+		{name: "native"},
+		{name: "chat only", nativeStatus: 404, legacy: true},
+		{name: "method unavailable", nativeStatus: 405, legacy: true},
+		{name: "neither endpoint", nativeStatus: 404, chatStatus: 404, discoveryErr: true},
+		{name: "unknown main model", nativeStatus: 404, nativeBody: `{"error":{"type":"NotFoundError","param":"model"}}`, chatStatus: 404, discoveryErr: true},
+		{name: "unauthorized", nativeStatus: 401, discoveryErr: true},
+		{name: "forbidden", nativeStatus: 403, discoveryErr: true},
+		{name: "invalid probe", nativeStatus: 400, discoveryErr: true},
+		{name: "validation error", nativeStatus: 422, discoveryErr: true},
+		{name: "rate limited", nativeStatus: 429, discoveryErr: true},
+		{name: "server error", nativeStatus: 500, discoveryErr: true},
+		{name: "not implemented", nativeStatus: 501, discoveryErr: true},
+		{name: "malformed response", nativeBody: "not JSON", discoveryErr: true},
+		{name: "empty response", nativeBody: `{"token_ids":[]}`, discoveryErr: true},
+		{name: "chat unauthorized", nativeStatus: 404, chatStatus: 401, discoveryErr: true},
+		{name: "chat malformed response", nativeStatus: 404, chatBody: "not JSON", discoveryErr: true},
+		{name: "chat empty response", nativeStatus: 404, chatBody: `{"token_ids":[]}`, discoveryErr: true},
+		{name: "unknown request adapter", userStatus: 404},
+		{name: "request server error", userStatus: 500},
+	} {
+		for _, mode := range []string{"", "auto"} {
+			t.Run(tc.name+"/mode="+mode, func(t *testing.T) {
+				const raw = ` {"model":"adapter","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"high"},"unknown":{"z":1,"a":2}} `
+				var calls []string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					require.Equal(t, http.MethodPost, r.Method)
+					require.Equal(t, "Bearer secret", r.Header.Get("Authorization"))
+					body, err := io.ReadAll(r.Body)
+					require.NoError(t, err)
+					var payload struct {
+						Model    string `json:"model"`
+						Messages []struct {
+							Content string `json:"content"`
+						} `json:"messages"`
+					}
+					require.NoError(t, json.Unmarshal(body, &payload))
+					require.Len(t, payload.Messages, 1)
+					status, response := tc.userStatus, `{"token_ids":[1,2,3]}`
+					if payload.Messages[0].Content == "warmup" {
+						calls = append(calls, "probe "+r.URL.Path)
+						require.JSONEq(t, `{"model":"configured-model","max_tokens":1,"messages":[{"role":"user","content":"warmup"}]}`, string(body))
+						status = tc.nativeStatus
+						if r.URL.Path == chatRenderPath {
+							status = tc.chatStatus
+							if tc.chatBody != "" {
+								response = tc.chatBody
+							}
+						} else {
+							require.Equal(t, messagesRenderPath, r.URL.Path)
+							if tc.nativeBody != "" {
+								response = tc.nativeBody
+							}
+						}
+					} else {
+						calls = append(calls, "request "+r.URL.Path)
+						if tc.legacy {
+							require.Equal(t, chatRenderPath, r.URL.Path)
+							require.Equal(t, "configured-model", payload.Model)
+						} else {
+							require.Equal(t, messagesRenderPath, r.URL.Path)
+							require.Equal(t, raw, string(body))
+						}
+					}
+					if status != 0 {
+						w.WriteHeader(status)
+					}
+					_, _ = io.WriteString(w, response)
+				}))
+				defer srv.Close()
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				p, err := NewPlugin(ctx, "messages", &tokenizerPluginConfig{
+					ModelName: "configured-model", VLLM: &vllmConfig{URL: srv.URL, MessagesRenderMode: mode},
+				})
+				require.NoError(t, err)
+				var wantCalls []string
+				for i := range 2 {
+					if i == 0 || tc.discoveryErr {
+						wantCalls = append(wantCalls, "probe "+messagesRenderPath)
+						if tc.nativeStatus == 404 || tc.nativeStatus == 405 {
+							wantCalls = append(wantCalls, "probe "+chatRenderPath)
+						}
+					}
+					if !tc.discoveryErr {
+						path := messagesRenderPath
+						if tc.legacy {
+							path = chatRenderPath
+						}
+						wantCalls = append(wantCalls, "request "+path)
+					}
+					parsed, err := anthropic.NewAnthropicParser().ParseRequest(context.Background(), []byte(raw), map[string]string{":path": "/v1/messages"})
+					require.NoError(t, err)
+					req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": "Bearer secret"}}
+					err = p.Produce(context.Background(), req, nil)
+					if tc.discoveryErr || tc.userStatus != 0 {
+						require.Error(t, err)
+						require.Nil(t, req.Body.TokenizedRequest)
+					} else {
+						require.NoError(t, err)
+						require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+					}
+					require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
+				}
+				require.Equal(t, wantCalls, calls)
+			})
+		}
+	}
+}
+
+func TestAutoMessagesDiscoveryConcurrent(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.URL.Path == messagesRenderPath {
+					close(started)
+					<-release
+					if legacy {
+						http.NotFound(w, r)
+						return
+					}
+				} else {
+					require.Equal(t, chatRenderPath, r.URL.Path)
+				}
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			}))
+			defer srv.Close()
+			var warnings strings.Builder
+			ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) { warnings.WriteString(args) }, funcr.Options{}))
+			selection, err := configureLegacyMessages(ctx, "test", "auto")
+			require.NoError(t, err)
+			renderer := newHTTPRenderer(t, srv)
+			var wg sync.WaitGroup
+			for range 16 {
+				wg.Go(func() {
+					got, err := selection.useLegacy(ctx, renderer, "main")
+					assert.NoError(t, err)
+					assert.Equal(t, legacy, got)
+				})
+			}
+			<-started
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+			_, err = selection.useLegacy(cancelled, renderer, "main")
+			assert.ErrorIs(t, err, context.Canceled)
+			close(release)
+			wg.Wait()
+			if legacy {
+				require.EqualValues(t, 2, calls.Load())
+				require.Equal(t, 1, strings.Count(warnings.String(), "deprecated"))
+			} else {
+				require.EqualValues(t, 1, calls.Load())
+				require.Empty(t, warnings.String())
+			}
+		})
+	}
+}
+
+func TestAutoMessagesDiscoveryRetry(t *testing.T) {
+	for _, failure := range []string{"authentication", "timeout", "transport"} {
+		t.Run(failure, func(t *testing.T) {
+			selection, err := configureLegacyMessages(context.Background(), "test", "auto")
+			require.NoError(t, err)
+			renderer, err := newVLLMHTTPRenderer(&vllmConfig{Timeout: "1ms", MMTimeout: "1ms"})
+			require.NoError(t, err)
+			calls := 0
+			renderer.client.Transport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				require.Equal(t, messagesRenderPath, r.URL.Path)
+				if calls == 1 {
+					switch failure {
+					case "authentication":
+						require.Empty(t, r.Header.Get("Authorization"))
+						return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader("unauthorized")), Header: http.Header{}}, nil
+					case "timeout":
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					default:
+						return nil, io.ErrUnexpectedEOF
+					}
+				}
+				require.Equal(t, "Bearer secret", r.Header.Get("Authorization"))
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"token_ids":[1]}`)), Header: http.Header{}}, nil
+			})
+			_, err = selection.useLegacy(context.Background(), renderer, "main")
+			require.Error(t, err)
+			for range 2 {
+				legacy, err := selection.useLegacy(withAuthHeader(context.Background(), "Bearer secret"), renderer, "main")
+				require.NoError(t, err)
+				require.False(t, legacy)
+			}
+			require.Equal(t, 2, calls)
+		})
+	}
+}
+
+func TestAutoMessagesDiscoveryWarmup(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+	}))
+	defer srv.Close()
+	selection, err := configureLegacyMessages(context.Background(), "test", "auto")
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	backend := renderBackend{tk: newHTTPRenderer(t, srv), modelName: "main", legacyMessages: selection}
+	backend.warmup(ctx)
+	require.NoError(t, ctx.Err())
+	legacy, err := selection.useLegacy(ctx, backend.tk, "main")
+	require.NoError(t, err)
+	require.False(t, legacy)
+	require.Equal(t, []string{messagesRenderPath, chatRenderPath, chatRenderPath}, calls)
+}
+
+func TestMessagesDiscoveryLive(t *testing.T) {
+	e := renderEndpointForTest(t)
+	target, err := url.Parse(e.url)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name                                               string
+		hide, invalidMain, invalidRequest, unauthenticated bool
+	}{
+		{name: "native"},
+		{name: "chat-only", hide: true},
+		{name: "unknown-main-model", invalidMain: true},
+		{name: "unknown-request-adapter", invalidRequest: true},
+		{name: "authentication-retry", unauthenticated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unauthenticated && e.auth == "" {
+				t.Skip("set VLLM_RENDER_TEST_AUTHORIZATION for authentication checks")
+			}
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			var paths []string
+			var mu sync.Mutex
+			endpoint := e
+			if tc.invalidMain {
+				endpoint.model = "missing-main-model"
+			}
+			p := endpoint.plugin(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path)
+				mu.Unlock()
+				require.NotEqual(t, "/tokenize", r.URL.Path)
+				if tc.hide && r.URL.Path == messagesRenderPath {
+					http.NotFound(w, r)
+					return
+				}
+				proxy.ServeHTTP(w, r)
+			}))
+			if tc.unauthenticated {
+				backend := p.backend.(renderBackend)
+				_, err := backend.legacyMessages.useLegacy(t.Context(), backend.tk, e.model)
+				require.True(t, isRenderAuthError(err), "%v", err)
+			}
+			model := e.model
+			if tc.invalidRequest {
+				model = "missing-request-adapter"
+			}
+			raw := []byte(fmt.Sprintf(` {"model":%q,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]} `, model))
+			var want []fwkrh.PromptTokens
+			if !tc.invalidMain && !tc.invalidRequest {
+				want = e.render(t, messagesRenderPath, raw)
+			}
+			for range 2 {
+				parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), raw, map[string]string{":path": "/v1/messages"})
+				require.NoError(t, err)
+				req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": e.auth}}
+				err = p.Produce(t.Context(), req, nil)
+				if tc.invalidMain || tc.invalidRequest {
+					var status *renderStatusError
+					require.ErrorAs(t, err, &status)
+					require.Equal(t, http.StatusNotFound, status.StatusCode)
+					require.Nil(t, req.Body.TokenizedRequest)
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, want, req.Body.TokenizedRequest.Prompts)
+				}
+				require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
+			}
+			wantPaths := []string{messagesRenderPath, messagesRenderPath, messagesRenderPath}
+			if tc.hide {
+				wantPaths = []string{messagesRenderPath, chatRenderPath, chatRenderPath, chatRenderPath}
+			}
+			if tc.invalidMain {
+				wantPaths = []string{messagesRenderPath, chatRenderPath, messagesRenderPath, chatRenderPath}
+			}
+			if tc.unauthenticated {
+				wantPaths = append([]string{messagesRenderPath}, wantPaths...)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			require.Equal(t, wantPaths, paths)
+		})
+	}
+}
+
+func TestLegacyMessagesRenderLive(t *testing.T) {
+	e := renderEndpointForTest(t)
+	target, err := url.Parse(e.url)
+	require.NoError(t, err)
+	for _, tc := range []struct{ name, messages, chat string }{
+		{"text", `"messages":[{"role":"user","content":"hi"}]`, `"messages":[{"role":"user","content":"hi"}]`},
+		{"system", `"system":"Be brief","messages":[{"role":"user","content":"hi"}]`, `"messages":[{"role":"system","content":"Be brief"},{"role":"user","content":"hi"}]`},
+		{"structured-text", `"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]`, `"messages":[{"role":"user","content":"hi"}]`},
+		{"tools", `"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"greet","input_schema":{"type":"object","properties":{"z":{"type":"number"},"a":{"type":"string"}}}}]`, `"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"greet","parameters":{"type":"object","properties":{"z":{"type":"number"},"a":{"type":"string"}}}}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			var paths []string
+			var mu sync.Mutex
+			p := e.plugin(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path)
+				mu.Unlock()
+				proxy.ServeHTTP(w, r)
+			}))
+			raw := []byte(fmt.Sprintf(`{"model":%q,"max_tokens":8,%s}`, e.model, tc.messages))
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), raw, map[string]string{":path": "/v1/messages"})
+			require.NoError(t, err)
+			req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": e.auth}}
+			require.NoError(t, p.Produce(t.Context(), req, nil))
+			require.Equal(t, e.render(t, chatRenderPath, []byte(fmt.Sprintf(`{"model":%q,%s}`, e.model, tc.chat))), req.Body.TokenizedRequest.Prompts)
+			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
+			mu.Lock()
+			defer mu.Unlock()
+			require.Equal(t, []string{messagesRenderPath, chatRenderPath, chatRenderPath}, paths, "requires a renderer without /v1/messages/render")
+		})
+	}
 }
 
 func BenchmarkLegacyMessagesPayload(b *testing.B) {
@@ -539,7 +944,7 @@ func TestLegacyProduceMessages(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-	p.backend = renderBackend{tk: tok, modelName: "configured-model", legacyMessages: true}
+	p.backend = renderBackend{tk: tok, modelName: "configured-model", legacyMessages: &legacyMessagesMode{mode: messagesRenderModeLegacy}}
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
@@ -771,7 +1176,7 @@ func TestLegacyProduceMessagesToolSchemaOrder(t *testing.T) {
 		},
 	}
 	p := newTestPlugin(tok)
-	p.backend = renderBackend{tk: tok, modelName: "configured-model", legacyMessages: true}
+	p.backend = renderBackend{tk: tok, modelName: "configured-model", legacyMessages: &legacyMessagesMode{mode: messagesRenderModeLegacy}}
 
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{

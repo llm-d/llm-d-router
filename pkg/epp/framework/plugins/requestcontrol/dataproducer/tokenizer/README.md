@@ -33,29 +33,37 @@ Backend selection:
   certificates, configure `vllm.caCertPath` to trust the CA, and optionally
   `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS.
 
-## Deprecated Messages conversion
+## Messages rendering
 
-`vllm.messagesRenderMode: legacy` converts Anthropic Messages into Chat
-Completions render input and uses the configured `modelName`. The mode logs a
-deprecation warning once per plugin instance. Conversion does not guarantee
-token parity with inference. The forwarded request is unchanged.
+`vllm.messagesRenderMode: auto` probes `/v1/messages/render` with a small text
+request using `modelName`. A successful probe selects native pass-through. A
+404 or 405 selects legacy conversion only if the same probe succeeds at
+`/v1/chat/completions/render`. Other discovery errors leave the mode unresolved.
+Discovery runs during warmup and, if unresolved, on the next Messages request
+using its Authorization header. User-request errors do not change the mode.
 
-Set `vllm.messagesRenderMode: native` to forward Messages to
-`/v1/messages/render` without conversion. This mode requires a renderer with
-that endpoint.
+The selection is cached for the plugin lifetime. The configured renderer URL
+must serve a consistent vLLM version and accept `modelName`. Restart EPP to
+rediscover capabilities after a renderer upgrade. Explicit `native` and
+`legacy` modes bypass discovery. Neither mode uses `/tokenize` or falls back
+to estimation when rendering fails.
+
+Legacy conversion uses the configured `modelName` and logs a deprecation
+warning once per plugin instance. Conversion does not guarantee token parity
+with inference. The forwarded request is unchanged.
 
 The compatibility implementation and tests are contained in
 `legacy_messages.go` and `legacy_messages_test.go`. Its integration points are
 the `MessagesRenderMode` configuration field, `configureLegacyMessages` in the
-plugin constructor, and the `legacyMessages` field and branch in Messages
-dispatch. The native rendering and token production implementations do not use
+plugin constructor, and `legacyMessages` in warmup and Messages dispatch.
+The native rendering and token production implementations do not use
 legacy conversion helpers or wire types. Helpers required by estimation are
 owned by `estimate.go`.
 
 ## Native render contract
 
 Completions and Chat Completions use native rendering. Messages uses this
-contract when `vllm.messagesRenderMode: native`.
+contract when native rendering is selected.
 
 The renderer sends the original HTTP JSON body when EPP has not mutated it.
 It does not substitute the model, translate protocols, rewrite messages or
@@ -106,7 +114,7 @@ EPP contract does not establish parity for them.
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
 | `modelName`                | - (required for `vllm`) | Model for startup probes, native gRPC text, and legacy Messages conversion. Native HTTP rendering retains the effective request model. |
-| `vllm.messagesRenderMode`  | `legacy`               | `legacy` (deprecated conversion) or `native` (Messages pass-through). |
+| `vllm.messagesRenderMode`  | `auto`                 | Discover Messages rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of the vLLM render endpoint (no trailing slash).                    |
 | `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages timeout.                      |
 | `vllm.mmTimeout`           | `30s`                   | Chat/Messages timeout budget, including multimodal processing.               |
@@ -240,6 +248,34 @@ containers:
 ```
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+
+## Live verification
+
+The live tests use the actual parsers and token producer with a running vLLM
+endpoint. They are opt-in and do not call `/tokenize`. Configure
+`VLLM_RENDER_TEST_URL`, `VLLM_RENDER_TEST_MODEL`, and `VLLM_RENDER_TEST_ALIAS`.
+Use two accepted names for the same model to exercise alias rewrites. Set
+`VLLM_RENDER_TEST_AUTHORIZATION` to the full Authorization header when required.
+Tool cases require the renderer's tool-choice and tool-parser configuration.
+
+Run the appropriate tests in the builder with these variables forwarded:
+
+- `TestNativeRenderLive`: all three native endpoints, content cases, model
+  rewrites, direct render bypass, and exact token comparison after repackaging.
+- `TestRenderLiveProtocolHandoff`: real renderer tokens through SGLang, vLLM
+  HTTP and gRPC parsers; vLLM gRPC text and Vertex AI Chat rendering. This does
+  not contact SGLang or gRPC serving endpoints.
+- `TestMessagesDiscoveryLive`: native selection, simulated Chat-only support,
+  authentication retry, and model errors. Requires native Messages rendering.
+- `TestLegacyMessagesRenderLive`: automatic selection against a Chat-only
+  renderer, with text, system, structured text, and tool-schema fixtures.
+- `TestRenderServingLive`: set `VLLM_RENDER_TEST_SERVE=1` and point the URL at a
+  server supporting both rendering and inference. Five Chat/Completions cases
+  compare exact serving prompt IDs. Generate checks supplied IDs and serving
+  token counts. Inference is serial and limited to one output token per prompt.
+
+Render-only comparisons do not establish serving parity. These tests do not
+cover loaded LoRA adapters, multimodal serving, or a deployed EPP/sidecar path.
 
 ---
 
