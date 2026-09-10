@@ -562,9 +562,7 @@ the current names in new dashboards and alerts. The aliases do not cover every c
 |---|---|---|
 | `llm_d_inference_scheduler_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Dual emission. |
 | `llm_d_inference_scheduler_datalayer_poll_errors_total`, `llm_d_inference_scheduler_datalayer_extract_errors_total` | `llm_d_epp_datalayer_poll_errors_total`, `llm_d_epp_datalayer_extract_errors_total` | Dual emission. |
-| `inference_objective_*` request, latency, predicted-latency, and SLO series | Corresponding `llm_d_epp_*` series | Dual emission. Some predicted-latency labels differ between legacy and current series. |
-| `inference_pool_average_*`, `inference_pool_ready_pods` | Corresponding `llm_d_epp_*` series | Dual emission. Current standard-deviation series have no legacy twin. |
-| `inference_pool_per_pod_queue_size` | `llm_d_epp_per_endpoint_queue_size` | Dual emission with different metric names and labels. |
+| `inference_objective_*` predicted-latency series | Corresponding `llm_d_epp_*` series | Dual emission. Some predicted-latency labels differ between legacy and current series. |
 | `inference_extension_scheduler_e2e_duration_seconds` | `llm_d_epp_scheduler_e2e_duration_seconds` | Dual emission. |
 | `inference_extension_scheduler_attempts_total` | `llm_d_epp_scheduler_attempts_total` | Dual emission. |
 | `inference_extension_plugin_duration_seconds` | `llm_d_epp_plugin_duration_seconds` | Dual emission. |

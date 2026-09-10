@@ -314,7 +314,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 			var epdEncoders []string
 			var capturedReq *http.Request
 			if tt.epdConfigured {
-				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string) {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ reqcommon.APIType) {
 					epdCalled = true
 					epdPrefill = prefillHost
 					epdEncoders = encoders

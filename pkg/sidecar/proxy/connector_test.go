@@ -444,11 +444,11 @@ var _ = Describe("Unreadable request body", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: KVConnectorNIXLV2, ECConnector: ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"})
+				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage, ECConnector: ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"})
+				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {

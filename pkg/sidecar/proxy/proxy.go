@@ -289,7 +289,7 @@ func (c Config) String() string {
 // absent); the APIType selects the fields that cap the prefill leg.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
 
 // Server is the reverse proxy server
 type Server struct {

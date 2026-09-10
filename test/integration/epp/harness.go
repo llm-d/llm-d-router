@@ -27,6 +27,7 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/google/uuid"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -41,7 +42,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	metricsutils "k8s.io/component-base/metrics/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -397,16 +397,16 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	return h
 }
 
-// WaitForReadyPodsMetric blocks until the prometheus metric 'inference_pool_ready_pods' matches the expected count.
+// WaitForReadyPodsMetric blocks until the prometheus metric 'llm_d_epp_ready_endpoints' matches the expected count.
 func (h *TestHarness) WaitForReadyPodsMetric(expectedCount int) {
 	h.t.Helper()
 
 	expected := cleanMetric(metricReadyPods(expectedCount))
 	require.Eventually(h.t, func() bool {
-		err := metricsutils.GatherAndCompare(crmetrics.Registry, strings.NewReader(expected),
-			"inference_pool_ready_pods")
+		err := promtestutil.GatherAndCompare(crmetrics.Registry, strings.NewReader(expected),
+			"llm_d_epp_ready_endpoints")
 		return err == nil
-	}, 10*time.Second, 50*time.Millisecond, "Timed out waiting for inference_pool_ready_pods metric to settle")
+	}, 10*time.Second, 50*time.Millisecond, "Timed out waiting for llm_d_epp_ready_endpoints metric to settle")
 }
 
 // WaitForSync blocks until the EPP Datastore has synced the expected number of pods.
@@ -447,7 +447,7 @@ func (h *TestHarness) ExpectMetrics(expected map[string]string) {
 	for name, value := range expected {
 		var err error
 		assert.Eventually(h.t, func() bool {
-			err = metricsutils.GatherAndCompare(crmetrics.Registry, strings.NewReader(value), name)
+			err = promtestutil.GatherAndCompare(crmetrics.Registry, strings.NewReader(value), name)
 			return err == nil
 		}, 2*time.Second, 50*time.Millisecond, "Timed out waiting for metric %s to match: %v", name)
 		if err != nil {

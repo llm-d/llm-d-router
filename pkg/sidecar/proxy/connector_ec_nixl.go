@@ -8,7 +8,9 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // fanoutEncoderCollect fans out per-image encoder requests and merges
@@ -83,7 +85,7 @@ func (s *Server) fanoutEncoderCollect(
 // handleECNIXL fans out per-image encoder requests, aggregates each
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
-func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
+func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
@@ -126,5 +128,5 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
 }
