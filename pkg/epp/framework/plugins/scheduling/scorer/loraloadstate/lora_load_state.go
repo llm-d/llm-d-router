@@ -56,13 +56,6 @@ type Parameters struct {
 	// SaturatedScore is given when the adapter is not resident and every GPU slot
 	// holds a busy or pinned adapter. Default 0.0.
 	SaturatedScore *float64 `json:"saturatedScore,omitempty"`
-	// LoadHorizonSeconds prices a miss from the transition times the model
-	// servers report instead of the fixed tier scores: an endpoint that would
-	// take t seconds to make the adapter servable scores gpuResidentScore *
-	// (1 - t/horizon), floored at saturatedScore. Endpoints that have not
-	// reported a transition use the fleet mean; with no data anywhere the
-	// fixed tiers apply. 0 disables it. Default 0.
-	LoadHorizonSeconds *float64 `json:"loadHorizonSeconds,omitempty"`
 }
 
 type scoreTable struct {
@@ -71,16 +64,14 @@ type scoreTable struct {
 	freeSlot    float64
 	evictable   float64
 	saturated   float64
-	loadHorizon float64
 }
 
 var defaultScores = scoreTable{
 	gpuResident: 1.0, cpuResident: 0.7, freeSlot: 0.6, evictable: 0.3, saturated: 0.0,
 }
 
-// valid reports whether every score is in [0, 1], the tiers are ordered
-// gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and the
-// load horizon is not negative.
+// valid reports whether every score is in [0, 1] and the tiers are ordered
+// gpuResident >= cpuResident >= freeSlot >= evictable >= saturated.
 func (t scoreTable) valid() bool {
 	inRange := func(v float64) bool { return v >= 0 && v <= 1 }
 	tiers := []float64{t.gpuResident, t.cpuResident, t.freeSlot, t.evictable, t.saturated}
@@ -88,9 +79,6 @@ func (t scoreTable) valid() bool {
 		if !inRange(v) {
 			return false
 		}
-	}
-	if t.loadHorizon < 0 {
-		return false
 	}
 	for i := 1; i < len(tiers); i++ {
 		if tiers[i-1] < tiers[i] {
@@ -118,10 +106,9 @@ func (p *Parameters) scores(ctx context.Context) scoreTable {
 		freeSlot:    pick(p.FreeSlotScore, defaultScores.freeSlot),
 		evictable:   pick(p.EvictableScore, defaultScores.evictable),
 		saturated:   pick(p.SaturatedScore, defaultScores.saturated),
-		loadHorizon: pick(p.LoadHorizonSeconds, defaultScores.loadHorizon),
 	}
 	if !candidate.valid() {
-		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer parameters; scores must be in [0, 1], tiers ordered gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and loadHorizonSeconds >= 0, using defaults",
+		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer parameters; scores must be in [0, 1], tiers ordered gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, using defaults",
 			"parameters", fmt.Sprintf("%+v", candidate))
 		return defaultScores
 	}
@@ -182,12 +169,10 @@ func (s *LoraLoadStateScorer) Category() fwksched.ScorerCategory {
 func (s *LoraLoadStateScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			fwkplugin.NewDataKey(metrics.LoadedModelsKey, metrics.MetricsExtractorType):        map[string]fwkdl.LoraLoadState{},
-			fwkplugin.NewDataKey(metrics.GPULoadedModelsKey, metrics.MetricsExtractorType):     int(0),
-			fwkplugin.NewDataKey(metrics.BaseModelKey, metrics.MetricsExtractorType):           string(""),
-			fwkplugin.NewDataKey(metrics.ActiveModelsKey, metrics.MetricsExtractorType):        map[string]int{},
-			fwkplugin.NewDataKey(metrics.LoraLoadSecondsKey, metrics.MetricsExtractorType):     float64(0),
-			fwkplugin.NewDataKey(metrics.LoraActivateSecondsKey, metrics.MetricsExtractorType): float64(0),
+			fwkplugin.NewDataKey(metrics.LoadedModelsKey, metrics.MetricsExtractorType):    map[string]fwkdl.LoraLoadState{},
+			fwkplugin.NewDataKey(metrics.GPULoadedModelsKey, metrics.MetricsExtractorType): int(0),
+			fwkplugin.NewDataKey(metrics.BaseModelKey, metrics.MetricsExtractorType):       string(""),
+			fwkplugin.NewDataKey(metrics.ActiveModelsKey, metrics.MetricsExtractorType):    map[string]int{},
 		},
 	}
 }
@@ -210,9 +195,8 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 		}
 		return scores
 	}
-	costs := s.transitionCosts(endpoints)
 	for _, endpoint := range endpoints {
-		scores[endpoint] = s.tierScore(classify(endpoint.GetMetrics(), request.TargetModel), costs[endpoint])
+		scores[endpoint] = s.tierScore(classify(endpoint.GetMetrics(), request.TargetModel))
 	}
 	return scores
 }
@@ -246,91 +230,20 @@ func classify(m *fwkdl.Metrics, adapter string) residency {
 	}
 }
 
-// tierScore is the score for a residency tier: the fixed table entry, or,
-// when a load horizon is set and the endpoint's transition times are known,
-// gpuResident * (1 - t/horizon) floored at saturated, where t is the time to
-// make the adapter servable. Evicting keeps its fixed ratio below a free
-// slot so the tiers stay ordered.
-func (s *LoraLoadStateScorer) tierScore(r residency, cost transitionCost) float64 {
-	t := s.scores
-	priced := cost.known && t.loadHorizon > 0
-	price := func(seconds float64) float64 {
-		return max(t.saturated, t.gpuResident*max(0, 1-seconds/t.loadHorizon))
-	}
+// tierScore is the fixed score for a residency tier.
+func (s *LoraLoadStateScorer) tierScore(r residency) float64 {
 	switch r {
 	case gpuResident:
-		return t.gpuResident
+		return s.scores.gpuResident
 	case cpuResident:
-		if priced {
-			return price(cost.activate)
-		}
-		return t.cpuResident
+		return s.scores.cpuResident
 	case freeSlot:
-		if priced {
-			return price(cost.load + cost.activate)
-		}
-		return t.freeSlot
+		return s.scores.freeSlot
 	case evictable:
-		if priced && t.freeSlot > 0 {
-			return price(cost.load+cost.activate) * t.evictable / t.freeSlot
-		}
-		return t.evictable
+		return s.scores.evictable
 	default:
-		return t.saturated
+		return s.scores.saturated
 	}
-}
-
-// transitionCost is what an endpoint would spend making a non-resident
-// adapter servable, in seconds, from the transition times it reports.
-type transitionCost struct {
-	load, activate float64
-	known          bool
-}
-
-// transitionCosts returns a cost per endpoint when a load horizon is set.
-// An endpoint that has not reported a transition borrows the fleet mean, so
-// a fresh pod is priced like its peers rather than by the fixed tiers; with
-// no reports anywhere every cost is unknown and the fixed tiers apply.
-func (s *LoraLoadStateScorer) transitionCosts(endpoints []fwksched.Endpoint) map[fwksched.Endpoint]transitionCost {
-	costs := make(map[fwksched.Endpoint]transitionCost, len(endpoints))
-	if s.scores.loadHorizon <= 0 {
-		return costs
-	}
-	var loadSum, activateSum float64
-	var loadN, activateN int
-	for _, endpoint := range endpoints {
-		m := endpoint.GetMetrics()
-		if m.LoraLoadSeconds > 0 {
-			loadSum += m.LoraLoadSeconds
-			loadN++
-		}
-		if m.LoraActivateSeconds > 0 {
-			activateSum += m.LoraActivateSeconds
-			activateN++
-		}
-	}
-	if loadN == 0 && activateN == 0 {
-		return costs
-	}
-	fleet := transitionCost{known: true}
-	if loadN > 0 {
-		fleet.load = loadSum / float64(loadN)
-	}
-	if activateN > 0 {
-		fleet.activate = activateSum / float64(activateN)
-	}
-	for _, endpoint := range endpoints {
-		m := endpoint.GetMetrics()
-		cost := fleet
-		if m.LoraLoadSeconds > 0 {
-			cost.load = m.LoraLoadSeconds
-		}
-		if m.LoraActivateSeconds > 0 {
-			cost.activate = m.LoraActivateSeconds
-		}
-		costs[endpoint] = cost
-	}
-	return costs
 }
 
 // baseModelHeadroom scores an endpoint for a request that needs no adapter:

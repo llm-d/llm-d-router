@@ -55,9 +55,6 @@ type (
 		// LoRAGPUSlotsSpec defines the metric specification string for the gauge holding the
 		// number of GPU adapter slots (max_loras). Overrides the max_lora label of LoRASpec.
 		LoRAGPUSlotsSpec string `json:"loraGPUSlotsSpec,omitempty"`
-		// LoRALoadSecondsSpec defines the metric specification string for the histogram of
-		// adapter transition times, labelled by transition (load, activate).
-		LoRALoadSecondsSpec string `json:"loraLoadSecondsSpec,omitempty"`
 		// CacheInfoSpec defines the metric specification string for retrieving KV cache configuration
 		// from an info-style gauge where block_size and num_gpu_blocks are label values.
 		CacheInfoSpec string `json:"cacheInfoSpec"`
@@ -109,7 +106,6 @@ var defaultEngineConfigs = []engineConfigParams{
 		LoRALoadedSpec:      "vllm:lora_adapter_loaded",
 		LoRAGPULoadedSpec:   "vllm:num_gpu_loaded_lora_adapters",
 		LoRAGPUSlotsSpec:    "vllm:max_gpu_lora_adapters",
-		LoRALoadSecondsSpec: "vllm:lora_adapter_load_seconds",
 		CacheInfoSpec:       "vllm:cache_config_info",
 	},
 	{
@@ -236,7 +232,6 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			LoraLoaded:          engineConfig.LoRALoadedSpec,
 			LoraGPULoaded:       engineConfig.LoRAGPULoadedSpec,
 			LoraGPUSlots:        engineConfig.LoRAGPUSlotsSpec,
-			LoraLoadSeconds:     engineConfig.LoRALoadSecondsSpec,
 			CacheInfo:           engineConfig.CacheInfoSpec,
 			CacheBlockSizeLabel: engineConfig.CacheBlockSizeLabelName,
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,

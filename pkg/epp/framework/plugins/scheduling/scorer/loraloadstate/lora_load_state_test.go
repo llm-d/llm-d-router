@@ -104,12 +104,10 @@ func TestParameters(t *testing.T) {
 			&Parameters{CPUResidentScore: f(0.9), FreeSlotScore: f(0.15), EvictableScore: f(0.1), SaturatedScore: f(0.0)},
 			scoreTable{gpuResident: 1.0, cpuResident: 0.9, freeSlot: 0.15, evictable: 0.1, saturated: 0.0},
 		},
-		{"partial override keeps the other defaults", &Parameters{FreeSlotScore: f(0.5)}, scoreTable{1.0, 0.7, 0.5, 0.3, 0.0, 0}},
+		{"partial override keeps the other defaults", &Parameters{FreeSlotScore: f(0.5)}, scoreTable{1.0, 0.7, 0.5, 0.3, 0.0}},
 		{"out of range falls back as a set", &Parameters{GPUResidentScore: f(1.5), FreeSlotScore: f(0.1)}, defaultScores},
 		{"tier order violation falls back as a set", &Parameters{CPUResidentScore: f(0.2), FreeSlotScore: f(0.5)}, defaultScores},
-		{"equal tiers are allowed", &Parameters{EvictableScore: f(0.0)}, scoreTable{1.0, 0.7, 0.6, 0.0, 0.0, 0}},
-		{"load horizon is kept", &Parameters{LoadHorizonSeconds: f(2)}, scoreTable{1.0, 0.7, 0.6, 0.3, 0.0, 2}},
-		{"negative load horizon falls back as a set", &Parameters{LoadHorizonSeconds: f(-1)}, defaultScores},
+		{"equal tiers are allowed", &Parameters{EvictableScore: f(0.0)}, scoreTable{1.0, 0.7, 0.6, 0.0, 0.0}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -123,7 +121,7 @@ func TestFactory(t *testing.T) {
 	plugin, err := LoraLoadStateScorerFactory("big-adapters", decoder, nil)
 	require.NoError(t, err)
 	scorer := plugin.(*LoraLoadStateScorer)
-	assert.Equal(t, scoreTable{1.0, 0.95, 0.2, 0.1, 0.0, 0}, scorer.scores)
+	assert.Equal(t, scoreTable{1.0, 0.95, 0.2, 0.1, 0.0}, scorer.scores)
 	assert.Equal(t, fwkplugin.TypedName{Type: LoraLoadStateScorerType, Name: "big-adapters"}, scorer.TypedName())
 	assert.Equal(t, fwksched.Affinity, scorer.Category())
 
@@ -167,47 +165,4 @@ func TestBaseModelRequestIsNeutralWhenEveryEndpointIsFull(t *testing.T) {
 
 func TestNoEndpoints(t *testing.T) {
 	assert.Empty(t, score(t, nil, "target"))
-}
-
-func TestLoadHorizonPricesMissesFromObservedTransitionTimes(t *testing.T) {
-	horizon := 2.0
-	params := &Parameters{LoadHorizonSeconds: &horizon}
-	// Every endpoint has one free slot; they differ only in how long a load
-	// takes there and in whether the adapter is already in the host cache.
-	slowDisk := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}, LoraLoadSeconds: 1.0, LoraActivateSeconds: 0.2}
-	fastDisk := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}, LoraLoadSeconds: 0.2, LoraActivateSeconds: 0.2}
-	hostCached := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "target": cpu}, LoraLoadSeconds: 1.0, LoraActivateSeconds: 0.2}
-	fresh := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}}
-	got := score(t, params, "target", endpoint("slow", slowDisk), endpoint("fast", fastDisk), endpoint("host", hostCached), endpoint("fresh", fresh))
-
-	assert.InDelta(t, 1-1.2/horizon, got["slow"], 1e-9, "load + activate over the horizon")
-	assert.InDelta(t, 1-0.4/horizon, got["fast"], 1e-9)
-	assert.InDelta(t, 1-0.2/horizon, got["host"], 1e-9, "host-cached pays activation only")
-	// The fresh pod borrows the fleet means: load (1.0+0.2+1.0)/3, activate 0.2.
-	assert.InDelta(t, 1-(2.2/3+0.2)/horizon, got["fresh"], 1e-9)
-	assert.Greater(t, got["host"], got["fast"])
-	assert.Greater(t, got["fast"], got["fresh"])
-	assert.Greater(t, got["fresh"], got["slow"])
-}
-
-func TestLoadHorizonFloorsAtSaturatedAndKeepsEvictableBelowFreeSlot(t *testing.T) {
-	horizon := 1.0
-	params := &Parameters{LoadHorizonSeconds: &horizon}
-	glacial := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}, LoraLoadSeconds: 5, LoraActivateSeconds: 1}
-	freeSlot := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}, LoraLoadSeconds: 0.2, LoraActivateSeconds: 0.2}
-	evictable := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, LoraLoadSeconds: 0.2, LoraActivateSeconds: 0.2}
-	got := score(t, params, "target", endpoint("glacial", glacial), endpoint("free", freeSlot), endpoint("evictable", evictable))
-	assert.Equal(t, defaultScores.saturated, got["glacial"])
-	assert.InDelta(t, 0.6, got["free"], 1e-9)
-	assert.InDelta(t, 0.6*defaultScores.evictable/defaultScores.freeSlot, got["evictable"], 1e-9)
-}
-
-func TestLoadHorizonWithoutAnyObservationUsesFixedTiers(t *testing.T) {
-	horizon := 2.0
-	params := &Parameters{LoadHorizonSeconds: &horizon}
-	free := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 0, LoadedModels: map[string]fwkdl.LoraLoadState{}}
-	host := &fwkdl.Metrics{MaxActiveModels: 2, GPULoadedModels: 0, LoadedModels: map[string]fwkdl.LoraLoadState{"target": cpu}}
-	got := score(t, params, "target", endpoint("free", free), endpoint("host", host))
-	assert.Equal(t, defaultScores.freeSlot, got["free"])
-	assert.Equal(t, defaultScores.cpuResident, got["host"])
 }
