@@ -528,6 +528,8 @@ func (s *Server) setKVConnector() {
 			s.handleSharedStorage(w, r, host, apiType)
 		}
 	case KVConnectorSGLang:
+		// SGLang sends the same body to both legs and caps no output tokens, so
+		// it does not use the API type.
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
 			s.handleSGLang(w, r, host)
 		}
@@ -581,7 +583,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	})
 	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
 	// served routes from drifting away from it.
-	for _, path := range []string{ChatCompletionsPath, CompletionsPath, MessagesPath, ResponsesPath, GeneratePath} {
+	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathGenerate} {
 		mux.HandleFunc("POST "+path, s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path)))
 	}
 

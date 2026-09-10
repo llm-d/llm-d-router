@@ -18,7 +18,6 @@ package request
 
 import (
 	"fmt"
-	"maps"
 	"strings"
 )
 
@@ -31,14 +30,12 @@ const (
 	PathGenerate        = "/inference/v1/generate"
 )
 
-// APIType is the inference API a request speaks. It selects the JSON field
-// names a request carries and the path a synthesized request is sent to. A
-// value outside the constants below degrades to APITypeChatCompletions.
+// APIType is the inference API a request was sent to. A value outside the
+// constants below degrades to APITypeChatCompletions.
 type APIType int
 
 const (
-	// APITypeChatCompletions is the Chat Completions API (/v1/chat/completions)
-	// and the Anthropic Messages API (/v1/messages), which share its field names.
+	// APITypeChatCompletions is the Chat Completions API (/v1/chat/completions).
 	APITypeChatCompletions APIType = iota
 	// APITypeCompletions is the legacy Completions API (/v1/completions).
 	APITypeCompletions
@@ -46,6 +43,8 @@ const (
 	APITypeResponses
 	// APITypeGenerate is vLLM's token-in generate API (/inference/v1/generate).
 	APITypeGenerate
+	// APITypeMessages is the Anthropic Messages API (/v1/messages).
+	APITypeMessages
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -59,13 +58,14 @@ func (a APIType) String() string {
 		return "responses"
 	case APITypeGenerate:
 		return "generate"
+	case APITypeMessages:
+		return "messages"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
 }
 
-// Path returns the canonical request path for the API. PathMessages shares the
-// chat completions field names but is not a synthesis target.
+// Path returns the canonical request path for the API.
 func (a APIType) Path() string {
 	switch a {
 	case APITypeCompletions:
@@ -74,6 +74,8 @@ func (a APIType) Path() string {
 		return PathResponses
 	case APITypeGenerate:
 		return PathGenerate
+	case APITypeMessages:
+		return PathMessages
 	default:
 		return PathChatCompletions
 	}
@@ -91,7 +93,7 @@ func DetectAPIType(path string) APIType {
 	case strings.Contains(path, PathResponses):
 		return APITypeResponses
 	case strings.Contains(path, PathMessages):
-		return APITypeChatCompletions
+		return APITypeMessages
 	case strings.Contains(path, PathGenerate):
 		return APITypeGenerate
 	default:
@@ -102,9 +104,10 @@ func DetectAPIType(path string) APIType {
 // JSON request field names that cap output tokens, by API. Chat completions caps
 // both max_tokens and max_completion_tokens: vLLM and SGLang accept the two
 // together and prefer max_completion_tokens, so capping both bounds the request
-// regardless of which field the engine consults. The Completions and generate
-// APIs share a list: neither defines max_completion_tokens, so capping it would
-// put a field on the wire that a strict server is free to reject.
+// regardless of which field the engine consults. The Completions, Messages, and
+// generate APIs share a list: none of them defines max_completion_tokens, so
+// capping it would put a field on the wire that a strict server is free to
+// reject.
 var (
 	chatCompletionTokenLimitFields = []string{FieldMaxTokens, FieldMaxCompletionTokens}
 	maxTokensOnlyTokenLimitFields  = []string{FieldMaxTokens}
@@ -117,26 +120,9 @@ func (a APIType) tokenLimitFields() []string {
 	switch a {
 	case APITypeResponses:
 		return responsesTokenLimitFields
-	case APITypeCompletions, APITypeGenerate:
+	case APITypeCompletions, APITypeGenerate, APITypeMessages:
 		return maxTokensOnlyTokenLimitFields
 	default:
 		return chatCompletionTokenLimitFields
-	}
-}
-
-// tokenLimitMap returns the map inside body that holds the token limit fields:
-// sampling_params for the generate API, body itself otherwise. The generate map
-// is always replaced with one body owns, so a caller that writes into the result
-// never reaches a nested map the body was cloned from.
-func (a APIType) tokenLimitMap(body map[string]any) map[string]any {
-	switch a {
-	case APITypeGenerate:
-		sp, _ := body[FieldSamplingParams].(map[string]any)
-		owned := make(map[string]any, len(sp)+1)
-		maps.Copy(owned, sp)
-		body[FieldSamplingParams] = owned
-		return owned
-	default:
-		return body
 	}
 }

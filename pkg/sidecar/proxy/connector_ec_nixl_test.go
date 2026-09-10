@@ -178,7 +178,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 		imageURLItem("https://example.com/img1.jpg"),
 		imageURLItem("https://example.com/img2.jpg"),
 	))
-	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
 	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
@@ -234,7 +234,7 @@ func TestHandleECEPDAllMissingDoesNotAddField(t *testing.T) {
 		imageURLItem("https://example.com/img1.jpg"),
 		imageURLItem("https://example.com/img2.jpg"),
 	))
-	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
 	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
@@ -296,7 +296,7 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 		imageURLItem("https://example.com/img1.jpg"),
 		imageURLItem("https://example.com/img2.jpg"),
 	))
-	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
 	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
@@ -534,7 +534,7 @@ func TestHandleECNIXLEmptyEncodeEndPoints(t *testing.T) {
 	}
 
 	reqBody, _ := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
-	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
 	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", nil, reqcommon.APITypeChatCompletions)
@@ -584,7 +584,7 @@ func TestHandleECNIXLTextOnlyRequest(t *testing.T) {
 		},
 	}
 	reqBody, _ := json.Marshal(textOnly)
-	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
 	srv.handleECNIXL(rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
@@ -640,7 +640,7 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 	}
 
 	reqBody, _ := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
-	httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 	rw := httptest.NewRecorder()
 
 	// Empty prefillEndPoint triggers the decoder-direct branch.

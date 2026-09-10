@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -37,7 +38,7 @@ import (
 )
 
 const (
-	testChatCompletionsPath = gateway.PathChatCompletions
+	testChatCompletionsPath = reqcommon.PathChatCompletions
 	testModelName           = "test-model"
 )
 

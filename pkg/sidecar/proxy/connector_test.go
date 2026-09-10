@@ -72,13 +72,13 @@ const generateRequestBodyWithTokenLimits = `{
 // contract on the two legs the connector produces: the prefill leg is capped to
 // a single output token inside sampling_params, and the decode leg still carries
 // the client's own limits. It is the regression test for the sampling_params
-// sharing that reqcommon.APIType.tokenLimitMap documents.
+// sharing that reqcommon.CapSingleToken documents.
 func expectGenerateLegTokenLimits(testInfo *sidecarTestInfo) {
 	GinkgoHelper()
 
 	proxyBaseAddr := testInfo.startProxy()
 
-	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+GeneratePath,
+	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathGenerate,
 		bytes.NewReader([]byte(generateRequestBodyWithTokenLimits)))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
@@ -184,7 +184,7 @@ var _ = Describe("Common Connector tests", func() {
 				By("sending a /v1/chat/completions request with max_completion_tokens set")
 				body := chatCompletionsRequestBodyWithMaxCompletionTokens
 
-				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 				Expect(err).ToNot(HaveOccurred())
 				req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -244,7 +244,7 @@ var _ = Describe("Common Connector tests", func() {
 				    "max_tokens": 50
 			    }`
 
-				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 				Expect(err).ToNot(HaveOccurred())
 				req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -298,7 +298,7 @@ var _ = Describe("Common Connector tests", func() {
 				By("sending a /v1/chat/completions request with min_tokens set")
 				body := chatCompletionsRequestBodyWithMinTokens
 
-				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 				Expect(err).ToNot(HaveOccurred())
 				req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -373,7 +373,7 @@ var _ = Describe("Non-object request body", func() {
 			testInfo := sidecarConnectionTestSetup(connector)
 			proxyBaseAddr := testInfo.startProxy()
 
-			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 			Expect(err).ToNot(HaveOccurred())
 			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -410,7 +410,7 @@ var _ = Describe("Unreadable request body", func() {
 		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request)) {
 			proxy := NewProxy(config)
 			w := httptest.NewRecorder()
-			r := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, errReader{})
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
 
 			handle(proxy, w, r)
 

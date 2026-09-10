@@ -63,7 +63,7 @@ func runPrefillHandler(t *testing.T, logged *[]string) (downstream logr.Logger) 
 		downstream = log.FromContext(r.Context())
 	}
 
-	req := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, http.NoBody)
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, http.NoBody)
 	req.Header.Set(routing.PrefillEndpointHeader, "prefill-pod:8000")
 	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
 

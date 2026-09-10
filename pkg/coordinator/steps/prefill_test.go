@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -183,7 +184,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathCompletions {
+		if r.URL.Path != reqcommon.PathCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -205,7 +206,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:         "req-compl",
-		OriginalPath:      gateway.PathCompletions,
+		OriginalPath:      reqcommon.PathCompletions,
 		Model:             "test-model",
 		TokenIDs:          []int{1, 2345, 6789},
 		MultimodalEntries: nil,
@@ -269,7 +270,7 @@ func TestPrefillStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-compl",
-		OriginalPath:     gateway.PathCompletions,
+		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
 		TokenIDs:         nil,
 		Body:             map[string]any{"prompt": "Hello"},
@@ -289,7 +290,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -313,7 +314,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -392,7 +393,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -414,7 +415,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-stream",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":          "test-model",
@@ -463,7 +464,7 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-max-completion-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":                 "test-model",
@@ -512,7 +513,7 @@ func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-min-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":      "test-model",
@@ -553,14 +554,14 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 		{
 			name:         "ChatCompletions",
 			useOpenAI:    true,
-			originalPath: gateway.PathChatCompletions,
+			originalPath: reqcommon.PathChatCompletions,
 			body: map[string]any{
 				"model":    "m",
 				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 			},
 		},
-		{name: "Completions", useOpenAI: true, originalPath: gateway.PathCompletions},
-		{name: "Generate", useOpenAI: false, originalPath: gateway.PathChatCompletions},
+		{name: "Completions", useOpenAI: true, originalPath: reqcommon.PathCompletions},
+		{name: "Generate", useOpenAI: false, originalPath: reqcommon.PathChatCompletions},
 	}
 
 	for _, tc := range cases {
@@ -669,7 +670,7 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-1",
 		Model:        "test",
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: reqcommon.PathGenerate,
 		TokenIDs:     []int{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},

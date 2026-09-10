@@ -16,10 +16,13 @@ limitations under the License.
 
 package request
 
+import "maps"
+
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token request for a prefill or encode leg. It returns the map
-// the caps were written into, which is where the generate API also expects
-// transfer params, so a caller adding them needs no second lookup.
+// the caps were written into: sampling_params for the generate API, body itself
+// otherwise. The generate API also expects transfer params in that map, so a
+// caller adding them needs no second lookup.
 //
 // The caps to rewrite come from APIType.tokenLimitFields, so each API's output
 // caps are named in one place. min_tokens is a floor rather than a cap, so it is
@@ -28,9 +31,16 @@ package request
 // SamplingParams rejects min_tokens > max_tokens).
 //
 // body is rewritten in place, so the caller passes its own copy. A one-level
-// copy is enough; APIType.tokenLimitMap documents why.
+// copy is enough: the generate sampling_params is always replaced with a map
+// body owns, so the rewrite never reaches a nested map the body was cloned from.
 func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
-	limits := apiType.tokenLimitMap(body)
+	limits := body
+	if apiType == APITypeGenerate {
+		sp, _ := body[FieldSamplingParams].(map[string]any)
+		limits = make(map[string]any, len(sp)+1)
+		maps.Copy(limits, sp)
+		body[FieldSamplingParams] = limits
+	}
 	for _, field := range apiType.tokenLimitFields() {
 		limits[field] = 1
 	}

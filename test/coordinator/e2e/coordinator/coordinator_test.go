@@ -30,7 +30,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -50,14 +50,14 @@ var (
 
 var _ = ginkgo.Describe("Coordinator pipeline", func() {
 	ginkgo.It("routes a text only chat completion end-to-end", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`,
 			modelName,
 		)), textOnlySteps, 0, tokenLimits{})
 	})
 
 	ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
 			modelName, inlineImageDataURI,
 		)), allSteps, 1, tokenLimits{min: 3, max: 5, maxCompletion: 100})
@@ -66,35 +66,35 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 	// Passthrough disabled collapses the chat request to the generate wire format
 	// on the encode and prefill legs.
 	ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode with OpenAI passthrough disabled", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
 			modelName, inlineImageDataURI,
 		)), allSteps, 1, tokenLimits{min: 3, max: 5, maxCompletion: 100}, coordinatorConfigNIXLGenerate)
 	})
 
 	ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 			modelName, testImageURL,
 		)), allSteps, 1, tokenLimits{})
 	})
 
 	ginkgo.It("routes a multimodal chat completion with two images end-to-end", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"What is in these two images?"}]}],"max_tokens":150}`,
 			modelName, testImageURL, testImageURL2,
 		)), allSteps, 2, tokenLimits{})
 	})
 
 	ginkgo.It("routes a multimodal chat completion with an inline base64 image end-to-end", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 			modelName, inlineImageDataURI,
 		)), allSteps, 1, tokenLimits{})
 	})
 
 	ginkgo.It("routes a multimodal chat completion with one inline and one remote image end-to-end", func() {
-		runCoordinatorPipeline(gateway.PathChatCompletions, []byte(fmt.Sprintf(
+		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"Describe what you see in both images."}]}],"max_tokens":150}`,
 			modelName, inlineImageDataURI, testImageURL,
 		)), allSteps, 2, tokenLimits{})
@@ -211,7 +211,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		}
 		// Mirrors resolveFormat: the legs speak generate for a native generate
 		// request and for a chat request with passthrough disabled, chat otherwise.
-		legsSpeakChat := path != gateway.DefaultGeneratePath && cfg != coordinatorConfigNIXLGenerate
+		legsSpeakChat := path != reqcommon.PathGenerate && cfg != coordinatorConfigNIXLGenerate
 		verifyTokenLimits(logs, limits, legsSpeakChat, capLegs)
 	}
 }

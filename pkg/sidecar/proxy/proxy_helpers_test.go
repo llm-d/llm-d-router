@@ -28,10 +28,13 @@ import (
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func postBody(body string) *http.Request {
-	return httptest.NewRequest(http.MethodPost, ChatCompletionsPath, bytes.NewReader([]byte(body)))
+	return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 }
 
 var _ = Describe("bodyAsJSON", func() {
@@ -71,7 +74,7 @@ var _ = Describe("bodyAsJSON", func() {
 	)
 
 	It("wraps a read failure without marking it invalid JSON", func() {
-		r := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, errReader{})
+		r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
 
 		_, parsed, err := bodyAsJSON(r)
 
@@ -122,7 +125,7 @@ var _ = Describe("readJSONBody", func() {
 
 	It("answers a read failure with a vLLM-shaped 400", func() {
 		w := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, errReader{})
+		r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
 
 		_, _, ok := proxy.readJSONBody(r, w)
 
@@ -147,24 +150,56 @@ var _ = Describe("readJSONBody", func() {
 		Entry("null body", func() *http.Request { return postBody(`null`) }),
 		Entry("malformed body", func() *http.Request { return postBody(`{"model":`) }),
 		Entry("read failure", func() *http.Request {
-			return httptest.NewRequest(http.MethodPost, ChatCompletionsPath, errReader{})
+			return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
 		}),
 	)
 
 	// A client that hangs up before reading the refusal leaves nowhere to send
 	// it, so the error goes to the log instead of the wire.
 	It("logs the refusal when the response cannot be written", func() {
-		var logged []string
-		proxy.logger = funcr.New(func(prefix, args string) {
-			logged = append(logged, prefix+" "+args)
-		}, funcr.Options{})
+		logged := captureLogs(proxy, 0)
 
 		_, _, ok := proxy.readJSONBody(postBody(`null`), errWriter{})
 
 		Expect(ok).To(BeFalse())
-		Expect(logged).To(ContainElement(ContainSubstring("failed to send error response to client")))
+		Expect(*logged).To(ContainElement(ContainSubstring("failed to send error response to client")))
+	})
+
+	// The 400 reaches only the client, so the reason is also logged for operators.
+	DescribeTable("logs the refusal reason at debug level",
+		func(newRequest func() *http.Request, reason string) {
+			logged := captureLogs(proxy, logging.DEBUG)
+
+			_, _, ok := proxy.readJSONBody(newRequest(), httptest.NewRecorder())
+
+			Expect(ok).To(BeFalse())
+			Expect(*logged).To(ContainElement(And(ContainSubstring("invalid request body"), ContainSubstring(reason))))
+		},
+		Entry("null body", func() *http.Request { return postBody(`null`) }, "is not a JSON object"),
+		Entry("read failure", func() *http.Request {
+			return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
+		}, "read failed"),
+	)
+
+	It("does not log the refusal reason below debug level", func() {
+		logged := captureLogs(proxy, logging.VERBOSE)
+
+		_, _, ok := proxy.readJSONBody(postBody(`null`), httptest.NewRecorder())
+
+		Expect(ok).To(BeFalse())
+		Expect(*logged).ToNot(ContainElement(ContainSubstring("invalid request body")))
 	})
 })
+
+// captureLogs points the proxy logger at the returned slice, keeping entries up
+// to the given verbosity.
+func captureLogs(proxy *Server, verbosity int) *[]string {
+	logged := &[]string{}
+	proxy.logger = funcr.New(func(prefix, args string) {
+		*logged = append(*logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: verbosity})
+	return logged
+}
 
 // expectErrorEnvelope asserts the vLLM error envelope a gateway unmarshals and
 // returns its message, so a caller can additionally check the refusal reason.

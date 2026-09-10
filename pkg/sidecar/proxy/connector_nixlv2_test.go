@@ -32,6 +32,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -66,7 +67,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	}
 
 	sendChatCompletionsRequest := func(proxyBaseAddr string) map[string]any {
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -94,7 +95,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"stream_options": {"include_usage": true}
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -123,7 +124,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		proxyBaseAddr := startProxy()
 
 		By("sending a /v1/chat/completions request with prefill header")
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -179,7 +180,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		messages := `[{"role":"user","content":[{"type":"text","text":"Hello"}]}]`
 		body := `{"model":"Qwen/Qwen2-0.5B","messages":` + messages + `,"max_tokens":50,"tools":` + tools + `}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -276,7 +277,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 	})
 
 	sendChatCompletionsRequestWithBody := func(proxyBaseAddr, body string) {
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -329,8 +330,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(decodeReq).ToNot(HaveKey(requestFieldMinTokens))
 	})
 
-	// Messages API tests — verify /v1/messages routes through the disaggregation
-	// handler with the same token-limit fields as chat completions.
+	// Messages API tests. /v1/messages routes through the disaggregation handler
+	// and caps only max_tokens, the one output cap the API defines.
 
 	It("should successfully send messages API request to 1. prefill 2. decode with the correct fields", func() {
 		proxyBaseAddr := startProxy()
@@ -344,7 +345,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"max_tokens": 50
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+MessagesPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathMessages, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -369,6 +370,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(kvTransferParams).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
 
 		Expect(prq1).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
+		Expect(prq1).ToNot(HaveKey("max_completion_tokens"))
 		Expect(prq1).To(HaveKeyWithValue("stream", false))
 
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
@@ -387,7 +389,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"max_tokens": 50
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+MessagesPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathMessages, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		rp, err := http.DefaultClient.Do(req)
@@ -427,7 +429,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"max_output_tokens": 50
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ResponsesPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -492,7 +494,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"max_output_tokens": 100
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ResponsesPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -543,7 +545,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"input": "Hello!"
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ResponsesPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -595,7 +597,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"max_output_tokens": 50
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ResponsesPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 
 		rp, err := http.DefaultClient.Do(req)
@@ -623,7 +625,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 			proxyBaseAddr := startProxy()
 
-			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 			Expect(err).ToNot(HaveOccurred())
 			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -652,7 +654,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		proxyBaseAddr := startProxy()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -678,7 +680,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		proxyBaseAddr := startProxy()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -704,7 +706,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		proxyBaseAddr := startProxy()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -745,7 +747,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 				"stream": true
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ResponsesPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
 
@@ -793,7 +795,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+GeneratePath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathGenerate, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		if withPrefillHeader {
 			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
@@ -963,7 +965,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 			"max_tokens": 50
 		}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, prefillBackend.URL[len("http://"):])
 
@@ -1104,7 +1106,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 		})
-		env.sendTo(ChatCompletionsPath, `{
+		env.sendTo(reqcommon.PathChatCompletions, `{
 				"model": "Qwen/Qwen2-0.5B",
 				"messages": [
 				  {"role": "user", "content": "Hello"}
@@ -1129,7 +1131,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 		})
-		env.sendTo(GeneratePath, generateRequestBodyWithTokenLimits)
+		env.sendTo(reqcommon.PathGenerate, generateRequestBodyWithTokenLimits)
 
 		expectGenerateLegTokenLimitsOn(env.prefillHandler, env.decodeHandler)
 	})
@@ -1274,7 +1276,7 @@ func startMoRIProxy(mutate func(cfg *Config)) *moriProxyEnv {
 // sequential in the serial path) by the time this returns, so the captured
 // requests / headers are safe to read afterwards.
 func (env *moriProxyEnv) send() {
-	env.sendTo(ChatCompletionsPath, chatCompletionsRequestBody)
+	env.sendTo(reqcommon.PathChatCompletions, chatCompletionsRequestBody)
 }
 
 // sendTo sends a caller-supplied body to one of the proxy's inference paths.

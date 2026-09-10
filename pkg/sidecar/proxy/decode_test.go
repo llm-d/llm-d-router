@@ -30,6 +30,8 @@ import (
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -122,7 +124,7 @@ func chatResponse(content, finishReason string, promptTokens, completionTokens i
 
 // doPost sends a POST request to the proxy and returns the response.
 func doPost(addr, body string) *http.Response {
-	req, err := http.NewRequest(http.MethodPost, addr+ChatCompletionsPath, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, addr+reqcommon.PathChatCompletions, strings.NewReader(body))
 	Expect(err).ToNot(HaveOccurred())
 	resp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred())

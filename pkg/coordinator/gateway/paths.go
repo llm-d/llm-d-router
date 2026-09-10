@@ -16,13 +16,7 @@ limitations under the License.
 
 package gateway
 
-import reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-
 const (
-	PathChatCompletions = reqcommon.PathChatCompletions
-	PathCompletions     = reqcommon.PathCompletions
-	DefaultGeneratePath = reqcommon.PathGenerate
-
 	EPPProfileHeader  = "EPP-Profile"
 	ContentTypeHeader = "Content-Type"
 	ContentTypeJSON   = "application/json"

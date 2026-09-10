@@ -151,7 +151,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			}
 
 			reqBody, _ := json.Marshal(userMessageRequest(tt.items...))
-			httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+			httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 			rw := httptest.NewRecorder()
 
 			tt.handler(srv, rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)

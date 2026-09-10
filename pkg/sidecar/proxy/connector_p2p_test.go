@@ -28,6 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -46,7 +47,7 @@ var _ = Describe("P2P Connector", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		body := chatCompletionsRequestBodyWithMaxCompletionTokens
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -115,7 +116,7 @@ var _ = Describe("P2P Connector", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		body := chatCompletionsRequestBodyWithMinTokens
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -170,7 +171,7 @@ var _ = Describe("P2P Connector", func() {
 		defer blockingPrefill.Close()
 
 		body := chatCompletionsRequestBodyWithMaxCompletionTokens
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, blockingPrefill.URL[len("http://"):])
 
@@ -208,7 +209,7 @@ var _ = Describe("P2P Connector", func() {
 		}))
 		defer failingPrefill.Close()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
 			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionTokens)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, failingPrefill.URL[len("http://"):])
@@ -231,7 +232,7 @@ var _ = Describe("P2P Connector", func() {
 	It("should add max_completion_tokens=1 to the prefill leg even when absent from the original request", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]

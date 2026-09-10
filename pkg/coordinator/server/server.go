@@ -118,9 +118,9 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Use(middleware.Recoverer)
 	r.Use(logRequestResponse)
 
-	r.Post(gateway.PathChatCompletions, s.handleInference)
-	r.Post(gateway.PathCompletions, s.handleInference)
-	r.Post(gateway.DefaultGeneratePath, s.handleInference)
+	r.Post(reqcommon.PathChatCompletions, s.handleInference)
+	r.Post(reqcommon.PathCompletions, s.handleInference)
+	r.Post(reqcommon.PathGenerate, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)

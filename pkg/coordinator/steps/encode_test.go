@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -275,7 +276,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -378,7 +379,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-max-completion-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -450,37 +451,44 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 // multimodal entries are present: the prefill worker runs the vision encoder
 // inline, so the encode fan-out and EC handoff are skipped.
 func TestEncodeStep_SkipsForGenerate(t *testing.T) {
-	gatewayCallCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gatewayCallCount++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	for name, path := range map[string]string{
+		"exact path":    reqcommon.PathGenerate,
+		"prefixed path": "/prefix" + reqcommon.PathGenerate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gatewayCallCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gatewayCallCount++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
 
-	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
-	if err != nil {
-		t.Fatal(err)
-	}
+			gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+			step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	reqCtx := &pipeline.RequestContext{
-		RequestID:    "req-generate",
-		Model:        "test-model",
-		OriginalPath: gateway.DefaultGeneratePath,
-		TokenIDs:     []int{1, 32000, 32000, 2},
-		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
-		},
-	}
+			reqCtx := &pipeline.RequestContext{
+				RequestID:    "req-generate",
+				Model:        "test-model",
+				OriginalPath: path,
+				TokenIDs:     []int{1, 32000, 32000, 2},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+				},
+			}
 
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if gatewayCallCount != 0 {
-		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
-	}
-	if reqCtx.ECTransferParams != nil {
-		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gatewayCallCount != 0 {
+				t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
+			}
+			if reqCtx.ECTransferParams != nil {
+				t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+			}
+		})
 	}
 }
 

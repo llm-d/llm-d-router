@@ -38,23 +38,6 @@ type contextKey string
 
 const requestStartTimeKey contextKey = "request_start_time"
 
-const (
-	// ChatCompletionsPath is the OpenAI chat completions path
-	ChatCompletionsPath = reqcommon.PathChatCompletions
-
-	// CompletionsPath is the legacy completions path
-	CompletionsPath = reqcommon.PathCompletions
-
-	// ResponsesPath is the OpenAI Responses API path
-	ResponsesPath = reqcommon.PathResponses
-
-	// MessagesPath is the Anthropic Messages API path
-	MessagesPath = reqcommon.PathMessages
-
-	// GeneratePath is vLLM's token-in generate endpoint
-	GeneratePath = reqcommon.PathGenerate
-)
-
 func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
 	return attribute.String("llm_d.openai.api", apiType.String())
 }
@@ -221,7 +204,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				s.decodeWithP2PSource(w, r, kvCacheSource)
 				return
 			}
-			if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
+			if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
 				s.runChunkedDecode(w, r)
 				return
 			}

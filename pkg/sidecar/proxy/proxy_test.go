@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
@@ -196,7 +197,7 @@ var _ = Describe("Reverse Proxy", func() {
         			"max_tokens": 50
 				}`
 
-				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 				Expect(err).ToNot(HaveOccurred())
 				req.Header.Add(routing.PrefillEndpointHeader, prefillBackend.URL)
 
@@ -269,7 +270,7 @@ var _ = Describe("Reverse Proxy", func() {
         			"max_tokens": 50
 				}`
 
-				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+				req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 				Expect(err).ToNot(HaveOccurred())
 				req.Header.Add(routing.PrefillEndpointHeader, prefillBackend.URL[len("http://"):])
 

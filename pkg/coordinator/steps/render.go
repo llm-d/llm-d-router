@@ -124,7 +124,6 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	// The Responses API carries no token_ids to normalize, so it skips the step.
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeGenerate:
 		return s.executeGenerate(ctx, reqCtx)
@@ -132,10 +131,12 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return s.executeCompletions(ctx, reqCtx)
 	case reqcommon.APITypeChatCompletions:
 		return s.executeChatCompletions(ctx, reqCtx)
+	default:
+		// Other APIs, such as Responses, carry no token_ids to normalize.
+		logger := log.FromContext(ctx).WithName(RenderStepName)
+		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
+		return nil
 	}
-	logger := log.FromContext(ctx).WithName(RenderStepName)
-	logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
-	return nil
 }
 
 // executeGenerate handles the tokens-in generate path. It does not tokenize:
@@ -202,7 +203,7 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 		// decode into a minimal struct so completions stays decoupled from the
 		// chat-completions response shape.
 		var renderResp []completionsRenderResponse
-		if err := s.postRender(ctx, reqCtx, gateway.PathCompletions, &renderResp); err != nil {
+		if err := s.postRender(ctx, reqCtx, reqcommon.PathCompletions, &renderResp); err != nil {
 			return err
 		}
 		if len(renderResp) != 1 {
@@ -262,7 +263,7 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	var renderResp renderResponse
-	if err := s.postRender(ctx, reqCtx, gateway.PathChatCompletions, &renderResp); err != nil {
+	if err := s.postRender(ctx, reqCtx, reqcommon.PathChatCompletions, &renderResp); err != nil {
 		return err
 	}
 

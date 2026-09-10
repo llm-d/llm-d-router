@@ -201,7 +201,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 
-			req, err := http.NewRequestWithContext(gctx, "POST", ChatCompletionsPath, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(gctx, "POST", reqcommon.PathChatCompletions, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)

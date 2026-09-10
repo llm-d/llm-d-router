@@ -22,8 +22,7 @@ import (
 	"testing"
 )
 
-// Regression test for the sampling_params sharing that APIType.tokenLimitMap
-// documents.
+// Regression test for the sampling_params sharing that CapSingleToken documents.
 func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	client := map[string]any{
 		"token_ids":         []any{1, 2, 3},
@@ -47,6 +46,47 @@ func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	}
 	if _, ok := prefillLimits[FieldMinTokens]; ok {
 		t.Error("prefill leg kept min_tokens")
+	}
+}
+
+// Callers add transfer params to the returned map, so writes into it must
+// reach the body that is sent.
+func TestCapSingleToken_ReturnsTheCappedMap(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiType APIType
+		body    map[string]any
+		limits  func(body map[string]any) map[string]any
+	}{
+		{
+			name:    "chat completions returns the body",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"model": "m"},
+			limits:  func(body map[string]any) map[string]any { return body },
+		},
+		{
+			name:    "generate returns the body's sampling_params",
+			apiType: APITypeGenerate,
+			body:    map[string]any{"model": "m", FieldSamplingParams: map[string]any{"temperature": 0.5}},
+			limits:  func(body map[string]any) map[string]any { return body[FieldSamplingParams].(map[string]any) },
+		},
+		{
+			name:    "generate returns a synthesized sampling_params",
+			apiType: APITypeGenerate,
+			body:    map[string]any{"model": "m"},
+			limits:  func(body map[string]any) map[string]any { return body[FieldSamplingParams].(map[string]any) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CapSingleToken(tt.body, tt.apiType)
+			got["marker"] = true
+
+			if limits := tt.limits(tt.body); limits["marker"] != true {
+				t.Fatalf("write into the returned map did not reach the body: %v", tt.body)
+			}
+		})
 	}
 }
 
@@ -109,6 +149,12 @@ func TestCapSingleToken(t *testing.T) {
 			name:    "completions caps max_tokens, strips min_tokens, forces non-streaming",
 			apiType: APITypeCompletions,
 			body:    map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5},
+			want:    map[string]any{"model": "m", "max_tokens": 1, "stream": false},
+		},
+		{
+			name:    "messages caps only max_tokens, strips min_tokens, forces non-streaming",
+			apiType: APITypeMessages,
+			body:    map[string]any{"model": "m", "max_tokens": 50, "min_tokens": 5, "stream": true},
 			want:    map[string]any{"model": "m", "max_tokens": 1, "stream": false},
 		},
 		{

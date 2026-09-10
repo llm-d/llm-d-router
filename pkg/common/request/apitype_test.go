@@ -27,6 +27,7 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeCompletions:     {"completions", PathCompletions},
 		APITypeResponses:       {"responses", PathResponses},
 		APITypeGenerate:        {"generate", PathGenerate},
+		APITypeMessages:        {"messages", PathMessages},
 		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
 	for apiType, want := range cases {
@@ -48,10 +49,11 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "chat completions", path: PathChatCompletions, want: APITypeChatCompletions},
 		{name: "completions", path: PathCompletions, want: APITypeCompletions},
 		{name: "responses", path: PathResponses, want: APITypeResponses},
-		{name: "messages shares chat completions fields", path: PathMessages, want: APITypeChatCompletions},
+		{name: "messages", path: PathMessages, want: APITypeMessages},
 		{name: "generate", path: PathGenerate, want: APITypeGenerate},
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
+		{name: "prefixed messages", path: "/prefix" + PathMessages, want: APITypeMessages},
 		{name: "prefixed generate", path: "/prefix" + PathGenerate, want: APITypeGenerate},
 		{name: "unknown path falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
 		{name: "empty path falls back to chat completions", path: "", want: APITypeChatCompletions},
@@ -71,74 +73,12 @@ func TestAPIType_tokenLimitFields(t *testing.T) {
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
 		APITypeGenerate:        {FieldMaxTokens},
+		APITypeMessages:        {FieldMaxTokens},
 		APIType(7):             {FieldMaxTokens, FieldMaxCompletionTokens},
 	}
 	for apiType, want := range cases {
 		if got := apiType.tokenLimitFields(); !reflect.DeepEqual(got, want) {
 			t.Errorf("APIType(%d).tokenLimitFields() = %v, want %v", int(apiType), got, want)
 		}
-	}
-}
-
-func TestAPIType_tokenLimitMap(t *testing.T) {
-	t.Run("non-generate returns the body itself", func(t *testing.T) {
-		body := map[string]any{"model": "m"}
-		got := APITypeChatCompletions.tokenLimitMap(body)
-		if !reflect.DeepEqual(got, body) {
-			t.Errorf("got %v, want the body %v", got, body)
-		}
-		if _, ok := body[FieldSamplingParams]; ok {
-			t.Error("sampling_params was added to a non-generate body")
-		}
-	})
-
-	t.Run("an unrecognized API is treated as chat completions", func(t *testing.T) {
-		body := map[string]any{"model": "m"}
-
-		got := APIType(7).tokenLimitMap(body)
-
-		if !reflect.DeepEqual(got, body) {
-			t.Errorf("got %v, want the body %v", got, body)
-		}
-		if _, ok := body[FieldSamplingParams]; ok {
-			t.Error("sampling_params was added to a non-generate body")
-		}
-	})
-
-	t.Run("generate copies an existing sampling_params", func(t *testing.T) {
-		sp := map[string]any{FieldMaxTokens: 100}
-		body := map[string]any{FieldSamplingParams: sp}
-
-		got := APITypeGenerate.tokenLimitMap(body)
-
-		if !reflect.DeepEqual(got, sp) {
-			t.Errorf("got %v, want the entries of %v", got, sp)
-		}
-		got[FieldMaxTokens] = 1
-		if sp[FieldMaxTokens] != 100 {
-			t.Errorf("caller's sampling_params was written through: %v", sp)
-		}
-		if body[FieldSamplingParams].(map[string]any)[FieldMaxTokens] != 1 {
-			t.Errorf("body sampling_params = %v, want the returned map", body[FieldSamplingParams])
-		}
-	})
-
-	for name, value := range map[string]any{"absent": nil, "not a map": "not-a-map"} {
-		t.Run("generate replaces a sampling_params that is "+name, func(t *testing.T) {
-			body := map[string]any{"model": "m"}
-			if value != nil {
-				body[FieldSamplingParams] = value
-			}
-
-			got := APITypeGenerate.tokenLimitMap(body)
-
-			if len(got) != 0 {
-				t.Errorf("got %v, want an empty map", got)
-			}
-			got[FieldMaxTokens] = 1
-			if sp, ok := body[FieldSamplingParams].(map[string]any); !ok || sp[FieldMaxTokens] != 1 {
-				t.Errorf("body sampling_params = %v, want the returned map", body[FieldSamplingParams])
-			}
-		})
 	}
 }
