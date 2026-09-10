@@ -243,7 +243,7 @@ func TestBaseModelRequestPrefersEndpointsNotServingAdapters(t *testing.T) {
 
 func TestBaseModelRequestIsNeutralWhenEveryEndpointIsFull(t *testing.T) {
 	a := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
-	b := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"p": gpu, "q": cpu}, ActiveModels: map[string]int{"p": 1, "q": 1}}
+	b := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"p": gpu, "q": gpu, "r": cpu}, ActiveModels: map[string]int{"p": 1, "q": 1, "r": 1}}
 	unreported := &fwkdl.Metrics{BaseModel: "base"}
 	got := score(t, nil, "base", endpoint("a", a), endpoint("b", b))
 	assert.Equal(t, got["a"], got["b"])
