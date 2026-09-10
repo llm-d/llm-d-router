@@ -10,8 +10,7 @@
 # active in this environment, so the coordinator adds no value for that path.
 #
 # Paths not listed here (e.g. /v1/completions, /v1/inference) fall through
-# to the catch-all PathPrefix route, which can point at the coordinator or
-# directly at the pool depending on the environment overlay.
+# to the inference-gateway component's catch-all PathPrefix route.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -73,27 +72,6 @@ spec:
     - path:
         type: Exact
         value: /v1/embeddings
-    backendRefs:
-    - group: inference.networking.k8s.io
-      kind: InferencePool
-      name: ${POOL_NAME}
-      port: 8000
-    timeouts:
-      request: 120s
----
-# Catch-all for paths not covered by exact matches above.
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: ${POOL_NAME}-catchall
-spec:
-  parentRefs:
-  - name: inference-gateway
-  rules:
-  - matches:
-    - path:
-        type: PathPrefix
-        value: /
     backendRefs:
     - group: inference.networking.k8s.io
       kind: InferencePool

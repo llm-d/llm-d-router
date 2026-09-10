@@ -76,20 +76,3 @@ spec:
         emptyDir:
           medium: Memory
           sizeLimit: 8Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-omni
-  labels:
-    app: ${POOL_NAME}
-spec:
-  selector:
-    app: ${POOL_NAME}
-    llm-d.ai/model-arch: omni-llm
-  ports:
-  - name: http
-    protocol: TCP
-    port: 8000
-    targetPort: 8000
-  type: ClusterIP
