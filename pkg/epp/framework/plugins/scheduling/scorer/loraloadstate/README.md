@@ -36,6 +36,12 @@ scaled into the range left over by the bonuses):
 Endpoints whose model server does not report residency score by the capacity tiers only, which
 is the same for all such endpoints and leaves the choice to the other scorers in the profile.
 
+Residency is polled with the other metrics (every `--refresh-metrics-interval`, 50 ms by default)
+and the gauges flip when the load completes, so an adapter's first requests can arrive while it
+is still loading and see it as absent. The placement bonus exists for that window: they all go to
+the same endpoint, which becomes the home once the load finishes, instead of each triggering a
+load somewhere else.
+
 A request for the base model itself (the `model_name` the server stamps on its metrics) needs no
 adapter. It scores by the endpoint's share of free GPU slots, so base-model traffic drifts away
 from the pods serving as adapter homes; once every endpoint is full the term is the same
@@ -58,8 +64,10 @@ It also relies on endpoint metric `MaxActiveModels` to determine remaining GPU s
 ## Model server requirements
 
 See [LoRA Adapter Residency](../../../../../../../docs/plugin-metric-protocol.md#lora-adapter-residency)
-for the metrics the model server must expose. The core metrics extractor reads them for vLLM by
-default; other engines set `loraLoadedSpec` and `loraGPULoadedSpec` in their `engineConfigs` entry.
+for the metrics the model server must expose and which vLLM version carries them. The core
+metrics extractor reads them for vLLM by default; other engines set `loraLoadedSpec`,
+`loraGPULoadedSpec` and `loraGPUSlotsSpec` in their `engineConfigs` entry. Servers without the
+gauges are scored by the capacity tiers alone, so the scorer is safe to enable on a mixed fleet.
 
 ## Configuration
 

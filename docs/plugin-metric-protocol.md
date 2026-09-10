@@ -113,7 +113,7 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
 
 ## LoRA Adapter Residency
 
-**Required by:** `lora-load-state-scorer`
+**Required by:** `lora-load-state-scorer`, `lora-residency-filter`
 
 Model servers that keep a cache of loaded LoRA adapters can report which adapters are resident and
 where, so the EPP can route an adapter's requests to servers that already hold it. Unlike the
@@ -137,6 +137,9 @@ and
 * Metric type: Gauge
 * Metric value: The number of adapters occupying GPU slots. This gauge exists from startup, so its
   presence tells the EPP the server reports residency even when no adapter is loaded yet.
+* Metric labels:
+  * `model_name`: The served base model. A request whose `model` equals it needs no adapter, and
+    the residency plugins treat it as not applicable.
 
 and, for the GPU slot capacity,
 
@@ -146,6 +149,14 @@ and, for the GPU slot capacity,
 
 When this gauge is absent, capacity falls back to the `max_lora` label of
 `vllm:lora_requests_info`, which only appears once an adapter has served a request.
+
+Availability: vLLM adds these gauges in [vllm-project/vllm#51433](https://github.com/vllm-project/vllm/pull/51433)
+and [vllm-project/vllm#54830](https://github.com/vllm-project/vllm/pull/54830) (not in a tagged
+release yet). Against a server without them, `LoadedModels` stays nil and the residency plugins
+fall through to the capacity tiers, which score every such endpoint the same. The gauges update
+when the model server finishes loading an adapter, so requests routed during the load itself
+(hundreds of milliseconds for a 1 GB adapter) still see it as absent; the scorer's placement bonus
+sends them to the same endpoint anyway.
 
 ## Prefix Cache Reuse
 
