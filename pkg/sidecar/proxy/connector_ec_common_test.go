@@ -45,42 +45,42 @@ func TestECPipelineTokenLimits(t *testing.T) {
 			apiType:     reqcommon.APITypeChatCompletions,
 			path:        reqcommon.PathChatCompletions,
 			body:        `{"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":80,"max_completion_tokens":90,"min_tokens":5}`,
-			tokenFields: []string{"max_tokens", "max_completion_tokens"},
+			tokenFields: []string{reqcommon.FieldMaxTokens, reqcommon.FieldMaxCompletionTokens},
 		},
 		{
 			name:        "responses",
 			apiType:     reqcommon.APITypeResponses,
 			path:        reqcommon.PathResponses,
 			body:        `{"model":"m","input":"hello","max_output_tokens":800}`,
-			tokenFields: []string{"max_output_tokens"},
+			tokenFields: []string{reqcommon.FieldMaxOutputTokens},
 		},
 		{
 			name:        "responses without limit",
 			apiType:     reqcommon.APITypeResponses,
 			path:        reqcommon.PathResponses,
 			body:        `{"model":"m","input":"hello"}`,
-			tokenFields: []string{"max_output_tokens"},
+			tokenFields: []string{reqcommon.FieldMaxOutputTokens},
 		},
 		{
 			name:        "generate",
 			apiType:     reqcommon.APITypeGenerate,
 			path:        reqcommon.PathGenerate,
 			body:        `{"model":"m","token_ids":[1,2],"sampling_params":{"max_tokens":800,"min_tokens":5,"temperature":0.7}}`,
-			tokenFields: []string{"max_tokens"},
+			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 		{
 			name:        "generate without limits",
 			apiType:     reqcommon.APITypeGenerate,
 			path:        reqcommon.PathGenerate,
 			body:        `{"model":"m","token_ids":[1,2],"sampling_params":{"temperature":0.7}}`,
-			tokenFields: []string{"max_tokens"},
+			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 		{
 			name:        "generate without sampling params",
 			apiType:     reqcommon.APITypeGenerate,
 			path:        reqcommon.PathGenerate,
 			body:        `{"model":"m","token_ids":[1,2]}`,
-			tokenFields: []string{"max_tokens"},
+			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 	}
 
@@ -128,27 +128,150 @@ func TestECPipelineTokenLimits(t *testing.T) {
 					require.NoError(t, json.Unmarshal([]byte(tt.body), &wantPrefill))
 					limits := wantPrefill
 					if tt.apiType == reqcommon.APITypeGenerate {
-						limits, _ = wantPrefill["sampling_params"].(map[string]any)
+						limits, _ = wantPrefill[reqcommon.FieldSamplingParams].(map[string]any)
 						if limits == nil {
 							limits = make(map[string]any)
-							wantPrefill["sampling_params"] = limits
+							wantPrefill[reqcommon.FieldSamplingParams] = limits
 						}
 					}
 					for _, field := range tt.tokenFields {
 						limits[field] = float64(1)
 					}
 					// The prefill leg drops min_tokens; see reqcommon.CapSingleToken.
-					delete(limits, requestFieldMinTokens)
-					wantPrefill["stream"] = false
-					wantPrefill["cache_hit_threshold"] = float64(0)
-					delete(prefillBody, "kv_transfer_params")
+					delete(limits, reqcommon.FieldMinTokens)
+					wantPrefill[reqcommon.FieldStream] = false
+					wantPrefill[reqcommon.FieldCacheHitThreshold] = float64(0)
+					delete(prefillBody, reqcommon.FieldKVTransferParams)
 					assert.Equal(t, wantPrefill, prefillBody)
 
-					delete(decodeBody, "kv_transfer_params")
-					delete(decodeBody, "cache_hit_threshold")
+					delete(decodeBody, reqcommon.FieldKVTransferParams)
+					delete(decodeBody, reqcommon.FieldCacheHitThreshold)
 					assert.Equal(t, original, decodeBody)
 				})
 			}
 		})
 	}
+}
+
+func TestBuildEncoderRequest(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "text",
+						"text": "What's in this image?",
+					},
+					map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "https://example.com/image.jpg",
+						},
+					},
+				},
+			},
+		},
+		"max_tokens": 100,
+		"stream":     true,
+	}
+
+	mmItem := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "https://example.com/image.jpg",
+		},
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	// Verify encoder request modifications
+	assert.Equal(t, 1, encoderRequest["max_tokens"])
+	assert.Equal(t, false, encoderRequest["stream"])
+	_, hasStreamOptions := encoderRequest["stream_options"]
+	assert.False(t, hasStreamOptions)
+
+	// Verify messages contain only the MM item
+	messages, ok := encoderRequest["messages"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, 1, len(messages))
+
+	content, ok := messages[0]["content"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, 1, len(content))
+	assert.Equal(t, "image_url", content[0]["type"])
+}
+
+// TestBuildEncoderRequest_MaxCompletionTokens is a regression test: a shallow
+// copy previously left the client's max_completion_tokens value untouched
+// alongside the newly-capped max_tokens=1, so a reasoning-model client's
+// large max_completion_tokens would survive uncapped into the encoder request.
+func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "https://example.com/image.jpg",
+						},
+					},
+				},
+			},
+		},
+		"max_tokens":            50,
+		"max_completion_tokens": 100,
+	}
+
+	mmItem := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "https://example.com/image.jpg",
+		},
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.Equal(t, 1, encoderRequest["max_tokens"])
+	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
+}
+
+// TestBuildEncoderRequest_MinTokens is a regression test for stripping a
+// client-supplied min_tokens from the encoder leg; reqcommon.CapSingleToken
+// documents why.
+func TestBuildEncoderRequest_MinTokens(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "https://example.com/image.jpg",
+						},
+					},
+				},
+			},
+		},
+		"max_tokens": 50,
+		"min_tokens": 5,
+	}
+
+	mmItem := map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "https://example.com/image.jpg",
+		},
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.Equal(t, 1, encoderRequest["max_tokens"])
+	assert.NotContains(t, encoderRequest, "min_tokens")
 }

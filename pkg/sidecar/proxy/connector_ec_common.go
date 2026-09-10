@@ -112,6 +112,9 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
+	// The encoder leg carries the item in messages and is sent to
+	// reqcommon.PathChatCompletions whatever API the client used (#2742), so it
+	// is capped as chat completions.
 	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
 
 	return encoderRequest
