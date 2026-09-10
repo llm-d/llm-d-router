@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
@@ -36,8 +35,7 @@ func (e Engine) PreparePrefill(reqCtx *pipeline.RequestContext, kvParams, ecPara
 	var body map[string]any
 	switch format {
 	case gateway.FormatChatCompletions:
-		body = maps.Clone(reqCtx.Body)
-		capSingleTokenOutput(body, format)
+		body = reqcommon.SingleTokenChatRequest(reqCtx.Body)
 		tokens := map[string]any{
 			"token_ids": reqCtx.TokenIDs,
 		}

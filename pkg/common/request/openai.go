@@ -16,6 +16,8 @@ limitations under the License.
 
 package request
 
+import "maps"
+
 const imageURLPartType = "image_url"
 
 // ImageParts returns image_url content parts in message order.
@@ -64,6 +66,15 @@ func SingleImageChatRequest(model string, imageParts []map[string]any, index int
 			},
 		},
 	}
+	PrimeSingleTokenRequest(body)
+	return body
+}
+
+// SingleTokenChatRequest copies a chat body into a non-streaming,
+// single-output-token request. Nested values remain shared with the input
+// and must not be mutated through the returned body.
+func SingleTokenChatRequest(body map[string]any) map[string]any {
+	body = maps.Clone(body)
 	PrimeSingleTokenRequest(body)
 	return body
 }
