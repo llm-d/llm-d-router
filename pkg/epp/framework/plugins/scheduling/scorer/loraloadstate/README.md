@@ -43,9 +43,10 @@ the same endpoint, which becomes the home once the load finishes, instead of eac
 load somewhere else.
 
 A request for the base model itself (the `model_name` the server stamps on its metrics) needs no
-adapter. It scores by the endpoint's share of free GPU slots, so base-model traffic drifts away
-from the pods serving as adapter homes; once every endpoint is full the term is the same
-everywhere and the other scorers decide.
+adapter. It scores by the share of GPU slots not serving an adapter right now (a resident adapter
+with nothing in flight does not count), so base-model traffic drifts away from pods that are
+batching LoRA work; once every endpoint is busy the term is the same everywhere and the other
+scorers decide.
 
 ## Scheduling intent
 

@@ -334,14 +334,25 @@ func (s *LoraLoadStateScorer) priced(fixed, seconds float64, known bool) float64
 }
 
 // baseModelHeadroom scores an endpoint for a request that needs no adapter:
-// the share of GPU slots not holding one, so base-model traffic drifts away
-// from adapter homes. Once every endpoint is full the term is constant and
-// the other scorers decide.
+// the share of GPU slots not serving an adapter right now, so base-model
+// traffic drifts away from pods that are batching LoRA work. A resident
+// adapter with nothing in flight costs the base model nothing, so only busy
+// residents count. Once every endpoint is busy the term is constant and the
+// other scorers decide.
 func baseModelHeadroom(m *fwkdl.Metrics) float64 {
 	if m.MaxActiveModels <= 0 {
 		return 1
 	}
-	return float64(max(m.MaxActiveModels-m.GPULoadedModels, 0)) / float64(m.MaxActiveModels)
+	busy := 0
+	for name, state := range m.LoadedModels {
+		if state.Level != fwkdl.LoraLoadLevelGPU {
+			continue
+		}
+		if _, active := m.ActiveModels[name]; active {
+			busy++
+		}
+	}
+	return float64(max(m.MaxActiveModels-busy, 0)) / float64(m.MaxActiveModels)
 }
 
 // isBaseModelRequest reports whether the request targets the served base

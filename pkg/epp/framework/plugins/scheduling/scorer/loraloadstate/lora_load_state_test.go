@@ -223,16 +223,18 @@ func TestFactory(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestBaseModelRequestPrefersAdapterFreeEndpoints(t *testing.T) {
-	resident := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}}
+func TestBaseModelRequestPrefersEndpointsNotServingAdapters(t *testing.T) {
+	resident := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu, "x": gpu}, ActiveModels: map[string]int{"target": 1, "x": 1}}
 	empty := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 0, LoadedModels: map[string]fwkdl.LoraLoadState{}}
-	half := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}}
+	idle := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}}
+	half := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1}}
 	full := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
-	got := score(t, noBonus(), "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("half", half), endpoint("full", full))
+	got := score(t, noBonus(), "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("idle", idle), endpoint("half", half), endpoint("full", full))
 	assert.Equal(t, 1.0, got["empty"])
+	assert.Equal(t, 1.0, got["idle"], "resident but idle adapters cost the base model nothing")
 	assert.Equal(t, 0.5, got["half"])
 	assert.Equal(t, 0.0, got["full"])
-	assert.Equal(t, got["full"], got["resident"], "residency of some adapter is irrelevant to a base-model request")
+	assert.Equal(t, got["full"], got["resident"], "which adapters are busy is irrelevant to a base-model request")
 
 	got = score(t, nil, "target", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
 	assert.Greater(t, got["resident"], got["empty"])
@@ -240,8 +242,8 @@ func TestBaseModelRequestPrefersAdapterFreeEndpoints(t *testing.T) {
 }
 
 func TestBaseModelRequestIsNeutralWhenEveryEndpointIsFull(t *testing.T) {
-	a := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}}
-	b := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"p": gpu, "q": cpu}}
+	a := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
+	b := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"p": gpu, "q": cpu}, ActiveModels: map[string]int{"p": 1, "q": 1}}
 	unreported := &fwkdl.Metrics{BaseModel: "base"}
 	got := score(t, nil, "base", endpoint("a", a), endpoint("b", b))
 	assert.Equal(t, got["a"], got["b"])
