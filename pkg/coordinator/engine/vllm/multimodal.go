@@ -17,10 +17,7 @@ limitations under the License.
 // Package vllm prepares coordinator payloads for the vLLM inference protocol.
 package vllm
 
-import (
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
-)
+import "github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 
 const modalityImage = "image"
 
@@ -66,22 +63,4 @@ func mmKwargsField(kwargs []string) map[string][]any {
 		}
 	}
 	return map[string][]any{modalityImage: items}
-}
-
-// setGenerateTransferParams nests the kv/ec transfer params under
-// sampling_params.extra_args, the only place the /inference/v1/generate engine
-// reads them (top-level kv_transfer_params/ec_transfer_params are ignored on
-// input). It get-or-creates extra_args on the given sampling map so a client's
-// existing generation fields survive. ecParams may be empty, in which case
-// ec_transfer_params is left unset.
-func setGenerateTransferParams(sampling map[string]any, kvParams any, ecParams map[string]any) {
-	extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
-	if !ok {
-		extraArgs = map[string]any{}
-		sampling[reqcommon.FieldExtraArgs] = extraArgs
-	}
-	extraArgs[reqcommon.FieldKVTransferParams] = kvParams
-	if len(ecParams) > 0 {
-		extraArgs[reqcommon.FieldECTransferParams] = ecParams
-	}
 }

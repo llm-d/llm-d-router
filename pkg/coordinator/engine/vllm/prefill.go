@@ -17,9 +17,6 @@ limitations under the License.
 package vllm
 
 import (
-	"encoding/json"
-	"io"
-
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -27,50 +24,24 @@ import (
 
 // PreparePrefill adds vLLM token, feature and transfer fields to a prefill body.
 func PreparePrefill(reqCtx *pipeline.RequestContext, body, kvParams, ecParams map[string]any, format gateway.RequestFormat) {
-	features := buildMMFeatures(reqCtx.MultimodalEntries, true)
 	switch format {
 	case gateway.FormatChatCompletions:
-		tokens := map[string]any{"token_ids": reqCtx.TokenIDs}
-		if features != nil {
-			tokens["features"] = map[string]any{
-				"mm_hashes":       features["mm_hashes"],
-				"mm_placeholders": features["mm_placeholders"],
-			}
-		}
-		body["tokens"] = tokens
-	case gateway.FormatCompletions:
+		SetTokens(body, reqCtx.TokenIDs, reqCtx.MultimodalEntries)
+	case gateway.FormatCompletions, gateway.FormatGenerate:
 		body["request_id"] = reqCtx.RequestID
-		if features != nil {
+		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features
 		}
-	case gateway.FormatGenerate:
-		sampling := map[string]any{reqcommon.FieldMaxTokens: 1}
-		setGenerateTransferParams(sampling, kvParams, ecParams)
-		body["request_id"] = reqCtx.RequestID
-		body["token_ids"] = reqCtx.TokenIDs
-		body[reqcommon.FieldSamplingParams] = sampling
-		if features != nil {
-			body["features"] = features
+		if format == gateway.FormatGenerate {
+			sampling := map[string]any{}
+			setGenerateTransferParams(sampling, kvParams, ecParams)
+			body["token_ids"] = reqCtx.TokenIDs
+			body[reqcommon.FieldSamplingParams] = sampling
+			return
 		}
-		return
 	}
 	body[reqcommon.FieldKVTransferParams] = kvParams
 	if len(ecParams) > 0 {
 		body[reqcommon.FieldECTransferParams] = ecParams
 	}
-}
-
-// ReadPrefillResponse extracts KV transfer parameters from a JSON response.
-func ReadPrefillResponse(body io.Reader) (any, error) {
-	var response prefillResponse
-	if err := json.NewDecoder(body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return response.KVTransferParams, nil
-}
-
-type prefillResponse struct {
-	// KVTransferParams is decoded as any (not map[string]any) so a non-object
-	// value does not fail the decode; coerceParamsMap coerces it.
-	KVTransferParams any `json:"kv_transfer_params"`
 }

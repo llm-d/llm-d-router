@@ -114,7 +114,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	for i, entry := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			body := s.buildEncodeBody(reqCtx, entry, format, imageParts)
+			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
+
+			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
@@ -151,14 +153,14 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				return err
 			}
 
-			params, err := vllm.ReadEncodeResponse(resp.Body)
-			if err != nil {
+			var encResp encodeResponse
+			if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
 				err = fmt.Errorf("encode[%d]: decode response: %w", i, err)
 				logger.Error(err, "encode fanout decode", "index", i)
 				return err
 			}
 
-			results[i] = coerceParamsMap(logger.WithValues("index", i), params, "ec_transfer_params")
+			results[i] = coerceParamsMap(logger.WithValues("index", i), encResp.ECTransferParams, "ec_transfer_params")
 			return nil
 		})
 	}
@@ -175,7 +177,29 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	return nil
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {
+	bos := 1
+	placeholderTokenID := 0
+	if len(fullTokenIDs) > 0 {
+		bos = fullTokenIDs[0]
+		// Only the upper bound is checked here; offset >= 0 is guaranteed for all
+		// paths, either by extractMultimodalEntries (generate) or by the trusted
+		// render-service response (chat/completions). A negative offset would
+		// index out of range.
+		if entry.Placeholder.Offset < len(fullTokenIDs) {
+			placeholderTokenID = fullTokenIDs[entry.Placeholder.Offset]
+		}
+	}
+
+	tokenIDs := make([]int, 1+entry.Placeholder.Length)
+	tokenIDs[0] = bos
+	for j := 1; j <= entry.Placeholder.Length; j++ {
+		tokenIDs[j] = placeholderTokenID
+	}
+	return tokenIDs
+}
+
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
 	body := map[string]any{"model": reqCtx.Model}
 	if format == gateway.FormatChatCompletions {
 		imageContent := buildSingleImageContent(imageParts, entry.Index)
@@ -186,7 +210,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 			},
 		}
 	}
-	vllm.PrepareEncode(reqCtx, body, entry, format)
+	vllm.PrepareEncode(body, tokenIDs, entry, format)
 	capSingleTokenOutput(body, format)
 	return body
 }
@@ -230,4 +254,10 @@ func buildSingleImageContent(imageParts []map[string]any, index int) map[string]
 		"type":      imageURLPartType,
 		"image_url": map[string]any{"url": ""},
 	}
+}
+
+type encodeResponse struct {
+	// ECTransferParams is decoded as any (not map[string]any) so a non-object
+	// value does not fail the decode; coerceParamsMap coerces it.
+	ECTransferParams any `json:"ec_transfer_params"`
 }

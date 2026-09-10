@@ -106,8 +106,14 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 
 func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any) {
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	if format == gateway.FormatCompletions && len(reqCtx.TokenIDs) > 0 {
-		body["prompt"] = reqCtx.TokenIDs
+	switch format {
+	case gateway.FormatChatCompletions:
+		if len(reqCtx.TokenIDs) > 0 {
+			vllm.SetTokens(body, reqCtx.TokenIDs, reqCtx.MultimodalEntries)
+		}
+	case gateway.FormatCompletions:
+		if len(reqCtx.TokenIDs) > 0 {
+			body["prompt"] = reqCtx.TokenIDs
+		}
 	}
-	vllm.PrepareConditionalDecode(reqCtx, body, format)
 }

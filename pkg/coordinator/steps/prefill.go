@@ -118,12 +118,12 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		return upstreamError(PrefillStepName, resp.StatusCode, respBody)
 	}
 
-	params, err := vllm.ReadPrefillResponse(resp.Body)
-	if err != nil {
+	var prefillResp prefillResponse
+	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
 		return fmt.Errorf("prefill: decode response: %w", err)
 	}
 
-	reqCtx.KVTransferParams = coerceParamsMap(logger, params, "kv_transfer_params")
+	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
@@ -154,4 +154,10 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	vllm.PreparePrefill(reqCtx, body, kvParams, ecParams, format)
 	capSingleTokenOutput(body, format)
 	return body, nil
+}
+
+type prefillResponse struct {
+	// KVTransferParams is decoded as any (not map[string]any) so a non-object
+	// value does not fail the decode; coerceParamsMap coerces it.
+	KVTransferParams any `json:"kv_transfer_params"`
 }

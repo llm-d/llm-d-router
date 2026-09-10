@@ -28,7 +28,7 @@ func PrepareDecode(reqCtx *pipeline.RequestContext, kvParams map[string]any, for
 	switch format {
 	case gateway.FormatChatCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
-		injectTokensField(reqCtx, reqCtx.Body)
+		SetTokens(reqCtx.Body, reqCtx.TokenIDs, reqCtx.MultimodalEntries)
 	case gateway.FormatCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case gateway.FormatGenerate:
@@ -41,16 +41,10 @@ func PrepareDecode(reqCtx *pipeline.RequestContext, kvParams map[string]any, for
 	}
 }
 
-// PrepareConditionalDecode adds rendered tokens to a vLLM chat cache probe.
-func PrepareConditionalDecode(reqCtx *pipeline.RequestContext, body map[string]any, format gateway.RequestFormat) {
-	if format == gateway.FormatChatCompletions && len(reqCtx.TokenIDs) > 0 {
-		injectTokensField(reqCtx, body)
-	}
-}
-
-func injectTokensField(reqCtx *pipeline.RequestContext, body map[string]any) {
-	tokens := map[string]any{"token_ids": reqCtx.TokenIDs}
-	if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
+// SetTokens writes rendered tokens and multimodal features into the vLLM chat token field.
+func SetTokens(body map[string]any, tokenIDs []int, entries []pipeline.MultimodalEntry) {
+	tokens := map[string]any{"token_ids": tokenIDs}
+	if features := buildMMFeatures(entries, false); features != nil {
 		tokens["features"] = features
 	}
 	body["tokens"] = tokens
@@ -85,5 +79,23 @@ func injectUUIDs(reqCtx *pipeline.RequestContext) {
 				hashIdx++
 			}
 		}
+	}
+}
+
+// setGenerateTransferParams nests the kv/ec transfer params under
+// sampling_params.extra_args, the only place the /inference/v1/generate engine
+// reads them (top-level kv_transfer_params/ec_transfer_params are ignored on
+// input). It get-or-creates extra_args on the given sampling map so a client's
+// existing generation fields survive. ecParams may be empty, in which case
+// ec_transfer_params is left unset.
+func setGenerateTransferParams(sampling map[string]any, kvParams any, ecParams map[string]any) {
+	extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
+	if !ok {
+		extraArgs = map[string]any{}
+		sampling[reqcommon.FieldExtraArgs] = extraArgs
+	}
+	extraArgs[reqcommon.FieldKVTransferParams] = kvParams
+	if len(ecParams) > 0 {
+		extraArgs[reqcommon.FieldECTransferParams] = ecParams
 	}
 }
