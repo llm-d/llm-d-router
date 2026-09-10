@@ -39,30 +39,25 @@ func TestAPIType_StringAndPath(t *testing.T) {
 	}
 }
 
-func TestLookupAPIType(t *testing.T) {
+func TestDetectAPIType(t *testing.T) {
 	tests := []struct {
-		name      string
-		path      string
-		want      APIType
-		wantKnown bool
+		name string
+		path string
+		want APIType
 	}{
-		{name: "chat completions", path: PathChatCompletions, want: APITypeChatCompletions, wantKnown: true},
-		{name: "completions", path: PathCompletions, want: APITypeCompletions, wantKnown: true},
-		{name: "responses", path: PathResponses, want: APITypeResponses, wantKnown: true},
-		{name: "messages shares chat completions fields", path: PathMessages, want: APITypeChatCompletions, wantKnown: true},
-		{name: "generate", path: PathGenerate, want: APITypeGenerate, wantKnown: true},
-		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions, wantKnown: true},
-		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions, wantKnown: true},
-		{name: "prefixed generate", path: "/prefix" + PathGenerate, want: APITypeGenerate, wantKnown: true},
-		{name: "unknown path is unknown and falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
-		{name: "empty path is unknown and falls back to chat completions", path: "", want: APITypeChatCompletions},
+		{name: "chat completions", path: PathChatCompletions, want: APITypeChatCompletions},
+		{name: "completions", path: PathCompletions, want: APITypeCompletions},
+		{name: "responses", path: PathResponses, want: APITypeResponses},
+		{name: "messages shares chat completions fields", path: PathMessages, want: APITypeChatCompletions},
+		{name: "generate", path: PathGenerate, want: APITypeGenerate},
+		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
+		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
+		{name: "prefixed generate", path: "/prefix" + PathGenerate, want: APITypeGenerate},
+		{name: "unknown path falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
+		{name: "empty path falls back to chat completions", path: "", want: APITypeChatCompletions},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, known := LookupAPIType(tt.path)
-			if got != tt.want || known != tt.wantKnown {
-				t.Errorf("LookupAPIType(%q) = %v, %t, want %v, %t", tt.path, got, known, tt.want, tt.wantKnown)
-			}
 			if got := DetectAPIType(tt.path); got != tt.want {
 				t.Errorf("DetectAPIType(%q) = %v, want %v", tt.path, got, tt.want)
 			}

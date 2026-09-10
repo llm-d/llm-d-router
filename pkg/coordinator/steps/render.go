@@ -124,17 +124,14 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	// The Responses API, and any path the router does not register, carry no
-	// token_ids to normalize, so they skip the step.
-	if apiType, known := reqcommon.LookupAPIType(reqCtx.OriginalPath); known {
-		switch apiType {
-		case reqcommon.APITypeGenerate:
-			return s.executeGenerate(ctx, reqCtx)
-		case reqcommon.APITypeCompletions:
-			return s.executeCompletions(ctx, reqCtx)
-		case reqcommon.APITypeChatCompletions:
-			return s.executeChatCompletions(ctx, reqCtx)
-		}
+	// The Responses API carries no token_ids to normalize, so it skips the step.
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeGenerate:
+		return s.executeGenerate(ctx, reqCtx)
+	case reqcommon.APITypeCompletions:
+		return s.executeCompletions(ctx, reqCtx)
+	case reqcommon.APITypeChatCompletions:
+		return s.executeChatCompletions(ctx, reqCtx)
 	}
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 	logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)

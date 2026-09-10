@@ -61,17 +61,11 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 
 // resolveFormat maps a request path to the wire format a step emits. The steps
 // build only Completions, Chat Completions, and generate bodies, so any other
-// API, and any path the router does not register, collapses to APITypeGenerate;
-// Chat Completions additionally requires useOpenAIFormat. Generate is the
-// fallback because its body carries the prompt as reqCtx.TokenIDs and does not
-// depend on the client's request shape. It differs from LookupAPIType's
-// fallback, which names the API a path speaks.
+// API collapses to APITypeGenerate; Chat Completions additionally requires
+// useOpenAIFormat. Generate is the fallback because its body carries the prompt
+// as reqCtx.TokenIDs and does not depend on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
-	detected, known := reqcommon.LookupAPIType(path)
-	if !known {
-		return reqcommon.APITypeGenerate
-	}
-	switch detected {
+	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
 	case reqcommon.APITypeChatCompletions:

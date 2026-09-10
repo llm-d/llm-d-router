@@ -667,9 +667,10 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 	step, _ := NewPrefillStep(gwClient, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
-		RequestID: "req-1",
-		Model:     "test",
-		TokenIDs:  []int{1, 2345},
+		RequestID:    "req-1",
+		Model:        "test",
+		OriginalPath: gateway.DefaultGeneratePath,
+		TokenIDs:     []int{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},

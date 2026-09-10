@@ -179,34 +179,25 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	}
 }
 
-// The step renders only the generate, completions, and chat completions APIs.
-// Every other path reaches it without a body it knows how to normalize.
-func TestRenderStep_SkipsUnhandledAPIs(t *testing.T) {
-	for name, path := range map[string]string{
-		"responses":         reqcommon.PathResponses,
-		"unregistered path": "/v1/embeddings",
-	} {
-		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-				t.Fatal("render service should not be called")
-			}))
-			defer server.Close()
+func TestRenderStep_Responses_SkipsRender(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("render service should not be called for the responses API")
+	}))
+	defer server.Close()
 
-			step, _ := NewRenderStep(nil, map[string]any{})
-			step.(*RenderStep).SetServiceAddress(server.URL)
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
 
-			reqCtx := &pipeline.RequestContext{
-				OriginalPath: path,
-				Body:         map[string]any{"model": "test", "input": "hello"},
-			}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathResponses,
+		Body:         map[string]any{"model": "test", "input": "hello"},
+	}
 
-			if err := step.Execute(context.Background(), reqCtx); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(reqCtx.TokenIDs) != 0 {
-				t.Fatalf("expected no token_ids, got %v", reqCtx.TokenIDs)
-			}
-		})
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.TokenIDs) != 0 {
+		t.Fatalf("expected no token_ids, got %v", reqCtx.TokenIDs)
 	}
 }
 

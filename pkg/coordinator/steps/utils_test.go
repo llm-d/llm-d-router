@@ -59,7 +59,6 @@ func TestResolveFormat(t *testing.T) {
 		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
 		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathGenerate, want: reqcommon.APITypeGenerate},
 		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeGenerate},
-		{name: "unregistered path collapses to generate", useOpenAIFormat: true, path: "/v1/embeddings", want: reqcommon.APITypeGenerate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

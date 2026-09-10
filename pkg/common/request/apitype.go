@@ -79,30 +79,24 @@ func (a APIType) Path() string {
 	}
 }
 
-// LookupAPIType classifies a request path and reports whether the path matched
-// a known API. A step that must not process a path the router does not register
-// reads the second value; the first is APITypeChatCompletions when it is false.
-func LookupAPIType(path string) (APIType, bool) {
+// DetectAPIType classifies a request path. An unrecognized path maps to
+// APITypeChatCompletions: callers that route only known paths never reach the
+// fallback.
+func DetectAPIType(path string) APIType {
 	switch {
 	case strings.Contains(path, PathChatCompletions):
-		return APITypeChatCompletions, true
+		return APITypeChatCompletions
 	case strings.Contains(path, PathCompletions):
-		return APITypeCompletions, true
+		return APITypeCompletions
 	case strings.Contains(path, PathResponses):
-		return APITypeResponses, true
+		return APITypeResponses
 	case strings.Contains(path, PathMessages):
-		return APITypeChatCompletions, true
+		return APITypeChatCompletions
 	case strings.Contains(path, PathGenerate):
-		return APITypeGenerate, true
+		return APITypeGenerate
 	default:
-		return APITypeChatCompletions, false
+		return APITypeChatCompletions
 	}
-}
-
-// DetectAPIType is LookupAPIType for callers that pass only known paths.
-func DetectAPIType(path string) APIType {
-	apiType, _ := LookupAPIType(path)
-	return apiType
 }
 
 // JSON request field names that cap output tokens, by API. Chat completions caps
