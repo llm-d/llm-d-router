@@ -1237,6 +1237,9 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"language": "en",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Transcriptions: &fwkrh.TranscriptionsRequest{
+					Language: "en",
+				},
 				Payload: fwkrh.PayloadMap{
 					"model":    "whisper-1",
 					"language": "en",
@@ -1277,20 +1280,6 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"prompt": "",
 			},
 			wantErr: true,
-		},
-		{
-			name:    "generic inference request",
-			headers: map[string]string{":path": "/v1/inference"},
-			body: map[string]any{
-				"model":           "my-model",
-				"routing_profile": "tts",
-			},
-			want: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.PayloadMap{
-					"model":           "my-model",
-					"routing_profile": "tts",
-				},
-			},
 		},
 	}
 
@@ -1966,7 +1955,6 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			imagesEditsAPI,
 			audioSpeechAPI,
 			audioTranscriptionsAPI,
-			inferenceAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}

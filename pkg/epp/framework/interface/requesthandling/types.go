@@ -90,7 +90,7 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
 // An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
-// TextToSpeechRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, ImagesGenerationsRequest, or MessagesRequest.
+// TextToSpeechRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, ImagesGenerationsRequest, TranscriptionsRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -112,6 +112,8 @@ type InferenceRequestBody struct {
 	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations
 	// or /v1/images/edits request body.
 	Images *ImagesGenerationsRequest `json:"images,omitempty"`
+	// TranscriptionsRequest is the representation of the OpenAI /v1/audio/transcriptions request body.
+	Transcriptions *TranscriptionsRequest `json:"transcriptions,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -582,6 +584,19 @@ func (i *ImagesGenerationsRequest) String() string {
 	}
 	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v}",
 		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
+}
+
+// TranscriptionsRequest is the representation of the OpenAI /v1/audio/transcriptions request body.
+type TranscriptionsRequest struct {
+	// Language is the ISO-639-1 language of the input audio.
+	Language string `json:"language,omitempty"`
+}
+
+func (t *TranscriptionsRequest) String() string {
+	if t == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{Language: %s}", t.Language)
 }
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints

@@ -51,7 +51,6 @@ const (
 	imagesEditsAPI         = "images/edits"
 	audioSpeechAPI         = "audio/speech"
 	audioTranscriptionsAPI = "audio/transcriptions"
-	inferenceAPI           = "inference"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -119,7 +118,6 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			imagesEditsAPI,
 			audioSpeechAPI,
 			audioTranscriptionsAPI,
-			inferenceAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -348,9 +346,6 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/audio/transcriptions") {
 		return audioTranscriptionsAPI
 	}
-	if request.MatchPathSuffix(path, "/inference") {
-		return inferenceAPI
-	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -441,8 +436,12 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 		}
 		return &fwkrh.InferenceRequestBody{Images: &images}, nil
 
-	case audioTranscriptionsAPI, inferenceAPI:
-		return &fwkrh.InferenceRequestBody{}, nil
+	case audioTranscriptionsAPI:
+		var transcriptions fwkrh.TranscriptionsRequest
+		if err := json.Unmarshal(rawBody, &transcriptions); err != nil {
+			return nil, requestBodyDecodeError(err, errors.New("invalid audio transcriptions request"))
+		}
+		return &fwkrh.InferenceRequestBody{Transcriptions: &transcriptions}, nil
 
 	default:
 		return nil, errors.New("unsupported API endpoint")

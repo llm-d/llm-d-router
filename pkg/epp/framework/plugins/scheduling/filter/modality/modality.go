@@ -19,14 +19,25 @@ package modality
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
-	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const ModalityFilterType = "modality-filter"
+
+// ModelArchLabel is the pod label indicating the model architecture category.
+const ModelArchLabel = "llm-d.ai/model-arch"
+
+// Model architecture values.
+const (
+	ModelArchOmniLLM        = "omni-llm"
+	ModelArchDiffusion      = "diffusion"
+	ModelArchAutoRegressTTS = "autoregressive-tts"
+	ModelArchEncoderDecSTT  = "encoder-decoder-stt"
+	ModelArchAutoRegressLLM = "autoregressive-llm"
+)
 
 var _ scheduling.Filter = &ModalityFilter{}
 
@@ -36,8 +47,8 @@ func ModalityFilterFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugi
 }
 
 // ModalityFilter selects endpoints whose llm-d.ai/model-arch label matches the
-// architectures compatible with the request path. Paths not in PathToModelArch
-// pass all endpoints through unchanged.
+// architectures compatible with the parsed request body. Request types with no
+// compatible-architecture mapping pass all endpoints through unchanged.
 type ModalityFilter struct {
 	typedName plugin.TypedName
 }
@@ -61,14 +72,10 @@ func (f *ModalityFilter) TypedName() plugin.TypedName {
 }
 
 // Filter keeps only endpoints whose model-arch label is compatible with the
-// request path. Unknown paths return all endpoints unfiltered.
+// request body type. Request types with no compatible-architecture mapping
+// return all endpoints unfiltered.
 func (f *ModalityFilter) Filter(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
-	path := request.Headers[common.EnvoyPathHeader]
-	if idx := strings.IndexByte(path, '?'); idx >= 0 {
-		path = path[:idx]
-	}
-
-	validArchs, known := common.PathToModelArch[path]
+	validArchs, known := modalityArchs(request.Body)
 	if !known {
 		return endpoints
 	}
@@ -80,11 +87,28 @@ func (f *ModalityFilter) Filter(_ context.Context, request *scheduling.Inference
 
 	filtered := make([]scheduling.Endpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
-		archLabel := ep.GetMetadata().Labels[common.ModelArchLabel]
+		archLabel := ep.GetMetadata().Labels[ModelArchLabel]
 		if _, ok := archSet[archLabel]; ok {
 			filtered = append(filtered, ep)
 		}
 	}
 
 	return filtered
+}
+
+// modalityArchs returns the model-arch label values that can serve body, and
+// false when body's request type carries no architecture constraint.
+func modalityArchs(body *fwkrh.InferenceRequestBody) ([]string, bool) {
+	switch {
+	case body == nil:
+		return nil, false
+	case body.TextToSpeech != nil:
+		return []string{ModelArchOmniLLM, ModelArchAutoRegressTTS}, true
+	case body.Images != nil:
+		return []string{ModelArchDiffusion}, true
+	case body.Transcriptions != nil:
+		return []string{ModelArchEncoderDecSTT}, true
+	default:
+		return nil, false // text request, pass all endpoints through
+	}
 }
