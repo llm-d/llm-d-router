@@ -130,7 +130,6 @@ The model server SHOULD expose the following metrics via the same Prometheus end
   * `level`: `gpu` when the adapter occupies a GPU slot and can serve immediately, `cpu` when it is
     held only in the host cache.
   * `pinned`: `true` when the adapter is exempt from eviction.
-  * `rank` (optional): the adapter's LoRA rank, a proxy for its size and load cost.
 
 and
 

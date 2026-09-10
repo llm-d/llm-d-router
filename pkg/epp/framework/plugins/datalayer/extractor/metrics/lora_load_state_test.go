@@ -48,12 +48,6 @@ func loadedSeries(engine, adapter, level, pinned string, value float64) *dto.Met
 	}
 }
 
-func rankedSeries(engine, adapter, level, rank string) *dto.Metric {
-	m := loadedSeries(engine, adapter, level, "false", 1)
-	m.Label = append(m.Label, &dto.LabelPair{Name: proto.String(LoraLoadedRankLabel), Value: proto.String(rank)})
-	return m
-}
-
 func countSeries(engine string, value float64) *dto.Metric {
 	return &dto.Metric{
 		Label: []*dto.LabelPair{
@@ -165,26 +159,6 @@ func TestExtractorLoraLoadState(t *testing.T) {
 			},
 			wantLoaded:  map[string]fwkdl.LoraLoadState{"carol": gpu},
 			wantGPU:     1,
-			wantBase:    "base",
-			wantUpdated: true,
-		},
-		{
-			name:       "rank label is kept and survives the multi-engine union",
-			loadedSpec: loraLoadedMetric,
-			countSpec:  loraGPULoadedMetric,
-			families: sourcemetrics.PrometheusMetricMap{
-				loraLoadedMetric: gaugeFamily(
-					rankedSeries("0", "alice", "gpu", "64"),
-					rankedSeries("1", "alice", "cpu", "64"),
-					rankedSeries("0", "bob", "gpu", "not-a-number"),
-				),
-				loraGPULoadedMetric: gaugeFamily(countSeries("0", 2)),
-			},
-			wantLoaded: map[string]fwkdl.LoraLoadState{
-				"alice": {Level: fwkdl.LoraLoadLevelGPU, Rank: 64},
-				"bob":   gpu,
-			},
-			wantGPU:     2,
 			wantBase:    "base",
 			wantUpdated: true,
 		},

@@ -57,7 +57,6 @@ const (
 	LoraLoadedAdapterNameLabel = "adapter_name"
 	LoraLoadedLevelLabel       = "level"
 	LoraLoadedPinnedLabel      = "pinned"
-	LoraLoadedRankLabel        = "rank"
 	// Label every vLLM metric carries with the served base model.
 	LoraModelNameLabel = "model_name"
 	// Label on the transition-time histogram and its two values.
@@ -350,10 +349,6 @@ func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sour
 					state.Level = fwkdl.LoraLoadLevel(label.GetValue())
 				case LoraLoadedPinnedLabel:
 					state.Pinned = label.GetValue() == "true"
-				case LoraLoadedRankLabel:
-					if rank, err := strconv.Atoi(label.GetValue()); err == nil {
-						state.Rank = rank
-					}
 				}
 			}
 			if name == "" {
@@ -364,7 +359,6 @@ func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sour
 					state.Level = prev.Level
 				}
 				state.Pinned = state.Pinned || prev.Pinned
-				state.Rank = max(state.Rank, prev.Rank)
 			}
 			loaded[name] = state
 		}

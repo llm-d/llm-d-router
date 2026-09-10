@@ -37,8 +37,6 @@ const (
 type LoraLoadState struct {
 	Level  LoraLoadLevel
 	Pinned bool
-	// Rank is the adapter's LoRA rank, a proxy for its size; 0 when not reported.
-	Rank int
 }
 
 // Metrics holds the latest metrics snapshot scraped from a pod.
