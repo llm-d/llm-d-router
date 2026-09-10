@@ -103,6 +103,9 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
 	}
 	for _, mapping := range ext.registry.Mappings() {
+		for _, tiered := range mapping.TieredOffloading {
+			produced[attrmetrics.ScalarMetricDataKey(tiered.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+		}
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
 		}
@@ -194,6 +197,17 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			clone.CacheNumBlocks = int(extractValue(metric))
 			updated = true
 		}
+	}
+
+	// All specs absent means the engine is not offloading at all: leave the attributes unset so a
+	// non-tiering endpoint is distinguishable from an idle tiering one.
+	for _, tiered := range mapping.TieredOffloading {
+		metric, err := tiered.Spec.getLatestMetric(families)
+		if err != nil {
+			continue
+		}
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(tiered.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
+		updated = true
 	}
 
 	for _, custom := range mapping.CustomMetrics {

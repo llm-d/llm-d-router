@@ -45,6 +45,26 @@ defaults to `false`: KV events arrive at many times the inference request rate,
 so with a shared head sampler always-on event spans crowd request traces out of
 the exported volume. The EPP `--tracing` flag gates tracing as a whole, so this
 field has no effect while that is off.
+### Device tier weights
+
+`indexerConfig.kvCacheBackendConfigs` controls how much a cached block
+on each device tier contributes to an endpoint's prefix match score.
+Defaults: `gpu=1.0`, `cpu=0.8`, `storage=0.3`. The `storage` tier
+covers filesystem-backed offloading (vLLM `TieringOffloadingSpec`);
+the conservative default suits most media. Override for fast storage (e.g. NVMe):
+
+```yaml
+indexerConfig:
+  kvCacheBackendConfigs:
+    - name: "gpu"
+      weight: 1.0
+    - name: "cpu"
+      weight: 0.8
+    - name: "storage"
+      weight: 0.6
+```
+
+Omit `kvCacheBackendConfigs` entirely to use the defaults. When overriding any tier, all tiers must be specified. The list replaces the defaults entirely.
 
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.

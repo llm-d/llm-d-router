@@ -139,6 +139,16 @@ func TestMatchBlockKeys(t *testing.T) {
 			},
 		},
 		{
+			name: "storage tier weighs its configured default",
+			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
+				10: {{PodIdentifier: podA, DeviceTier: "storage"}},
+			},
+			requestKeys: []kvblock.BlockHash{10},
+			want: map[string]kvcache.PodMatch{
+				podA: {WeightedScore: 0.3, MatchedBlocks: 1, BlocksByTier: map[string]int{"storage": 1}},
+			},
+		},
+		{
 			name: "unconfigured tier weighs the default",
 			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
 				10: {{PodIdentifier: podA, DeviceTier: "disk"}},
