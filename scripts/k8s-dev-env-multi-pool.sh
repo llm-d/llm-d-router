@@ -328,7 +328,7 @@ EOF
 
 # Accumulate per-pool resource names for the teardown section.
 _del_deployments="${PRE_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME}"
-_del_services=""
+_del_services="${PRE_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME}"
 _del_configmaps="envoy"
 _del_serviceaccounts=""
 _del_roles=""

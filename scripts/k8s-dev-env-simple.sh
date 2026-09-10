@@ -264,7 +264,7 @@ With that running in the background, you can make requests using port-forward an
 Resources created in namespace ${NAMESPACE}:
 
   Deployments:       ${PRE_DEPLOYMENT_NAME} ${INF_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME} ${EPP_NAME}
-  Services:          ${INF_DEPLOYMENT_NAME} inference-gateway-minimal
+  Services:          ${PRE_DEPLOYMENT_NAME} ${INF_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME} inference-gateway-minimal
   ConfigMaps:        envoy epp-config
   ServiceAccounts:   ${EPP_NAME}
   Roles:             ${EPP_NAME}
@@ -274,7 +274,7 @@ Resources created in namespace ${NAMESPACE}:
 To delete all of the above:
 
   kubectl -n ${NAMESPACE} delete deployment ${PRE_DEPLOYMENT_NAME} ${INF_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME} ${EPP_NAME}
-  kubectl -n ${NAMESPACE} delete service ${INF_DEPLOYMENT_NAME} inference-gateway-minimal
+  kubectl -n ${NAMESPACE} delete service ${PRE_DEPLOYMENT_NAME} ${INF_DEPLOYMENT_NAME} ${POST_DEPLOYMENT_NAME} inference-gateway-minimal
   kubectl -n ${NAMESPACE} delete configmap envoy epp-config
   kubectl -n ${NAMESPACE} delete serviceaccount ${EPP_NAME}
   kubectl -n ${NAMESPACE} delete role ${EPP_NAME}
