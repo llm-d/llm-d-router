@@ -33,8 +33,7 @@ const (
 
 // APIType is the inference API a request speaks. It selects the JSON field
 // names a request carries and the path a synthesized request is sent to. A
-// value outside the constants below degrades to APITypeChatCompletions, the
-// same fallback DetectAPIType applies to an unrecognized path.
+// value outside the constants below degrades to APITypeChatCompletions.
 type APIType int
 
 const (
@@ -100,9 +99,7 @@ func LookupAPIType(path string) (APIType, bool) {
 	}
 }
 
-// DetectAPIType classifies a request path, treating an unrecognized path as
-// APITypeChatCompletions. Callers that route only known paths never reach that
-// fallback.
+// DetectAPIType is LookupAPIType for callers that pass only known paths.
 func DetectAPIType(path string) APIType {
 	apiType, _ := LookupAPIType(path)
 	return apiType

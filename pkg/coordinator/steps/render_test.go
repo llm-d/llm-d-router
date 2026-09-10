@@ -179,7 +179,7 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	}
 }
 
-// The step renders only the chat completions, completions, and generate APIs.
+// The step renders only the generate, completions, and chat completions APIs.
 // Every other path reaches it without a body it knows how to normalize.
 func TestRenderStep_SkipsUnhandledAPIs(t *testing.T) {
 	for name, path := range map[string]string{

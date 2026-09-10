@@ -311,17 +311,13 @@ var _ = Describe("Common Connector tests", func() {
 					Fail(string(bp))
 				}
 
-				By("verifying prefill request's min_tokens does not exceed max_tokens=1")
+				By("verifying prefill request drops min_tokens")
 				Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 				Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
 				prefillReq := testInfo.prefillHandler.CompletionRequests[0]
 
 				Expect(prefillReq).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
-				// Stripped (shared-storage) or capped to 1 (NIXLv2): either way it
-				// must not exceed the prefill leg's max_tokens=1.
-				if minTokens, ok := prefillReq["min_tokens"]; ok {
-					Expect(minTokens).To(BeNumerically("<=", 1))
-				}
+				Expect(prefillReq).ToNot(HaveKey(requestFieldMinTokens))
 
 				By("verifying decode request keeps the client's original min_tokens=5")
 				Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
