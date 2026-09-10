@@ -79,8 +79,11 @@ var _ = Describe("SGLang Connector", func() {
 		}
 
 		// Because SGLang connector sends requests concurrently (prefill in goroutine),
-		// wait until the prefill handler has finished processing before reading its state.
-		Eventually(testInfo.prefillHandler.RequestCount.Load).Should(Equal(int32(1)))
+		// wait until the prefill handler has finished processing before reading its
+		// state. The wait polls the recorded requests rather than RequestCount: the
+		// mock counts a request on entry and records it after reading the body, so
+		// the counter reaches 1 while the slice is still empty.
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
 
 		// Validate prefill request
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
