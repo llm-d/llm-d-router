@@ -51,16 +51,32 @@ func parseTopic(topic string) (string, string) {
 	return topic, ""
 }
 
-// getHashAsUint64 converts engine hash formats (uint64, int64, or []byte) to uint64.
-// This handles both legacy uint64 hashes and new []byte hashes by taking
-// the last 8 bytes and interpreting them as a big-endian integer.
+// getHashAsUint64 converts MessagePack integer types or []byte to uint64.
+// MessagePack may decode small Python int values into narrow Go integer types,
+// so all supported integer widths are accepted.
+// Signed integer hashes preserve their two's-complement bit pattern. Byte
+// hashes use the last 8 bytes, interpreted as a big-endian integer.
 func getHashAsUint64(raw any) (uint64, error) {
 	switch val := raw.(type) {
 	case uint64:
 		return val, nil
+	case uint32:
+		return uint64(val), nil
+	case uint16:
+		return uint64(val), nil
+	case uint8:
+		return uint64(val), nil
+	case int32:
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
+		return uint64(val), nil
+	case int16:
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
+		return uint64(val), nil
+	case int8:
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
+		return uint64(val), nil
 	case int64:
-		// msgpack can decode small integers as int64
-		//nolint:gosec // int64 to uint64 conversion is safe here
+		//nolint:gosec // preserve the two's-complement bit pattern of signed hashes
 		return uint64(val), nil
 	case []byte:
 		if len(val) == 0 {
