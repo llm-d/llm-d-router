@@ -35,6 +35,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/lora"
 )
 
 const (
@@ -151,7 +152,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		return kept
 	}
 
-	if request == nil || request.TargetModel == "" || len(endpoints) <= 1 || isBaseModelRequest(request, endpoints) {
+	if request == nil || request.TargetModel == "" || len(endpoints) <= 1 || lora.IsBaseModelRequest(request, endpoints) {
 		return decide(outcomeNotApplicable, endpoints)
 	}
 	span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
@@ -192,17 +193,6 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		}
 	}
 	return decide(outcomeFleetSaturated, homes)
-}
-
-// isBaseModelRequest reports whether the request targets the served base
-// model, which needs no adapter and therefore has no home.
-func isBaseModelRequest(request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
-	for _, ep := range endpoints {
-		if base := ep.GetMetrics().BaseModel; base != "" && base == request.TargetModel {
-			return true
-		}
-	}
-	return false
 }
 
 func (p *Plugin) saturated(ep fwksched.Endpoint) bool {

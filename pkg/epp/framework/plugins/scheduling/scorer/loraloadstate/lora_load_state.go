@@ -28,6 +28,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/lora"
 )
 
 const (
@@ -227,7 +228,7 @@ func (s *LoraLoadStateScorer) WithName(name string) *LoraLoadStateScorer {
 func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	scale := 1 - s.scores.budget()
-	if isBaseModelRequest(request, endpoints) {
+	if lora.IsBaseModelRequest(request, endpoints) {
 		for _, endpoint := range endpoints {
 			scores[endpoint] = baseModelHeadroom(endpoint.GetMetrics()) * scale
 		}
@@ -238,28 +239,9 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 
 	for _, endpoint := range endpoints {
 		m := endpoint.GetMetrics()
-		state, resident := m.LoadedModels[request.TargetModel]
-		cost := costs[endpoint]
-
-		var tier float64
-		switch {
-		case resident && state.Level == fwkdl.LoraLoadLevelGPU:
-			tier = s.scores.gpuResident
-		case resident:
-			tier = s.priced(s.scores.cpuResident, cost.activate, cost.known)
-		case m.GPULoadedModels < m.MaxActiveModels:
-			tier = s.priced(s.scores.freeSlot, cost.load+cost.activate, cost.known)
-		case hasIdleResident(m):
-			tier = s.priced(s.scores.evictable, cost.load+cost.activate, cost.known)
-			if s.scores.freeSlot > 0 && cost.known && s.scores.loadHorizon > 0 {
-				tier *= s.scores.evictable / s.scores.freeSlot
-			}
-		default:
-			tier = s.scores.saturated
-		}
-
-		score := tier * scale
-		if endpoint == preferred && (!resident || state.Level != fwkdl.LoraLoadLevelGPU) {
+		r := classify(m, request.TargetModel)
+		score := s.tierScore(r, costs[endpoint]) * scale
+		if endpoint == preferred && r != gpuResident {
 			score += s.scores.placementBonus
 		}
 		if m.MaxActiveModels > 0 && m.GPULoadedModels < m.MaxActiveModels {
@@ -269,6 +251,69 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 	}
 
 	return scores
+}
+
+// residency is where an endpoint stands relative to one adapter, from
+// cheapest to most expensive to serve it there.
+type residency int
+
+const (
+	gpuResident residency = iota
+	cpuResident
+	freeSlot
+	evictable
+	saturated
+)
+
+// classify places an endpoint in a residency tier for the adapter.
+func classify(m *fwkdl.Metrics, adapter string) residency {
+	state, resident := m.LoadedModels[adapter]
+	switch {
+	case resident && state.Level == fwkdl.LoraLoadLevelGPU:
+		return gpuResident
+	case resident:
+		return cpuResident
+	case m.GPULoadedModels < m.MaxActiveModels:
+		return freeSlot
+	case lora.HasIdleGPUAdapter(m):
+		return evictable
+	default:
+		return saturated
+	}
+}
+
+// tierScore is the score for a residency tier: the fixed table entry, or,
+// when a load horizon is set and the endpoint's transition times are known,
+// gpuResident * (1 - t/horizon) floored at saturated, where t is the time to
+// make the adapter servable. Evicting keeps its fixed ratio below a free
+// slot so the tiers stay ordered.
+func (s *LoraLoadStateScorer) tierScore(r residency, cost transitionCost) float64 {
+	t := s.scores
+	priced := cost.known && t.loadHorizon > 0
+	price := func(seconds float64) float64 {
+		return max(t.saturated, t.gpuResident*max(0, 1-seconds/t.loadHorizon))
+	}
+	switch r {
+	case gpuResident:
+		return t.gpuResident
+	case cpuResident:
+		if priced {
+			return price(cost.activate)
+		}
+		return t.cpuResident
+	case freeSlot:
+		if priced {
+			return price(cost.load + cost.activate)
+		}
+		return t.freeSlot
+	case evictable:
+		if priced && t.freeSlot > 0 {
+			return price(cost.load+cost.activate) * t.evictable / t.freeSlot
+		}
+		return t.evictable
+	default:
+		return t.saturated
+	}
 }
 
 // transitionCost is what an endpoint would spend making a non-resident
@@ -324,15 +369,6 @@ func (s *LoraLoadStateScorer) transitionCosts(endpoints []fwksched.Endpoint) map
 	return costs
 }
 
-// priced converts a transition time into a tier score when a horizon is set
-// and the cost is known, otherwise returns the fixed tier score.
-func (s *LoraLoadStateScorer) priced(fixed, seconds float64, known bool) float64 {
-	if !known || s.scores.loadHorizon <= 0 {
-		return fixed
-	}
-	return max(s.scores.saturated, s.scores.gpuResident*max(0, 1-seconds/s.scores.loadHorizon))
-}
-
 // baseModelHeadroom scores an endpoint for a request that needs no adapter:
 // the share of GPU slots not serving an adapter right now, so base-model
 // traffic drifts away from pods that are batching LoRA work. A resident
@@ -343,41 +379,7 @@ func baseModelHeadroom(m *fwkdl.Metrics) float64 {
 	if m.MaxActiveModels <= 0 {
 		return 1
 	}
-	busy := 0
-	for name, state := range m.LoadedModels {
-		if state.Level != fwkdl.LoraLoadLevelGPU {
-			continue
-		}
-		if _, active := m.ActiveModels[name]; active {
-			busy++
-		}
-	}
-	return float64(max(m.MaxActiveModels-busy, 0)) / float64(m.MaxActiveModels)
-}
-
-// isBaseModelRequest reports whether the request targets the served base
-// model rather than an adapter.
-func isBaseModelRequest(request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
-	for _, endpoint := range endpoints {
-		if base := endpoint.GetMetrics().BaseModel; base != "" && base == request.TargetModel {
-			return true
-		}
-	}
-	return false
-}
-
-// hasIdleResident reports whether an unpinned GPU-resident adapter has no
-// request in flight, so vLLM can evict it without stalling anyone.
-func hasIdleResident(m *fwkdl.Metrics) bool {
-	for name, state := range m.LoadedModels {
-		if state.Level != fwkdl.LoraLoadLevelGPU || state.Pinned {
-			continue
-		}
-		if _, active := m.ActiveModels[name]; !active {
-			return true
-		}
-	}
-	return false
+	return float64(max(m.MaxActiveModels-lora.BusyGPUAdapters(m), 0)) / float64(m.MaxActiveModels)
 }
 
 // rendezvous picks the endpoint with the highest hash of (adapter, endpoint
