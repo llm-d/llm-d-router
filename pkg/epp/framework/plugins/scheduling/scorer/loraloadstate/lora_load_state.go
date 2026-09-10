@@ -218,7 +218,7 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 	scale := 1 - s.scores.budget()
 	if isBaseModelRequest(request, endpoints) {
 		for _, endpoint := range endpoints {
-			scores[endpoint] = s.scores.gpuResident * scale
+			scores[endpoint] = baseModelHeadroom(endpoint.GetMetrics()) * scale
 		}
 		return scores
 	}
@@ -255,9 +255,19 @@ func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.Inferen
 	return scores
 }
 
+// baseModelHeadroom scores an endpoint for a request that needs no adapter:
+// the share of GPU slots not holding one, so base-model traffic drifts away
+// from adapter homes. Once every endpoint is full the term is constant and
+// the other scorers decide.
+func baseModelHeadroom(m *fwkdl.Metrics) float64 {
+	if m.MaxActiveModels <= 0 {
+		return 1
+	}
+	return float64(max(m.MaxActiveModels-m.GPULoadedModels, 0)) / float64(m.MaxActiveModels)
+}
+
 // isBaseModelRequest reports whether the request targets the served base
-// model rather than an adapter, in which case residency is irrelevant and
-// every endpoint scores the same.
+// model rather than an adapter.
 func isBaseModelRequest(request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) bool {
 	for _, endpoint := range endpoints {
 		if base := endpoint.GetMetrics().BaseModel; base != "" && base == request.TargetModel {

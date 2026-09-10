@@ -221,17 +221,30 @@ func TestFactory(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestBaseModelRequestScoresEveryEndpointTheSame(t *testing.T) {
+func TestBaseModelRequestPrefersAdapterFreeEndpoints(t *testing.T) {
 	resident := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"target": gpu}}
 	empty := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 0, LoadedModels: map[string]fwkdl.LoraLoadState{}}
+	half := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 1, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu}}
 	full := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}, ActiveModels: map[string]int{"x": 1, "y": 1}}
-	got := score(t, nil, "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
-	assert.Equal(t, got["resident"], got["empty"])
-	assert.Equal(t, got["resident"], got["full"])
+	got := score(t, noBonus(), "base", endpoint("resident", resident), endpoint("empty", empty), endpoint("half", half), endpoint("full", full))
+	assert.Equal(t, 1.0, got["empty"])
+	assert.Equal(t, 0.5, got["half"])
+	assert.Equal(t, 0.0, got["full"])
+	assert.Equal(t, got["full"], got["resident"], "residency of some adapter is irrelevant to a base-model request")
 
 	got = score(t, nil, "target", endpoint("resident", resident), endpoint("empty", empty), endpoint("full", full))
 	assert.Greater(t, got["resident"], got["empty"])
 	assert.Greater(t, got["empty"], got["full"])
+}
+
+func TestBaseModelRequestIsNeutralWhenEveryEndpointIsFull(t *testing.T) {
+	a := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"x": gpu, "y": gpu}}
+	b := &fwkdl.Metrics{BaseModel: "base", MaxActiveModels: 2, GPULoadedModels: 2, LoadedModels: map[string]fwkdl.LoraLoadState{"p": gpu, "q": cpu}}
+	unreported := &fwkdl.Metrics{BaseModel: "base"}
+	got := score(t, nil, "base", endpoint("a", a), endpoint("b", b))
+	assert.Equal(t, got["a"], got["b"])
+	got = score(t, nil, "base", endpoint("a", a), endpoint("unreported", unreported))
+	assert.Greater(t, got["unreported"], got["a"], "an endpoint with no adapter slots is the best place for base traffic")
 }
 
 func TestNoEndpoints(t *testing.T) {

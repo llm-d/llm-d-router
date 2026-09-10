@@ -36,6 +36,11 @@ scaled into the range left over by the bonuses):
 Endpoints whose model server does not report residency score by the capacity tiers only, which
 is the same for all such endpoints and leaves the choice to the other scorers in the profile.
 
+A request for the base model itself (the `model_name` the server stamps on its metrics) needs no
+adapter. It scores by the endpoint's share of free GPU slots, so base-model traffic drifts away
+from the pods serving as adapter homes; once every endpoint is full the term is the same
+everywhere and the other scorers decide.
+
 ## Scheduling intent
 
 The scorer returns category `Affinity`, preferring endpoints with the lowest adapter-load cost.
