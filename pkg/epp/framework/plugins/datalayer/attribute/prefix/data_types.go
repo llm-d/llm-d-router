@@ -24,9 +24,19 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
+	p2psourceconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/constants"
 )
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// ReusablePrefixTokensDataKey identifies the request-wide reusable prefix
+// token floor published by a p2p-source-producer instance.
+var ReusablePrefixTokensDataKey = plugin.NewDataKey("ReusablePrefixTokensDataKey", p2psourceconstants.P2PSourcePluginType)
+
+// ReusablePrefixTokens is a floor on the prompt tokens every valid destination
+// can reuse either from confirmed local cache or by pulling confirmed CPU-tier
+// blocks from the sampled source.
+type ReusablePrefixTokens int
 
 // SpeculativeTierKey is the CachedBlocksByTier key for speculative index
 // entries, which carry no engine-reported device tier.
@@ -47,6 +57,11 @@ type PrefixCacheMatchInfo struct {
 	// the prefix-based PD decider) get an accurate cached-token figure rather
 	// than a tier-attenuated one. Defaults to matchBlocks when not set.
 	cachedBlockCount int
+	// unweighted count of contiguous cached prefix blocks confirmed by the
+	// engine. Speculative index entries are excluded, while confirmed blocks
+	// can move between device tiers across the prefix. Defaults to
+	// cachedBlockCount when not set.
+	confirmedCachedBlockCount int
 	// per device tier, the unweighted count of contiguous cached prefix blocks
 	// the endpoint holds in that tier, from the first block until the first
 	// block missing from that tier. A block held in several tiers counts once
@@ -63,10 +78,11 @@ type MMMatchInfo struct {
 
 func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *PrefixCacheMatchInfo {
 	return &PrefixCacheMatchInfo{
-		matchBlocks:      matchBlocks,
-		totalBlocks:      totalBlocks,
-		blockSizeTokens:  blockSizeTokens,
-		cachedBlockCount: matchBlocks,
+		matchBlocks:               matchBlocks,
+		totalBlocks:               totalBlocks,
+		blockSizeTokens:           blockSizeTokens,
+		cachedBlockCount:          matchBlocks,
+		confirmedCachedBlockCount: matchBlocks,
 	}
 }
 
@@ -74,6 +90,7 @@ func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *Pre
 // returns the receiver for chaining.
 func (p *PrefixCacheMatchInfo) WithCachedBlockCount(cachedBlockCount int) *PrefixCacheMatchInfo {
 	p.cachedBlockCount = cachedBlockCount
+	p.confirmedCachedBlockCount = cachedBlockCount
 	return p
 }
 
@@ -96,6 +113,20 @@ func (p *PrefixCacheMatchInfo) CachedBlockCount() int {
 	return p.cachedBlockCount
 }
 
+// WithConfirmedCachedBlockCount sets the unweighted contiguous count of
+// confirmed, non-speculative cached blocks and returns the receiver for
+// chaining.
+func (p *PrefixCacheMatchInfo) WithConfirmedCachedBlockCount(confirmedCachedBlockCount int) *PrefixCacheMatchInfo {
+	p.confirmedCachedBlockCount = confirmedCachedBlockCount
+	return p
+}
+
+// ConfirmedCachedBlockCount returns the unweighted contiguous count of
+// confirmed, non-speculative cached blocks on the endpoint.
+func (p *PrefixCacheMatchInfo) ConfirmedCachedBlockCount() int {
+	return p.confirmedCachedBlockCount
+}
+
 // WithCachedBlocksByTier sets the per-device-tier contiguous cached-block
 // counts and returns the receiver for chaining. Takes ownership of the map;
 // the caller must not mutate it after the call.
@@ -113,11 +144,12 @@ func (p *PrefixCacheMatchInfo) CachedBlocksByTier() map[string]int {
 
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	clone := &PrefixCacheMatchInfo{
-		matchBlocks:        p.matchBlocks,
-		totalBlocks:        p.totalBlocks,
-		blockSizeTokens:    p.blockSizeTokens,
-		cachedBlockCount:   p.cachedBlockCount,
-		cachedBlocksByTier: maps.Clone(p.cachedBlocksByTier),
+		matchBlocks:               p.matchBlocks,
+		totalBlocks:               p.totalBlocks,
+		blockSizeTokens:           p.blockSizeTokens,
+		cachedBlockCount:          p.cachedBlockCount,
+		confirmedCachedBlockCount: p.confirmedCachedBlockCount,
+		cachedBlocksByTier:        maps.Clone(p.cachedBlocksByTier),
 	}
 	if p.mm != nil {
 		clone.mm = ptr.To(*p.mm)

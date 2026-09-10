@@ -83,7 +83,7 @@ func TestRequestAttributes_ZeroValueRequestIsUsable(t *testing.T) {
 
 func TestRequestAttributes_ConcurrentAfterInit(t *testing.T) {
 	r := &InferenceRequest{}
-	r.PutAttribute(testKey("seed"), 0) // ensure the store is allocated before concurrent writers start
+	r.InitializeAttributeStore()
 
 	const writers = 8
 	const writes = 200
@@ -105,5 +105,5 @@ func TestRequestAttributes_ConcurrentAfterInit(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.Len(t, r.AttributeKeys(), writers*writes+1)
+	assert.Len(t, r.AttributeKeys(), writers*writes)
 }

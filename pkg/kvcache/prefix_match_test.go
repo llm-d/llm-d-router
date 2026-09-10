@@ -60,6 +60,7 @@ func assertPodMatches(t *testing.T, want, got map[string]kvcache.PodMatch) {
 		require.True(t, ok, "missing pod %q", pod)
 		assert.InDelta(t, w.WeightedScore, g.WeightedScore, 0.0001, "pod %q weighted score", pod)
 		assert.Equal(t, w.MatchedBlocks, g.MatchedBlocks, "pod %q matched blocks", pod)
+		assert.Equal(t, w.ConfirmedBlocks, g.ConfirmedBlocks, "pod %q confirmed blocks", pod)
 		assert.Equal(t, w.BlocksByTier, g.BlocksByTier, "pod %q blocks by tier", pod)
 	}
 }
@@ -95,10 +96,10 @@ func TestMatchBlockKeys(t *testing.T) {
 			want: map[string]kvcache.PodMatch{
 				// Per block the highest tier weight counts: gpu, gpu, cpu.
 				// gpu chain breaks at key 30, cpu chain at key 20.
-				podA: {WeightedScore: 2.8, MatchedBlocks: 3, BlocksByTier: map[string]int{"gpu": 2, "cpu": 1}},
+				podA: {WeightedScore: 2.8, MatchedBlocks: 3, ConfirmedBlocks: 3, BlocksByTier: map[string]int{"gpu": 2, "cpu": 1}},
 				// gpu@10 then cpu@20: the any-tier chain spans both keys,
 				// no tier survives past its own break.
-				podB: {WeightedScore: 1.8, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 1}},
+				podB: {WeightedScore: 1.8, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"gpu": 1}},
 			},
 		},
 		{
@@ -109,7 +110,7 @@ func TestMatchBlockKeys(t *testing.T) {
 			},
 			requestKeys: keys,
 			want: map[string]kvcache.PodMatch{
-				podA: {WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+				podA: {WeightedScore: 1.0, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
 			},
 		},
 		{
@@ -135,7 +136,7 @@ func TestMatchBlockKeys(t *testing.T) {
 			requestKeys: []kvblock.BlockHash{10, 20},
 			podFilter:   sets.New(podB),
 			want: map[string]kvcache.PodMatch{
-				podB: {WeightedScore: 2.0, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+				podB: {WeightedScore: 2.0, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
 			},
 		},
 		{
@@ -145,7 +146,7 @@ func TestMatchBlockKeys(t *testing.T) {
 			},
 			requestKeys: []kvblock.BlockHash{10},
 			want: map[string]kvcache.PodMatch{
-				podA: {WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
+				podA: {WeightedScore: 1.0, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
 			},
 		},
 		{
@@ -156,6 +157,30 @@ func TestMatchBlockKeys(t *testing.T) {
 			requestKeys: []kvblock.BlockHash{10},
 			want: map[string]kvcache.PodMatch{
 				podA: {WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{kvcache.SpeculativeTier: 1}},
+			},
+		},
+		{
+			name: "confirmed chain survives tier changes",
+			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
+				10: {{PodIdentifier: podA, DeviceTier: "gpu"}},
+				20: {{PodIdentifier: podA, DeviceTier: "cpu"}},
+				30: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}},
+			},
+			requestKeys: keys,
+			want: map[string]kvcache.PodMatch{
+				podA: {WeightedScore: 2.8, MatchedBlocks: 3, ConfirmedBlocks: 3, BlocksByTier: map[string]int{"gpu": 1}},
+			},
+		},
+		{
+			name: "speculative-only key ends the confirmed chain",
+			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
+				10: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, Speculative: true}},
+				20: {{PodIdentifier: podA, Speculative: true}},
+				30: {{PodIdentifier: podA, DeviceTier: "cpu"}},
+			},
+			requestKeys: keys,
+			want: map[string]kvcache.PodMatch{
+				podA: {WeightedScore: 2.8, MatchedBlocks: 3, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1, kvcache.SpeculativeTier: 2}},
 			},
 		},
 	}
@@ -273,7 +298,7 @@ func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
 	got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30}, nil)
 	require.NoError(t, err)
 	assertPodMatches(t, map[string]kvcache.PodMatch{
-		"pod-a": {WeightedScore: 3.0, MatchedBlocks: 3, BlocksByTier: map[string]int{kvcache.SpeculativeTier: 3}},
+		"pod-a": {WeightedScore: 3.0, MatchedBlocks: 3, ConfirmedBlocks: 0, BlocksByTier: map[string]int{kvcache.SpeculativeTier: 3}},
 	}, got)
 }
 
@@ -349,7 +374,7 @@ func TestMatchBlockKeysAfterPodChurn(t *testing.T) {
 	got, err := indexer.MatchBlockKeys(ctx, keys, nil)
 	require.NoError(t, err)
 	assertPodMatches(t, map[string]kvcache.PodMatch{
-		"pod-live": {WeightedScore: 2.0, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+		"pod-live": {WeightedScore: 2.0, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
 	}, got)
 }
 
@@ -372,7 +397,7 @@ func TestMatchBlockKeysManyTiers(t *testing.T) {
 	got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{1, 2, 3}, nil)
 	require.NoError(t, err)
 	assertPodMatches(t, map[string]kvcache.PodMatch{
-		"pod-a": {WeightedScore: 10.0, MatchedBlocks: 2, BlocksByTier: wantByTier},
+		"pod-a": {WeightedScore: 10.0, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: wantByTier},
 	}, got)
 }
 
@@ -435,9 +460,10 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 		want := map[string]kvcache.PodMatch{}
 		for pod, score := range legacyLongestPrefixScore(keys, keyToPods, weights) {
 			want[pod] = kvcache.PodMatch{
-				WeightedScore: score,
-				MatchedBlocks: legacyMatchedBlockCount(keys, keyToPods, pod),
-				BlocksByTier:  legacyMatchedBlockCountByTier(keys, keyToPods, pod),
+				WeightedScore:   score,
+				MatchedBlocks:   legacyMatchedBlockCount(keys, keyToPods, pod),
+				ConfirmedBlocks: legacyMatchedConfirmedBlockCount(keys, keyToPods, pod),
+				BlocksByTier:    legacyMatchedBlockCountByTier(keys, keyToPods, pod),
 			}
 		}
 		assertPodMatches(t, want, gotWalked)
@@ -491,6 +517,22 @@ func legacyMatchedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.Blo
 	count := 0
 	for _, key := range keys {
 		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool { return e.PodIdentifier == podID }) {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+// legacyMatchedConfirmedBlockCount is the producer's contiguous
+// non-speculative block counter the matcher replaced. An entry whose device
+// tier is named SpeculativeTier is speculative, as in the per-tier counter.
+func legacyMatchedConfirmedBlockCount(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry, podID string) int {
+	count := 0
+	for _, key := range keys {
+		if !slices.ContainsFunc(keyToPods[key], func(e kvblock.PodEntry) bool {
+			return e.PodIdentifier == podID && !e.Speculative && e.DeviceTier != kvcache.SpeculativeTier
+		}) {
 			break
 		}
 		count++
