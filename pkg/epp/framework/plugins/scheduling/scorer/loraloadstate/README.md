@@ -90,11 +90,30 @@ prefix-cache scorers.
 | `saturatedScore` | `float` | No | `0.0` | Adapter not resident, every slot busy or pinned. |
 | `placementBonus` | `float` | No | `0.03` | Bonus for the rendezvous-hash home while the adapter is not resident there. |
 | `headroomBonus` | `float` | No | `0.03` | Bonus scaled by the share of free GPU slots. |
+| `loadHorizonSeconds` | `float` | No | `0` | Price misses from observed transition times instead of the fixed tiers (see below). `0` disables. |
 
 Each score must be in `[0, 1]`, the tiers must satisfy `gpuResidentScore >= cpuResidentScore >=
 freeSlotScore >= evictableScore >= saturatedScore`, and the two bonuses together must be smaller
 than every non-zero gap between consecutive tiers after scaling; otherwise the whole set is
 ignored, logged, and the defaults are used.
+
+### Pricing misses from observed load times
+
+With `loadHorizonSeconds` set, the three miss tiers stop being fixed numbers. Each model server
+reports how long its adapter transitions took (`vllm:lora_adapter_load_seconds`, by transition),
+and an endpoint that would need `t` seconds to make the adapter servable scores
+`gpuResidentScore * (1 - t / loadHorizonSeconds)`, floored at `saturatedScore`:
+
+- host-cache resident: `t` is the endpoint's mean activation time
+- free GPU slot: `t` is mean load plus mean activation
+- evictable: the same, scaled down by `evictableScore / freeSlotScore`
+
+An endpoint that has not reported a transition yet is priced at the fleet mean; with no reports
+anywhere the fixed tiers apply, so the parameter is safe to leave on against servers that lack the
+histogram. The horizon is the TTFT you are willing to trade for adapter locality: a 1 GB adapter
+that takes 0.4 s to load scores 0.8 against a 2 s horizon and 0.2 against a 0.5 s one. The
+bonus-versus-tier-gap guarantee above holds for the fixed tiers only; priced tiers can sit closer
+together than the bonus budget.
 
 ### Example
 

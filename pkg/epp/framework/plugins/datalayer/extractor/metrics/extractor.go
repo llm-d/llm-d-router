@@ -45,6 +45,8 @@ const (
 	LoadedModelsKey        = "LoadedModels"
 	GPULoadedModelsKey     = "GPULoadedModels"
 	BaseModelKey           = "BaseModel"
+	LoraLoadSecondsKey     = "LoraLoadSeconds"
+	LoraActivateSecondsKey = "LoraActivateSeconds"
 
 	// LoRA metrics based on MSP
 	LoraInfoRunningAdaptersMetricName = "running_lora_adapters"
@@ -57,6 +59,10 @@ const (
 	LoraLoadedPinnedLabel      = "pinned"
 	// Label every vLLM metric carries with the served base model.
 	LoraModelNameLabel = "model_name"
+	// Label on the transition-time histogram and its two values.
+	LoraLoadTransitionLabel    = "transition"
+	LoraLoadTransitionLoad     = "load"
+	LoraLoadTransitionActivate = "activate"
 
 	CacheConfigBlockSizeInfoMetricName   = "block_size"
 	CacheConfigNumGPUBlocksMetricName    = "num_gpu_blocks"
@@ -114,6 +120,8 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 		fwkplugin.NewDataKey(LoadedModelsKey, MetricsExtractorType):        map[string]fwkdl.LoraLoadState{},
 		fwkplugin.NewDataKey(GPULoadedModelsKey, MetricsExtractorType):     int(0),
 		fwkplugin.NewDataKey(BaseModelKey, MetricsExtractorType):           string(""),
+		fwkplugin.NewDataKey(LoraLoadSecondsKey, MetricsExtractorType):     float64(0),
+		fwkplugin.NewDataKey(LoraActivateSecondsKey, MetricsExtractorType): float64(0),
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
@@ -177,6 +185,13 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		if populateLoraLoadState(clone, mapping, families) {
 			updated = true
 		}
+	}
+
+	if family := lookupFamily(mapping.LoraLoadSeconds, families); family != nil { // adapter transition times
+		load, activate := loraTransitionMeans(mapping.LoraLoadSeconds, family)
+		clone.LoraLoadSeconds = load
+		clone.LoraActivateSeconds = activate
+		updated = true
 	}
 
 	if family := lookupFamily(mapping.LoraGPUSlots, families); family != nil { // GPU slot capacity
@@ -375,6 +390,45 @@ func populateLoraLoadState(clone *fwkdl.Metrics, mapping *Mapping, families sour
 	clone.GPULoadedModels = gpuLoaded
 	clone.BaseModel = baseModel
 	return true
+}
+
+// loraTransitionMeans reduces the transition-time histogram to a mean per
+// transition, pooling every matching series (one per engine) into one
+// sample sum and count. A transition with no samples yields 0.
+func loraTransitionMeans(spec *Spec, family *dto.MetricFamily) (load, activate float64) {
+	var sums, counts [2]float64
+	for _, metric := range family.GetMetric() {
+		if !spec.labelsMatch(metric.GetLabel()) || metric.GetHistogram() == nil {
+			continue
+		}
+		var idx int
+		switch labelValue(metric, LoraLoadTransitionLabel) {
+		case LoraLoadTransitionLoad:
+			idx = 0
+		case LoraLoadTransitionActivate:
+			idx = 1
+		default:
+			continue
+		}
+		sums[idx] += metric.GetHistogram().GetSampleSum()
+		counts[idx] += float64(metric.GetHistogram().GetSampleCount())
+	}
+	mean := func(i int) float64 {
+		if counts[i] == 0 {
+			return 0
+		}
+		return sums[i] / counts[i]
+	}
+	return mean(0), mean(1)
+}
+
+func labelValue(metric *dto.Metric, name string) string {
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == name {
+			return label.GetValue()
+		}
+	}
+	return ""
 }
 
 // lookupFamily returns the family a spec names, or nil when the spec is unset

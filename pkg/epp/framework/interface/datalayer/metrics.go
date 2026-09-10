@@ -60,7 +60,13 @@ type Metrics struct {
 	// BaseModel is the model name the server stamps on its metrics
 	// (model_name). A request targeting it needs no adapter. Empty when
 	// the server does not report residency.
-	BaseModel               string
+	BaseModel string
+	// LoraLoadSeconds is the mean time this server took to read an adapter
+	// from disk into its host cache, and LoraActivateSeconds the mean time to
+	// move one from the host cache into a GPU slot. 0 until a transition has
+	// been observed.
+	LoraLoadSeconds         float64
+	LoraActivateSeconds     float64
 	RunningRequestsSize     int
 	WaitingQueueSize        int
 	KVCacheUsagePercent     float64
@@ -112,6 +118,8 @@ func (m *Metrics) Clone() *Metrics {
 		LoadedModels:            loadedModels,
 		GPULoadedModels:         m.GPULoadedModels,
 		BaseModel:               m.BaseModel,
+		LoraLoadSeconds:         m.LoraLoadSeconds,
+		LoraActivateSeconds:     m.LoraActivateSeconds,
 		RunningRequestsSize:     m.RunningRequestsSize,
 		WaitingQueueSize:        m.WaitingQueueSize,
 		KVCacheUsagePercent:     m.KVCacheUsagePercent,

@@ -41,6 +41,10 @@ type Mapping struct {
 	// Takes precedence over the max_lora label of LoraRequestInfo, which only
 	// appears once an adapter has served a request.
 	LoraGPUSlots *Spec
+	// LoraLoadSeconds is a histogram of adapter transition times labelled by
+	// transition ("load" from disk into the host cache, "activate" from the
+	// host cache into a GPU slot).
+	LoraLoadSeconds *Spec
 	// CacheInfo is used for info-style gauge metrics where block_size and
 	// num_gpu_blocks are exposed as label values.
 	CacheInfo *Spec
@@ -65,6 +69,7 @@ type MappingConfig struct {
 	LoraLoaded          string
 	LoraGPULoaded       string
 	LoraGPUSlots        string
+	LoraLoadSeconds     string
 	CacheInfo           string
 	CacheBlockSizeLabel string
 	CacheNumBlocksLabel string
@@ -98,6 +103,7 @@ func (m *Mapping) specs() []namedSpec {
 		namedSpec{"loraLoaded", m.LoraLoaded, m.LoraLoaded != nil},
 		namedSpec{"loraGPULoaded", m.LoraGPULoaded, m.LoraGPULoaded != nil},
 		namedSpec{"loraGPUSlots", m.LoraGPUSlots, m.LoraGPUSlots != nil},
+		namedSpec{"loraLoadSeconds", m.LoraLoadSeconds, m.LoraLoadSeconds != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
 	for _, custom := range m.CustomMetrics {
@@ -178,6 +184,10 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	loraLoadSecondsSpec, err := parseStringToSpec(cfg.LoraLoadSeconds)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	cacheInfoSpec, err := parseStringToSpec(cfg.CacheInfo)
 	if err != nil {
 		errs = append(errs, err)
@@ -204,6 +214,7 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		LoraLoaded:           loraLoadedSpec,
 		LoraGPULoaded:        loraGPULoadedSpec,
 		LoraGPUSlots:         loraGPUSlotsSpec,
+		LoraLoadSeconds:      loraLoadSecondsSpec,
 		CacheInfo:            cacheInfoSpec,
 		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
 		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,

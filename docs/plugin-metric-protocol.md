@@ -150,6 +150,18 @@ and, for the GPU slot capacity,
 When this gauge is absent, capacity falls back to the `max_lora` label of
 `vllm:lora_requests_info`, which only appears once an adapter has served a request.
 
+and, optionally, for pricing a miss,
+
+* Metric name implemented in vLLM: `vllm:lora_adapter_load_seconds`
+* Metric type: Histogram
+* Metric value: Seconds each adapter transition took on the server.
+* Metric labels:
+  * `transition`: `load` for a read from disk into the host cache, `activate` for a move from the
+    host cache into a GPU slot.
+
+The EPP reduces it to a mean per transition (`LoraLoadSeconds`, `LoraActivateSeconds`), which
+`lora-load-state-scorer` uses when `loadHorizonSeconds` is set.
+
 Availability: vLLM adds these gauges in [vllm-project/vllm#51433](https://github.com/vllm-project/vllm/pull/51433)
 and [vllm-project/vllm#54830](https://github.com/vllm-project/vllm/pull/54830) (not in a tagged
 release yet). Against a server without them, `LoadedModels` stays nil and the residency plugins
