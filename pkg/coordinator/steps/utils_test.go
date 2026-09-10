@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -42,6 +44,29 @@ func TestReadErrorBody_ReturnsSmallBodyVerbatim(t *testing.T) {
 	body := readErrorBody(strings.NewReader("overloaded"))
 	if string(body) != "overloaded" {
 		t.Fatalf("expected %q, got %q", "overloaded", string(body))
+	}
+}
+
+func TestResolveFormat(t *testing.T) {
+	tests := []struct {
+		name            string
+		useOpenAIFormat bool
+		path            string
+		want            reqcommon.APIType
+	}{
+		{name: "chat completions with openai format", useOpenAIFormat: true, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
+		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeGenerate},
+		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
+		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathGenerate, want: reqcommon.APITypeGenerate},
+		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeGenerate},
+		{name: "unregistered path collapses to generate", useOpenAIFormat: true, path: "/v1/embeddings", want: reqcommon.APITypeGenerate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveFormat(tt.useOpenAIFormat, tt.path); got != tt.want {
+				t.Errorf("resolveFormat(%t, %q) = %v, want %v", tt.useOpenAIFormat, tt.path, got, tt.want)
+			}
+		})
 	}
 }
 

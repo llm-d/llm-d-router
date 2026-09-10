@@ -33,8 +33,8 @@ const (
 
 // APIType is the inference API a request speaks. It selects the JSON field
 // names a request carries and the path a synthesized request is sent to. A
-// value outside the constants below degrades to APITypeGenerate, the same
-// fallback DetectAPIType applies to an unrecognized path.
+// value outside the constants below degrades to APITypeChatCompletions, the
+// same fallback DetectAPIType applies to an unrecognized path.
 type APIType int
 
 const (
@@ -65,38 +65,47 @@ func (a APIType) String() string {
 	}
 }
 
-// Path returns the canonical request path for the API. APITypeChatCompletions
-// maps to PathChatCompletions; PathMessages shares its field names but is not
-// a synthesis target.
+// Path returns the canonical request path for the API. PathMessages shares the
+// chat completions field names but is not a synthesis target.
 func (a APIType) Path() string {
 	switch a {
-	case APITypeChatCompletions:
-		return PathChatCompletions
 	case APITypeCompletions:
 		return PathCompletions
 	case APITypeResponses:
 		return PathResponses
-	default:
+	case APITypeGenerate:
 		return PathGenerate
+	default:
+		return PathChatCompletions
 	}
 }
 
-// DetectAPIType classifies a request path. An unrecognized path maps to
-// APITypeGenerate: callers that route only known paths never reach the
-// fallback, and a path the router does not register is not a client fault.
-func DetectAPIType(path string) APIType {
+// LookupAPIType classifies a request path and reports whether the path matched
+// a known API. A step that must not process a path the router does not register
+// reads the second value; the first is APITypeChatCompletions when it is false.
+func LookupAPIType(path string) (APIType, bool) {
 	switch {
 	case strings.Contains(path, PathChatCompletions):
-		return APITypeChatCompletions
+		return APITypeChatCompletions, true
 	case strings.Contains(path, PathCompletions):
-		return APITypeCompletions
+		return APITypeCompletions, true
 	case strings.Contains(path, PathResponses):
-		return APITypeResponses
+		return APITypeResponses, true
 	case strings.Contains(path, PathMessages):
-		return APITypeChatCompletions
+		return APITypeChatCompletions, true
+	case strings.Contains(path, PathGenerate):
+		return APITypeGenerate, true
 	default:
-		return APITypeGenerate
+		return APITypeChatCompletions, false
 	}
+}
+
+// DetectAPIType classifies a request path, treating an unrecognized path as
+// APITypeChatCompletions. Callers that route only known paths never reach that
+// fallback.
+func DetectAPIType(path string) APIType {
+	apiType, _ := LookupAPIType(path)
+	return apiType
 }
 
 // JSON request field names that cap output tokens, by API. Chat completions caps
@@ -115,12 +124,12 @@ var (
 // The returned slices are shared package-level vars; callers must not mutate them.
 func (a APIType) tokenLimitFields() []string {
 	switch a {
-	case APITypeChatCompletions:
-		return chatCompletionTokenLimitFields
 	case APITypeResponses:
 		return responsesTokenLimitFields
-	default:
+	case APITypeCompletions, APITypeGenerate:
 		return maxTokensOnlyTokenLimitFields
+	default:
+		return chatCompletionTokenLimitFields
 	}
 }
 
@@ -130,13 +139,13 @@ func (a APIType) tokenLimitFields() []string {
 // never reaches a nested map the body was cloned from.
 func (a APIType) tokenLimitMap(body map[string]any) map[string]any {
 	switch a {
-	case APITypeChatCompletions, APITypeCompletions, APITypeResponses:
-		return body
-	default:
+	case APITypeGenerate:
 		sp, _ := body[FieldSamplingParams].(map[string]any)
 		owned := make(map[string]any, len(sp)+1)
 		maps.Copy(owned, sp)
 		body[FieldSamplingParams] = owned
 		return owned
+	default:
+		return body
 	}
 }

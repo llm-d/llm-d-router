@@ -89,6 +89,25 @@ func TestCapSingleToken(t *testing.T) {
 			},
 		},
 		{
+			name:    "an unrecognized API is capped as chat completions",
+			apiType: APIType(7),
+			body: map[string]any{
+				"model":           "m",
+				"max_tokens":      100,
+				"min_tokens":      5,
+				"stream":          true,
+				"stream_options":  map[string]any{"include_usage": true},
+				"sampling_params": map[string]any{"max_tokens": 100},
+			},
+			want: map[string]any{
+				"model":                 "m",
+				"max_tokens":            1,
+				"max_completion_tokens": 1,
+				"stream":                false,
+				"sampling_params":       map[string]any{"max_tokens": 100},
+			},
+		},
+		{
 			name:    "completions caps max_tokens, strips min_tokens, forces non-streaming",
 			apiType: APITypeCompletions,
 			body:    map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5},

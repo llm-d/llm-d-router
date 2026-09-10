@@ -61,15 +61,17 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 
 // resolveFormat maps a request path to the wire format a step emits. The steps
 // build only Completions, Chat Completions, and generate bodies, so any other
-// API collapses to APITypeGenerate; Chat Completions additionally requires
-// useOpenAIFormat.
+// API, and any path the router does not register, collapses to APITypeGenerate;
+// Chat Completions additionally requires useOpenAIFormat.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
-	switch detected := reqcommon.DetectAPIType(path); detected {
-	case reqcommon.APITypeCompletions:
-		return detected
-	case reqcommon.APITypeChatCompletions:
-		if useOpenAIFormat {
+	if detected, known := reqcommon.LookupAPIType(path); known {
+		switch detected {
+		case reqcommon.APITypeCompletions:
 			return detected
+		case reqcommon.APITypeChatCompletions:
+			if useOpenAIFormat {
+				return detected
+			}
 		}
 	}
 	return reqcommon.APITypeGenerate

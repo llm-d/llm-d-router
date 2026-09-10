@@ -27,6 +27,8 @@ import (
 	"strings"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
@@ -174,6 +176,37 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	}
 	if reqCtx.TokenIDs[0] != 1 || reqCtx.TokenIDs[1] != 2345 || reqCtx.TokenIDs[2] != 6789 {
 		t.Fatalf("unexpected token_ids: %v", reqCtx.TokenIDs)
+	}
+}
+
+// The step renders only the chat completions, completions, and generate APIs.
+// Every other path reaches it without a body it knows how to normalize.
+func TestRenderStep_SkipsUnhandledAPIs(t *testing.T) {
+	for name, path := range map[string]string{
+		"responses":         reqcommon.PathResponses,
+		"unregistered path": "/v1/embeddings",
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("render service should not be called")
+			}))
+			defer server.Close()
+
+			step, _ := NewRenderStep(nil, map[string]any{})
+			step.(*RenderStep).SetServiceAddress(server.URL)
+
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: path,
+				Body:         map[string]any{"model": "test", "input": "hello"},
+			}
+
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(reqCtx.TokenIDs) != 0 {
+				t.Fatalf("expected no token_ids, got %v", reqCtx.TokenIDs)
+			}
+		})
 	}
 }
 

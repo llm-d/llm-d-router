@@ -27,7 +27,7 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeCompletions:     {"completions", PathCompletions},
 		APITypeResponses:       {"responses", PathResponses},
 		APITypeGenerate:        {"generate", PathGenerate},
-		APIType(7):             {"APIType(7)", PathGenerate},
+		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
 	for apiType, want := range cases {
 		if got := apiType.String(); got != want.name {
@@ -39,24 +39,30 @@ func TestAPIType_StringAndPath(t *testing.T) {
 	}
 }
 
-func TestDetectAPIType(t *testing.T) {
+func TestLookupAPIType(t *testing.T) {
 	tests := []struct {
-		name string
-		path string
-		want APIType
+		name      string
+		path      string
+		want      APIType
+		wantKnown bool
 	}{
-		{name: "chat completions", path: PathChatCompletions, want: APITypeChatCompletions},
-		{name: "completions", path: PathCompletions, want: APITypeCompletions},
-		{name: "responses", path: PathResponses, want: APITypeResponses},
-		{name: "messages shares chat completions fields", path: PathMessages, want: APITypeChatCompletions},
-		{name: "generate", path: PathGenerate, want: APITypeGenerate},
-		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
-		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
-		{name: "unknown path falls back to generate", path: "/v1/embeddings", want: APITypeGenerate},
-		{name: "empty path falls back to generate", path: "", want: APITypeGenerate},
+		{name: "chat completions", path: PathChatCompletions, want: APITypeChatCompletions, wantKnown: true},
+		{name: "completions", path: PathCompletions, want: APITypeCompletions, wantKnown: true},
+		{name: "responses", path: PathResponses, want: APITypeResponses, wantKnown: true},
+		{name: "messages shares chat completions fields", path: PathMessages, want: APITypeChatCompletions, wantKnown: true},
+		{name: "generate", path: PathGenerate, want: APITypeGenerate, wantKnown: true},
+		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions, wantKnown: true},
+		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions, wantKnown: true},
+		{name: "prefixed generate", path: "/prefix" + PathGenerate, want: APITypeGenerate, wantKnown: true},
+		{name: "unknown path is unknown and falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
+		{name: "empty path is unknown and falls back to chat completions", path: "", want: APITypeChatCompletions},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			got, known := LookupAPIType(tt.path)
+			if got != tt.want || known != tt.wantKnown {
+				t.Errorf("LookupAPIType(%q) = %v, %t, want %v, %t", tt.path, got, known, tt.want, tt.wantKnown)
+			}
 			if got := DetectAPIType(tt.path); got != tt.want {
 				t.Errorf("DetectAPIType(%q) = %v, want %v", tt.path, got, tt.want)
 			}
@@ -70,7 +76,7 @@ func TestAPIType_tokenLimitFields(t *testing.T) {
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
 		APITypeGenerate:        {FieldMaxTokens},
-		APIType(7):             {FieldMaxTokens},
+		APIType(7):             {FieldMaxTokens, FieldMaxCompletionTokens},
 	}
 	for apiType, want := range cases {
 		if got := apiType.tokenLimitFields(); !reflect.DeepEqual(got, want) {
@@ -91,14 +97,16 @@ func TestAPIType_tokenLimitMap(t *testing.T) {
 		}
 	})
 
-	t.Run("an unrecognized API is treated as generate", func(t *testing.T) {
+	t.Run("an unrecognized API is treated as chat completions", func(t *testing.T) {
 		body := map[string]any{"model": "m"}
 
 		got := APIType(7).tokenLimitMap(body)
 
-		got[FieldMaxTokens] = 1
-		if sp, ok := body[FieldSamplingParams].(map[string]any); !ok || sp[FieldMaxTokens] != 1 {
-			t.Errorf("body sampling_params = %v, want the returned map", body[FieldSamplingParams])
+		if !reflect.DeepEqual(got, body) {
+			t.Errorf("got %v, want the body %v", got, body)
+		}
+		if _, ok := body[FieldSamplingParams]; ok {
+			t.Error("sampling_params was added to a non-generate body")
 		}
 	})
 
