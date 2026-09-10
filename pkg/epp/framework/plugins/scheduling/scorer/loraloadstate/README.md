@@ -113,8 +113,6 @@ plugins:
       freeSlotScore: 0.2
       evictableScore: 0.1
       saturatedScore: 0.0
-      placementBonus: 0.02
-      headroomBonus: 0.02
 schedulingProfiles:
   - name: default
     plugins:
