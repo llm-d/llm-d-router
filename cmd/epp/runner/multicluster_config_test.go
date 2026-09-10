@@ -79,6 +79,7 @@ func TestMultiClusterConfigLoad(t *testing.T) {
 				"session-affinity":  "multicluster-session-affinity-filter",
 				"kv-cache":          "multicluster-kv-cache-utilization-scorer",
 				"queue":             "multicluster-queue-scorer",
+				"geo":               "multicluster-topology-scorer",
 			} {
 				p := r.PluginHandle.Plugin(name)
 				require.NotNil(t, p, "plugin %q must resolve", name)
@@ -113,6 +114,11 @@ plugins:
     name: kv-cache
   - type: multicluster-queue-scorer
     name: queue
+  - type: multicluster-topology-scorer
+    name: geo
+    parameters:
+      weights:
+        east: 1
   - type: max-score-picker
   - type: single-profile-handler
 dataLayer:
