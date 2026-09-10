@@ -84,11 +84,18 @@ func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
 // (vLLM's GenerateRequest schema); stream/stream_options stay top-level there
 // too, and generate has no max_completion_tokens-equivalent field, so only the
 // max_tokens/min_tokens capping (reqcommon.CapMaxTokensField) is reusable for it.
-//
-// TODO: max_output_tokens is another client-supplied output cap (Responses
-// API) that a client can send instead of max_tokens/max_completion_tokens; it
-// should be capped to 1 here as well so the synthetic legs stay single-token.
+// The Responses API schema has no max_tokens field; vLLM's ResponsesRequest
+// ignores it, so max_output_tokens is the only field that caps output length
+// there.
 func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
+	if format == gateway.FormatResponses {
+		body[reqcommon.FieldMaxOutputTokens] = 1
+		delete(body, reqcommon.FieldMinTokens)
+		body[reqcommon.FieldStream] = false
+		delete(body, reqcommon.FieldStreamOptions)
+		return
+	}
+
 	if format != gateway.FormatGenerate {
 		reqcommon.PrimeSingleTokenRequest(body)
 		return

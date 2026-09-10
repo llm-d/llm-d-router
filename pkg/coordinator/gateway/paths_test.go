@@ -23,11 +23,24 @@ func TestRequestFormatString(t *testing.T) {
 		FormatGenerate:        DefaultGeneratePath,
 		FormatCompletions:     PathCompletions,
 		FormatChatCompletions: PathChatCompletions,
+		FormatResponses:       PathResponses,
 		RequestFormat(99):     "unknown",
 	}
 	for f, want := range cases {
 		if got := f.String(); got != want {
 			t.Errorf("RequestFormat(%d).String() = %q, want %q", int(f), got, want)
 		}
+	}
+}
+
+func TestDetectFormat_Responses(t *testing.T) {
+	if got := DetectFormat("/v1/responses"); got != FormatResponses {
+		t.Errorf("DetectFormat(%q) = %v, want FormatResponses", "/v1/responses", got)
+	}
+}
+
+func TestPathForFormat_Responses(t *testing.T) {
+	if got := PathForFormat(FormatResponses); got != PathResponses {
+		t.Errorf("PathForFormat(FormatResponses) = %q, want %q", got, PathResponses)
 	}
 }

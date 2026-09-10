@@ -37,8 +37,10 @@ import (
 )
 
 const (
-	testChatCompletionsPath = gateway.PathChatCompletions
-	testModelName           = "test-model"
+	testChatCompletionsPath  = gateway.PathChatCompletions
+	testModelName            = "test-model"
+	testImageHash            = "hash-a"
+	testImageJPEGContentType = "image/jpeg"
 )
 
 func TestConditionalDecodeStep_CacheHit(t *testing.T) {
@@ -114,6 +116,51 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	respBody, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(respBody), "cached response") {
 		t.Fatalf("expected 'cached response' in body, got: %s", string(respBody))
+	}
+}
+
+func TestConditionalDecodeStep_ResponsesFormat_InjectsTokens(t *testing.T) {
+	var receivedBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gateway.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer srv.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-responses",
+		OriginalPath:   gateway.PathResponses,
+		Body:           map[string]any{"model": testModelName, "input": "hello"},
+		TokenIDs:       []int{1, 2345, 6789},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+
+	tokens, ok := receivedBody["tokens"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tokens field in responses conditional-decode request")
+	}
+	tokenIDs, _ := tokens["token_ids"].([]any)
+	if len(tokenIDs) != 3 {
+		t.Fatalf("expected 3 token_ids in tokens field, got %v", tokenIDs)
 	}
 }
 

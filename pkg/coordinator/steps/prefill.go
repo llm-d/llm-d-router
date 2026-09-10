@@ -138,7 +138,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
 	switch format {
-	case gateway.FormatChatCompletions:
+	case gateway.FormatChatCompletions, gateway.FormatResponses:
 		body := maps.Clone(reqCtx.Body)
 		capSingleTokenOutput(body, format)
 		tokens := map[string]any{
@@ -195,7 +195,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		return body, nil
 	}
-	// resolveFormat only ever yields the three formats above; a new value
+	// resolveFormat only ever yields the formats handled above; a new value
 	// reaching here is a programming error, not a client fault.
 	return nil, fmt.Errorf("prefill: unsupported request format %v", format)
 }
