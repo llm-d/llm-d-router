@@ -1,0 +1,19 @@
+# ------------------------------------------------------------------------------
+# Inference Gateway Pool Component
+#
+# Per-pool EPP + Envoy proxy. The EPP selects endpoints via INF_APP_NAME,
+# which is the pool-specific label carried only by inference pods. Pre/post
+# pods are included in the pool's endpoint set by the SHARED_APP_NAME.
+#
+# The epp-config ConfigMap is named ${EPP_NAME}-config and must be created
+# by the deployment script before applying this component.
+# The envoy ConfigMap is shared and named "envoy".
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- service-accounts.yaml
+- rbac.yaml
+- services.yaml
+- deployment.yaml

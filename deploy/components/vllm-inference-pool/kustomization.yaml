@@ -1,0 +1,12 @@
+# ------------------------------------------------------------------------------
+# VLLM Inference Pool Component
+#
+# Per-pool inference deployment. Each pool gets its own INF_APP_NAME label and
+# --served-model-name flag. The EPP for that pool selects on INF_APP_NAME.
+# ------------------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml
+- service.yaml

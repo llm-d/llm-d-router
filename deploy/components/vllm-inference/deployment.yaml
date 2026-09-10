@@ -145,4 +145,4 @@ spec:
             readOnly: false
         - name: datasets
           persistentVolumeClaim:
-            claimName: datasets-konpap
+            claimName: datasets

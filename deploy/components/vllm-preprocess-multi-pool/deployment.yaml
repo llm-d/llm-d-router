@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${PRE_DEPLOYMENT_NAME}
+  labels:
+    app: ${SHARED_APP_NAME}
+spec:
+  replicas: ${PRE_REPLICA_COUNT}
+  selector:
+    matchLabels:
+      app: ${SHARED_APP_NAME}
+      llm-d.ai/component: ${PRE_ROLE}
+  template:
+    metadata:
+      labels:
+        app: ${SHARED_APP_NAME}
+        llm-d.ai/component: ${PRE_ROLE}
+        llm-d.ai/role: ${PRE_ROLE}
+        llm-d.ai/engine-type: vllm-render
+    spec:
+      containers:
+        - name: vllm-${PRE_ROLE}
+          image: ${VLLM_CPU_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - "vllm"
+          args:
+            - "launch"
+            - "render"
+            - ${SHARED_MODEL_NAME}
+            - "--served-model-name"
+${SHARED_SERVED_MODEL_NAME}
+            - "--io-processor-plugin"
+            - ${IO_PROCESSOR_PLUGIN}
+            - "--skip-tokenizer-init"
+            - "--model-impl"
+            - "terratorch"
+            - "--runner"
+            - "pooling"
+            - "-cc.cudagraph_mode=piecewise"
+            - "--hf-overrides"
+            - '{"dtype": "torch.float16"}'
+            - "--dtype"
+            - "float16"
+            - "--enable-mm-embeds"
+            - "--renderer-num-workers"
+            - ${PRE_RENDERER_NUM_WORKERS_STR}
+            - --mm-processor-cache-gb
+            - "0"
+            - "--port"
+            - ${TARGET_PORT_STR}
+            - "--otlp-traces-endpoint"
+            - ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
+            - "--pooling_cache_config"
+            - ${POOLING_CACHE_CONFIG}
+          ports:
+            - name: http
+              containerPort: ${TARGET_PORT}
+            - name: tcp-io
+              containerPort: ${IO_PORT}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: ${TARGET_PORT}
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ${TARGET_PORT}
+            periodSeconds: 10
+            failureThreshold: 5
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: ${TARGET_PORT}
+            periodSeconds: 5
+            failureThreshold: 1
+            timeoutSeconds: 1
+          env:
+            - name: OMP_NUM_THREADS
+              value: ${OMP_NUM_THREADS_STR}
+            - name: HOME
+              value: /tmp/cache
+            - name: HF_TOKEN
+              value: ${HF_TOKEN}
+            - name: VLLM_PLUGINS
+              value: ${IO_PROCESSOR_PLUGIN}
+            - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+              value: ${OTEL_EXPORTER_OTLP_TRACES_PROTOCOL}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: PORT
+              value: ${TARGET_PORT_STR}
+            - name: PYTHONHASHSEED
+              value: "42"
+            - name: PYTHONPATH
+              value: "/opt/venv/lib/python3.12/site-packages"
+            - name: VLLM_LOGGING_LEVEL
+              value: ${VLLM_LOGGING_LEVEL}
+          volumeMounts:
+            - name: cache
+              mountPath: /tmp/cache
+            - name: io-transfer-volume
+              mountPath: /tmp/io_transfer
+              readOnly: false
+            - name: datasets
+              mountPath: /tmp/datasets
+          resources:
+            requests:
+              cpu: ${PRE_CPU_RESOURCES}
+              memory: ${PRE_MEMORY_RESOURCES}
+            limits:
+              cpu: ${PRE_CPU_RESOURCES_LIM}
+              memory: ${PRE_MEMORY_RESOURCES_LIM}
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: io-transfer-volume
+          persistentVolumeClaim:
+            claimName: disagg-data-pvc
+            readOnly: false
+        - name: datasets
+          persistentVolumeClaim:
+            claimName: datasets
