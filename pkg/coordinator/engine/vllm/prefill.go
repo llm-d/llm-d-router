@@ -59,13 +59,9 @@ func (e Engine) PreparePrefill(reqCtx *pipeline.RequestContext, kvParams, ecPara
 		if len(reqCtx.TokenIDs) > 0 {
 			prompt = reqCtx.TokenIDs
 		}
-		body = map[string]any{
-			"request_id":                    reqCtx.RequestID,
-			"model":                         reqCtx.Model,
-			"prompt":                        prompt,
-			reqcommon.FieldKVTransferParams: kvParams,
-		}
-		capSingleTokenOutput(body, format)
+		body = reqcommon.SingleTokenCompletionRequest(reqCtx.Model, prompt)
+		body["request_id"] = reqCtx.RequestID
+		body[reqcommon.FieldKVTransferParams] = kvParams
 		if features != nil {
 			body["features"] = features
 		}

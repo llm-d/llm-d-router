@@ -66,34 +66,11 @@ func (e Engine) injectTokensField(reqCtx *pipeline.RequestContext) {
 }
 
 func (e Engine) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return
-	}
-
-	hashIdx := 0
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
+	for i, part := range reqcommon.ImageParts(reqCtx.Body) {
+		if i >= len(reqCtx.MultimodalEntries) {
+			break
 		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] != "image_url" {
-				continue
-			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
-				hashIdx++
-			}
-		}
+		part["uuid"] = reqCtx.MultimodalEntries[i].Hash
 	}
 }
 

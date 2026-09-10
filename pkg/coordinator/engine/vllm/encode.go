@@ -20,12 +20,11 @@ import (
 	"encoding/json"
 	"io"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
-
-const imageURLPartType = "image_url"
 
 // PrepareEncode returns a per-image request builder, or nil to skip separate encoding.
 func (e Engine) PrepareEncode(reqCtx *pipeline.RequestContext) func(pipeline.MultimodalEntry) engine.Request {
@@ -37,7 +36,7 @@ func (e Engine) PrepareEncode(reqCtx *pipeline.RequestContext) func(pipeline.Mul
 	format := resolveFormat(e.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
 	if format == gateway.FormatChatCompletions {
-		imageParts = collectImageParts(reqCtx.Body)
+		imageParts = reqcommon.ImageParts(reqCtx.Body)
 	}
 	return func(entry pipeline.MultimodalEntry) engine.Request {
 		tokenIDs := e.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
@@ -80,24 +79,14 @@ func (e Engine) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Multimoda
 func (e Engine) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
 	switch format {
 	case gateway.FormatChatCompletions:
-		imageContent := buildSingleImageContent(imageParts, entry.Index)
-		body := map[string]any{
-			"model": reqCtx.Model,
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{imageContent},
-				},
-			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{modalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{modalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
+		body := reqcommon.SingleImageChatRequest(reqCtx.Model, imageParts, entry.Index)
+		body["tokens"] = map[string]any{
+			"token_ids": tokenIDs,
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{modalityImage: {entry.Hash}},
+				"mm_placeholders": map[string][]any{modalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 			},
 		}
-		capSingleTokenOutput(body, format)
 		return body
 	default:
 		body := map[string]any{
@@ -111,47 +100,6 @@ func (e Engine) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int,
 		}
 		capSingleTokenOutput(body, format)
 		return body
-	}
-}
-
-// collectImageParts walks the request messages once and returns the image_url
-// parts in order, so the fan-out loop can index by position instead of
-// re-walking all parts per image (O(N*M) -> O(N+M)).
-func collectImageParts(body map[string]any) []map[string]any {
-	messages, _ := body["messages"].([]any)
-	var parts []map[string]any
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] == imageURLPartType {
-				parts = append(parts, partMap)
-			}
-		}
-	}
-	return parts
-}
-
-func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
-	if index >= 0 && index < len(imageParts) {
-		return map[string]any{
-			"type":      imageURLPartType,
-			"image_url": imageParts[index][imageURLPartType],
-		}
-	}
-	return map[string]any{
-		"type":      imageURLPartType,
-		"image_url": map[string]any{"url": ""},
 	}
 }
 
