@@ -273,6 +273,13 @@ data:
                         socket_address:
                           address: llm-d-coordinator.${NAMESPACE}
                           port_value: 8080
+          # Accept untrusted certs from the coordinator (self-signed by default).
+          transport_socket:
+            name: "envoy.transport_sockets.tls"
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              common_tls_context:
+                validation_context:
         # Three ext_proc clusters — one per role-scoped EPP. The per-route ext_proc
         # override selects which one handles a given EPP-Profile request.
         - name: ext_proc_encode

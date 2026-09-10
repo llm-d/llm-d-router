@@ -219,7 +219,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi HTTP server. Accepts `/v1/chat/completions` and `/v1/completions`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_coordinator` is false. Accepts `/v1/chat/completions`, `/v1/completions` and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
@@ -625,7 +625,7 @@ commented with their defaults. The loader is [pkg/coordinator/config/config.go](
 ```yaml
 log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v overrides
 
-server:               # inbound HTTP listener
+server:               # inbound listener; TLS unless secure_coordinator is false
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
