@@ -79,6 +79,33 @@ func TestUnmarshalEnvelopeScalars(t *testing.T) {
 	}
 }
 
+func FuzzJSONMapAcceptance(f *testing.F) {
+	for _, input := range []string{
+		`{}`, `null`, `[]`, `true`, `"text"`, `{`,
+		`{"prompt":[1,2],"seed":1e1000}`, `{"prompt":null,"seed":-9007199254740993}`,
+		`{"prompt":"\uD800","prompt":{"z":1,"a":2}}`,
+		`{"prompt":[1,2,]}`, `{} {}`, `{} trailing`,
+	} {
+		f.Add([]byte(input))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var fields map[string]json.RawMessage
+		wantErr := Unmarshal(data, &fields)
+		for _, decode := range []func([]byte) (map[string]any, error){
+			func(data []byte) (map[string]any, error) { return UnmarshalEnvelope(data, "prompt") },
+			func(data []byte) (map[string]any, error) { return UnmarshalMapWithRawField(data, "prompt") },
+		} {
+			_, err := decode(data)
+			if (err == nil) != (wantErr == nil) {
+				t.Fatalf("acceptance differs: map decoder = %v, raw-field decoder = %v", wantErr, err)
+			}
+			if errors.Is(wantErr, ErrTrailingData) && !errors.Is(err, ErrTrailingData) {
+				t.Fatalf("error = %v, want trailing-data classification", err)
+			}
+		}
+	})
+}
+
 func TestUnmarshalEnvelopeStringAllocations(t *testing.T) {
 	allocations := func(size int) float64 {
 		data := []byte(`{"model":"m","max_tokens":1,"prompt":"` + strings.Repeat("x", size) + `"}`)

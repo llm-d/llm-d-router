@@ -50,7 +50,6 @@ func UnmarshalEnvelope(data []byte, rawFields ...string) (map[string]any, error)
 		if fallbackErr := Unmarshal(data, &fields); fallbackErr != nil {
 			return nil, fallbackErr
 		}
-		return nil, err
 	}
 	result := make(map[string]any, len(fields))
 	for key, raw := range fields {
@@ -93,11 +92,9 @@ func Unmarshal(data []byte, v any) error {
 func UnmarshalMapWithRawField(data []byte, rawField string) (map[string]any, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
-		var fallback map[string]json.RawMessage
-		if fallbackErr := Unmarshal(data, &fallback); fallbackErr != nil {
+		if fallbackErr := Unmarshal(data, &fields); fallbackErr != nil {
 			return nil, fallbackErr
 		}
-		return nil, err
 	}
 
 	result := make(map[string]any, len(fields))

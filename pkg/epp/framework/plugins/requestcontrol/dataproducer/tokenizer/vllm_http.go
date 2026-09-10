@@ -89,8 +89,7 @@ func isRenderAuthError(err error) bool {
 // (e.g., grpc) can be added alongside url.
 type vllmConfig struct {
 	// MessagesRenderMode selects "legacy" (default) or "native" Messages rendering.
-	//
-	// Deprecated: legacy conversion does not guarantee token parity; use "native".
+	// The "legacy" value is deprecated.
 	MessagesRenderMode string `json:"messagesRenderMode,omitempty"`
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
@@ -233,7 +232,6 @@ func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayl
 	return allTokenIDs, nil, nil
 }
 
-// RenderChat forwards the native Chat Completions body without model substitution.
 func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	return r.renderConversation(ctx, chatRenderPath, payload)
 }

@@ -38,8 +38,7 @@ Backend selection:
 `vllm.messagesRenderMode: legacy` converts Anthropic Messages into Chat
 Completions render input and uses the configured `modelName`. The mode logs a
 deprecation warning once per plugin instance. Conversion does not guarantee
-token parity with inference. It does not mutate the request forwarded to
-inference.
+token parity with inference. The forwarded request is unchanged.
 
 Set `vllm.messagesRenderMode: native` to forward Messages to
 `/v1/messages/render` without conversion. This mode requires a renderer with
@@ -49,9 +48,9 @@ The compatibility implementation and tests are contained in
 `legacy_messages.go` and `legacy_messages_test.go`. Its integration points are
 the `MessagesRenderMode` configuration field, `configureLegacyMessages` in the
 plugin constructor, and the `legacyMessages` field and branch in Messages
-dispatch. Removing these files and integration points leaves native rendering
-and token production intact. Helpers required by estimation are owned by
-`estimate.go`.
+dispatch. The native rendering and token production implementations do not use
+legacy conversion helpers or wire types. Helpers required by estimation are
+owned by `estimate.go`.
 
 ## Native render contract
 
@@ -84,7 +83,10 @@ parser-provided tokens without rendering. This exception does not apply to
 HTTP requests or the HTTP JSON embedded in Vertex AI gRPC requests.
 
 Chat and Messages requests use the larger of `vllm.timeout` and
-`vllm.mmTimeout`. The renderer does not inspect content to select a timeout.
+`vllm.mmTimeout`, including text-only requests. The default is 30 seconds.
+The renderer does not inspect content to select a timeout. Set both values
+to `5s` for a five-second render budget on all endpoints; multimodal requests
+share that limit. An earlier caller deadline takes precedence.
 
 Token parity requires matching render/serve model, tokenizer, template,
 processor, and parser configuration, plus deterministic upstream rendering.

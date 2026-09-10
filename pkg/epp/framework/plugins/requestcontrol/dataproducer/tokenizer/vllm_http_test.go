@@ -57,6 +57,80 @@ func newHTTPRenderer(t *testing.T, srv *httptest.Server) *vllmHTTPRenderer {
 	return r
 }
 
+func TestVLLMHTTPRenderer_TimeoutBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		cfg                       vllmConfig
+		completions, conversation time.Duration
+		parent                    time.Duration
+	}{
+		{"defaults", vllmConfig{}, 5 * time.Second, 30 * time.Second, 0},
+		{"short budget", vllmConfig{Timeout: "5s", MMTimeout: "5s"}, 5 * time.Second, 5 * time.Second, 0},
+		{"timeout exceeds mmTimeout", vllmConfig{Timeout: "45s", MMTimeout: "30s"}, 45 * time.Second, 45 * time.Second, 0},
+		{"parent deadline", vllmConfig{}, 5 * time.Second, 30 * time.Second, 2 * time.Second},
+	} {
+		for _, req := range []struct {
+			path, raw string
+		}{
+			{completionsRenderPath, `{"model":"m","prompt":"text"}`},
+			{chatRenderPath, `{"model":"m","messages":[{"role":"user","content":"text"}]}`},
+			{chatRenderPath, `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`},
+			{messagesRenderPath, `{"model":"m","messages":[{"role":"user","content":"text"}]}`},
+			{messagesRenderPath, `{"model":"m","messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]}`},
+		} {
+			t.Run(tc.name+req.path, func(t *testing.T) {
+				r, err := newVLLMHTTPRenderer(&tc.cfg)
+				require.NoError(t, err)
+				ctx := context.Background()
+				if tc.parent > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.parent)
+					defer cancel()
+				}
+				want := tc.conversation
+				if req.path == completionsRenderPath {
+					want = tc.completions
+				}
+				start := time.Now()
+				called := false
+				r.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+					called = true
+					deadline, ok := request.Context().Deadline()
+					require.True(t, ok)
+					if parentDeadline, ok := ctx.Deadline(); ok {
+						require.Equal(t, parentDeadline, deadline)
+					} else {
+						require.False(t, deadline.Before(start.Add(want)))
+						require.False(t, deadline.After(time.Now().Add(want)))
+					}
+					body, err := io.ReadAll(request.Body)
+					require.NoError(t, err)
+					require.Equal(t, req.raw, string(body))
+					response := `{"token_ids":[1]}`
+					if req.path == completionsRenderPath {
+						response = "[" + response + "]"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response)), Header: make(http.Header)}, nil
+				})
+				switch req.path {
+				case completionsRenderPath:
+					_, _, err = r.Render(ctx, fwkrh.RawPayload(req.raw))
+				case chatRenderPath:
+					_, _, err = r.RenderChat(ctx, fwkrh.RawPayload(req.raw))
+				case messagesRenderPath:
+					_, _, err = r.RenderMessages(ctx, fwkrh.RawPayload(req.raw))
+				}
+				require.NoError(t, err)
+				require.True(t, called)
+			})
+		}
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // httpFixture mimics vLLM's /render endpoints and captures request bodies
 // and Authorization headers.
 func httpFixture(t *testing.T, completionsResp []renderResponse, chatResp renderResponse) (*httptest.Server, *httpCaptured) {
@@ -555,6 +629,7 @@ func generateTestCert(t *testing.T, dir string) (certPath, keyPath string) {
 	return certPath, keyPath
 }
 
+// Route-specific span names make render calls identifiable in traces.
 func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
 	prevTP := otel.GetTracerProvider()
 	exporter := tracetest.NewInMemoryExporter()

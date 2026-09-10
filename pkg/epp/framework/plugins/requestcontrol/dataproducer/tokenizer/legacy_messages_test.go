@@ -19,6 +19,7 @@ package tokenizer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -181,8 +182,9 @@ func TestMessagesRenderModeDoesNotFallback(t *testing.T) {
 				parsed, err := anthropic.NewAnthropicParser().ParseRequest(context.Background(),
 					[]byte(`{"model":"adapter","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`), map[string]string{":path": "/v1/messages"})
 				require.NoError(t, err)
-				p := newTestPlugin(newHTTPRenderer(t, srv))
-				p.backend = renderBackend{tk: newHTTPRenderer(t, srv), modelName: "configured-model", legacyMessages: legacy}
+				renderer := newHTTPRenderer(t, srv)
+				p := newTestPlugin(renderer)
+				p.backend = renderBackend{tk: renderer, modelName: "configured-model", legacyMessages: legacy}
 				req := &scheduling.InferenceRequest{Body: parsed.Body}
 				err = p.Produce(context.Background(), req, nil)
 				if tc.wantErr {
@@ -231,8 +233,9 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 					}
 				}))
 				defer srv.Close()
-				p := newTestPlugin(newHTTPRenderer(t, srv))
-				p.backend = renderBackend{tk: newHTTPRenderer(t, srv), modelName: "configured-model", legacyMessages: legacy}
+				renderer := newHTTPRenderer(t, srv)
+				p := newTestPlugin(renderer)
+				p.backend = renderBackend{tk: renderer, modelName: "configured-model", legacyMessages: legacy}
 				parsed, err := tc.parser.ParseRequest(context.Background(), []byte(tc.raw), map[string]string{":path": tc.path})
 				require.NoError(t, err)
 				before, err := json.Marshal(parsed.Body.Payload)
@@ -272,13 +275,41 @@ func TestLegacyMessagesPreservesPrepopulatedTokens(t *testing.T) {
 	require.Equal(t, "tenant-a", tokens.CacheSalt)
 }
 
+func TestLegacyMessagesPayloadWire(t *testing.T) {
+	const raw = `{"messages":[{"role":"user","content":"<hi>"},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"run","input":{"z":1e0,"a":2}}]}],"tools":[{"name":"run","input_schema":{"z":1,"a":2}}]}`
+	const want = `{"messages":[{"role":"user","content":"\u003chi\u003e"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"z\": 1e0, \"a\": 2}","name":"run"},"id":"call_1","type":"function"}]}],"tools":[{"function":{"name":"run","parameters":{"z":1,"a":2}},"type":"function"}]}`
+	var msg fwkrh.MessagesRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &msg))
+	got, err := legacyMessagesPayload(&msg).Marshal()
+	require.NoError(t, err)
+	require.Equal(t, want, string(got))
+}
+
+func BenchmarkLegacyMessagesPayload(b *testing.B) {
+	for _, count := range []int{1, 32, 256} {
+		b.Run(fmt.Sprintf("messages=%d", count), func(b *testing.B) {
+			msg := &fwkrh.MessagesRequest{Messages: make([]fwkrh.AnthropicMessage, count)}
+			for i := range msg.Messages {
+				msg.Messages[i] = fwkrh.AnthropicMessage{Role: "user", Content: fwkrh.AnthropicContent{Raw: strings.Repeat("text ", 64)}}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := legacyMessagesPayload(msg).Marshal(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestLegacyMessagesToRenderChatRequest_RawSystem(t *testing.T) {
 	msg := &fwkrh.MessagesRequest{
 		System:   fwkrh.AnthropicContent{Raw: "You are helpful."},
 		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello"}}},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
@@ -296,7 +327,7 @@ func TestLegacyMessagesToRenderChatRequest_Tools(t *testing.T) {
 		Tools:    tools,
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Tools, 1)
 	assert.Equal(t, map[string]any{
@@ -319,7 +350,7 @@ func TestLegacyMessagesToRenderChatRequest_ToolDefaults(t *testing.T) {
 		},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Tools, 2)
 	assert.Equal(t, map[string]any{
@@ -351,7 +382,7 @@ func TestLegacyMessagesToRenderChatRequest_StructuredSystem(t *testing.T) {
 		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, "system", result.Conversation[0].Role)
@@ -369,7 +400,7 @@ func TestLegacyMessagesToRenderChatRequest_SystemBillingHeaderStripped(t *testin
 		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 2)
 	assert.Equal(t, &tokenizerTypes.Content{Raw: "Real system prompt."}, result.Conversation[0].Content)
@@ -380,7 +411,7 @@ func TestLegacyMessagesToRenderChatRequest_NoSystem(t *testing.T) {
 		Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hi"}}},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 1)
 	assert.Equal(t, "user", result.Conversation[0].Role)
@@ -485,7 +516,7 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := &fwkrh.MessagesRequest{Messages: tt.messages}
-			result := legacyMessagesToRenderChatRequest(msg)
+			result := messagesToRenderChatRequest(msg)
 			require.Len(t, result.Conversation, len(tt.wantConv))
 			for i, want := range tt.wantConv {
 				got := result.Conversation[i]
@@ -529,22 +560,9 @@ func TestLegacyProduceMessages(t *testing.T) {
 	pm, ok := gotPayload.AsMap()
 	require.True(t, ok, "RenderChat payload must be a map")
 	assert.NotContains(t, pm, "system", "raw Anthropic top-level system must not reach /render")
-	msgs, ok := pm["messages"].([]any)
-	require.True(t, ok, "payload must carry the /render chat messages array")
-	require.Len(t, msgs, 2)
-	assertLegacyRolesInOrder(t, msgs, "system", "user")
-}
-
-func assertLegacyRolesInOrder(t *testing.T, msgs []any, roles ...string) {
-	t.Helper()
-	require.Len(t, msgs, len(roles))
-	for i, want := range roles {
-		raw, ok := msgs[i].(json.RawMessage)
-		require.True(t, ok, "message %d must be pre-encoded JSON", i)
-		var m map[string]any
-		require.NoError(t, json.Unmarshal(raw, &m), "message %d must be valid JSON", i)
-		assert.Equal(t, want, m["role"], "message %d role", i)
-	}
+	wire, err := pm.Marshal()
+	require.NoError(t, err)
+	require.JSONEq(t, `{"model":"configured-model","messages":[{"role":"system","content":"Be helpful."},{"role":"user","content":"Hi"}]}`, string(wire))
 }
 
 func TestLegacyPythonDumps(t *testing.T) {
@@ -561,7 +579,7 @@ func TestLegacyPythonDumps(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := legacyPythonDumps(json.RawMessage(tt.in))
+			got, err := pythonDumps(json.RawMessage(tt.in))
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
@@ -569,16 +587,16 @@ func TestLegacyPythonDumps(t *testing.T) {
 }
 
 func TestLegacyPythonDumpsNonASCIIEscaped(t *testing.T) {
-	got, err := legacyPythonDumps(json.RawMessage("{\"e\":\"Z\u00fcrich \U0001f600\"}"))
+	got, err := pythonDumps(json.RawMessage("{\"e\":\"Z\u00fcrich \U0001f600\"}"))
 	require.NoError(t, err)
 	assert.Equal(t, `{"e": "Z\u00fcrich \ud83d\ude00"}`, got)
 }
 
 func TestLegacyPythonArguments(t *testing.T) {
-	assert.Equal(t, "{}", legacyPythonArguments(nil))
-	assert.Equal(t, "{}", legacyPythonArguments(json.RawMessage(`null`)))
-	assert.Equal(t, "{}", legacyPythonArguments(json.RawMessage(`{}`)))
-	assert.Equal(t, `{"a": 1}`, legacyPythonArguments(json.RawMessage(`{"a":1}`)))
+	assert.Equal(t, "{}", pythonArguments(nil))
+	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`null`)))
+	assert.Equal(t, "{}", pythonArguments(json.RawMessage(`{}`)))
+	assert.Equal(t, `{"a": 1}`, pythonArguments(json.RawMessage(`{"a":1}`)))
 }
 
 func TestLegacyMessagesToRenderChatRequest_ToolUseAndThinking(t *testing.T) {
@@ -597,7 +615,7 @@ func TestLegacyMessagesToRenderChatRequest_ToolUseAndThinking(t *testing.T) {
 		},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 2)
 	assistant := result.Conversation[1]
@@ -634,7 +652,7 @@ func TestLegacyMessagesToRenderChatRequest_AssistantToolOnlyOmitsContent(t *test
 		},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 1)
 	assert.Nil(t, result.Conversation[0].Content)
@@ -664,7 +682,7 @@ func TestLegacyMessagesToRenderChatRequest_ToolResult(t *testing.T) {
 		},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 4)
 
@@ -702,7 +720,7 @@ func TestLegacyMessagesToRenderChatRequest_ToolResultOnlyUserDropped(t *testing.
 		},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 1)
 	assert.Equal(t, "tool", result.Conversation[0].Role)
@@ -731,7 +749,7 @@ func TestLegacyMessagesToRenderChatRequest_FullAgenticTurn(t *testing.T) {
 		},
 	}
 
-	result := legacyMessagesToRenderChatRequest(msg)
+	result := messagesToRenderChatRequest(msg)
 
 	require.Len(t, result.Conversation, 4)
 	assert.Equal(t, "system", result.Conversation[0].Role)

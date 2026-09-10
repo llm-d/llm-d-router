@@ -133,10 +133,11 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	if path := strings.TrimRight(request.GetRequestPath(headers), "/"); strings.HasSuffix(path, "/"+chatCompletionsAPI+"/render") || strings.HasSuffix(path, "/"+completionsAPI+"/render") {
+	path := request.GetRequestPath(headers)
+	if request.MatchPathSuffix(path, chatCompletionsAPI+"/render") || request.MatchPathSuffix(path, completionsAPI+"/render") {
 		return parserutil.ParseRenderRequest(body)
 	}
-	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	apiType := determineAPITypeFromPath(path)
 	if apiType == imagesEditsAPI {
 		return parseImagesEditsRequest(body, headers)
 	}
@@ -185,8 +186,6 @@ func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
 
 func tokenInputField(body *fwkrh.InferenceRequestBody) string {
 	switch {
-	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return "prompt"
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
 		return "input"
 	default:

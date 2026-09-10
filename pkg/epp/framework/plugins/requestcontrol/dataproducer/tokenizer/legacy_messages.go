@@ -37,8 +37,6 @@ const (
 	messagesRenderModeNative = "native"
 )
 
-// Deprecated: use native Messages rendering. Conversion does not guarantee
-// token parity with inference.
 func configureLegacyMessages(ctx context.Context, name, mode string) (bool, error) {
 	switch mode {
 	case "", messagesRenderModeLegacy:
@@ -67,23 +65,16 @@ func (b renderBackend) renderLegacyMessages(ctx context.Context, msg *fwkrh.Mess
 	}}}, nil
 }
 
-// Pre-encoded messages and schemas preserve key order in the converted payload.
 func legacyMessagesPayload(msg *fwkrh.MessagesRequest) fwkrh.PayloadMap {
-	rr := legacyBuildChatRenderRequest(legacyMessagesToRenderChatRequest(msg))
-	msgs := make([]any, len(rr.Messages))
-	for i, m := range rr.Messages {
-		data, _ := json.Marshal(m)
-		msgs[i] = json.RawMessage(data)
-	}
-	pm := fwkrh.PayloadMap{"messages": msgs}
+	rr := buildChatRenderRequest(messagesToRenderChatRequest(msg))
+	pm := fwkrh.PayloadMap{"messages": rr.Messages}
 	if len(rr.Tools) > 0 {
-		data, _ := json.Marshal(rr.Tools)
-		pm["tools"] = json.RawMessage(data)
+		pm["tools"] = rr.Tools
 	}
 	return pm
 }
 
-func legacyMessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.RenderChatRequest {
+func messagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTypes.RenderChatRequest {
 	conversation := make([]tokenizerTypes.Conversation, 0, 1+len(msg.Messages))
 
 	if sys := anthropicSystemText(msg.System); sys != "" {
@@ -103,16 +94,17 @@ func legacyMessagesToRenderChatRequest(msg *fwkrh.MessagesRequest) *tokenizerTyp
 			}
 			continue
 		}
-		conversation = legacyAppendAnthropicMessage(conversation, m)
+		conversation = appendAnthropicMessage(conversation, m)
 	}
 
 	return &tokenizerTypes.RenderChatRequest{
 		Conversation: conversation,
-		Tools:        legacyConvertAnthropicTools(msg.Tools),
+		Tools:        convertAnthropicTools(msg.Tools),
 	}
 }
 
-func legacyAppendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.AnthropicMessage) []tokenizerTypes.Conversation {
+// Tool replies must follow the assistant's tool calls in the Chat history.
+func appendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.AnthropicMessage) []tokenizerTypes.Conversation {
 	if m.Content.Raw != "" {
 		return append(conversation, tokenizerTypes.Conversation{
 			Role:    m.Role,
@@ -135,10 +127,10 @@ func legacyAppendAnthropicMessage(conversation []tokenizerTypes.Conversation, m 
 			reasoning.WriteString(b.Thinking)
 		case "redacted_thinking":
 		case blockTypeToolUse:
-			toolCalls = append(toolCalls, legacyAnthropicToolCall(b))
+			toolCalls = append(toolCalls, anthropicToolCall(b))
 		case blockTypeToolResult:
 			if m.Role == "user" {
-				conversation = legacyAppendAnthropicToolResult(conversation, b)
+				conversation = appendAnthropicToolResult(conversation, b)
 			} else {
 				text, _ := anthropicToolResultContent(b)
 				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{
@@ -160,15 +152,17 @@ func legacyAppendAnthropicMessage(conversation []tokenizerTypes.Conversation, m 
 	case len(contentBlocks) > 0:
 		conv.Content = &tokenizerTypes.Content{Structured: contentBlocks}
 	}
+	// Tool-result-only user messages are represented by their tool messages.
 	if m.Role == "user" && conv.Content == nil {
 		return conversation
 	}
 	return append(conversation, conv)
 }
 
-func legacyAnthropicToolCall(b fwkrh.AnthropicContentBlock) map[string]any {
+func anthropicToolCall(b fwkrh.AnthropicContentBlock) map[string]any {
 	id := b.ID
 	if id == "" {
+		// A fixed stand-in preserves rendered length when an ID is absent.
 		id = "call_0000000000"
 	}
 	return map[string]any{
@@ -176,23 +170,25 @@ func legacyAnthropicToolCall(b fwkrh.AnthropicContentBlock) map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":      b.Name,
-			"arguments": legacyPythonArguments(b.Input),
+			"arguments": pythonArguments(b.Input),
 		},
 	}
 }
 
-func legacyPythonArguments(raw json.RawMessage) string {
+// CPython-formatted tool arguments become text in the rendered prompt.
+func pythonArguments(raw json.RawMessage) string {
 	switch string(bytes.TrimSpace(raw)) {
 	case "", "null", "{}":
 		return "{}"
 	}
-	if out, err := legacyPythonDumps(raw); err == nil {
+	if out, err := pythonDumps(raw); err == nil {
 		return out
 	}
 	return "{}"
 }
 
-func legacyAppendAnthropicToolResult(conversation []tokenizerTypes.Conversation, b fwkrh.AnthropicContentBlock) []tokenizerTypes.Conversation {
+// Preserve legacy Chat role ordering for images in tool results.
+func appendAnthropicToolResult(conversation []tokenizerTypes.Conversation, b fwkrh.AnthropicContentBlock) []tokenizerTypes.Conversation {
 	text, imageBlocks := anthropicToolResultContent(b)
 	conversation = append(conversation, tokenizerTypes.Conversation{
 		Role:       "tool",
@@ -208,7 +204,8 @@ func legacyAppendAnthropicToolResult(conversation []tokenizerTypes.Conversation,
 	return conversation
 }
 
-func legacyConvertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
+// input_schema stays raw so serialization preserves the wire key order.
+func convertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 	if len(tools) == 0 {
 		return nil
 	}
@@ -236,115 +233,115 @@ func legacyConvertAnthropicTools(tools []fwkrh.AnthropicTool) []any {
 	return out
 }
 
-type legacyChatRenderRequest struct {
-	Messages []legacyChatMessage `json:"messages"`
-	Tools    []any               `json:"tools,omitempty"`
+type chatRenderRequest struct {
+	Messages []chatMessage `json:"messages"`
+	Tools    []any         `json:"tools,omitempty"`
 }
 
-type legacyChatMessage struct {
-	Role       string             `json:"role"`
-	Content    *legacyChatContent `json:"content,omitempty"`
-	ToolCalls  []any              `json:"tool_calls,omitempty"`
-	Reasoning  string             `json:"reasoning,omitempty"`
-	ToolCallID string             `json:"tool_call_id,omitempty"`
+type chatMessage struct {
+	Role       string       `json:"role"`
+	Content    *chatContent `json:"content,omitempty"`
+	ToolCalls  []any        `json:"tool_calls,omitempty"`
+	Reasoning  string       `json:"reasoning,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
 }
 
-type legacyChatContent struct {
+type chatContent struct {
 	Raw   string
-	Parts []legacyChatPart
+	Parts []chatPart
 }
 
-func (c legacyChatContent) MarshalJSON() ([]byte, error) {
+func (c chatContent) MarshalJSON() ([]byte, error) {
 	if len(c.Parts) > 0 {
 		return json.Marshal(c.Parts)
 	}
 	return json.Marshal(c.Raw)
 }
 
-type legacyChatPart struct {
-	Type     string              `json:"type"`
-	Text     string              `json:"text,omitempty"`
-	ImageURL *legacyChatImageURL `json:"image_url,omitempty"`
+type chatPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *chatImageURL `json:"image_url,omitempty"`
 }
 
-type legacyChatImageURL struct {
+type chatImageURL struct {
 	URL string `json:"url"`
 }
 
-func legacyBuildChatRenderRequest(req *tokenizerTypes.RenderChatRequest) legacyChatRenderRequest {
-	msgs := make([]legacyChatMessage, len(req.Conversation))
+func buildChatRenderRequest(req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
+	msgs := make([]chatMessage, len(req.Conversation))
 	for idx, c := range req.Conversation {
-		msgs[idx] = legacyChatMessage{
+		msgs[idx] = chatMessage{
 			Role:       c.Role,
-			Content:    legacyToChatContent(c.Content),
+			Content:    toChatContent(c.Content),
 			ToolCalls:  c.ToolCalls,
 			Reasoning:  c.Reasoning,
 			ToolCallID: c.ToolCallID,
 		}
 	}
-	return legacyChatRenderRequest{
+	return chatRenderRequest{
 		Messages: msgs,
 		Tools:    req.Tools,
 	}
 }
 
-func legacyToChatContent(c *tokenizerTypes.Content) *legacyChatContent {
+func toChatContent(c *tokenizerTypes.Content) *chatContent {
 	if c == nil {
 		return nil
 	}
 	if len(c.Structured) == 0 {
-		return &legacyChatContent{Raw: c.Raw}
+		return &chatContent{Raw: c.Raw}
 	}
-	parts := make([]legacyChatPart, 0, len(c.Structured))
+	parts := make([]chatPart, 0, len(c.Structured))
 	for _, b := range c.Structured {
 		switch b.Type {
 		case blockTypeText:
-			parts = append(parts, legacyChatPart{Type: blockTypeText, Text: b.Text})
+			parts = append(parts, chatPart{Type: blockTypeText, Text: b.Text})
 		case blockTypeImageURL:
-			parts = append(parts, legacyChatPart{Type: blockTypeImageURL, ImageURL: &legacyChatImageURL{URL: b.ImageURL.URL}})
+			parts = append(parts, chatPart{Type: blockTypeImageURL, ImageURL: &chatImageURL{URL: b.ImageURL.URL}})
 		default:
 		}
 	}
-	return &legacyChatContent{Parts: parts}
+	return &chatContent{Parts: parts}
 }
 
-func legacyPythonDumps(raw json.RawMessage) (string, error) {
+func pythonDumps(raw json.RawMessage) (string, error) {
 	var sb strings.Builder
-	if err := legacyDumpValue(&sb, bytes.TrimSpace(raw)); err != nil {
+	if err := dumpValue(&sb, bytes.TrimSpace(raw)); err != nil {
 		return "", err
 	}
 	return sb.String(), nil
 }
 
-func legacyDumpValue(sb *strings.Builder, raw []byte) error {
+func dumpValue(sb *strings.Builder, raw []byte) error {
 	switch {
 	case len(raw) == 0:
-		return errors.New("legacyPythonDumps: empty JSON value")
+		return errors.New("pythonDumps: empty JSON value")
 	case raw[0] == '{':
-		return legacyDumpDelimited(sb, raw, '{')
+		return dumpDelimited(sb, raw, '{')
 	case raw[0] == '[':
-		return legacyDumpDelimited(sb, raw, '[')
+		return dumpDelimited(sb, raw, '[')
 	case raw[0] == '"':
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
-			return fmt.Errorf("legacyPythonDumps: decode string: %w", err)
+			return fmt.Errorf("pythonDumps: decode string: %w", err)
 		}
-		legacyWriteJSONString(sb, s)
+		writeJSONString(sb, s)
 		return nil
 	default:
 		var n json.Number
 		if string(raw) != "null" && string(raw) != "true" && string(raw) != "false" && json.Unmarshal(raw, &n) != nil {
-			return fmt.Errorf("legacyPythonDumps: invalid value %s", raw)
+			return fmt.Errorf("pythonDumps: invalid value %s", raw)
 		}
 		sb.Write(raw)
 		return nil
 	}
 }
 
-func legacyDumpDelimited(sb *strings.Builder, raw []byte, open byte) error {
+func dumpDelimited(sb *strings.Builder, raw []byte, open byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if _, err := dec.Token(); err != nil {
-		return fmt.Errorf("legacyPythonDumps: decode start: %w", err)
+		return fmt.Errorf("pythonDumps: decode start: %w", err)
 	}
 	closer, sep := '}', ": "
 	if open == '[' {
@@ -360,20 +357,20 @@ func legacyDumpDelimited(sb *strings.Builder, raw []byte, open byte) error {
 		if open == '{' {
 			tok, err := dec.Token()
 			if err != nil {
-				return fmt.Errorf("legacyPythonDumps: decode object key: %w", err)
+				return fmt.Errorf("pythonDumps: decode object key: %w", err)
 			}
 			key, ok := tok.(string)
 			if !ok {
-				return fmt.Errorf("legacyPythonDumps: unexpected object key %v", tok)
+				return fmt.Errorf("pythonDumps: unexpected object key %v", tok)
 			}
-			legacyWriteJSONString(sb, key)
+			writeJSONString(sb, key)
 			sb.WriteString(sep)
 		}
 		var val json.RawMessage
 		if err := dec.Decode(&val); err != nil {
-			return fmt.Errorf("legacyPythonDumps: decode value: %w", err)
+			return fmt.Errorf("pythonDumps: decode value: %w", err)
 		}
-		if err := legacyDumpValue(sb, bytes.TrimSpace(val)); err != nil {
+		if err := dumpValue(sb, bytes.TrimSpace(val)); err != nil {
 			return err
 		}
 	}
@@ -381,7 +378,7 @@ func legacyDumpDelimited(sb *strings.Builder, raw []byte, open byte) error {
 	return nil
 }
 
-func legacyWriteJSONString(sb *strings.Builder, s string) {
+func writeJSONString(sb *strings.Builder, s string) {
 	sb.WriteByte('"')
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])

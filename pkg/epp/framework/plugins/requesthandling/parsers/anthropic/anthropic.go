@@ -85,11 +85,11 @@ func (p *AnthropicParser) WithName(name string) *AnthropicParser {
 
 func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	path := request.GetRequestPath(headers)
-	if strings.HasSuffix(strings.TrimRight(path, "/"), "/"+messagesAPI+"/render") {
+	if request.MatchPathSuffix(path, messagesAPI+"/render") {
 		return parserutil.ParseRenderRequest(body)
 	}
 
-	// Auxiliary endpoints need neither local tokenization nor response interception.
+	// count_tokens delegates token counting to the server and passes its response through.
 	if strings.HasSuffix(path, "/"+countTokensAPI) {
 		return &fwkrh.ParseResult{
 			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},

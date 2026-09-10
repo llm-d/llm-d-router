@@ -48,8 +48,10 @@ const (
 )
 
 const (
+	// Per-request billing hashes must not defeat prefix caching.
 	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
-	defaultImageMediaType        = "image/jpeg"
+	// The base64 image fallback matches vLLM's Anthropic conversion.
+	defaultImageMediaType = "image/jpeg"
 )
 
 func anthropicSystemText(ac fwkrh.AnthropicContent) string {

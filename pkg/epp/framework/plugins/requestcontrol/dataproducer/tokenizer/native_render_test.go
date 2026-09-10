@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,29 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
+
+func TestNativeRenderPathMatching(t *testing.T) {
+	for _, tc := range []struct {
+		path   string
+		parser fwkrh.Parser
+	}{
+		{"chat/completions/render", openai.NewOpenAIParser()},
+		{"completions/render", openai.NewOpenAIParser()},
+		{"messages/render", anthropic.NewAnthropicParser()},
+	} {
+		for _, path := range []string{tc.path, "/v1/" + tc.path, "/v1/" + tc.path + "/", " /v1/" + tc.path + "/ "} {
+			t.Run(strings.ReplaceAll(path, " ", "_"), func(t *testing.T) {
+				const raw = ` {"model":"adapter","extension":{"z":1,"a":2}} `
+				parsed, err := tc.parser.ParseRequest(context.Background(), []byte(raw), map[string]string{":path": path})
+				require.NoError(t, err)
+				require.True(t, parsed.Body.RenderRequest)
+				require.True(t, parsed.SkipResponseProcessing)
+				require.Equal(t, "adapter", parsed.Body.Model)
+				require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
+			})
+		}
+	}
+}
 
 func TestNativeRenderPreservesRequest(t *testing.T) {
 	for _, tt := range []struct {

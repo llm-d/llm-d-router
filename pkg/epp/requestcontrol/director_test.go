@@ -86,10 +86,12 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 				parsed, err := tt.parser.ParseRequest(context.Background(), raw, map[string]string{":path": tt.path})
 				require.NoError(t, err)
 				body := parsed.Body
+				wantModel := `"alias"`
 				if rewrite {
 					body.Payload, err = tt.parser.(fwkrh.ModelNameRewriter).RewriteModelName(body.Payload.(fwkrh.MarshalablePayload), "adapter")
 					require.NoError(t, err)
 					body.Mutated = true
+					wantModel = `"adapter"`
 				}
 				var renderBody []byte
 				switch payload := body.WirePayload().(type) {
@@ -99,6 +101,9 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 					renderBody, err = payload.Marshal()
 				}
 				require.NoError(t, err)
+				var rendered map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(renderBody, &rendered))
+				require.Equal(t, wantModel, string(rendered["model"]))
 				reqCtx := &handlers.RequestContext{Request: &handlers.Request{RawBody: raw}}
 				dir := &Director{}
 				require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
@@ -109,6 +114,7 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 				require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
 				var final map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(reqCtx.Request.RawBody, &final))
+				require.Equal(t, wantModel, string(final["model"]))
 				require.Equal(t, `{"z":9007199254740993,"a":1e0}`, string(final["extension"]))
 				require.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 			})
