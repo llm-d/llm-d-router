@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -35,12 +34,11 @@ const (
 	LoraLoadStateScorerType = "lora-load-state-scorer"
 )
 
-// Parameters tunes the score each residency tier receives and the two
-// within-tier bonuses. The gaps between tiers encode the relative cost of
-// serving the adapter from that state, which grows with adapter size: a large
-// adapter makes a miss expensive and the free-slot tier should sit close to
-// saturated. Unset fields keep the defaults. Pointers so an explicit 0.0 is
-// distinguishable from unset.
+// Parameters tunes the score each residency tier receives. The gaps between
+// tiers encode the relative cost of serving the adapter from that state,
+// which grows with adapter size: a large adapter makes a miss expensive and
+// the free-slot tier should sit close to saturated. Unset fields keep the
+// defaults. Pointers so an explicit 0.0 is distinguishable from unset.
 type Parameters struct {
 	// GPUResidentScore is given when the adapter occupies a GPU slot. Default 1.0.
 	GPUResidentScore *float64 `json:"gpuResidentScore,omitempty"`
@@ -58,13 +56,6 @@ type Parameters struct {
 	// SaturatedScore is given when the adapter is not resident and every GPU slot
 	// holds a busy or pinned adapter. Default 0.0.
 	SaturatedScore *float64 `json:"saturatedScore,omitempty"`
-	// PlacementBonus is added to the one endpoint a rendezvous hash of the adapter
-	// name selects, while the adapter does not occupy a GPU slot there, so the
-	// first misses for an adapter converge on a single home. Default 0.03.
-	PlacementBonus *float64 `json:"placementBonus,omitempty"`
-	// HeadroomBonus scales with the endpoint's share of free GPU slots, breaking
-	// ties within a tier toward the endpoint with the most room. Default 0.03.
-	HeadroomBonus *float64 `json:"headroomBonus,omitempty"`
 	// LoadHorizonSeconds prices a miss from the transition times the model
 	// servers report instead of the fixed tier scores: an endpoint that would
 	// take t seconds to make the adapter servable scores gpuResidentScore *
@@ -75,29 +66,21 @@ type Parameters struct {
 }
 
 type scoreTable struct {
-	gpuResident    float64
-	cpuResident    float64
-	freeSlot       float64
-	evictable      float64
-	saturated      float64
-	placementBonus float64
-	headroomBonus  float64
-	loadHorizon    float64
+	gpuResident float64
+	cpuResident float64
+	freeSlot    float64
+	evictable   float64
+	saturated   float64
+	loadHorizon float64
 }
 
 var defaultScores = scoreTable{
 	gpuResident: 1.0, cpuResident: 0.7, freeSlot: 0.6, evictable: 0.3, saturated: 0.0,
-	placementBonus: 0.03, headroomBonus: 0.03,
 }
-
-// budget is the score range reserved for the bonuses. Tiers are scaled into
-// the remainder so a bonus can reorder endpoints within a tier but never
-// across one.
-func (t scoreTable) budget() float64 { return t.placementBonus + t.headroomBonus }
 
 // valid reports whether every score is in [0, 1], the tiers are ordered
 // gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and the
-// bonuses fit under every non-zero gap between consecutive tiers.
+// load horizon is not negative.
 func (t scoreTable) valid() bool {
 	inRange := func(v float64) bool { return v >= 0 && v <= 1 }
 	tiers := []float64{t.gpuResident, t.cpuResident, t.freeSlot, t.evictable, t.saturated}
@@ -106,15 +89,11 @@ func (t scoreTable) valid() bool {
 			return false
 		}
 	}
-	if !inRange(t.placementBonus) || !inRange(t.headroomBonus) || t.budget() >= 1 || t.loadHorizon < 0 {
+	if t.loadHorizon < 0 {
 		return false
 	}
 	for i := 1; i < len(tiers); i++ {
-		gap := tiers[i-1] - tiers[i]
-		if gap < 0 {
-			return false
-		}
-		if gap > 0 && gap*(1-t.budget()) <= t.budget() {
+		if tiers[i-1] < tiers[i] {
 			return false
 		}
 	}
@@ -134,17 +113,15 @@ func (p *Parameters) scores(ctx context.Context) scoreTable {
 		return *v
 	}
 	candidate := scoreTable{
-		gpuResident:    pick(p.GPUResidentScore, defaultScores.gpuResident),
-		cpuResident:    pick(p.CPUResidentScore, defaultScores.cpuResident),
-		freeSlot:       pick(p.FreeSlotScore, defaultScores.freeSlot),
-		evictable:      pick(p.EvictableScore, defaultScores.evictable),
-		saturated:      pick(p.SaturatedScore, defaultScores.saturated),
-		placementBonus: pick(p.PlacementBonus, defaultScores.placementBonus),
-		headroomBonus:  pick(p.HeadroomBonus, defaultScores.headroomBonus),
-		loadHorizon:    pick(p.LoadHorizonSeconds, defaultScores.loadHorizon),
+		gpuResident: pick(p.GPUResidentScore, defaultScores.gpuResident),
+		cpuResident: pick(p.CPUResidentScore, defaultScores.cpuResident),
+		freeSlot:    pick(p.FreeSlotScore, defaultScores.freeSlot),
+		evictable:   pick(p.EvictableScore, defaultScores.evictable),
+		saturated:   pick(p.SaturatedScore, defaultScores.saturated),
+		loadHorizon: pick(p.LoadHorizonSeconds, defaultScores.loadHorizon),
 	}
 	if !candidate.valid() {
-		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer parameters; scores must be in [0, 1], tiers ordered gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and the bonuses must fit under every tier gap, using defaults",
+		log.FromContext(ctx).Info("Ignoring lora-load-state-scorer parameters; scores must be in [0, 1], tiers ordered gpuResident >= cpuResident >= freeSlot >= evictable >= saturated, and loadHorizonSeconds >= 0, using defaults",
 			"parameters", fmt.Sprintf("%+v", candidate))
 		return defaultScores
 	}
@@ -227,29 +204,16 @@ func (s *LoraLoadStateScorer) WithName(name string) *LoraLoadStateScorer {
 // endpoint and so leave the decision to the other scorers.
 func (s *LoraLoadStateScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	scale := 1 - s.scores.budget()
 	if lora.IsBaseModelRequest(request, endpoints) {
 		for _, endpoint := range endpoints {
-			scores[endpoint] = baseModelHeadroom(endpoint.GetMetrics()) * scale
+			scores[endpoint] = baseModelHeadroom(endpoint.GetMetrics())
 		}
 		return scores
 	}
-	preferred := rendezvous(request.TargetModel, endpoints)
 	costs := s.transitionCosts(endpoints)
-
 	for _, endpoint := range endpoints {
-		m := endpoint.GetMetrics()
-		r := classify(m, request.TargetModel)
-		score := s.tierScore(r, costs[endpoint]) * scale
-		if endpoint == preferred && r != gpuResident {
-			score += s.scores.placementBonus
-		}
-		if m.MaxActiveModels > 0 && m.GPULoadedModels < m.MaxActiveModels {
-			score += s.scores.headroomBonus * float64(m.MaxActiveModels-m.GPULoadedModels) / float64(m.MaxActiveModels)
-		}
-		scores[endpoint] = score
+		scores[endpoint] = s.tierScore(classify(endpoint.GetMetrics(), request.TargetModel), costs[endpoint])
 	}
-
 	return scores
 }
 
@@ -380,22 +344,4 @@ func baseModelHeadroom(m *fwkdl.Metrics) float64 {
 		return 1
 	}
 	return float64(max(m.MaxActiveModels-lora.BusyGPUAdapters(m), 0)) / float64(m.MaxActiveModels)
-}
-
-// rendezvous picks the endpoint with the highest hash of (adapter, endpoint
-// id), which is stable across calls and moves only the adapters that hashed
-// to an endpoint that left.
-func rendezvous(adapter string, endpoints []fwksched.Endpoint) fwksched.Endpoint {
-	var best fwksched.Endpoint
-	var bestHash uint64
-	for _, endpoint := range endpoints {
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(adapter))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(endpoint.GetMetadata().ID.String()))
-		if sum := h.Sum64(); best == nil || sum > bestHash {
-			best, bestHash = endpoint, sum
-		}
-	}
-	return best
 }
