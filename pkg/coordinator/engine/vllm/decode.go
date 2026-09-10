@@ -17,30 +17,17 @@ limitations under the License.
 package vllm
 
 import (
-	"context"
 	"maps"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-// NewDecoder binds decode request preparation to the named KV connector.
-// The returned function mutates the request body, including nested image parts;
-// callers must not use those values concurrently.
-func (e Engine) NewDecoder(name string) (engine.DecodeRequest, error) {
-	connector, err := kv.Build(name)
-	if err != nil {
-		return nil, err
-	}
-	return func(ctx context.Context, req *pipeline.RequestContext) engine.Request {
-		return e.prepareDecode(req, connector.PrepareDecodeKVParams(ctx, req))
-	}, nil
-}
-
-func (e Engine) prepareDecode(reqCtx *pipeline.RequestContext, kvParams map[string]any) engine.Request {
+// PrepareDecode mutates the terminal request body, including nested image parts.
+// Callers must not use those values concurrently.
+func (e Engine) PrepareDecode(reqCtx *pipeline.RequestContext, kvParams map[string]any) engine.Request {
 	e.injectUUIDs(reqCtx)
 
 	format := resolveFormat(e.useOpenAIFormat, reqCtx.OriginalPath)

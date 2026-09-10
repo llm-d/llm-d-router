@@ -31,7 +31,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -59,7 +58,7 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	selectedEngine := vllm.New(useOpenAI, engine.Limits{})
+	selectedEngine := vllm.New(useOpenAI)
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)

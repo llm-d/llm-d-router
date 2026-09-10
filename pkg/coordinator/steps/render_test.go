@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -391,6 +392,31 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 
 	if err := step.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("unexpected error at limit: %v", err)
+	}
+}
+
+func TestRenderStep_PlaceholderLimitOverflow(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{"max_total_placeholder_tokens": 5})
+	if err != nil {
+		t.Fatalf("NewRenderStep: %v", err)
+	}
+	rs := step.(*RenderStep)
+
+	// Two lengths whose sum overflows int and wraps negative. Without the
+	// overflow guard, total > max is false and the limit is silently bypassed.
+	entries := []pipeline.MultimodalEntry{
+		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+	}
+	err = rs.checkPlaceholderLimit(entries)
+	if err == nil {
+		t.Fatal("expected error for overflowing placeholder length sum")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "too many placeholder tokens") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

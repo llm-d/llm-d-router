@@ -26,7 +26,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -40,8 +40,9 @@ func init() {
 }
 
 type DecodeStep struct {
-	prepare  engine.DecodeRequest
+	engine   vllm.Engine
 	gwClient *gateway.Client
+	kv       kv.Connector
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -52,16 +53,16 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	selectedEngine := vllm.New(useOpenAI, engine.Limits{})
+	selectedEngine := vllm.New(useOpenAI)
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	prepare, err := selectedEngine.NewDecoder(kvName)
+	kvConn, err := kv.Build(kvName)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{prepare: prepare, gwClient: gwClient}, nil
+	return &DecodeStep{engine: selectedEngine, gwClient: gwClient, kv: kvConn}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -69,7 +70,8 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	prepared := s.prepare(ctx, reqCtx)
+	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
+	prepared := s.engine.PrepareDecode(reqCtx, kvParams)
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", prepared.Path, "stream", reqCtx.Stream)
 

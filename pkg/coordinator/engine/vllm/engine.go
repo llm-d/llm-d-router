@@ -17,17 +17,12 @@ limitations under the License.
 // Package vllm prepares coordinator requests for the vLLM inference protocol.
 package vllm
 
-import (
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
-)
-
 // Engine implements vLLM request preparation and response parsing.
 type Engine struct {
 	useOpenAIFormat bool
-	limits          engine.Limits
 }
 
-// New constructs a vLLM engine using the configured wire format and input limits.
-func New(useOpenAIFormat bool, limits engine.Limits) Engine {
-	return Engine{useOpenAIFormat: useOpenAIFormat, limits: limits}
+// New constructs a vLLM engine using the configured wire format.
+func New(useOpenAIFormat bool) Engine {
+	return Engine{useOpenAIFormat: useOpenAIFormat}
 }

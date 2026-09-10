@@ -25,7 +25,6 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -51,7 +50,7 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 	if err != nil {
 		return nil, err
 	}
-	selectedEngine := vllm.New(useOpenAI, engine.Limits{})
+	selectedEngine := vllm.New(useOpenAI)
 	return &ConditionalDecodeStep{engine: selectedEngine, gwClient: gwClient}, nil
 }
 

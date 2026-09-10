@@ -30,7 +30,6 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/engine"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -59,7 +58,7 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("encode: %w", err)
 	}
-	selectedEngine := vllm.New(useOpenAI, engine.Limits{})
+	selectedEngine := vllm.New(useOpenAI)
 	maxParallel := 8
 	if v, ok, err := paramInt(params, "max_parallel"); err != nil {
 		return nil, err

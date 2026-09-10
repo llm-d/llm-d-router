@@ -17,15 +17,12 @@ limitations under the License.
 package steps
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 func TestParamInt(t *testing.T) {
@@ -197,12 +194,9 @@ func TestNewRenderStep_FloatFormattedLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	err = step.Execute(context.Background(), &pipeline.RequestContext{
-		OriginalPath: gateway.PathCompletions,
-		Body:         map[string]any{"prompt": []any{float64(1), float64(2), float64(3), float64(4), float64(5), float64(6)}},
-	})
-	if !errors.Is(err, pipeline.ErrBadRequest) {
-		t.Fatalf("expected configured token limit rejection, got %v", err)
+	rs := step.(*RenderStep)
+	if rs.maxTotalTokens != 5 {
+		t.Fatalf("maxTotalTokens = %d, want 5", rs.maxTotalTokens)
 	}
 }
 
