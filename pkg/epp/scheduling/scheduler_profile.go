@@ -127,14 +127,10 @@ func (p *SchedulerProfile) String() string {
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
-		// Filters draining a non-empty candidate set means the pool is busy, not
-		// broken: an empty pool is rejected in the director before scheduling
-		// runs. Report it with the same status and drop-reason vocabulary as a
-		// flow control capacity rejection.
 		return nil, errcommon.Error{
-			Code:    errcommon.ResourceExhausted,
+			Code:    errcommon.ServiceUnavailable,
 			Msg:     "no endpoints available for the given request",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
 	// if we got here, there is at least one endpoint to score
