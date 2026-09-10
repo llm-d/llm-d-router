@@ -86,6 +86,12 @@ func New(steps []Step) *Pipeline {
 	return &Pipeline{steps: steps}
 }
 
+// Steps returns the pipeline's steps in execution order. The server uses it
+// to discover steps that serve auxiliary HTTP routes.
+func (p *Pipeline) Steps() []Step {
+	return p.steps
+}
+
 // stepTiming holds one step's per-request timing for the summary log line
 // emitted by Execute.
 type stepTiming struct {
@@ -106,7 +112,9 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			stats = append(stats, "parse", reqCtx.ParseDuration.String())
 		}
 		for _, t := range timings {
-			stats = append(stats, t.name, t.duration.String())
+			if t.name != "" && t.duration > 0 {
+				stats = append(stats, t.duration.String())
+			}
 		}
 		logger.V(logutil.DEFAULT).Info("pipeline step timings", stats...)
 

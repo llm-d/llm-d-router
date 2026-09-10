@@ -19,6 +19,8 @@ package kvevents_test
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,4 +219,64 @@ func TestSubscriberManager_ConcurrentOperations(t *testing.T) {
 	assert.Len(t, identifiers, 10)
 
 	sm.Shutdown(ctx)
+}
+
+func TestSubscriberManager_Shutdown_ReleasesSocket(t *testing.T) {
+	ctx := context.Background()
+
+	indexConfig := kvblock.DefaultIndexConfig()
+	index, err := kvblock.NewIndex(ctx, indexConfig)
+	require.NoError(t, err)
+
+	poolConfig := kvevents.DefaultConfig()
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
+
+	sm := kvevents.NewSubscriberManager(pool)
+
+	endpoint := availableEndpoint(t, ctx)
+	err = sm.EnsureSubscriber(ctx, "test-pod-releases-socket", "", endpoint, "", "kv@", false)
+	require.NoError(t, err)
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	sm.Shutdown(shutdownCtx)
+
+	assert.NoError(t, shutdownCtx.Err())
+
+	// Since Shutdown waits for the subscriber goroutine to exit, the socket must
+	// be closed and the port immediately available for reuse without address conflicts.
+	l, err := net.Listen("tcp", strings.TrimPrefix(endpoint, "tcp://"))
+	require.NoError(t, err, "port must be immediately available after Shutdown returns")
+	_ = l.Close()
+
+	identifiers, _ := sm.GetActiveSubscribers()
+	assert.Empty(t, identifiers)
+}
+
+func TestSubscriberManager_Shutdown_HonorsContextCancellation(t *testing.T) {
+	ctx := context.Background()
+
+	indexConfig := kvblock.DefaultIndexConfig()
+	index, err := kvblock.NewIndex(ctx, indexConfig)
+	require.NoError(t, err)
+
+	poolConfig := kvevents.DefaultConfig()
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
+
+	sm := kvevents.NewSubscriberManager(pool)
+
+	endpoint := availableEndpoint(t, ctx)
+	err = sm.EnsureSubscriber(ctx, "test-pod-canceled", "", endpoint, "", "kv@", false)
+	require.NoError(t, err)
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	sm.Shutdown(canceledCtx)
+
+	identifiers, _ := sm.GetActiveSubscribers()
+	assert.Empty(t, identifiers)
 }

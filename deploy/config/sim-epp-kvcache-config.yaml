@@ -7,11 +7,11 @@ plugins:
   parameters:
     modelName: ${MODEL_NAME}
     vllm:
-      url: ${VLLM_RENDER_URL}
+      url: ${VLLM_RENDER_URL}  # substituted by kind-dev-env.sh envsubst (render Service)
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
-      blockSize: 16
+      blockSizeTokens: 16
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
     indexerConfig:

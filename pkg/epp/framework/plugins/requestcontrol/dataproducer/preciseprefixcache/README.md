@@ -55,7 +55,7 @@ Block keys are recomputed by the EPP from `TokenizedPrompt` (tokens, model,
 multimodal features, cache salt) on both the lookup path and the KV-event
 ingestion path, using this plugin's `tokenProcessorConfig`. The engine's own
 block hashes serve only as opaque keys for the engine-to-request mapping, so
-`blockSize`/`hashSeed` need not match the engine.
+`blockSizeTokens`/`hashSeed` need not match the engine.
 
 The cross-engine requirement is that the engine emits, in its KV-events, the
 hash-affecting inputs the EPP hashes: `token_ids`, and `extra_keys` carrying

@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
-	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +28,6 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
@@ -175,151 +172,17 @@ func TestPluginFactory_RejectsMultipleExistingProducers(t *testing.T) {
 	assert.Contains(t, err.Error(), "multiple precise-prefix-cache-producer instances")
 }
 
-// stubPromptTokenizer captures the inputs Tokenize was called with so
-// tests can verify the legacy path routed the prompt through the pool.
-type stubPromptTokenizer struct {
-	tokens   []uint32
-	lastRReq *tokenizerTypes.RenderChatRequest
-	lastRaw  string
-	calls    int
-}
-
-func (s *stubPromptTokenizer) Tokenize(rr *tokenizerTypes.RenderChatRequest, prompt string) ([]uint32, *tokenization.MultiModalFeatures) {
-	s.calls++
-	s.lastRReq = rr
-	s.lastRaw = prompt
-	return s.tokens, nil
-}
-
-// With a wrapper-owned tokenizer pool, Consumes must drop the inner
-// producer's TokenizedRequest dependency — the wrapper supplies tokens
-// itself and no upstream token-producer is required.
-func TestLegacyProducer_ConsumesDropsTokenizedRequestWhenPoolSet(t *testing.T) {
+// The self-hosted path forwards indexerConfig verbatim to the producer, whose
+// indexer has no tokenization pool, so a config still carrying one is rejected
+// by strict decoding rather than silently ignored.
+func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	handle := fwkplugin.NewEppHandle(ctx, nil,
 		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
 
-	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
-	require.NoError(t, err)
+	raw := json.RawMessage(`{"indexerConfig":{"tokenizersPoolConfig":{"modelName":"x"}}}`)
 
-	lp := &legacyProducer{
-		Producer:      inner.(*preciseproducer.Producer),
-		tokenizerPool: &stubPromptTokenizer{},
-	}
-	assert.Empty(t, lp.Consumes())
-
-	lpNoPool := &legacyProducer{Producer: inner.(*preciseproducer.Producer)}
-	assert.NotEmpty(t, lpNoPool.Consumes(), "without a pool, Consumes must keep TokenizedRequest")
-}
-
-// When a completions prompt arrives without TokenizedRequest and the pool
-// is set, Produce must route the prompt through the pool and stash the
-// resulting tokens on request.Body.TokenizedRequest.
-func TestLegacyProducer_TokenizesCompletionPromptViaPool(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := fwkplugin.NewEppHandle(ctx, nil,
-		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
-	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
-	require.NoError(t, err)
-
-	stub := &stubPromptTokenizer{tokens: []uint32{1, 2, 3}}
-	lp := &legacyProducer{
-		Producer:      inner.(*preciseproducer.Producer),
-		tokenizerPool: stub,
-	}
-
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt:    fwkrh.Prompt{Raw: "hello world"},
-				CacheSalt: "leg-salt",
-			},
-		},
-	}
-	require.NoError(t, lp.Produce(ctx, req, nil))
-
-	assert.Equal(t, 1, stub.calls)
-	assert.Equal(t, "hello world", stub.lastRaw)
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
-	// Wrapper-owned tokenization must still carry the cache salt so precise
-	// keys stay isolated on this path.
-	assert.Equal(t, "leg-salt", req.Body.TokenizedRequest.CacheSalt)
-}
-
-// End-to-end: tokens from the pool flow into the embedded producer, get
-// hashed into block keys, and a PrefixCacheMatchInfo is written to each
-// endpoint. With an empty index the match count is 0, but the totalBlocks
-// denominator must reflect the tokens the wrapper supplied. Guards against
-// regressions in the pool → tokens → block-key → attribute pipeline that
-// the deleted UDS integration tests used to cover.
-func TestLegacyProducer_TokensFlowToEndpointAttribute(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := fwkplugin.NewEppHandle(ctx, nil,
-		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
-	// Small block size for a predictable totalBlocks: 16 tokens / 4 = 4 blocks.
-	const blockSize = 4
-	rawCfg := json.RawMessage(`{"tokenProcessorConfig":{"blockSize":4}}`)
-	inner, err := preciseproducer.PluginFactory("inner", fwkplugin.StrictDecoder(rawCfg), handle)
-	require.NoError(t, err)
-
-	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-	lp := &legacyProducer{
-		Producer:      inner.(*preciseproducer.Producer),
-		tokenizerPool: &stubPromptTokenizer{tokens: tokens},
-	}
-
-	req := &scheduling.InferenceRequest{
-		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
-		},
-	}
-	endpoint := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
-		ID:      k8stypes.NamespacedName{Name: "pod1"},
-		Address: "10.0.0.1",
-		Port:    "8000",
-	}, nil, nil)
-
-	require.NoError(t, lp.Produce(ctx, req, []scheduling.Endpoint{endpoint}))
-
-	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("inner")
-	raw, ok := endpoint.Get(key)
-	require.True(t, ok, "endpoint should have PrefixCacheMatchInfo set")
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	require.True(t, ok)
-	assert.Equal(t, len(tokens)/blockSize, info.TotalBlocks(),
-		"totalBlocks must reflect tokens produced by the wrapper-owned pool")
-	assert.Equal(t, 0, info.MatchBlocks(),
-		"empty index → no matches")
-}
-
-// Pre-existing TokenizedRequest must skip the pool entirely, so the new-path
-// token-producer pipeline isn't shadowed by the legacy pool.
-func TestLegacyProducer_KeepsExistingTokenizedRequest(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := fwkplugin.NewEppHandle(ctx, nil,
-		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-
-	inner, err := preciseproducer.PluginFactory("inner", nil, handle)
-	require.NoError(t, err)
-
-	stub := &stubPromptTokenizer{tokens: []uint32{9, 9, 9}}
-	lp := &legacyProducer{
-		Producer:      inner.(*preciseproducer.Producer),
-		tokenizerPool: stub,
-	}
-
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{5, 5, 5}}}},
-			Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "should not tokenize"}},
-		},
-	}
-	require.NoError(t, lp.Produce(ctx, req, nil))
-
-	assert.Equal(t, 0, stub.calls, "pool must not be called when tokens already present")
-	assert.Equal(t, []uint32{5, 5, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	_, err := PluginFactory("test", fwkplugin.StrictDecoder(raw), handle)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown field "tokenizersPoolConfig"`)
 }

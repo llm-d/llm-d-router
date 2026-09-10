@@ -88,10 +88,6 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
 		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
 
-	// RotateScoredEndpoints provides deterministic round-robin
-	// tie-breaking instead of random shuffle (see picker/common.go)
-	picker.RotateScoredEndpoints(scoredEndpoints)
-
 	slices.SortStableFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first
 		if i.Score > j.Score {
 			return -1
@@ -101,6 +97,21 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 		}
 		return 0
 	})
+
+	// RotateScoredEndpoints provides deterministic round-robin tie-breaking
+	// for equal-score candidates. Rotating within each equal-score tier ensures
+	// traffic is distributed evenly without distortion from lower-scoring endpoints.
+	counter := picker.PickerRand.NextCounter()
+	for start := 0; start < len(scoredEndpoints) && start < p.maxNumOfEndpoints; {
+		end := start + 1
+		for end < len(scoredEndpoints) && scoredEndpoints[end].Score == scoredEndpoints[start].Score {
+			end++
+		}
+		if end-start > 1 {
+			picker.RotateScoredEndpoints(scoredEndpoints[start:end], counter)
+		}
+		start = end
+	}
 
 	// if we have enough endpoints to return keep only the "maxNumOfEndpoints" highest scored endpoints
 	if p.maxNumOfEndpoints < len(scoredEndpoints) {
