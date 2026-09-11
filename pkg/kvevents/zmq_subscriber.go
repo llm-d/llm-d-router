@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
@@ -51,6 +52,8 @@ type zmqSubscriber struct {
 	replayEndpoint string
 	remote         bool
 	topicFilter    string
+	queueMu        sync.Mutex
+	retired        bool
 
 	// Replay state persists across reconnections within subscriber lifetime.
 	lastSeq           uint64
@@ -103,7 +106,7 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			// setup/teardown and connection retries cleanly.
 			z.runSubscriber(ctx)
 			if z.pool.consumer != nil && z.sourceEndpoint != "" {
-				z.pool.resetForSource("", z.sourceEndpoint)
+				z.resetForSource("")
 				// Cleared availability requires a full replay on reconnect.
 				z.lastSeq, z.lastLiveSeq = 0, 0
 				z.hasLastSeq, z.hasLastLiveSeq = false, false
@@ -195,7 +198,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			logger.Info("Detected event sequence reset, rebuilding index",
 				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
-			z.pool.resetForSource(topic, z.sourceEndpoint)
+			z.resetForSource(topic)
 			z.lastSeq = 0
 			z.hasLastSeq = false
 			z.lastReplayFailure = time.Time{}
@@ -264,7 +267,7 @@ func (z *zmqSubscriber) acceptLiveWithoutReplay(topic string, seq uint64) bool {
 			return false
 		}
 		if seq != z.lastLiveSeq+1 {
-			z.pool.resetForSource(topic, z.sourceEndpoint)
+			z.resetForSource(topic)
 		}
 	}
 	z.lastLiveSeq, z.hasLastLiveSeq = seq, true
@@ -306,7 +309,34 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		carried := sc
 		msg.SpanContext = &carried
 	}
+	z.enqueue(msg)
+}
+
+func (z *zmqSubscriber) enqueue(msg *RawMessage) {
+	if z.pool.consumer != nil {
+		z.queueMu.Lock()
+		defer z.queueMu.Unlock()
+		if z.retired {
+			return
+		}
+	}
 	z.pool.AddTask(msg)
+}
+
+func (z *zmqSubscriber) resetForSource(topic string) {
+	z.enqueue(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true})
+}
+
+func (z *zmqSubscriber) retire() {
+	if z.pool.consumer == nil {
+		return
+	}
+	z.queueMu.Lock()
+	defer z.queueMu.Unlock()
+	// Queue the reset after accepted events and reject later events or resets,
+	// without waiting for socket teardown.
+	z.retired = true
+	z.pool.resetForSource(z.podIdentifier, z.sourceEndpoint)
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {
@@ -314,7 +344,7 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
-	z.pool.resetForSource(topic, z.sourceEndpoint)
+	z.resetForSource(topic)
 	z.lastSeq = 0
 	z.hasLastSeq = false
 	z.lastReplayFailure = time.Now()
@@ -416,7 +446,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			}
 			if attemptReplayed == 0 && seq > expectedSeq {
 				// A bounded replay buffer can lose removals for indexed blocks.
-				z.pool.resetForSource(topic, z.sourceEndpoint)
+				z.resetForSource(topic)
 				logger.Info("Rebuilding from retained replay history",
 					"requestedSeq", expectedSeq, "firstAvailableSeq", seq,
 					"replayEndpoint", z.replayEndpoint)

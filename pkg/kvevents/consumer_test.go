@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -112,4 +113,66 @@ func TestConsumerSubscriberAttachInvalidatesRetainedState(t *testing.T) {
 	assert.Equal(t, "serving:8000", msg.SourceEndpoint)
 	p.queues[0].Done(msg)
 	sm.RemoveSubscriber(t.Context(), "pod")
+}
+
+func TestConsumerSubscriberRetirementDoesNotWaitForSocketClose(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		name := "remove"
+		if replace {
+			name = "replace"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Concurrency = 1
+			p := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+			t.Cleanup(func() { p.Shutdown(t.Context()) })
+			sm := NewSubscriberManager(p)
+			t.Cleanup(func() { sm.Shutdown(t.Context()) })
+			done := make(chan struct{})
+			t.Cleanup(func() { close(done) })
+			old := newZMQSubscriber(p, "pod", "serving:8000", "old", "", "", true)
+			sm.subscribers["pod"] = &subscriberEntry{
+				subscriber: old, endpoint: "old", sourceEndpoint: "serving:8000",
+				done: done, cancel: func() {},
+			}
+			old.addTask(t.Context(), "topic", 1, []byte{1})
+			completed := make(chan error, 1)
+			go func() {
+				if replace {
+					ctx, cancel := context.WithCancel(t.Context())
+					cancel()
+					completed <- sm.EnsureSubscriber(ctx, "pod", "serving:8000", "new", "", "", true)
+				} else {
+					sm.RemoveSubscriber(t.Context(), "pod")
+					completed <- nil
+				}
+			}()
+			select {
+			case err := <-completed:
+				require.NoError(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("endpoint reconciliation waited for the retired socket to close")
+			}
+			// Late events and reconnect resets from the retired subscriber must
+			// not alter residency after its removal or replacement.
+			old.addTask(t.Context(), "topic", 2, []byte{2})
+			old.invalidateReplay("topic")
+			want := []bool{false, true}
+			if replace {
+				sm.subscribers["pod"].subscriber.addTask(t.Context(), "topic", 3, []byte{3})
+				want = append(want, true, false)
+			}
+			require.Equal(t, len(want), p.queues[0].Len())
+			for _, reset := range want {
+				msg, shutdown := p.queues[0].Get()
+				require.False(t, shutdown)
+				assert.Equal(t, reset, msg.reset)
+				assert.Equal(t, "serving:8000", msg.SourceEndpoint)
+				if !reset {
+					assert.NotEqual(t, uint64(2), msg.Sequence)
+				}
+				p.queues[0].Done(msg)
+			}
+		})
+	}
 }
