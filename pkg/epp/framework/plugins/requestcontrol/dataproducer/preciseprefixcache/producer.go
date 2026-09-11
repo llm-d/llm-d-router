@@ -177,6 +177,9 @@ func newProducer(ctx context.Context, name string, config PluginConfig, manager 
 		if config.SpeculativeIndexing {
 			return nil, errors.New("sessionManager does not support speculativeIndexing")
 		}
+		if indexConfig := config.IndexerConfig.KVBlockIndexConfig; indexConfig != nil && indexConfig.RedisConfig != nil {
+			return nil, errors.New("sessionManager does not support redisConfig: residency and source metadata must be local to each producer")
+		}
 		if config.KVEventsConfig == nil || !config.KVEventsConfig.DiscoverPods ||
 			config.KVEventsConfig.PodDiscoveryConfig == nil || config.KVEventsConfig.ZMQEndpoint != "" {
 			return nil, errors.New("sessionManager requires per-endpoint KV event discovery")

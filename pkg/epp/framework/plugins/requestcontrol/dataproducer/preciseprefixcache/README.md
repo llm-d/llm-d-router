@@ -133,9 +133,11 @@ The data path is:
    index separately for each endpoint, DP rank, and cache group, then publishes
    `PrefixCacheMatchInfo`. Candidate branches and physical locations are never
    combined to create a match.
-3. `PreRequest` writes the stamp to the JSON body's `session_id` and writes
-   `full` or `incremental` to `vllm_xargs.kv_cache_report_mode`. These values
-   come from the manager; other arguments and opaque content fields are preserved.
+3. `PreRequest` replaces any incoming body `session_id` with the manager's
+   stamp and sets `vllm_xargs.kv_cache_report_mode` to `full` or `incremental`.
+   Other arguments and opaque content fields are preserved. vLLM gives the
+   body identity precedence over session headers and `vllm_xargs.session_id`,
+   so those inputs no longer determine the engine's identity after stamping.
 4. Decoded KV batches update block availability and reach the manager through
    `ProcessEvents`, including the serving endpoint, wire sequence, DP rank,
    group, and optional session stamp. Tokens are not hashed on this path.
@@ -150,8 +152,12 @@ The manager must scope continuation lookup by tenant, model, and cache salt,
 and bound its association storage. A reused logical session ID alone does not
 identify which concurrent request emitted an event. `Stamp` can be a request
 ID mapped to that logical session; vLLM echoes it through the `session_id`
-field. The manager must retain bindings long enough for delayed events and
-handle aborts through the request lifecycle hooks it implements.
+field. The manager must read incoming identity before stamping and retain its
+binding to the outgoing stamp. It can use the incoming value as `Stamp` when it
+can distinguish the associated concurrent observations. Bindings must survive
+delayed events; the manager handles aborts through its request lifecycle hooks.
+The engine's precedence is defined by
+[vLLM's session-ID resolver](https://github.com/vllm-project/vllm/blob/f4eccdadefc6501fafeb1a0bf7f171ff24f984b0/vllm/entrypoints/generate/base/serving.py#L261).
 
 Logical paths contain no endpoint or rank. A path learned on one worker can
 find blocks reported by another compatible worker, including reports without
@@ -168,8 +174,13 @@ Store reports are idempotent. The engine event protocol does not distinguish a
 physical allocation from a reused-block report, so the index cannot count
 duplicate physical copies. A removal conservatively marks that hash unavailable
 at the reported location until another store report arrives.
-Use a separate Redis database if token lookup and session lookup share a Redis
-server. Their index key spaces must remain separate.
+
+Session mode requires an in-memory index; `redisConfig` is rejected. Residency
+and source/group metadata are private to each producer instance. With multiple
+EPP replicas, each replica subscribes to the engines and builds its own index;
+one replica's reset cannot clear another's residency. The external manager must
+provide any cross-replica sharing of session associations. This mode does not
+provide a shared residency index or persist residency across EPP restarts.
 
 Session lookup supports one prompt with equal-sized blocks per candidate
 prefix, per-endpoint discovery, and local GPU full-attention or MLA events. Other

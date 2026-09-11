@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
@@ -493,4 +494,40 @@ func TestSessionCacheCoverageAndEventScope(t *testing.T) {
 	batch.Events = []kvevents.GenericEvent{&kvevents.AllBlocksClearedEvent{}}
 	require.NoError(t, p.sessionEvents.ProcessEvents(t.Context(), source, batch))
 	assert.Zero(t, sessionMatch(t, p, req).MatchBlocks())
+}
+
+func TestSessionCacheRejectsRedis(t *testing.T) {
+	server := miniredis.RunT(t)
+	params := fmt.Sprintf(`{"sessionManager":"sessions","indexerConfig":{"kvBlockIndexConfig":{"redisConfig":{"address":%q}}}}`, server.Addr())
+	handle := plugin.NewEppHandle(t.Context(), nil)
+	handle.AddPlugin("sessions", &testSessionManager{})
+	_, err := PluginFactory("cache", plugin.StrictDecoder(json.RawMessage(params)), handle)
+	require.ErrorContains(t, err, "sessionManager does not support redisConfig")
+	assert.Zero(t, server.CommandCount(), "reject Redis before opening a connection")
+	params = fmt.Sprintf(`{"indexerConfig":{"kvBlockIndexConfig":{"redisConfig":{"address":%q}}}}`, server.Addr())
+	_, err = PluginFactory("token-cache", plugin.StrictDecoder(json.RawMessage(params)), handle)
+	require.NoError(t, err, "token-based lookup still supports Redis")
+	assert.Positive(t, server.CommandCount())
+}
+
+func TestSessionCacheIndependentReplicas(t *testing.T) {
+	first, _ := newSessionProducer(t)
+	second, _ := newSessionProducer(t)
+	source := kvevents.EventSource{Endpoint: "10.0.0.1:8080"}
+	batch := kvevents.EventBatch{Events: []kvevents.GenericEvent{
+		&kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16, DeviceTier: "GPU"},
+	}}
+	req := sessionRequest("next", "")
+	req.PutAttribute(sessionTestKey(), fwkrc.SessionCacheRequest{Stamp: "next", TotalTokens: 32,
+		Prefixes: []fwkrc.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}},
+	})
+	for _, p := range []*Producer{first, second} {
+		require.NoError(t, p.sessionEvents.ProcessEvents(t.Context(), source, batch))
+		assert.Equal(t, 32, sessionMatch(t, p, req).CachedBlockCount())
+	}
+	require.NoError(t, second.sessionEvents.Reset(t.Context(), source.Endpoint))
+	assert.Equal(t, 32, sessionMatch(t, first, req).CachedBlockCount())
+	assert.Zero(t, sessionMatch(t, second, req).CachedBlockCount())
+	require.NoError(t, second.sessionEvents.ProcessEvents(t.Context(), source, batch))
+	assert.Equal(t, 32, sessionMatch(t, second, req).CachedBlockCount())
 }
