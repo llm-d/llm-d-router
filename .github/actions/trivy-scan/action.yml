@@ -13,6 +13,10 @@ inputs:
     required: false
     default: 'HIGH,CRITICAL'
     description: "Comma-separated severities that fail the scan (e.g. 'CRITICAL' or 'MEDIUM,HIGH,CRITICAL')."
+  exit-code:
+    required: false
+    default: '1'
+    description: "Exit code on a severity match: '1' fails the build, '0' reports only. SARIF uploads either way."
 
 runs:
   using: "composite"
@@ -25,7 +29,7 @@ runs:
         format: 'sarif'
         output: 'trivy-results.sarif'
         severity: ${{ inputs.severity }}
-        exit-code: '1'
+        exit-code: ${{ inputs.exit-code }}
         # trivy-action drops the severity filter for SARIF output unless told
         # otherwise, which fails the scan on findings outside `severity` (e.g.
         # UNKNOWN-severity Go vulndb notes).

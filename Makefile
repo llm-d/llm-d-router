@@ -43,9 +43,15 @@ export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
 export VLLM_RENDER_PORT ?= 8082
 export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
-BUILDER_TAG ?= dev
+# A locally edited Dockerfile.builder hashes to a tag that
+# was never published, so image-build-builder misses the pull and falls back
+# to a local build instead of running against a stale published image.
+BUILDER_TAG ?= $(shell git hash-object Dockerfile.builder)
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
 export BUILDER_IMAGE ?= $(BUILDER_TAG_BASE):$(BUILDER_TAG)
+# Escape hatch for testing local Dockerfile.builder changes without a matching
+# published tag:. Set BUILDER_PULL=false to force a local build.
+BUILDER_PULL ?= true
 
 NAMESPACE ?= hc4ai-operator
 LINT_NEW_ONLY ?= false # Set to true to only lint new code, false to lint all code (default matches CI behavior)
@@ -246,7 +252,7 @@ tidy:
 
 .PHONY: clean
 clean: ## Clean build artifacts, tools and caches
-	rm -rf bin build $(BUILDER_STAMP)
+	rm -rf bin build
 	-$(BUILDER_RUN) 'go clean -testcache -cache'
 
 .PHONY: format
@@ -457,19 +463,17 @@ image-build-%: check-container-tool ## Build Container image using $(CONTAINER_R
 		$(if $(BASE_IMAGE),--build-arg BASE_IMAGE="$(BASE_IMAGE)") \
 		-t $($*_IMAGE) -f Dockerfile.$* .
 
-BUILDER_STAMP = build/.builder.stamp
-
 .PHONY: image-build-builder
-image-build-builder: check-container-tool ## Build builder image if missing locally, stamp missing, or Dockerfile.builder newer than stamp
+image-build-builder: check-container-tool ## Use local builder image, else pull the published tag, else build locally
 	@mkdir -p $(GO_MOD_CACHE_VOL) $(GO_BUILD_CACHE_VOL)
-	@if ! $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1 || \
-	    [ ! -f $(BUILDER_STAMP) ] || \
-	    [ Dockerfile.builder -nt $(BUILDER_STAMP) ]; then \
-		printf "\033[33;1m==== Building image $(BUILDER_IMAGE) ====\033[0m\n"; \
-		$(CONTAINER_RUNTIME) build -f Dockerfile.builder -t $(BUILDER_IMAGE) .; \
-		mkdir -p $(dir $(BUILDER_STAMP)); \
-		touch $(BUILDER_STAMP); \
-	fi
+	@if $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	if [ "$(BUILDER_PULL)" = "true" ] && $(CONTAINER_RUNTIME) pull --platform linux/$(TARGETARCH) $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	printf "\033[33;1m==== Building image $(BUILDER_IMAGE) ====\033[0m\n"; \
+	$(CONTAINER_RUNTIME) build -f Dockerfile.builder -t $(BUILDER_IMAGE) .
 
 .PHONY: image-push
 image-push: image-push-epp image-push-sidecar ## Push container images to registry using $(CONTAINER_RUNTIME)
@@ -522,6 +526,10 @@ print-namespace: ## Print the current namespace
 .PHONY: print-project-name
 print-project-name: ## Print the current project name
 	@echo "$(PROJECT_NAME)"
+
+.PHONY: print-builder-tag
+print-builder-tag: ## Print the builder image tag (content hash of Dockerfile.builder)
+	@echo "$(BUILDER_TAG)"
 
 ##@ Deprecated aliases for backwards compatibility
 .PHONY: install-docker

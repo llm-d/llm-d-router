@@ -187,6 +187,85 @@ jobs:
           subject-digest: ${{ steps.push-coordinator.outputs.digest }}
           push-to-registry: true
 
+  # Gated on registry existence rather than a path filter, so a push that fails
+  # or is skipped is retried on the next call instead of never firing again.
+  # Not needed for push-helm-charts because the builder is unrelated to chart publishing.
+  build-builder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Compute builder tag
+        id: builder-tag
+        run: echo "tag=$(make print-builder-tag)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Check whether the builder image is already published
+        id: check
+        run: |
+          if docker manifest inspect ghcr.io/llm-d/llm-d-builder:${{ steps.builder-tag.outputs.tag }} > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build builder AMD64 image (no push)
+        if: steps.check.outputs.exists == 'false'
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: Dockerfile.builder
+          tag: ${{ steps.builder-tag.outputs.tag }}
+          image-name: llm-d-builder
+          registry: ghcr.io/llm-d
+          push: 'false'
+          buildx-outputs: type=docker,dest=/tmp/builder-image.tar
+
+      # Findings in the Go toolchain, podman and the docker CLI never block this
+      # build. SARIF still uploads to the Security tab.
+      - name: Run Trivy scan for builder on AMD64
+        if: steps.check.outputs.exists == 'false'
+        uses: ./.github/actions/trivy-scan
+        with:
+          tarball: /tmp/builder-image.tar
+          exit-code: '0'
+
+      # prerelease: 'true' suppresses the composite action's floating :latest
+      # tag. The builder is addressed only by its content hash tag.
+      - name: Push builder image for both AMD64 and ARM64
+        if: steps.check.outputs.exists == 'false'
+        id: push-builder
+        uses: ./.github/actions/docker-build-and-push
+        with:
+          docker-file: Dockerfile.builder
+          tag: ${{ steps.builder-tag.outputs.tag }}
+          image-name: llm-d-builder
+          registry: ghcr.io/llm-d
+          github-token: ${{ github.token }}
+          prerelease: 'true'
+          push: 'true'
+
+      - name: Attest builder image provenance
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/llm-d/llm-d-builder
+          subject-digest: ${{ steps.push-builder.outputs.digest }}
+          push-to-registry: true
+
   push-helm-charts:
     needs: [build-epp, build-sidecar, build-coordinator]
     runs-on: ubuntu-latest
