@@ -40,8 +40,9 @@ var SessionCacheRequestDataKey = plugin.NewDataKey("SessionCacheRequest", "")
 // SessionCacheRequest carries a manager's event stamp and cache lookup for one
 // prompt. Absence or an empty stamp skips session lookup and request mutation.
 type SessionCacheRequest struct {
-	// Stamp is echoed in vLLM's session_id. The manager must distinguish
-	// concurrent requests whose block observations cannot be combined.
+	// Stamp replaces the request body's session_id and returns in vLLM's KV
+	// events. The manager must distinguish concurrent requests whose block
+	// observations cannot be combined.
 	Stamp string
 	// FullReport requests reused blocks as well as newly stored blocks.
 	FullReport bool
