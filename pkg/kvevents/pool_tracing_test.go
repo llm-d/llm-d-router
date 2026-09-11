@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
@@ -89,19 +90,19 @@ func TestProcessRawMessage_EmitsProcessAndDecodeSpans(t *testing.T) {
 
 	process := findEventSpan(t, recorder, "events_process")
 	pAttrs := eventSpanAttrs(process)
-	assert.Equal(t, "kv@10.0.0.1:8000@test-model", pAttrs["llm_d.kv_cache.events.topic"].AsString())
-	assert.Equal(t, int64(1), pAttrs["llm_d.kv_cache.events.payload_size_bytes"].AsInt64())
-	assert.Equal(t, int64(1), pAttrs["llm_d.kv_cache.events.event_count"].AsInt64())
+	assert.Equal(t, "kv@10.0.0.1:8000@test-model", pAttrs[semconv.LLMDKVCacheEventsTopicKey].AsString())
+	assert.Equal(t, int64(1), pAttrs[semconv.LLMDKVCacheEventsPayloadSizeBytesKey].AsInt64())
+	assert.Equal(t, int64(1), pAttrs[semconv.LLMDKVCacheEventsEventCountKey].AsInt64())
 	// The subscriber's endpoint wins over the adapter-parsed one.
-	assert.Equal(t, "10.0.0.1:8003", pAttrs["llm_d.kv_cache.events.pod_id"].AsString())
+	assert.Equal(t, "10.0.0.1:8003", pAttrs[semconv.LLMDKVCacheEventsPodIDKey].AsString())
 
 	decode := findEventSpan(t, recorder, "events_decode")
 	dAttrs := eventSpanAttrs(decode)
-	assert.Equal(t, "test-model", dAttrs["gen_ai.request.model"].AsString())
+	assert.Equal(t, "test-model", dAttrs[semconv.GenAIRequestModelKey].AsString())
 	// pod_id carries the effective pod and belongs on events_process alone, so
 	// a query on it cannot return the pre-override value.
-	assert.NotContains(t, dAttrs, attribute.Key("llm_d.kv_cache.events.pod_id"))
-	assert.NotContains(t, dAttrs, attribute.Key("llm_d.kv_cache.events.event_count"))
+	assert.NotContains(t, dAttrs, semconv.LLMDKVCacheEventsPodIDKey)
+	assert.NotContains(t, dAttrs, semconv.LLMDKVCacheEventsEventCountKey)
 
 	// decode nests under process
 	assert.Equal(t, process.SpanContext().SpanID(), decode.Parent().SpanID())

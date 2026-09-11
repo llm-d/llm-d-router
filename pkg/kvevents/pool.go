@@ -22,7 +22,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -30,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
@@ -380,8 +380,8 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(
-			attribute.String("llm_d.kv_cache.events.topic", msg.Topic),
-			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(msg.Payload)),
+			semconv.LLMDKVCacheEventsTopic(msg.Topic),
+			semconv.LLMDKVCacheEventsPayloadSizeBytes(len(msg.Payload)),
 		)
 	}
 
@@ -399,8 +399,8 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	}
 	if tracingActive {
 		span.SetAttributes(
-			attribute.String("llm_d.kv_cache.events.pod_id", podID),
-			attribute.Int("llm_d.kv_cache.events.event_count", len(batch.Events)),
+			semconv.LLMDKVCacheEventsPodID(podID),
+			semconv.LLMDKVCacheEventsEventCount(len(batch.Events)),
 		)
 	}
 
@@ -425,7 +425,7 @@ func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, Eve
 	// pod after the SourceEndpoint override. Repeating the pre-override pod
 	// under the same key would give one attribute two meanings in one trace.
 	if span.IsRecording() {
-		span.SetAttributes(attribute.String("gen_ai.request.model", modelName))
+		span.SetAttributes(semconv.GenAIRequestModel(modelName))
 	}
 
 	return podID, modelName, batch, nil

@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
@@ -256,13 +257,13 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	defer span.End()
 	if span.IsRecording() {
 		attrs := []attribute.KeyValue{
-			attribute.String("llm_d.kv_cache.events.topic", topic),
-			attribute.Int64("llm_d.kv_cache.events.sequence", int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
-			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(payload)),
+			semconv.LLMDKVCacheEventsTopic(topic),
+			semconv.LLMDKVCacheEventsSequence(int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
+			semconv.LLMDKVCacheEventsPayloadSizeBytes(len(payload)),
 		}
 		// Empty unless the subscriber was created by pod discovery.
 		if z.sourceEndpoint != "" {
-			attrs = append(attrs, attribute.String("llm_d.kv_cache.events.source_endpoint", z.sourceEndpoint))
+			attrs = append(attrs, semconv.LLMDKVCacheEventsSourceEndpoint(z.sourceEndpoint))
 		}
 		span.SetAttributes(attrs...)
 	}
