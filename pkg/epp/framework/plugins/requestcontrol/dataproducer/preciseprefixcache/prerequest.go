@@ -88,6 +88,7 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	cache := ttlcache.New[string, *speculativeEntries](
 		ttlcache.WithTTL[string, *speculativeEntries](ttl),
 	)
+	logger := log.FromContext(ctx).WithName(PluginType)
 	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
 		item *ttlcache.Item[string, *speculativeEntries],
 	) {
@@ -95,11 +96,18 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 			return
 		}
 		entries := item.Value()
+		keys := make([]kvblock.BlockHash, 0)
 		for _, promptKeys := range entries.perPromptKeys {
-			for _, reqKey := range promptKeys {
-				//nolint:errcheck // best-effort cleanup on TTL expiry
-				index.Evict(ctx, reqKey, kvblock.RequestKey, entries.podEntries)
-			}
+			keys = append(keys, promptKeys...)
+		}
+		if len(keys) == 0 || len(entries.podEntries) == 0 {
+			return
+		}
+		// On failure the entries stay until the pod's next Clear, or until the same
+		// prefix is routed to the same pod again and that TTL expiry succeeds.
+		if err := index.Evict(ctx, kvblock.RequestKey, keys, entries.podEntries); err != nil {
+			logger.Error(err, "Failed to evict speculative entries on TTL expiry",
+				"requestID", item.Key(), "keys", len(keys))
 		}
 	})
 	go cache.Start()

@@ -301,7 +301,7 @@ func TestWalkKeysOrdinalsAreStable(t *testing.T) {
 	// Ordinals survive removal: a pod cleared or evicted and added again
 	// keeps its own.
 	require.NoError(t, index.Clear(ctx, "pod-a"))
-	require.NoError(t, index.Evict(ctx, 1, RequestKey, []PodEntry{cpuB}))
+	require.NoError(t, index.Evict(ctx, RequestKey, []BlockHash{1}, []PodEntry{cpuB}))
 	require.NoError(t, index.Add(ctx, nil, []BlockHash{3}, []PodEntry{gpuA, cpuB}))
 	for _, v := range walkAll(t, index, []BlockHash{3})[0].entries {
 		assert.Equal(t, byEntry[v.PodEntry].PodOrdinal, v.PodOrdinal, "%v pod ordinal after removal", v.PodEntry)

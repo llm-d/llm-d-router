@@ -77,28 +77,31 @@ type RedisIndex struct {
 
 var _ Index = &RedisIndex{}
 
-// pruneRequestKeyScript atomically deletes a request key hash if it contains no pods.
-var pruneRequestKeyScript = redis.NewScript(`
-	local hashLen = redis.call('HLEN', KEYS[1])
-	if hashLen == 0 then
-		redis.call('DEL', KEYS[1])
-		return 1
-	end
-	return 0
-`)
-
-// pruneEngineKeyScript atomically deletes an engine key mapping only if all
-// associated request key hashes are empty. This prevents a TOCTOU race where a
-// concurrent Add could insert into a request key between checking and deleting.
-// KEYS[1] = engine key ("engine:<hash>"), KEYS[2..N] = request key hashes.
+// pruneEngineKeyScript atomically deletes each engine key mapping whose
+// associated request key hashes are all empty. This prevents a TOCTOU race
+// where a concurrent Add could insert into a request key between checking and
+// deleting. KEYS holds one group per engine key: the engine key
+// ("engine:<hash>") followed by its request key hashes. ARGV[i] is the number
+// of request keys in group i. Returns the number of engine keys pruned.
 var pruneEngineKeyScript = redis.NewScript(`
-	for i = 2, #KEYS do
-		if redis.call('HLEN', KEYS[i]) > 0 then
-			return 0
+	local pruned = 0
+	local idx = 1
+	for i = 1, #ARGV do
+		local n = tonumber(ARGV[i])
+		local allEmpty = true
+		for j = idx + 1, idx + n do
+			if redis.call('HLEN', KEYS[j]) > 0 then
+				allEmpty = false
+				break
+			end
 		end
+		if allEmpty then
+			redis.call('DEL', KEYS[idx])
+			pruned = pruned + 1
+		end
+		idx = idx + n + 1
 	end
-	redis.call('DEL', KEYS[1])
-	return 1
+	return pruned
 `)
 
 // Lookup receives a list of keys and a set of pod identifiers,
@@ -215,65 +218,80 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 	return nil
 }
 
-// Evict removes a key and its associated pod entries from the index backend.
-// keyType indicates whether the key is an EngineKey (requires engine→request lookup)
-// or a RequestKey (used directly for speculative entries without engineKey mapping).
-func (r *RedisIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
-	if len(entries) == 0 {
-		return fmt.Errorf("no entries provided for eviction from index")
+// Evict removes keys and their associated pod entries from the index backend.
+// keyType indicates whether the keys are EngineKeys (each resolved independently
+// via the engine→request mapping) or RequestKeys (used directly).
+// It is not transactional: a failed call may leave the request keys partially
+// evicted and every engine key mapping in place. Nothing is rolled back.
+func (r *RedisIndex) Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error {
+	if len(keys) == 0 || len(entries) == 0 {
+		return fmt.Errorf("no keys or entries provided for eviction from index")
 	}
 
 	switch keyType {
 	case EngineKey:
-		rks, err := r.getRequestKeys(ctx, key)
-		if err != nil || len(rks) == 0 {
-			// Engine key not found in mapping — nothing to evict
-			return nil //nolint:nilerr // intentional: missing engine key means nothing to evict
+		groups, err := r.getRequestKeys(ctx, keys)
+		if err != nil {
+			return err
 		}
-		for _, rk := range rks {
-			if err := r.evictPodsFromRequestKey(ctx, rk, entries); err != nil {
-				return err
+
+		// scriptKeys and groupSizes carry the per-engine-key layout that
+		// pruneEngineKeyScript expects. Engine keys with no mapping are skipped.
+		var allRks []BlockHash
+		var scriptKeys []string
+		var groupSizes []interface{}
+		for i, rks := range groups {
+			if len(rks) == 0 {
+				continue
 			}
+			scriptKeys = append(scriptKeys, redisEngineKey(keys[i]))
+			groupSizes = append(groupSizes, len(rks))
+			for _, rk := range rks {
+				scriptKeys = append(scriptKeys, rk.String())
+			}
+			allRks = append(allRks, rks...)
 		}
-		keys := make([]string, 0, 1+len(rks))
-		keys = append(keys, redisEngineKey(key))
-		for _, rk := range rks {
-			keys = append(keys, rk.String())
+
+		if len(allRks) == 0 {
+			return nil
 		}
-		if err := pruneEngineKeyScript.Run(ctx, r.RedisClient, keys).Err(); err != nil && !errors.Is(err, redis.Nil) {
-			return fmt.Errorf("failed to prune engine key mapping: %w", err)
+		if err := r.evictPodsFromRequestKeys(ctx, allRks, entries); err != nil {
+			return err
+		}
+		if err := pruneEngineKeyScript.Run(ctx, r.RedisClient, scriptKeys, groupSizes...).Err(); err != nil && !errors.Is(err, redis.Nil) {
+			return fmt.Errorf("failed to prune engine key mappings: %w", err)
 		}
 		return nil
 	case RequestKey:
-		return r.evictPodsFromRequestKey(ctx, key, entries)
+		return r.evictPodsFromRequestKeys(ctx, keys, entries)
 	default:
 		return fmt.Errorf("unknown key type: %d", keyType)
 	}
 }
 
-// evictPodsFromRequestKey removes the given pod entries from a single request key.
-// If the pod hash becomes empty, the request key is removed.
-func (r *RedisIndex) evictPodsFromRequestKey(ctx context.Context, requestKey BlockHash, entries []PodEntry) error {
-	redisKey := requestKey.String()
-	pipe := r.RedisClient.Pipeline()
-
+// evictPodsFromRequestKeys removes the given pod entries from the request keys
+// in one pipeline.
+func (r *RedisIndex) evictPodsFromRequestKeys(ctx context.Context, requestKeys []BlockHash, entries []PodEntry) error {
+	fields := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		field, err := encodeRedisPodField(entry)
 		if err != nil {
 			return err
 		}
-		pipe.HDel(ctx, redisKey, field)
+		fields = append(fields, field)
+	}
+
+	pipe := r.RedisClient.Pipeline()
+	for _, requestKey := range requestKeys {
+		pipe.HDel(ctx, requestKey.String(), fields...)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to evict entries from Redis: %w", err)
 	}
 
-	// Atomically delete the request key hash if it's now empty
-	if err := pruneRequestKeyScript.Run(ctx, r.RedisClient, []string{redisKey}).Err(); err != nil {
-		return fmt.Errorf("failed to prune empty request key: %w", err)
-	}
-
+	// HDEL deletes the hash once no fields remain, so emptied request keys
+	// need no separate cleanup: https://redis.io/docs/latest/commands/hdel/
 	return nil
 }
 
@@ -294,25 +312,35 @@ func decodeRedisPodField(field string) (PodEntry, bool) {
 	return entry, true
 }
 
-// getRequestKeys returns all request keys mapped to the given engine key.
-func (r *RedisIndex) getRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error) {
-	vals, err := r.RedisClient.ZRange(ctx, redisEngineKey(engineKey), 0, -1).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return nil, nil
-		}
-		return nil, err
+// getRequestKeys returns the request keys mapped to each engine key, aligned
+// with engineKeys. An engine key with no mapping yields an empty slice.
+func (r *RedisIndex) getRequestKeys(ctx context.Context, engineKeys []BlockHash) ([][]BlockHash, error) {
+	pipe := r.RedisClient.Pipeline()
+	cmds := make([]*redis.StringSliceCmd, len(engineKeys))
+	for i, key := range engineKeys {
+		cmds[i] = pipe.ZRange(ctx, redisEngineKey(key), 0, -1)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("failed to resolve engine keys: %w", err)
 	}
 
-	rks := make([]BlockHash, 0, len(vals))
-	for _, val := range vals {
-		hash, err := strconv.ParseUint(val, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid hash format: %s", val)
+	groups := make([][]BlockHash, len(engineKeys))
+	for i, cmd := range cmds {
+		vals, err := cmd.Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("failed to resolve engine key %s: %w", engineKeys[i], err)
 		}
-		rks = append(rks, BlockHash(hash))
+		rks := make([]BlockHash, 0, len(vals))
+		for _, val := range vals {
+			hash, err := strconv.ParseUint(val, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid hash format: %s", val)
+			}
+			rks = append(rks, BlockHash(hash))
+		}
+		groups[i] = rks
 	}
-	return rks, nil
+	return groups, nil
 }
 
 // GetRequestKey returns the last request key (highest score) associated with the given engineKey.
@@ -344,8 +372,8 @@ func redisEngineKey(engineKey BlockHash) string {
 // Clear removes every hash field for the pod across all request-key hashes and
 // device tiers. Each field is a JSON-encoded PodEntry, so matching decodes the
 // field and compares PodIdentifier — catching every tier, group, and speculative
-// variant. It pages the keyspace with SCAN (skipping engine: keys), HDELs the
-// pod's fields, and prunes now-empty hashes. O(keyspace), but Clear is rare and
+// variant. It pages the keyspace with SCAN (skipping engine: keys) and HDELs
+// the pod's fields. O(keyspace), but Clear is rare and
 // off the Lookup/Add hot path. Because it deletes from the shared store, it is
 // correct for multi-replica deployments with no cross-process coordination.
 func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
@@ -383,11 +411,6 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 				return fmt.Errorf("clear hdel failed for %s: %w", key, err)
 			}
 			removed += len(stale)
-
-			if err := pruneRequestKeyScript.Run(ctx, r.RedisClient, []string{key}).Err(); err != nil &&
-				!errors.Is(err, redis.Nil) {
-				return fmt.Errorf("clear prune failed for %s: %w", key, err)
-			}
 		}
 
 		if cursor = next; cursor == 0 {
