@@ -825,10 +825,12 @@ Prefill only needs the metadata sibling plus `ec_transfer_params` to load those
 embeddings. For large images the pixel tensors dominate payload size, so dropping
 `kwargs_data` on prefill cuts coordinator-to-prefill traffic.
 
+The multimodal data each stage sends:
+
 ```text
-Encode  = kwargs_data
-Prefill = mm_metadata + ec_transfer_params
-no EC / old renderers = kwargs_data unchanged
+Encode              = kwargs_data
+Prefill (optimized) = mm_metadata + ec_transfer_params
+Prefill (fallback)  = kwargs_data
 ```
 
 **Coordinator behavior:**
