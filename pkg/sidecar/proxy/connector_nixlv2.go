@@ -694,6 +694,18 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	go func() {
 		defer close(prefillDone)
 		defer prefillSpan.End()
+		// ErrAbortHandler is only recovered on the request goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				prefillSpan.SetStatus(codes.Error, "prefill handler aborted")
+				cancel()
+				s.logger.Error(nil, "concurrent-dispatch prefill handler aborted",
+					"request_id", uuidStr)
+			}
+		}()
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, preq)
 		prefillResp = pw
@@ -716,6 +728,18 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	decodeStartedAt := time.Now()
 	go func() {
 		defer close(decodeDone)
+		// Same recover: abort this request, do not kill the process.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				decodeSpan.SetStatus(codes.Error, "decode handler aborted")
+				dcw.abort()
+				s.logger.Error(nil, "concurrent-dispatch decode handler aborted",
+					"request_id", uuidStr)
+			}
+		}()
 		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq)
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
