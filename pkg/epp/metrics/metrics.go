@@ -410,8 +410,8 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fai
 }
 
 // observeWithTraceExemplar records an observation, attaching the request's trace
-// ID as a Prometheus exemplar so a point on a latency graph can be opened as the
-// trace that produced it.
+// and span IDs as a Prometheus exemplar so a point on a latency graph can be
+// opened as the trace that produced it.
 //
 // The exemplar is attached only when the span is sampled. An unsampled span still
 // carries a trace ID, but no trace was ever exported for it, so attaching one
@@ -423,7 +423,14 @@ func observeWithTraceExemplar(ctx context.Context, observer prometheus.Observer,
 	sc := trace.SpanContextFromContext(ctx)
 	if sc.IsSampled() {
 		if exemplarObserver, ok := observer.(prometheus.ExemplarObserver); ok {
-			exemplarObserver.ObserveWithExemplar(value, prometheus.Labels{"trace_id": sc.TraceID().String()})
+			// Both IDs fit comfortably inside OpenMetrics' 128-rune exemplar
+			// label budget (63 runes), and the span ID lets a traces backend
+			// open the span that observed this latency rather than only the
+			// trace containing it.
+			exemplarObserver.ObserveWithExemplar(value, prometheus.Labels{
+				"trace_id": sc.TraceID().String(),
+				"span_id":  sc.SpanID().String(),
+			})
 			return
 		}
 	}
