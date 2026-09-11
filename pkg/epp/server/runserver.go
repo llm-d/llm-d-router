@@ -81,8 +81,50 @@ type ExtProcServerRunner struct {
 	EvictChannelLookup handlers.EvictChannelLookup
 }
 
+// NewExtProcServerRunner builds a runner from the runtime options plus the dependencies the
+// caller has already constructed. It is the single place that maps *Options onto
+// ExtProcServerRunner: adding an option here reaches every ext_proc server, instead of only
+// whichever call site the author happened to edit.
+//
+// GrpcListener and EvictChannelLookup stay the caller's job -- both are optional and only
+// some call sites have one.
+func NewExtProcServerRunner(
+	opts *Options,
+	gknn common.GKNN,
+	controllerCfg ControllerConfig,
+	ds datastore.Datastore,
+	director *requestcontrol.Director,
+	parserRegistry *handlers.ParserRegistry,
+	saturationDetector fwkfc.SaturationDetector,
+	priorityBandControlPlane contracts.PriorityBandControlPlane,
+) *ExtProcServerRunner {
+	return &ExtProcServerRunner{
+		GrpcPort:                         opts.GRPCPort,
+		GKNN:                             gknn,
+		ControllerCfg:                    controllerCfg,
+		Datastore:                        ds,
+		SecureServing:                    opts.SecureServing,
+		HealthChecking:                   opts.HealthChecking,
+		CertPath:                         opts.CertPath,
+		EnableCertReload:                 opts.EnableCertReload,
+		TLSMinVersion:                    opts.TLSMinVersionValue(),
+		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
+		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
+		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
+		Director:                         director,
+		ParserRegistry:                   parserRegistry,
+		SaturationDetector:               saturationDetector,
+		PriorityBandControlPlane:         priorityBandControlPlane,
+		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
+		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
+		EmitEndpointScores:               opts.EmitEndpointScores,
+	}
+}
+
 // NewDefaultExtProcServerRunner creates a runner with default values.
-// Note: Dependencies like Datastore, Scheduler, SD need to be set separately.
+// Note: Dependencies like Datastore, Director, ParserRegistry, SaturationDetector, and
+// PriorityBandControlPlane need to be set separately, hence the nil arguments below.
 func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 	opts := NewOptions()
 	if opts.PoolNamespace == "" {
@@ -96,24 +138,13 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 			Kind:  "InferencePool",
 		},
 	}
-	return &ExtProcServerRunner{
-		GrpcPort:           opts.GRPCPort,
-		GRPCMaxRecvMsgSize: opts.GRPCMaxRecvMsgSize,
-		GRPCMaxSendMsgSize: opts.GRPCMaxSendMsgSize,
-		GKNN:               gknn,
-		ControllerCfg: ControllerConfig{
-			startCrdReconcilers:       true,
-			hasInferenceObjective:     true,
-			hasInferenceModelRewrites: true,
-			InferenceObjectiveGV:      inferenceAPIGV,
-			InferenceModelRewriteGV:   inferenceAPIGV,
-		},
-		SecureServing:                    opts.SecureServing,
-		HealthChecking:                   opts.HealthChecking,
-		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
-		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
-		// Dependencies can be assigned later.
-	}
+	return NewExtProcServerRunner(opts, gknn, ControllerConfig{
+		startCrdReconcilers:       true,
+		hasInferenceObjective:     true,
+		hasInferenceModelRewrites: true,
+		InferenceObjectiveGV:      inferenceAPIGV,
+		InferenceModelRewriteGV:   inferenceAPIGV,
+	}, nil, nil, nil, nil, nil)
 }
 
 // SetupWithManager sets up the runner with the given manager.
