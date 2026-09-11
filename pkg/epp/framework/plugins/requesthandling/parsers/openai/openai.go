@@ -43,6 +43,7 @@ const (
 	responsesAPI       = "responses"
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
+	promptField        = "prompt"
 	embeddingsAPI      = "embeddings"
 	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
 	imagesGenerationsAPI = "images/generations"
@@ -132,7 +133,11 @@ func (p *OpenAIParser) WithName(name string) *OpenAIParser {
 
 // ParseRequest parses the request body and headers and returns a map representation.
 func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	apiType := determineAPITypeFromPath(request.GetRequestPath(headers))
+	path := request.GetRequestPath(headers)
+	if request.MatchPathSuffix(path, chatCompletionsAPI+"/render") || request.MatchPathSuffix(path, completionsAPI+"/render") {
+		return parserutil.ParseRenderRequest(body)
+	}
+	apiType := determineAPITypeFromPath(path)
 	if apiType == imagesEditsAPI {
 		return parseImagesEditsRequest(body, headers)
 	}
@@ -141,9 +146,13 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		return nil, fmt.Errorf("error extracting request body: %w", err)
 	}
 
-	rawField := tokenInputField(extractedBody)
 	var bodyMap fwkrh.PayloadMap
-	if rawField == "" {
+	if apiType == chatCompletionsAPI || apiType == completionsAPI {
+		var payload map[string]any
+		payload, err = parserutil.UnmarshalEnvelope(body, promptField)
+		bodyMap = fwkrh.PayloadMap(payload)
+		extractedBody.RawBody = body
+	} else if rawField := tokenInputField(extractedBody); rawField == "" {
 		bodyMap = make(fwkrh.PayloadMap)
 		err = parserutil.Unmarshal(body, &bodyMap)
 	} else {
@@ -177,8 +186,6 @@ func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
 
 func tokenInputField(body *fwkrh.InferenceRequestBody) string {
 	switch {
-	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return "prompt"
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
 		return "input"
 	default:

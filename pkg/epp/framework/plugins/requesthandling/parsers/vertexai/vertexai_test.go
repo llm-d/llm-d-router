@@ -97,6 +97,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Stream:  true,
 					Payload: fwkrh.PayloadProto{Message: reqMsg},
+					RawBody: reqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
 			},

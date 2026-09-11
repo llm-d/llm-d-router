@@ -355,7 +355,7 @@ func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContex
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
 		return nil
 	}
-	marshaler, ok := inferenceRequestBody.Payload.(fwkrh.Marshaler)
+	marshaler, ok := inferenceRequestBody.WirePayload().(fwkrh.Marshaler)
 	if !ok {
 		// Payload forwarded unchanged (raw or proto).
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
