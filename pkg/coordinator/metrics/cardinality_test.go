@@ -27,3 +27,24 @@ func TestBoundModel_EmptyIsUnknown(t *testing.T) {
 	// a flood of empty-model requests can never exhaust the cap.
 	require.Equal(t, ModelUnknown, boundModel(""))
 }
+
+func TestBoundRoute_ClosedSet(t *testing.T) {
+	require.Equal(t, RouteChatCompletions, boundRoute(RouteChatCompletions))
+	require.Equal(t, RouteCompletions, boundRoute(RouteCompletions))
+	require.Equal(t, RouteGenerate, boundRoute(RouteGenerate))
+	require.Equal(t, RouteUnknown, boundRoute("/v1/chat/completions"))
+	require.Equal(t, RouteUnknown, boundRoute(""))
+}
+
+func TestBoundMediaType_ClosedSet(t *testing.T) {
+	require.Equal(t, MediaTypeImage, boundMediaType(MediaTypeImage))
+	require.Equal(t, MediaTypeOther, boundMediaType("image/png"))
+	require.Equal(t, MediaTypeOther, boundMediaType(""))
+}
+
+func TestBoundDownloadResult_ClosedSet(t *testing.T) {
+	require.Equal(t, DownloadResultSuccess, boundDownloadResult(DownloadResultSuccess))
+	require.Equal(t, DownloadResultError, boundDownloadResult(DownloadResultError))
+	require.Equal(t, DownloadResultCancelled, boundDownloadResult(DownloadResultCancelled))
+	require.Equal(t, DownloadResultError, boundDownloadResult("timeout"))
+}

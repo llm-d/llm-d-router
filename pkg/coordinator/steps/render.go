@@ -185,6 +185,8 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	reqCtx.MultimodalEntries = entries
 
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(entries))
+
 	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "images", len(entries))
 	return nil
 }
