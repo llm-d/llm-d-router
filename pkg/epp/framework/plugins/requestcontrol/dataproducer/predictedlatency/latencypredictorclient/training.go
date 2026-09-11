@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 
@@ -217,6 +218,18 @@ func (p *Predictor) ValidateTrainingEntry(entry TrainingEntry) error {
 	}
 	if entry.ActualTPOT < 0.0 {
 		return fmt.Errorf("actual_tpot_ms must be non-negative, got %f", entry.ActualTPOT)
+	}
+	if entry.PredictedTTFT != nil && *entry.PredictedTTFT < 0.0 {
+		return fmt.Errorf("predicted_ttft_ms must be non-negative, got %f", *entry.PredictedTTFT)
+	}
+	if entry.PredictedTTFT != nil && (math.IsNaN(*entry.PredictedTTFT) || math.IsInf(*entry.PredictedTTFT, 0)) {
+		return fmt.Errorf("predicted_ttft_ms must be a finite number, got %f", *entry.PredictedTTFT)
+	}
+	if entry.PredictedTPOT != nil && *entry.PredictedTPOT < 0.0 {
+		return fmt.Errorf("predicted_tpot_ms must be non-negative, got %f", *entry.PredictedTPOT)
+	}
+	if entry.PredictedTPOT != nil && (math.IsNaN(*entry.PredictedTPOT) || math.IsInf(*entry.PredictedTPOT, 0)) {
+		return fmt.Errorf("predicted_tpot_ms must be a finite number, got %f", *entry.PredictedTPOT)
 	}
 	if entry.PrefixCacheScore < 0.0 || entry.PrefixCacheScore > 1.0 {
 		return fmt.Errorf("prefix_cache_score must be between 0.0 and 1.0, got %f", entry.PrefixCacheScore)

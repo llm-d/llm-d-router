@@ -197,10 +197,13 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 					0,
 					0,
 					0,
+					trainingEntryOptions{PredictedTPOT: predictedLatencyMSPtr(predictedLatencyCtx.avgPredictedTPOT)},
 				)
 				entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatch
 				entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
 				entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatch
+				// Request-average actual TPOT is paired with the scheduling-time
+				// selected decode/primary prediction (avgPredictedTPOT).
 				if err := pl.latencypredictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 					logger.V(logutil.DEBUG).Error(err, "record TPOT training failed")
 				}
