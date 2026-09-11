@@ -431,17 +431,28 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	prefillRequest := maps.Clone(body)
 
 	// Pin both requests to the same DP rank (kv_transfer_params + HTTP header).
-	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
+	// The header and remote_dp_rank must be in [0, dp_size_local).
+	dpLocal := s.config.MoRIIODPSizeLocal
+	if dpLocal <= 0 {
+		dpLocal = s.config.MoRIIODPSize
+	}
+	if dpLocal <= 0 {
+		dpLocal = 1
+	}
+	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize) % dpLocal
+
+	decodePodIP := s.currentDecodePodIP(parentCtx)
+	decodeHosts := s.currentDecodeHosts(parentCtx)
 
 	// Build prefill body. remote_host points at the decode pod so prefill can
-	// RDMA-Write KV there; remote_dp_size gates the decode-side per-DP-rank
-	// handshake loop for Wide-EP.
+	// RDMA-Write KV there; remote_dp_size stays global, gating the decode-side
+	// per-DP-rank handshake loop for Wide-EP.
 	prefillRequest[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemoteDecode:       true,
 		requestFieldDoRemotePrefill:      false,
 		requestFieldRemoteEngineID:       nil,
 		requestFieldRemoteBlockIDs:       nil,
-		requestFieldRemoteHost:           s.currentDecodePodIP(parentCtx),
+		requestFieldRemoteHost:           decodePodIP,
 		requestFieldRemotePort:           nil,
 		requestFieldRemoteNotifyPort:     s.config.MoRIIODecodeNotifyPort,
 		requestFieldRemoteDPRank:         dpRank,
@@ -455,7 +466,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// IPs so prefill handshakes the right pods. Omitted when unset, falling back
 	// to the single-host remote_host path. Re-resolved per request so peer
 	// restarts (new IP) are picked up within the TTL.
-	if decodeHosts := s.currentDecodeHosts(parentCtx); len(decodeHosts) > 0 {
+	if len(decodeHosts) > 0 {
 		pkv := prefillRequest[requestFieldKVTransferParams].(map[string]any)
 		hosts := make([]any, len(decodeHosts))
 		for i, h := range decodeHosts {
@@ -487,7 +498,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	if splitErr != nil {
 		prefillHost = prefillPodHostPort
 	}
+	remoteHosts := s.currentRemoteHosts(parentCtx)
 
+	// Decode: one prefill host; leader bit for follower global ranks.
 	body[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill: true,
 		requestFieldDoRemoteDecode:  false,
@@ -502,18 +515,15 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldRemoteHandshakePort:  s.config.MoRIIOPrefillHandshakePort,
 		requestFieldTransferID:           transferID,
 		"tp_size":                        s.config.MoRIIOTPSize,
-		"remote_dp_size":                 s.config.MoRIIODPSize,
+		"remote_dp_size":                 dpLocal,
+		"is_request_leader":              true,
 	}
 	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
 	// request so peer restarts (new IP) are picked up within the TTL.
-	if remoteHosts := s.currentRemoteHosts(parentCtx); len(remoteHosts) > 0 {
+	if len(remoteHosts) > 0 {
 		dkv := body[requestFieldKVTransferParams].(map[string]any)
-		hosts := make([]any, len(remoteHosts))
-		for i, h := range remoteHosts {
-			hosts[i] = h
-		}
-		dkv["remote_hosts"] = hosts
+		dkv["remote_hosts"] = []any{prefillHost}
 		if s.config.MoRIIODPSizeLocal > 0 {
 			dkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
 		}
