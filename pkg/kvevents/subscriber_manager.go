@@ -83,6 +83,7 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
 		entry.cancel()
+		entry.subscriber.retire()
 		delete(sm.subscribers, podIdentifier)
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
@@ -96,6 +97,10 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	if sm.pool.consumer != nil && sourceEndpoint != "" {
+		// Availability retained by an index backend predates this stream.
+		sm.pool.resetForSource("", sourceEndpoint)
+	}
 	go func() {
 		defer close(done)
 		subscriber.Start(subCtx)
@@ -131,6 +136,7 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
 	entry.cancel()
+	entry.subscriber.retire()
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)

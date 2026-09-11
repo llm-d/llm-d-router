@@ -53,6 +53,8 @@ type PrefixCacheMatchInfo struct {
 	// per tier. Speculative index entries count under SpeculativeTierKey.
 	// Nil when the producer supplies no tier data.
 	cachedBlocksByTier map[string]int
+	inputTokenCount    *int
+	observedTokenCount *int
 	// optional multimodal block-match attribution
 	mm *MMMatchInfo
 }
@@ -111,6 +113,28 @@ func (p *PrefixCacheMatchInfo) CachedBlocksByTier() map[string]int {
 	return p.cachedBlocksByTier
 }
 
+// WithInputTokenCount supplies the full prompt length in the same token units
+// as this match, replacing the token producer's length estimate for load accounting.
+func (p *PrefixCacheMatchInfo) WithInputTokenCount(count int) *PrefixCacheMatchInfo {
+	p.inputTokenCount = ptr.To(count)
+	return p
+}
+
+func (p *PrefixCacheMatchInfo) InputTokenCount() (int, bool) {
+	return ptr.Deref(p.inputTokenCount, 0), p.inputTokenCount != nil
+}
+
+// WithObservedTokenCount records the resident span of an observed engine path.
+// It does not establish that the current request contains that prefix.
+func (p *PrefixCacheMatchInfo) WithObservedTokenCount(count int) *PrefixCacheMatchInfo {
+	p.observedTokenCount = ptr.To(count)
+	return p
+}
+
+func (p *PrefixCacheMatchInfo) ObservedTokenCount() (int, bool) {
+	return ptr.Deref(p.observedTokenCount, 0), p.observedTokenCount != nil
+}
+
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	clone := &PrefixCacheMatchInfo{
 		matchBlocks:        p.matchBlocks,
@@ -121,6 +145,12 @@ func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	}
 	if p.mm != nil {
 		clone.mm = ptr.To(*p.mm)
+	}
+	if p.inputTokenCount != nil {
+		clone.inputTokenCount = ptr.To(*p.inputTokenCount)
+	}
+	if p.observedTokenCount != nil {
+		clone.observedTokenCount = ptr.To(*p.observedTokenCount)
 	}
 	return clone
 }
