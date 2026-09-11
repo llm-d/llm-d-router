@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -141,6 +142,107 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("missing key %q in merged ECTransferParams: %v", want, reqCtx.ECTransferParams)
 		}
+	}
+}
+
+func TestEncodeStep_AggregatesResponseHeadersAfterParallelFanOut(t *testing.T) {
+	const imageCount = 5
+	type routingValues struct {
+		slice string
+		zone  string
+	}
+	valuesByHash := map[string]routingValues{
+		"h1": {slice: "slice-01", zone: "zone-b"},
+		"h2": {slice: "slice-02", zone: "zone-a"},
+		"h3": {slice: "slice-01", zone: "zone-b"},
+		"h4": {slice: "slice-02", zone: "zone-a"},
+		"h5": {slice: "slice-01", zone: "zone-b"},
+	}
+
+	var requestCount atomic.Int32
+	allRequestsStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, name := range []string{"X-Disagg-Slice", "X-Route-Zone"} {
+			if got := r.Header.Get(name); got != "" {
+				t.Errorf("parallel encode request carried %s=%q from a sibling response", name, got)
+			}
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read encode body: %v", err)
+			return
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("decode encode body: %v", err)
+			return
+		}
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		if len(imageHashes) != 1 {
+			t.Errorf("encode request has %d image hashes, want 1", len(imageHashes))
+			return
+		}
+		hash, _ := imageHashes[0].(string)
+		values, found := valuesByHash[hash]
+		if !found {
+			t.Errorf("unexpected image hash %q", hash)
+			return
+		}
+
+		if requestCount.Add(1) == imageCount {
+			close(allRequestsStarted)
+		}
+		select {
+		case <-allRequestsStarted:
+		case <-r.Context().Done():
+			return
+		}
+
+		w.Header().Set("X-Disagg-Slice", values.slice)
+		w.Header().Set("X-Route-Zone", values.zone)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		"max_parallel":      imageCount,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-header-mode",
+		Model:     testModelName,
+		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Index: 2, Hash: "h3", KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+			{Index: 3, Hash: "h4", KwargsData: "dDQ=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 1}},
+			{Index: 4, Hash: "h5", KwargsData: "dDU=", Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 1}},
+		},
+	}
+
+	p, err := pipeline.NewWithForwardResponseHeaders([]pipeline.Step{step}, []string{"X-Disagg-Slice", "X-Route-Zone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Execute(ctx, reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	forwarded := reqCtx.ForwardedHeaders()
+	if got := forwarded["x-disagg-slice"]; got != "slice-01" {
+		t.Errorf("forwarded slice = %q, want %q", got, "slice-01")
+	}
+	if got := forwarded["x-route-zone"]; got != "zone-b" {
+		t.Errorf("forwarded zone = %q, want %q", got, "zone-b")
 	}
 }
 

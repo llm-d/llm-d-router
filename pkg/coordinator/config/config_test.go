@@ -105,6 +105,9 @@ func TestLoadEnvOverride(t *testing.T) {
 func TestLoadStepParams(t *testing.T) {
 	const body = `log_level: 2
 pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
   steps:
     - type: replace-media-urls
       params:
@@ -122,6 +125,9 @@ pipeline:
 
 	if len(cfg.Pipeline.Steps) != 2 {
 		t.Fatalf("got %d steps, want 2", len(cfg.Pipeline.Steps))
+	}
+	if got := cfg.Pipeline.ForwardResponseHeaders; len(got) != 2 || got[0] != "x-llm-d-disagg-revision" || got[1] != "x-disagg-slice" {
+		t.Fatalf("pipeline.forward_response_headers = %v, want revision and slice headers", got)
 	}
 
 	first := cfg.Pipeline.Steps[0]

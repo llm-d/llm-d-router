@@ -339,6 +339,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 		respBody := readErrorBody(resp.Body)
 		return upstreamError(RenderStepName, resp.StatusCode, respBody)
 	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("decoding render response: %w", err)
 	}
