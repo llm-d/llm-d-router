@@ -606,6 +606,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 - `ec_transfer_params` is a flat map keyed by mm_hash (same format as the encode response), merging all per-image entries from the encode stage
 - `kv_transfer_params.do_remote_decode = true, do_remote_prefill = false` tells the prefill worker to store KV cache for remote decode
 - `mm_placeholders` use the original offsets from the render response (positions in the full token sequence)
+- Every coordinator phase request carries the same coordinator-owned `x-llm-d-revision-decision-id`. Revision-aware EPP plugins can use it to coordinate one revision across parallel encode requests. A client-provided value is always replaced.
 
 ---
 

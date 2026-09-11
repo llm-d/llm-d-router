@@ -19,6 +19,8 @@ package pipeline
 import (
 	"net/http"
 	"testing"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func TestForwardedHeaders_NormalizesKeysToLowercase(t *testing.T) {
@@ -112,9 +114,31 @@ func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 	}
 }
 
+func TestForwardedHeaders_UsesCoordinatorRevisionDecisionID(t *testing.T) {
+	rc := &RequestContext{
+		RevisionDecisionID: "coordinator-decision-id",
+		OriginalHeaders: http.Header{
+			"X-Llm-D-Revision-Decision-Id": {"client-decision-id"},
+		},
+	}
+
+	out := rc.ForwardedHeaders()
+	if got := out[reqcommon.RevisionDecisionIDHeaderKey]; got != rc.RevisionDecisionID {
+		t.Errorf("revision decision ID = %q, want %q", got, rc.RevisionDecisionID)
+	}
+}
+
 func TestForwardedHeaders_NilOriginalHeaders(t *testing.T) {
 	rc := &RequestContext{}
 	if out := rc.ForwardedHeaders(); len(out) != 0 {
 		t.Fatalf("expected empty map for nil OriginalHeaders, got %v", out)
+	}
+}
+
+func TestForwardedHeaders_UsesRevisionDecisionIDWithoutOriginalHeaders(t *testing.T) {
+	rc := &RequestContext{RevisionDecisionID: "coordinator-decision-id"}
+	out := rc.ForwardedHeaders()
+	if got := out[reqcommon.RevisionDecisionIDHeaderKey]; got != rc.RevisionDecisionID {
+		t.Errorf("revision decision ID = %q, want %q", got, rc.RevisionDecisionID)
 	}
 }

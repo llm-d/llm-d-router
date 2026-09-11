@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -84,6 +85,7 @@ func TestECTransferParams_NotForwardedToDecodeBackend(t *testing.T) {
 }
 
 func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
+	const revisionDecisionID = "decision-id"
 	expectedKVParams := map[string]any{
 		"block_id":  "block-999",
 		"peer_host": "10.0.0.42",
@@ -94,6 +96,9 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phase := r.Header.Get(gateway.EPPProfileHeader)
+		if got := r.Header.Get(reqcommon.RevisionDecisionIDHeaderKey); got != revisionDecisionID {
+			t.Errorf("%s revision decision ID = %q, want %q", phase, got, revisionDecisionID)
+		}
 		switch phase {
 		case gateway.PhasePrefill:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -124,11 +129,12 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 
 	reqCtx := &pipeline.RequestContext{
-		RequestID:    "test-flow",
-		OriginalPath: gateway.PathChatCompletions,
-		Model:        "llama-3",
-		Stream:       false,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		RequestID:          "test-flow",
+		RevisionDecisionID: revisionDecisionID,
+		OriginalPath:       gateway.PathChatCompletions,
+		Model:              "llama-3",
+		Stream:             false,
+		TokenIDs:           []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},

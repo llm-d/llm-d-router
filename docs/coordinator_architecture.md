@@ -261,6 +261,7 @@ steps read and mutate. The load-bearing fields:
 | `Body` | server (parsed JSON) | every step; mutated in place as the request is enriched |
 | `OriginalPath`, `OriginalHeaders`, `OriginalBody` | server | format detection, header forwarding |
 | `Model`, `Stream` | server | request construction, response handling |
+| `RevisionDecisionID` | pipeline | EPP revision coordination across parallel and sequential phase requests |
 | `TokenIDs` | `render` | `conditional-decode`, `encode`, `prefill`, `decode` |
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
@@ -269,7 +270,9 @@ steps read and mutate. The load-bearing fields:
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`.
+it as the base header set, then stamp the request ID and `EPP-Profile`. The
+pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
+request. Any client-provided value under that name is discarded.
 
 ### EPP-Profile routing
 
@@ -312,6 +315,14 @@ selection swaps in `header-profile-handler` for that one plugin.
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
+
+### Revision coordination
+
+The coordinator sends the same revision decision ID to every phase. A
+revision-aware EPP plugin can use an atomic cross-replica operation to choose
+one revision for parallel encode requests and reuse it for prefill and decode.
+The decision ID is independent of `x-request-id`, so a client cannot pin a
+revision by supplying a request ID.
 
 ### Decode disaggregation deciders
 
