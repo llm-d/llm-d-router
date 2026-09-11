@@ -77,10 +77,22 @@ func TestObserveWithTraceExemplar_SampledSpanAttachesTraceID(t *testing.T) {
 	exemplars := collectExemplars(t, h)
 	require.Len(t, exemplars, 1, "a sampled span should attach exactly one exemplar")
 
-	labels := exemplars[0].Label
-	require.Len(t, labels, 1)
-	require.Equal(t, "trace_id", labels[0].GetName())
-	require.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", labels[0].GetValue())
+	labels := map[string]string{}
+	for _, l := range exemplars[0].Label {
+		labels[l.GetName()] = l.GetValue()
+	}
+	require.Equal(t, map[string]string{
+		"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+		"span_id":  "0102030405060708",
+	}, labels)
+
+	// OpenMetrics caps an exemplar's whole label set at 128 runes; exceeding it
+	// makes client_golang reject the observation at runtime.
+	runes := 0
+	for name, value := range labels {
+		runes += len([]rune(name)) + len([]rune(value))
+	}
+	require.LessOrEqual(t, runes, prometheus.ExemplarMaxRunes)
 	require.InDelta(t, 0.5, exemplars[0].GetValue(), 1e-9)
 }
 
