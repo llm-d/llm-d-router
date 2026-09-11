@@ -1,0 +1,11 @@
+apiVersion: llm-d.ai/v1alpha1
+featureGates:
+- flowControl
+kind: EndpointPickerConfig
+plugins:
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
