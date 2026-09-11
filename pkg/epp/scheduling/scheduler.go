@@ -25,11 +25,11 @@ import (
 	"slices"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -152,7 +152,7 @@ func runSchedulerProfile(ctx context.Context, name string, profile fwksched.Sche
 ) (*fwksched.ProfileRunResult, error) {
 	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, "run_scheduler_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attribute.String("llm_d.epp.scheduling.profile.name", name)),
+		trace.WithAttributes(semconv.LLMDEPPProfileName(name)),
 	)
 	defer span.End()
 

@@ -25,6 +25,10 @@ spec:
       annotations:
         checksum/config: {{ include "llm-d-router.proxyConfigMapData" . | sha256sum }}
     spec:
+      {{- if .Values.router.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ $proxy.name }}
           image: {{ $proxy.image }}

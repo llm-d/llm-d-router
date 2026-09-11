@@ -56,7 +56,7 @@ func main() {
 
 	pflag.Parse()
 
-	logutil.InitSetupLogging()
+	logutil.InitSetupLogging("llm-d-coordinator")
 	log := ctrl.Log.WithName("coordinator")
 
 	log.Info("coordinator build", "commit-sha", version.CommitSHA, "build-ref", version.BuildRef)

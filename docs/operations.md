@@ -91,7 +91,9 @@ These were run against 0.9.0 EPP container image.
 
 ## 2. Envoy Proxy Sizing (Standalone Mode)
 
-When running the llm-d Router in **Standalone Mode**, the Envoy proxy container runs in the same pod alongside the EPP container. Sizing the Envoy proxy container depends primarily on the request throughput (requests/second) and the request/response payload size (concurrency of streaming data).
+Standalone mode supports two Envoy proxy topologies. In the default `sidecar` mode, each EPP pod includes one proxy container, so the EPP replica count also determines the proxy replica count. With `router.proxy.mode: service`, the proxy runs in a separate Deployment and Service. Set `router.proxy.replicas` to scale service-mode proxies independently from EPP.
+
+Sizing each Envoy proxy container depends primarily on the request throughput handled by that replica and the request and response payload size. The `router.proxy.resources` setting applies to each proxy container in either topology.
 
 ### Sizing Recommendations
 
@@ -216,4 +218,3 @@ router:
   proxy:
     failOpen: true
 ```
-

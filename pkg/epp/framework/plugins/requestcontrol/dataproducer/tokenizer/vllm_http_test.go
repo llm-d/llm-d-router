@@ -335,6 +335,7 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 }
 
 func TestProduce_VLLMHTTPForwardsAuthorization(t *testing.T) {
+	t.Setenv(vllmAPIKeyEnvVar, "warmup-secret")
 	srv, cap := httpFixture(t,
 		[]renderResponse{{TokenIDs: []uint32{1}}}, renderResponse{TokenIDs: []uint32{2}})
 	defer srv.Close()
@@ -406,6 +407,22 @@ func TestRenderBackend_WarmupStopsOnAuthRejection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRenderBackend_WarmupUsesAPIKeyEnv(t *testing.T) {
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{1}}}, renderResponse{TokenIDs: []uint32{2}})
+	defer srv.Close()
+
+	t.Setenv(vllmAPIKeyEnvVar, "warmup-secret")
+	r := newHTTPRenderer(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), warmupRetryInterval/2)
+	defer cancel()
+	renderBackend{tk: r, warmupAuth: vllmWarmupAuthHeader()}.warmup(ctx) // wired as in NewPlugin
+
+	assert.Equal(t, "Bearer warmup-secret", cap.chatAuth)
+	assert.NoError(t, ctx.Err(), "warmup must succeed and return before the retry interval")
 }
 
 func TestVLLMHTTPRenderer_RenderMultiPrompt(t *testing.T) {
@@ -664,4 +681,35 @@ func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
 	for _, s := range clientSpans {
 		assert.Equal(t, "tokenize_render /v1/completions/render", s.Name)
 	}
+}
+
+// TestVLLMHTTPRenderer_RustStandaloneRenderer verifies compatibility with the
+// response shapes produced by the standalone Rust renderer (`vllm-rs render`).
+// The Rust renderer returns {"token_ids": [...]} without multimodal features.
+func TestVLLMHTTPRenderer_RustStandaloneRenderer(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"token_ids":[101, 2054, 2003, 1037, 3231, 102]}`))
+	})
+	mux.HandleFunc(completionsRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"token_ids":[101, 2054, 2003, 1037, 3231, 102]}]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+
+	chatTokens, features, err := r.RenderChat(context.Background(), fwkrh.PayloadMap{
+		"messages": []any{map[string]any{"role": "user", "content": "hello world"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{101, 2054, 2003, 1037, 3231, 102}, chatTokens)
+	assert.Nil(t, features)
+
+	compTokens, offsets, err := r.Render(context.Background(), fwkrh.PayloadMap{
+		"prompt": "hello world",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{101, 2054, 2003, 1037, 3231, 102}}, compTokens)
+	assert.Nil(t, offsets)
 }

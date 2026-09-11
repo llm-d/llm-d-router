@@ -554,23 +554,28 @@ func TestAutoMessagesDiscoveryRetry(t *testing.T) {
 }
 
 func TestAutoMessagesDiscoveryWarmup(t *testing.T) {
-	var calls []string
+	t.Setenv(vllmAPIKeyEnvVar, "warmup-secret")
+	var calls, auth []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.URL.Path)
+		auth = append(auth, r.Header.Get("Authorization"))
 		_, _ = io.WriteString(w, `{"token_ids":[1]}`)
 	}))
 	defer srv.Close()
-	selection, err := configureLegacyMessages(context.Background(), "test", "auto")
+	startup, stop := context.WithCancel(t.Context())
+	stop()
+	p, err := NewPlugin(startup, "test", &tokenizerPluginConfig{ModelName: "main", VLLM: &vllmConfig{URL: srv.URL}})
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	backend := renderBackend{tk: newHTTPRenderer(t, srv), modelName: "main", legacyMessages: selection}
+	backend := p.backend.(renderBackend)
 	backend.warmup(ctx)
 	require.NoError(t, ctx.Err())
-	legacy, err := selection.useLegacy(ctx, backend.tk, "main")
+	legacy, err := backend.legacyMessages.useLegacy(ctx, backend.tk, "main")
 	require.NoError(t, err)
 	require.False(t, legacy)
 	require.Equal(t, []string{messagesRenderPath, chatRenderPath, chatRenderPath}, calls)
+	require.Equal(t, []string{"Bearer warmup-secret", "Bearer warmup-secret", "Bearer warmup-secret"}, auth)
 }
 
 func TestMessagesDiscoveryLive(t *testing.T) {

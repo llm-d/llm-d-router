@@ -364,10 +364,14 @@ schedulingProfiles:
 featureGates:
 - flowControl
 flowControl:
+  defaultRequestTTL: 1m
   priorityBands:
   - priority: 100
+    defaultRequestTTL: 5m
     orderingPolicyRef: customFCFS
     fairnessPolicyRef: customFairness
+  - priority: -1
+    defaultRequestTTL: 0s
 `
 
 // successParserConfigText tests that configuration with parser plugin is correctly loaded.

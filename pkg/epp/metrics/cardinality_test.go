@@ -39,10 +39,10 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
 	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
-	requestCounter.Reset()
+	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
-		requestCounter.Reset()
+		llmdRequestCounter.Reset()
 	})
 
 	PreAdmitModelLabels("llama-70b", "llama-70b-canary")
@@ -51,7 +51,7 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 	}
 	RecordRequestCounter("llama-70b", "llama-70b-canary", "fairness", 0)
 
-	series := promtestutil.CollectAndCount(requestCounter)
+	series := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, series, testCap+2, "cardinality must stay bounded, got %d series", series)
 	require.Equal(t, "llama-70b", boundModel("llama-70b"),
 		"configured model emits its real label after the flood")
@@ -65,17 +65,17 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
 	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
-	requestCounter.Reset()
+	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
-		requestCounter.Reset()
+		llmdRequestCounter.Reset()
 	})
 
 	for i := 0; i < 1000; i++ {
 		RecordRequestCounter(fmt.Sprintf("model-%d", i), "target", "fairness", 0)
 	}
 
-	count := promtestutil.CollectAndCount(requestCounter)
+	count := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, count, testCap+1,
 		"model_name cardinality must stay bounded by the cap, got %d series", count)
 }
@@ -140,11 +140,9 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 	metricsutil.SetFairnessIDLabelLimit(testCap)
 	oldModels := modelLabelLimiter
 	modelLabelLimiter = metricsutil.NewBoundedLabel(10)
-	requestCounter.Reset()
 	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = oldModels
-		requestCounter.Reset()
 		llmdRequestCounter.Reset()
 	})
 
@@ -154,8 +152,6 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdRequestCounter),
 		"100 distinct fairness IDs must collapse to cap+overflow series on the request family")
-	require.Equal(t, 1, promtestutil.CollectAndCount(requestCounter),
-		"the deprecated family has no fairness_id label and must stay a single series")
 }
 
 // RecordFlowControlRequestQueueDuration takes request-body model names; they must flow through the

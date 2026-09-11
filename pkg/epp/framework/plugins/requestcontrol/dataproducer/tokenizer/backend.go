@@ -68,6 +68,10 @@ type warmer interface {
 // an authentication rejection, or on context cancellation.
 func (b renderBackend) warmup(ctx context.Context) {
 	logger := log.FromContext(ctx)
+	// The warmup credential, when set, authenticates the probe's render calls.
+	if b.warmupAuth != "" {
+		ctx = withAuthHeader(ctx, b.warmupAuth)
+	}
 	for i := 0; i < warmupAttempts; i++ {
 		_, err := b.legacyMessages.useLegacy(ctx, b.tk, b.modelName)
 		if err == nil {
@@ -78,7 +82,7 @@ func (b renderBackend) warmup(ctx context.Context) {
 			logger.V(logutil.DEBUG).Info("token-producer backend warmed up", "attempts", i+1)
 			return
 		}
-		// Warmup carries no credentials; an auth rejection will not clear on retry.
+		// An auth rejection will not clear on retry.
 		if isRenderAuthError(err) {
 			logger.V(logutil.DEFAULT).Info(
 				"token-producer backend requires authentication, skipping warmup; "+
@@ -114,6 +118,7 @@ type renderBackend struct {
 	tk             tokenizer
 	modelName      string
 	legacyMessages *legacyMessagesMode
+	warmupAuth     string
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {

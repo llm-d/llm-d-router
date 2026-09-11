@@ -24,12 +24,12 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 func TestParseRequest(t *testing.T) {

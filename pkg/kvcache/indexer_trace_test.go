@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
@@ -47,13 +48,13 @@ func setupSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
 	return recorder
 }
 
-func spanAttributes(t *testing.T, recorder *tracetest.SpanRecorder, name string) map[string]attribute.Value {
+func spanAttributes(t *testing.T, recorder *tracetest.SpanRecorder, name string) map[attribute.Key]attribute.Value {
 	t.Helper()
 	for _, span := range recorder.Ended() {
 		if span.Name() == name {
-			attrs := make(map[string]attribute.Value)
+			attrs := make(map[attribute.Key]attribute.Value)
 			for _, attr := range span.Attributes() {
-				attrs[string(attr.Key)] = attr.Value
+				attrs[attr.Key] = attr.Value
 			}
 			return attrs
 		}
@@ -62,9 +63,9 @@ func spanAttributes(t *testing.T, recorder *tracetest.SpanRecorder, name string)
 	return nil
 }
 
-// blocks_found counts requested keys held by any candidate pod, not the
-// longest chain: pod-a holds only the first key and pod-b only the second,
-// so both keys are found while the longest chain is one block.
+// blocks_found is the longest contiguous prefix one candidate holds: pod-a
+// holds only the first key and pod-b only the second, so the chain is one
+// block and pod-b's key lies beyond what a walk reads.
 func TestScoreTokensBlockHitTelemetry(t *testing.T) {
 	recorder := setupSpanRecorder(t)
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
@@ -81,13 +82,13 @@ func TestScoreTokensBlockHitTelemetry(t *testing.T) {
 	assert.Equal(t, map[string]float64{testPodA: 1.0}, scores)
 
 	scoreAttrs := spanAttributes(t, recorder, "score_tokens")
-	assert.Equal(t, int64(2), scoreAttrs["llm_d.kv_cache.blocks_found"].AsInt64())
-	assert.InDelta(t, 1.0, scoreAttrs["llm_d.kv_cache.block_hit_ratio"].AsFloat64(), 0.0001)
+	assert.Equal(t, int64(1), scoreAttrs[semconv.LLMDKVCacheBlocksFoundKey].AsInt64())
+	assert.InDelta(t, 0.5, scoreAttrs[semconv.LLMDKVCacheBlockHitRatioKey].AsFloat64(), 0.0001)
 
 	matchAttrs := spanAttributes(t, recorder, "match_block_keys")
-	assert.Equal(t, int64(2), matchAttrs["llm_d.kv_cache.prefix_match.keys_found"].AsInt64())
-	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.longest_chain"].AsInt64())
-	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.pods_matched"].AsInt64())
+	assert.True(t, matchAttrs[semconv.LLMDKVCachePrefixMatchWalkedKey].AsBool())
+	assert.Equal(t, int64(1), matchAttrs[semconv.LLMDKVCachePrefixMatchLongestChainKey].AsInt64())
+	assert.Equal(t, int64(1), matchAttrs[semconv.LLMDKVCachePrefixMatchPodsMatchedKey].AsInt64())
 }
 
 // emptyEntryIndex reports one requested key as an entry with no pods, the
@@ -111,8 +112,9 @@ func (e *emptyEntryIndex) Lookup(ctx context.Context, requestKeys []kvblock.Bloc
 	return found, nil
 }
 
-// A key returned with no pods is a miss, so it counts towards neither
-// blocks_found nor the hit ratio.
+// A key returned with no pods ends the chain, so it counts towards neither
+// blocks_found nor the hit ratio. The stub carries no KeyWalker, so this
+// covers the materialized fallback, the path where such an entry appears.
 func TestScoreTokensBlockHitTelemetryIgnoresEmptyEntries(t *testing.T) {
 	recorder := setupSpanRecorder(t)
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
@@ -133,9 +135,10 @@ func TestScoreTokensBlockHitTelemetryIgnoresEmptyEntries(t *testing.T) {
 	require.NoError(t, err)
 
 	scoreAttrs := spanAttributes(t, recorder, "score_tokens")
-	assert.Equal(t, int64(1), scoreAttrs["llm_d.kv_cache.blocks_found"].AsInt64())
-	assert.InDelta(t, 0.5, scoreAttrs["llm_d.kv_cache.block_hit_ratio"].AsFloat64(), 0.0001)
+	assert.Equal(t, int64(1), scoreAttrs[semconv.LLMDKVCacheBlocksFoundKey].AsInt64())
+	assert.InDelta(t, 0.5, scoreAttrs[semconv.LLMDKVCacheBlockHitRatioKey].AsFloat64(), 0.0001)
 
 	matchAttrs := spanAttributes(t, recorder, "match_block_keys")
-	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.keys_found"].AsInt64())
+	assert.False(t, matchAttrs[semconv.LLMDKVCachePrefixMatchWalkedKey].AsBool())
+	assert.Equal(t, int64(1), matchAttrs[semconv.LLMDKVCachePrefixMatchLongestChainKey].AsInt64())
 }

@@ -28,7 +28,7 @@ end up active.
 ```yaml
 - type: precise-prefix-cache-scorer
   parameters:
-    tokenProcessorConfig: { blockSize: 64 }
+    tokenProcessorConfig: { blockSizeTokens: 64 }
     kvEventsConfig: { discoverPods: true, podDiscoveryConfig: { socketPort: 5557 } }
 ```
 
@@ -37,7 +37,7 @@ becomes
 ```yaml
 - type: precise-prefix-cache-producer
   parameters:
-    tokenProcessorConfig: { blockSize: 64 }
+    tokenProcessorConfig: { blockSizeTokens: 64 }
     kvEventsConfig: { discoverPods: true, podDiscoveryConfig: { socketPort: 5557 } }
 - type: prefix-cache-scorer
   parameters:

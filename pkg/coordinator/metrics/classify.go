@@ -39,7 +39,7 @@ type ClassifyOptions struct {
 // ClassifyErrorCode maps a pipeline error to the error_code label emitted on
 // request_error_total and step_errors_total. Both metric families use the
 // same label vocabulary, so the two call sites share this function to stay
-// consistent — a new bucket or a shifted status band is one edit, both
+// consistent. A new bucket or a shifted status band is one edit, and both
 // metrics pick it up.
 func ClassifyErrorCode(err error, opts ClassifyOptions) string {
 	if opts.BadRequest != nil && errors.Is(err, opts.BadRequest) {

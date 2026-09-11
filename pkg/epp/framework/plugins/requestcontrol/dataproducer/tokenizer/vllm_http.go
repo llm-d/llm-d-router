@@ -52,6 +52,11 @@ const (
 	// embedding them in the returned error, so a misconfigured upstream that
 	// returns a large HTML error page can't blow up log size.
 	maxErrorBodySnippetBytes = 1024
+
+	// vllmAPIKeyEnvVar names the environment variable holding the render
+	// endpoint's API key, sent by the warmup probe as a Bearer token. Request
+	// paths forward the inbound client's Authorization header instead.
+	vllmAPIKeyEnvVar = "VLLM_API_KEY"
 )
 
 // authHeaderCtxKey carries the inbound request's Authorization header from
@@ -67,6 +72,15 @@ func withAuthHeader(ctx context.Context, value string) context.Context {
 func authHeaderFromContext(ctx context.Context) string {
 	value, _ := ctx.Value(authHeaderCtxKey{}).(string)
 	return value
+}
+
+// vllmWarmupAuthHeader returns the Authorization header value for the warmup
+// probe, from VLLM_API_KEY; empty when the variable is unset.
+func vllmWarmupAuthHeader() string {
+	if key := os.Getenv(vllmAPIKeyEnvVar); key != "" {
+		return "Bearer " + key
+	}
+	return ""
 }
 
 // renderStatusError is a non-2xx response from the render endpoint.
