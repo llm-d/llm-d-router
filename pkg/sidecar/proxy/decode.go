@@ -32,6 +32,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 const (
@@ -62,7 +63,7 @@ const (
 // body is the already-parsed JSON map; callers that hold it
 // should use this instead of calling s.decoderProxy directly.
 func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map[string]any) {
-	if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
+	if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
 		s.runChunkedDecodeFromMap(w, r, body)
 		return
 	}

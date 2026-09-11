@@ -28,6 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -97,7 +98,7 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 // the proxy surfaces as a client error and fails the test deterministically
 // rather than blocking the suite forever.
 func (env *parallelCommitEnv) send(clientTimeout time.Duration) (int, http.Header, string, error) {
-	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, strings.NewReader(chatCompletionsRequestBody))
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, strings.NewReader(chatCompletionsRequestBody))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, env.prefillHost)
 

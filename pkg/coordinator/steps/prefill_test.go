@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -133,6 +134,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
 	}
+	// The request body is built from RequestContext, so this guards against the branch
+	// starting to forward client sampling_params.
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
@@ -181,7 +184,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathCompletions {
+		if r.URL.Path != reqcommon.PathCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -203,7 +206,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:         "req-compl",
-		OriginalPath:      gateway.PathCompletions,
+		OriginalPath:      reqcommon.PathCompletions,
 		Model:             "test-model",
 		TokenIDs:          []int{1, 2345, 6789},
 		MultimodalEntries: nil,
@@ -225,13 +228,17 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	if prefillBody["request_id"] != "req-compl" {
 		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
 	}
-	// Prefill leg caps output to a single token: max_tokens is pinned to 1 and
-	// min_tokens is stripped (it defaults to 0, keeping min_tokens <= max_tokens).
+	// The request body is built from RequestContext, so this guards against the branch
+	// starting to forward client limits.
 	if prefillBody["max_tokens"] != float64(1) {
 		t.Fatalf("expected max_tokens=1, got %v", prefillBody["max_tokens"])
 	}
 	if _, ok := prefillBody["min_tokens"]; ok {
 		t.Fatalf("expected min_tokens to be stripped, got %v", prefillBody["min_tokens"])
+	}
+	// The legacy Completions API does not define max_completion_tokens.
+	if _, ok := prefillBody["max_completion_tokens"]; ok {
+		t.Fatalf("completions request carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
 	}
 	// Completions format has top-level kv_transfer_params
 	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
@@ -263,7 +270,7 @@ func TestPrefillStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-compl",
-		OriginalPath:     gateway.PathCompletions,
+		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
 		TokenIDs:         nil,
 		Body:             map[string]any{"prompt": "Hello"},
@@ -283,7 +290,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -307,7 +314,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -386,7 +393,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -408,7 +415,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-stream",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":          "test-model",
@@ -457,7 +464,7 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-max-completion-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":                 "test-model",
@@ -481,11 +488,11 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 	}
 }
 
-// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens is a regression
-// test for the one coordinator path where a client-supplied min_tokens survives
-// into the capped body: chat-completions clones reqCtx.Body, so a client
-// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the leg.
-// The generate and completions legs build fresh bodies that never carry it.
+// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens covers the one
+// coordinator path where a client-supplied min_tokens reaches the capped body:
+// chat-completions clones reqCtx.Body, while the generate and completions requests
+// build fresh bodies that never carry it. reqcommon.CapSingleToken documents why
+// min_tokens is stripped.
 func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 	var prefillBody map[string]any
 
@@ -506,7 +513,7 @@ func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-min-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":      "test-model",
@@ -547,14 +554,14 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 		{
 			name:         "ChatCompletions",
 			useOpenAI:    true,
-			originalPath: gateway.PathChatCompletions,
+			originalPath: reqcommon.PathChatCompletions,
 			body: map[string]any{
 				"model":    "m",
 				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 			},
 		},
-		{name: "Completions", useOpenAI: true, originalPath: gateway.PathCompletions},
-		{name: "Generate", useOpenAI: false, originalPath: gateway.PathChatCompletions},
+		{name: "Completions", useOpenAI: true, originalPath: reqcommon.PathCompletions},
+		{name: "Generate", useOpenAI: false, originalPath: reqcommon.PathChatCompletions},
 	}
 
 	for _, tc := range cases {
@@ -661,9 +668,10 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 	step, _ := NewPrefillStep(gwClient, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
-		RequestID: "req-1",
-		Model:     "test",
-		TokenIDs:  []int{1, 2345},
+		RequestID:    "req-1",
+		Model:        "test",
+		OriginalPath: reqcommon.PathGenerate,
+		TokenIDs:     []int{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},

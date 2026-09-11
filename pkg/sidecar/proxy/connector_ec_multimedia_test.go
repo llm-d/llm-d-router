@@ -29,6 +29,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // TestHandleEC_Multimedia asserts that video_url, audio_url, and input_audio
@@ -44,7 +46,7 @@ import (
 func TestHandleEC_Multimedia(t *testing.T) {
 	tests := []struct {
 		name         string
-		handler      func(*Server, http.ResponseWriter, *http.Request, string, []string, APIType)
+		handler      func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
 		items        []map[string]any
 		wantECParams bool
 		wantECLen    int
@@ -142,17 +144,17 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			srv.logger = log.Log
 
 			var capturedBody []byte
-			srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ APIType) {
+			srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
 				buf, err := io.ReadAll(r.Body)
 				assert.NoError(t, err)
 				capturedBody = buf
 			}
 
 			reqBody, _ := json.Marshal(userMessageRequest(tt.items...))
-			httpReq := httptest.NewRequest(http.MethodPost, ChatCompletionsPath, io.NopCloser(bytes.NewReader(reqBody)))
+			httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 			rw := httptest.NewRecorder()
 
-			tt.handler(srv, rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, APITypeChatCompletions)
+			tt.handler(srv, rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantEncCalls, encoderCalls.Load(), "unexpected encoder call count")
 			if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {

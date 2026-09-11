@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -40,7 +41,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 		receivedPhases = append(receivedPhases, phase)
 		mu.Unlock()
 
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			http.Error(w, "unexpected path", 404)
 			return
@@ -83,7 +84,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-path-test",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
@@ -184,7 +185,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-openai-false",
-		OriginalPath: gateway.PathCompletions,
+		OriginalPath: reqcommon.PathCompletions,
 		Model:        "test-model",
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
@@ -217,7 +218,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 	defer mu.Unlock()
 
 	for i, path := range receivedPaths {
-		if path != gateway.PathCompletions {
+		if path != reqcommon.PathCompletions {
 			t.Errorf("request %d: expected /v1/completions, got %s", i, path)
 		}
 	}
@@ -241,7 +242,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-2",
-		OriginalPath:     gateway.PathCompletions,
+		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test",
 		Stream:           false,
 		TokenIDs:         []int{1, 2345, 6789},
@@ -258,7 +259,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 		t.Fatalf("decode failed: %v", err)
 	}
 
-	if receivedPath != gateway.PathCompletions {
+	if receivedPath != reqcommon.PathCompletions {
 		t.Fatalf("expected /v1/completions, got %s", receivedPath)
 	}
 	if receivedPhase != gateway.PhaseDecode {

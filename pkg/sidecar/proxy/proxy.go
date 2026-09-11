@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -110,53 +109,6 @@ const (
 	ECExampleConnector       = constants.ECExampleConnector
 	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
-
-// APIType represents the type of OpenAI API being used.
-type APIType int
-
-const (
-	// APITypeChatCompletions is the Chat Completions API (/v1/chat/completions, /v1/completions)
-	APITypeChatCompletions APIType = iota
-	// APITypeResponses is the Responses API (/v1/responses)
-	APITypeResponses
-	// APITypeGenerate is vLLM's token-in generate API (/inference/v1/generate)
-	APITypeGenerate
-)
-
-// String implements fmt.Stringer so structured logs show readable API names.
-func (a APIType) String() string {
-	switch a {
-	case APITypeChatCompletions:
-		return "chat_completions"
-	case APITypeResponses:
-		return "responses"
-	case APITypeGenerate:
-		return "generate"
-	default:
-		return fmt.Sprintf("APIType(%d)", int(a))
-	}
-}
-
-// JSON request field names used for token limits in prefill/decode staging.
-// Do not mutate these slices.
-var (
-	chatCompletionTokenLimitFields = []string{requestFieldMaxTokens, requestFieldMaxCompletionTokens, requestFieldMinTokens}
-	responsesStyleTokenLimitFields = []string{requestFieldMaxOutputTokens}
-	generateStyleTokenLimitFields  = []string{requestFieldMaxTokens, requestFieldMinTokens}
-)
-
-// tokenLimitFieldsForAPIType returns token limit field names for the given API.
-// Returned slices are shared package-level vars; callers must not mutate them.
-func tokenLimitFieldsForAPIType(api APIType) []string {
-	switch api {
-	case APITypeResponses:
-		return responsesStyleTokenLimitFields
-	case APITypeGenerate:
-		return generateStyleTokenLimitFields
-	default:
-		return chatCompletionTokenLimitFields
-	}
-}
 
 // Config represents the complete runtime configuration for the proxy server.
 type Config struct {
@@ -338,11 +290,10 @@ func (c Config) String() string {
 
 // pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
 // validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
-// absent); the APIType lets each connector decide internally which JSON fields
-// (if any) need special handling.
-type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, APIType)
+// absent); the APIType selects the fields that cap the prefill request.
+type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, APIType)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
 
 // Server is the reverse proxy server
 type Server struct {
@@ -573,25 +524,27 @@ func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
 	case KVConnectorSharedStorage:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
-			s.handleSharedStorage(w, r, host)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
+			s.handleSharedStorage(w, r, host, apiType)
 		}
 	case KVConnectorSGLang:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
+		// SGLang sends the same body to the prefill and decode requests and caps no
+		// output tokens, so it does not use the API type.
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
 			s.handleSGLang(w, r, host)
 		}
 	case KVConnectorMooncake:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ APIType) {
-			s.handleMooncake(w, r, host)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
+			s.handleMooncake(w, r, host, apiType)
 		}
 	case KVConnectorOffloading:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, _ APIType) {
-			s.handleP2P(w, r, host, kvCacheSource)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
+			s.handleP2P(w, r, host, kvCacheSource, apiType)
 		}
 	case KVConnectorNIXLV2:
 		fallthrough
 	default:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
 			s.handleNIXLV2(w, r, host, kvCacheSource, apiType)
 		}
 	}
@@ -628,11 +581,11 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("POST "+ChatCompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
-	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
-	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
-	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
-	mux.HandleFunc("POST "+GeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
+	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
+	// served routes from drifting away from it.
+	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathGenerate} {
+		mux.HandleFunc("POST "+path, s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path)))
+	}
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 

@@ -377,7 +377,7 @@ func TestPassthrough_RegisteredPathsBypass(t *testing.T) {
 	defer upstream.Close()
 
 	srv := newTestServerWithGateway(nil, upstream.URL)
-	req := httptest.NewRequest(http.MethodPost, gateway.PathChatCompletions, strings.NewReader(`{"model":"m"}`))
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m"}`))
 	rec := doPassthrough(t, srv, req)
 
 	if rec.Code != http.StatusOK {

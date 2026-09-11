@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"strconv"
@@ -35,22 +36,11 @@ const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the oth
 
 const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id in header to prefill
 
-func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if err := errorJSONInvalid(fmt.Errorf("failed to read request body: %w", err), w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	requestData, err := decodeRequestBody(body)
-	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -78,17 +68,14 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		"engine_id", engineID)
 
 	// Build prefill request body
-	prefillData := make(map[string]any)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
+	prefillData := maps.Clone(requestData)
 	prefillData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill: false,
 		requestFieldDoRemoteDecode:  true,
 		requestFieldTransferID:      transferID,
 	}
 	// update fields from original body; return asap.
-	reqcommon.PrimeSingleTokenRequest(prefillData)
+	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
@@ -105,10 +92,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	}
 
 	// Build decode request body
-	decodeData := make(map[string]any)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
+	decodeData := maps.Clone(requestData)
 	decodeData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill:     true,
 		requestFieldDoRemoteDecode:      false,
