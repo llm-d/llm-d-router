@@ -257,8 +257,8 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should cap sampling_params in the prefill leg and restore originals in decode", func() {
-		expectGenerateLegTokenLimits(testInfo)
+	It("should cap sampling_params in the prefill request and restore originals in decode", func() {
+		expectGenerateRequestTokenLimits(testInfo)
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

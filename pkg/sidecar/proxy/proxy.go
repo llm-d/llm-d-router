@@ -290,7 +290,7 @@ func (c Config) String() string {
 
 // pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
 // validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
-// absent); the APIType selects the fields that cap the prefill leg.
+// absent); the APIType selects the fields that cap the prefill request.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
 type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
@@ -528,8 +528,8 @@ func (s *Server) setKVConnector() {
 			s.handleSharedStorage(w, r, host, apiType)
 		}
 	case KVConnectorSGLang:
-		// SGLang sends the same body to both legs and caps no output tokens, so
-		// it does not use the API type.
+		// SGLang sends the same body to the prefill and decode requests and caps no
+		// output tokens, so it does not use the API type.
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
 			s.handleSGLang(w, r, host)
 		}

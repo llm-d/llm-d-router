@@ -67,13 +67,13 @@ const generateRequestBodyWithTokenLimits = `{
 				"sampling_params": {"max_tokens": 100, "min_tokens": 5}
 			}`
 
-// expectGenerateLegTokenLimits starts the proxy, posts a generate request
+// expectGenerateRequestTokenLimits starts the proxy, posts a generate request
 // carrying client token limits, and asserts the generate-API token-limit
-// contract on the two legs the connector produces: the prefill leg is capped to
-// a single output token inside sampling_params, and the decode leg still carries
-// the client's own limits. It is the regression test for the sampling_params
-// sharing that reqcommon.CapSingleToken documents.
-func expectGenerateLegTokenLimits(testInfo *sidecarTestInfo) {
+// contract on the two requests the connector produces: the prefill request is
+// capped to a single output token inside sampling_params, and the decode request
+// still carries the client's own limits. It is the regression test for the
+// sampling_params sharing that reqcommon.CapSingleToken documents.
+func expectGenerateRequestTokenLimits(testInfo *sidecarTestInfo) {
 	GinkgoHelper()
 
 	proxyBaseAddr := testInfo.startProxy()
@@ -92,16 +92,16 @@ func expectGenerateLegTokenLimits(testInfo *sidecarTestInfo) {
 		Fail(string(bp))
 	}
 
-	expectGenerateLegTokenLimitsOn(testInfo.prefillHandler, testInfo.decodeHandler)
+	expectGenerateRequestTokenLimitsOn(testInfo.prefillHandler, testInfo.decodeHandler)
 }
 
-// expectGenerateLegTokenLimitsOn asserts that contract on the legs captured by
-// the two mock backends, for a client body carrying max_tokens 100 and
-// min_tokens 5 under sampling_params. The top-level assertions pin the caps to
-// the API the client spoke: a leg builder that names the chat fields regardless
-// of the API type writes max_tokens beside sampling_params instead of inside it,
-// where the engine never reads it.
-func expectGenerateLegTokenLimitsOn(prefillHandler, decodeHandler *mock.ChatCompletionHandler) {
+// expectGenerateRequestTokenLimitsOn asserts that contract on the requests
+// captured by the two mock backends, for a client body carrying max_tokens 100
+// and min_tokens 5 under sampling_params. The top-level assertions pin the caps
+// to the API the client spoke: a request builder that names the chat fields
+// regardless of the API type writes max_tokens beside sampling_params instead of
+// inside it, where the engine never reads it.
+func expectGenerateRequestTokenLimitsOn(prefillHandler, decodeHandler *mock.ChatCompletionHandler) {
 	GinkgoHelper()
 
 	// Eventually covers the connectors that dispatch prefill asynchronously and
@@ -276,7 +276,7 @@ var _ = Describe("Common Connector tests", func() {
 				<-testInfo.stoppedCh
 			})
 
-			// Regression test for stripping min_tokens from the prefill leg;
+			// Regression test for stripping min_tokens from the prefill request;
 			// reqcommon.CapSingleToken documents why.
 			It("should strip min_tokens in prefill and restore original value in decode", func() {
 				testInfo := sidecarConnectionTestSetup(connector)
@@ -331,7 +331,7 @@ var _ = Describe("Common Connector tests", func() {
 
 			It("should cap sampling_params in prefill and restore originals in decode", func() {
 				testInfo := sidecarConnectionTestSetup(connector)
-				expectGenerateLegTokenLimits(testInfo)
+				expectGenerateRequestTokenLimits(testInfo)
 
 				testInfo.cancelFn()
 				<-testInfo.stoppedCh
@@ -386,7 +386,7 @@ var _ = Describe("Non-object request body", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(string(respBody)).To(ContainSubstring("BadRequestError"))
 
-			By("verifying neither leg was dispatched")
+			By("verifying neither the prefill nor the decode request was dispatched")
 			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeZero())
 			Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeZero())
 

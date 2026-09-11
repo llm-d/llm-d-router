@@ -19,7 +19,7 @@ package request
 import "maps"
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
-// single-output-token request for a prefill or encode leg. It returns the map
+// single-output-token prefill or encode request. It returns the map
 // the caps were written into: sampling_params for the generate API, body itself
 // otherwise. The generate API also expects transfer params in that map, so a
 // caller adding them needs no second lookup.

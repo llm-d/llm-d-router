@@ -34,18 +34,18 @@ func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 
 	decodeLimits := client[FieldSamplingParams].(map[string]any)
 	if got := decodeLimits[FieldMaxTokens]; got != 200 {
-		t.Errorf("decode leg max_tokens = %v, want the client's 200", got)
+		t.Errorf("decode request max_tokens = %v, want the client's 200", got)
 	}
 	if got, ok := decodeLimits[FieldMinTokens]; !ok || got != 10 {
-		t.Errorf("decode leg min_tokens = %v (present %v), want the client's 10", got, ok)
+		t.Errorf("decode request min_tokens = %v (present %v), want the client's 10", got, ok)
 	}
 
 	prefillLimits := prefill[FieldSamplingParams].(map[string]any)
 	if got := prefillLimits[FieldMaxTokens]; got != 1 {
-		t.Errorf("prefill leg max_tokens = %v, want 1", got)
+		t.Errorf("prefill request max_tokens = %v, want 1", got)
 	}
 	if _, ok := prefillLimits[FieldMinTokens]; ok {
-		t.Error("prefill leg kept min_tokens")
+		t.Error("prefill request kept min_tokens")
 	}
 }
 
@@ -187,9 +187,9 @@ func TestCapSingleToken(t *testing.T) {
 			},
 		},
 		{
-			// The sidecar caps the leg straight off the client body, with no
+			// The sidecar caps the request straight off the client body, with no
 			// equivalent of the coordinator's validateSamplingParams ahead of
-			// it, so a malformed sampling_params arrives here. The leg still
+			// it, so a malformed sampling_params arrives here. The request still
 			// has to carry a cap, so the field is replaced.
 			name:    "generate replaces a non-object sampling_params",
 			apiType: APITypeGenerate,

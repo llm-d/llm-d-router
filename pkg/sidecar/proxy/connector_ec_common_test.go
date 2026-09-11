@@ -37,7 +37,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 		apiType reqcommon.APIType
 		path    string
 		body    string
-		// Output cap fields the prefill leg must set to 1.
+		// Output cap fields the prefill request must set to 1.
 		tokenFields []string
 	}{
 		{
@@ -137,7 +137,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 					for _, field := range tt.tokenFields {
 						limits[field] = float64(1)
 					}
-					// The prefill leg drops min_tokens; see reqcommon.CapSingleToken.
+					// The prefill request drops min_tokens; see reqcommon.CapSingleToken.
 					delete(limits, reqcommon.FieldMinTokens)
 					wantPrefill[reqcommon.FieldStream] = false
 					wantPrefill[reqcommon.FieldCacheHitThreshold] = float64(0)
@@ -241,7 +241,7 @@ func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
 }
 
 // TestBuildEncoderRequest_MinTokens is a regression test for stripping a
-// client-supplied min_tokens from the encoder leg; reqcommon.CapSingleToken
+// client-supplied min_tokens from the encoder request; reqcommon.CapSingleToken
 // documents why.
 func TestBuildEncoderRequest_MinTokens(t *testing.T) {
 	originalRequest := map[string]any{

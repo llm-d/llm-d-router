@@ -64,7 +64,7 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 	})
 
 	// Passthrough disabled collapses the chat request to the generate wire format
-	// on the encode and prefill legs.
+	// on the encode and prefill requests.
 	ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode with OpenAI passthrough disabled", func() {
 		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
@@ -108,7 +108,7 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAaUlEQVR4nOzPUQkAIRQAweMwx+sfxViG8GMQdhLsrj3zvezXAbca0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0E4AAAD//9Q1AYfjlntsAAAAAElFTkSuQmCC"
 
 // tokenLimits are the output limits a request sends. A zero field means the
-// request omits that limit, so its value is not asserted on the decode leg.
+// request omits that limit, so its value is not asserted on the decode request.
 type tokenLimits struct{ min, max, maxCompletion int }
 
 // runCoordinatorPipeline deploys the e-p-d topology and coordinator, posts the
@@ -209,10 +209,10 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		if expectedImages > 0 {
 			capLegs = append(capLegs, "encode")
 		}
-		// Mirrors resolveFormat: the legs speak generate for a native generate
+		// Mirrors resolveFormat: the pipeline sends generate for a native generate
 		// request and for a chat request with passthrough disabled, chat otherwise.
-		legsSpeakChat := path != reqcommon.PathGenerate && cfg != coordinatorConfigNIXLGenerate
-		verifyTokenLimits(logs, limits, legsSpeakChat, capLegs)
+		requestsSpeakChat := path != reqcommon.PathGenerate && cfg != coordinatorConfigNIXLGenerate
+		verifyTokenLimits(logs, limits, requestsSpeakChat, capLegs)
 	}
 }
 
@@ -385,21 +385,22 @@ func fetchCoordinatorLogs(nsName string) string {
 	return fetchDeploymentLogs(nsName, "llm-d-coordinator", "coordinator")
 }
 
-// verifyTokenLimits asserts the pipeline's token-limit contract: the decode leg
-// forwards the client's limits unchanged, while the synthetic prefill and encode
-// legs (capLegs) cap output to a single token and strip min_tokens. CapSingleToken
-// writes every output cap field the leg format defines, so a chat leg always
-// carries max_completion_tokens=1 and a generate leg never carries the field at
-// all, whatever the client sent. Leg request bodies surface only at TRACE, so this
-// relies on the coordinator running at log_level 5.
-func verifyTokenLimits(logs string, limits tokenLimits, legsSpeakChat bool, capLegs []string) {
-	ginkgo.By("Verifying decode leg forwards the client min_tokens/max_tokens")
+// verifyTokenLimits asserts the pipeline's token-limit contract: the decode
+// request forwards the client's limits unchanged, while the synthetic prefill and
+// encode requests (capLegs) cap output to a single token and strip min_tokens.
+// CapSingleToken writes every output cap field the request format defines, so a
+// chat request always carries max_completion_tokens=1 and a generate request
+// never carries the field at all, whatever the client sent. Pipeline request
+// bodies surface only at TRACE, so this relies on the coordinator running at
+// log_level 5.
+func verifyTokenLimits(logs string, limits tokenLimits, requestsSpeakChat bool, capLegs []string) {
+	ginkgo.By("Verifying decode request forwards the client min_tokens/max_tokens")
 	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"decode"`,
 		fmt.Sprintf(`"min_tokens":%d`, limits.min), fmt.Sprintf(`"max_tokens":%d`, limits.max))).To(gomega.BeTrue(),
 		"coordinator logs have no decode request body carrying min_tokens=%d and max_tokens=%d", limits.min, limits.max)
 
 	if limits.maxCompletion > 0 {
-		ginkgo.By("Verifying decode leg forwards the client max_completion_tokens")
+		ginkgo.By("Verifying decode request forwards the client max_completion_tokens")
 		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"decode"`,
 			fmt.Sprintf(`"max_completion_tokens":%d`, limits.maxCompletion))).To(gomega.BeTrue(),
 			"coordinator logs have no decode request body carrying max_completion_tokens=%d", limits.maxCompletion)
@@ -408,20 +409,20 @@ func verifyTokenLimits(logs string, limits tokenLimits, legsSpeakChat bool, capL
 	for _, phase := range capLegs {
 		phaseField := `"epp-profile":"` + phase + `"`
 
-		ginkgo.By("Verifying " + phase + " leg caps max_tokens to 1")
+		ginkgo.By("Verifying " + phase + " request caps max_tokens to 1")
 		gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"max_tokens":1`)).To(gomega.BeTrue(),
 			"coordinator logs have no %s request body carrying max_tokens=1", phase)
 
-		ginkgo.By("Verifying " + phase + " leg strips min_tokens")
+		ginkgo.By("Verifying " + phase + " request strips min_tokens")
 		gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"min_tokens"`)).To(gomega.BeFalse(),
 			"%s request body must not carry min_tokens", phase)
 
-		if legsSpeakChat {
-			ginkgo.By("Verifying " + phase + " leg caps max_completion_tokens to 1")
+		if requestsSpeakChat {
+			ginkgo.By("Verifying " + phase + " request caps max_completion_tokens to 1")
 			gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"max_completion_tokens":1`)).To(gomega.BeTrue(),
 				"coordinator logs have no %s request body carrying max_completion_tokens=1", phase)
 		} else {
-			ginkgo.By("Verifying " + phase + " leg drops max_completion_tokens")
+			ginkgo.By("Verifying " + phase + " request drops max_completion_tokens")
 			gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"max_completion_tokens"`)).To(gomega.BeFalse(),
 				"%s request body must not carry max_completion_tokens on the generate wire format", phase)
 		}

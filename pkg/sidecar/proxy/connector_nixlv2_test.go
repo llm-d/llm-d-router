@@ -1133,7 +1133,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		})
 		env.sendTo(reqcommon.PathGenerate, generateRequestBodyWithTokenLimits)
 
-		expectGenerateLegTokenLimitsOn(env.prefillHandler, env.decodeHandler)
+		expectGenerateRequestTokenLimitsOn(env.prefillHandler, env.decodeHandler)
 	})
 
 	// 1P1D DP=8, serial dispatch: the prefill leg sets the DP-rank header and

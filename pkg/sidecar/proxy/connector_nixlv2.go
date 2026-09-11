@@ -90,7 +90,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
 	}
 
-	// Keeps the client's body intact for the decode leg below.
+	// Keeps the client's body intact for the decode request below.
 	prefillRequest := maps.Clone(body)
 
 	// WRITE mode populates the destination fields the prefill engine needs for
@@ -427,7 +427,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	parentCtx := r.Context()
 	requestStartedAt := time.Now()
 
-	// Keeps the client's body intact for the decode leg built below.
+	// Keeps the client's body intact for the decode request built below.
 	prefillRequest := maps.Clone(body)
 
 	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).
