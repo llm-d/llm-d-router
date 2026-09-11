@@ -381,20 +381,21 @@ router:
 
 Runs a tokenizer sidecar that EPP queries to tokenize incoming requests, enabling precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
 
-The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`.
+The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`.
 
 #### Tokenizer Sidecar Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.tokenizer.enabled` | Enable the vLLM `/render` tokenizer sidecar in the EPP deployment. | `false` |
-| `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's `vllm launch render` command. | `""` |
+| `router.tokenizer.flavor` | Renderer backend: `"python"` runs `vllm launch render`; `"rust"` runs `vllm-rs render` (requires an image containing `vllm-rs`). | `"python"` |
+| `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
 | `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
-| `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]`. | `[]` |
+| `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
 | `router.tokenizer.args` | Override container args. Empty renders `["<modelName>", "--port=<port>"]`. | `[]` |
 | `router.tokenizer.extraArgs` | Extra args appended to the tokenizer container after the default or overridden args. | `[]` |
 | `router.tokenizer.initContainers` | Pod-level init containers rendered when the tokenizer is enabled. | `[]` |
