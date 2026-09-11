@@ -207,6 +207,7 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 			}
 			partial := buffer.partialOnce.CompareAndSwap(true, false)
 			sent := 0
+			disconnected := false
 			for _, replay := range messages {
 				if replay.seq < startSeq {
 					continue
@@ -220,21 +221,23 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 				if err := router.Send(zmq4.NewMsgFrom(
 					clientID, []byte{}, topic, seqFrame(replay.seq), replay.payload,
 				)); err != nil {
-					return
+					// The requester aborted this response; later requests
+					// are still served.
+					disconnected = true
+					break
 				}
 				sent++
 				if partial && sent == partialAfter {
 					break
 				}
 			}
-			if partial && sent == partialAfter {
+			if disconnected || (partial && sent == partialAfter) {
 				continue
 			}
-			if err := router.Send(zmq4.NewMsgFrom(
+			// A requester that closed its socket rejects the end marker.
+			_ = router.Send(zmq4.NewMsgFrom(
 				clientID, []byte{}, []byte{}, seqFrame(math.MaxUint64), []byte{},
-			)); err != nil {
-				return
-			}
+			))
 		}
 	}()
 
