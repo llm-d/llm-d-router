@@ -9,6 +9,7 @@
   - [PeerMetadata](#peermetadata)
   - [Ordering contract](#ordering-contract)
   - [PeerStore](#peerstore)
+- [In-tree plugin: k8s-peer-discovery](#in-tree-plugin-k8s-peer-discovery)
 - [Selecting a peer discovery plugin in the EPP config](#selecting-a-peer-discovery-plugin-in-the-epp-config)
 - [Writing a peer discovery plugin](#writing-a-peer-discovery-plugin)
 
@@ -105,6 +106,49 @@ returning a deterministically ordered snapshot of the current peer set.
 
 ---
 
+## In-tree plugin: k8s-peer-discovery
+
+The `k8s-peer-discovery` plugin
+(`pkg/epp/framework/plugins/datalayer/discovery/k8speer`) watches Pods
+matching the EPP Deployment's own label selector via a controller-runtime
+reconciler. It re-uses the Pod get/watch/list RBAC the EPP already holds for
+model-server pod tracking, so no additional permissions are required.
+
+The reconciler runs on every replica (leader election is disabled for its
+controller) and filters pods by namespace, label selector, and readiness.
+Each ready, non-self pod is upserted through the bound `PeerNotifier`; pods
+that become unready or are deleted are removed.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `selector` | `string` | yes | Kubernetes label selector matching this EPP Deployment's pods (e.g. `app=my-epp`). |
+| `port` | `string` | yes | Port peer replicas listen on for state sync. Pods do not self-report a service port, so it comes from config. |
+| `namespace` | `string` | yes | Namespace of this EPP Deployment's pods. |
+
+The plugin reads `POD_IP` from the environment to exclude this replica from
+the peer set.
+
+### Example config
+
+```yaml
+plugins:
+  - name: peer-disc
+    type: k8s-peer-discovery
+    parameters:
+      selector: "app=my-epp"
+      port: "9002"
+      namespace: default
+
+dataLayer:
+  discovery:
+    peers:
+      pluginRef: peer-disc
+```
+
+---
+
 ## Selecting a peer discovery plugin in the EPP config
 
 Add a `peers` entry inside `dataLayer.discovery` in the
@@ -114,9 +158,11 @@ in the top-level `plugins` list.
 ```yaml
 plugins:
   - name: my-peer-disc
-    type: <peer-discovery-plugin-type>
+    type: k8s-peer-discovery
     parameters:
-      # plugin-specific parameters
+      selector: "app=my-epp"
+      port: "9002"
+      namespace: default
 
 dataLayer:
   discovery:
