@@ -17,9 +17,10 @@
 # A compromised log store would expose them.
 log_level: 2
 
-# ---------------------------------------------------------------------------
-# server: HTTP listener for incoming OpenAI-compatible requests.
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
+# server: listener for incoming OpenAI-compatible requests. Serves TLS unless set
+# secure_coordinator: false.
+# -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
@@ -29,6 +30,31 @@ server:
   # overrides this.
   # env: COORDINATOR_SERVER_METRICS_PORT
   # metrics_port: 9090
+
+  # secure_coordinator serves the inference listener over TLS. Default true.
+  # The --secure-coordinator CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_SECURE_COORDINATOR
+  # secure_coordinator: true
+
+  # cert_path is the directory containing tls.crt and tls.key for the inference
+  # listener. Empty generates a self-signed certificate, which is only suitable
+  # for testing. Certificate changes are picked up without a restart.
+  # The --cert-path CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_CERT_PATH
+  # cert_path: ""
+
+  # tls_min_version is the minimum TLS version the inference listener accepts,
+  # for example VersionTLS12 or VersionTLS13. Empty uses the crypto/tls default.
+  # The --tls-min-version CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_MIN_VERSION
+  # tls_min_version: ""
+
+  # tls_cipher_suites are the cipher suites the inference listener accepts, by
+  # Go crypto/tls name. Empty uses the crypto/tls default. Only effective for
+  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.
+  # The --tls-cipher-suites CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_CIPHER_SUITES
+  # tls_cipher_suites: []
 
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
