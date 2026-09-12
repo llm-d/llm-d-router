@@ -29,6 +29,18 @@ type Mapping struct {
 	TotalRunningRequests *Spec
 	KVCacheUtilization   *Spec
 	LoraRequestInfo      *LoRASpec
+	// LoraLoaded is a gauge family with one series per adapter resident in the
+	// model server's caches, labelled with the adapter name, cache level and
+	// pin state.
+	LoraLoaded *Spec
+	// LoraGPULoaded is a gauge counting adapters occupying GPU slots. Present
+	// from startup whenever the model server reports residency, so it also
+	// signals that LoraLoaded is meaningful when it has no series.
+	LoraGPULoaded *Spec
+	// LoraGPUSlots is a gauge holding the number of GPU slots (max_loras).
+	// Takes precedence over the max_lora label of LoraRequestInfo, which only
+	// appears once an adapter has served a request.
+	LoraGPUSlots *Spec
 	// CacheInfo is used for info-style gauge metrics where block_size and
 	// num_gpu_blocks are exposed as label values.
 	CacheInfo *Spec
@@ -50,6 +62,9 @@ type MappingConfig struct {
 	Running             string
 	KVUsage             string
 	Lora                string
+	LoraLoaded          string
+	LoraGPULoaded       string
+	LoraGPUSlots        string
 	CacheInfo           string
 	CacheBlockSizeLabel string
 	CacheNumBlocksLabel string
@@ -74,12 +89,15 @@ func (m *Mapping) specs() []namedSpec {
 	if m.LoraRequestInfo != nil {
 		loraSpec = m.LoraRequestInfo.Spec
 	}
-	specs := make([]namedSpec, 0, 5+len(m.CustomMetrics))
+	specs := make([]namedSpec, 0, 8+len(m.CustomMetrics))
 	specs = append(specs,
 		namedSpec{"queue", m.TotalQueuedRequests, m.TotalQueuedRequests != nil},
 		namedSpec{"running", m.TotalRunningRequests, m.TotalRunningRequests != nil},
 		namedSpec{"kv", m.KVCacheUtilization, m.KVCacheUtilization != nil},
 		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
+		namedSpec{"loraLoaded", m.LoraLoaded, m.LoraLoaded != nil},
+		namedSpec{"loraGPULoaded", m.LoraGPULoaded, m.LoraGPULoaded != nil},
+		namedSpec{"loraGPUSlots", m.LoraGPUSlots, m.LoraGPUSlots != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
 	for _, custom := range m.CustomMetrics {
@@ -148,6 +166,18 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	loraLoadedSpec, err := parseStringToSpec(cfg.LoraLoaded)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	loraGPULoadedSpec, err := parseStringToSpec(cfg.LoraGPULoaded)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	loraGPUSlotsSpec, err := parseStringToSpec(cfg.LoraGPUSlots)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	cacheInfoSpec, err := parseStringToSpec(cfg.CacheInfo)
 	if err != nil {
 		errs = append(errs, err)
@@ -171,6 +201,9 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		TotalRunningRequests: runningSpec,
 		KVCacheUtilization:   kvusageSpec,
 		LoraRequestInfo:      loraSpec,
+		LoraLoaded:           loraLoadedSpec,
+		LoraGPULoaded:        loraGPULoadedSpec,
+		LoraGPUSlots:         loraGPUSlotsSpec,
 		CacheInfo:            cacheInfoSpec,
 		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
 		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,

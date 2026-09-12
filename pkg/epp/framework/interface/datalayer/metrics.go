@@ -22,6 +22,23 @@ import (
 	"time"
 )
 
+// LoraLoadLevel is the cache tier holding a resident adapter's weights.
+type LoraLoadLevel string
+
+const (
+	// LoraLoadLevelGPU marks an adapter occupying a GPU slot, ready to serve.
+	LoraLoadLevelGPU LoraLoadLevel = "gpu"
+	// LoraLoadLevelCPU marks an adapter held only in the host cache; serving
+	// it costs a device copy and, when GPU slots are full, an eviction.
+	LoraLoadLevelCPU LoraLoadLevel = "cpu"
+)
+
+// LoraLoadState describes one adapter resident in the model server's caches.
+type LoraLoadState struct {
+	Level  LoraLoadLevel
+	Pinned bool
+}
+
 // Metrics holds the latest metrics snapshot scraped from a pod.
 type Metrics struct {
 	// ActiveModels holds only adapters that have at least one running or queued request.
@@ -31,7 +48,19 @@ type Metrics struct {
 	// Not useful until vLLM replaces it with a residency signal.
 	WaitingModels map[string]int
 	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
-	MaxActiveModels         int
+	MaxActiveModels int
+	// LoadedModels maps each adapter resident in the model server's adapter
+	// caches to where it lives. Unlike ActiveModels this is residency, not
+	// request activity: an idle adapter stays here until evicted. nil means
+	// the model server does not report residency.
+	LoadedModels map[string]LoraLoadState
+	// GPULoadedModels is the number of adapters occupying GPU slots, out of
+	// MaxActiveModels.
+	GPULoadedModels int
+	// BaseModel is the model name the server stamps on its metrics
+	// (model_name). A request targeting it needs no adapter. Empty when
+	// the server does not report residency.
+	BaseModel               string
 	RunningRequestsSize     int
 	WaitingQueueSize        int
 	KVCacheUsagePercent     float64
@@ -71,10 +100,18 @@ func (m *Metrics) Clone() *Metrics {
 	maps.Copy(activeModels, m.ActiveModels)
 	waitingModels := make(map[string]int, len(m.WaitingModels))
 	maps.Copy(waitingModels, m.WaitingModels)
+	var loadedModels map[string]LoraLoadState
+	if m.LoadedModels != nil {
+		loadedModels = make(map[string]LoraLoadState, len(m.LoadedModels))
+		maps.Copy(loadedModels, m.LoadedModels)
+	}
 	return &Metrics{
 		ActiveModels:            activeModels,
 		WaitingModels:           waitingModels,
 		MaxActiveModels:         m.MaxActiveModels,
+		LoadedModels:            loadedModels,
+		GPULoadedModels:         m.GPULoadedModels,
+		BaseModel:               m.BaseModel,
 		RunningRequestsSize:     m.RunningRequestsSize,
 		WaitingQueueSize:        m.WaitingQueueSize,
 		KVCacheUsagePercent:     m.KVCacheUsagePercent,

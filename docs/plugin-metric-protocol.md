@@ -116,6 +116,53 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
   * `waiting_lora_adapters`: A comma separated list of adapters that are waiting to be served.
     Example: `"waiting_lora_adapters": "adapter1, adapter2"`
 
+## LoRA Adapter Residency
+
+**Required by:** `lora-load-state-scorer`
+
+Model servers that keep a cache of loaded LoRA adapters can report which adapters are resident and
+where, so the EPP can route an adapter's requests to servers that already hold it. Unlike the
+`vllm:lora_requests_info` metric above, which lists adapters with in-flight requests, these metrics
+describe the cache contents and so include idle adapters and adapters loaded at startup.
+
+The model server SHOULD expose the following metrics via the same Prometheus endpoint:
+
+* Metric name implemented in vLLM: `vllm:lora_adapter_loaded`
+* Metric type: Gauge
+* Metric value: `1` while the adapter is resident. A series at `0` is treated as absent.
+* Metric labels:
+  * `adapter_name`: The adapter's public model name, as used in the request's `model` argument.
+  * `level`: `gpu` when the adapter occupies a GPU slot and can serve immediately, `cpu` when it is
+    held only in the host cache.
+  * `pinned`: `true` when the adapter is exempt from eviction.
+
+and
+
+* Metric name implemented in vLLM: `vllm:num_gpu_loaded_lora_adapters`
+* Metric type: Gauge
+* Metric value: The number of adapters occupying GPU slots. This gauge exists from startup, so its
+  presence tells the EPP the server reports residency even when no adapter is loaded yet.
+* Metric labels:
+  * `model_name`: The served base model. A request whose `model` equals it needs no adapter, and
+    the scorer scores every endpoint by its free-slot share instead.
+
+and, for the GPU slot capacity,
+
+* Metric name implemented in vLLM: `vllm:max_gpu_lora_adapters`
+* Metric type: Gauge
+* Metric value: The number of GPU adapter slots (`max_loras`). Present from startup.
+
+When this gauge is absent, capacity falls back to the `max_lora` label of
+`vllm:lora_requests_info`, which only appears once an adapter has served a request.
+
+Availability: vLLM adds these gauges in [vllm-project/vllm#51433](https://github.com/vllm-project/vllm/pull/51433)
+and [vllm-project/vllm#54830](https://github.com/vllm-project/vllm/pull/54830) (not in a tagged
+release yet). Against a server without them, `LoadedModels` stays nil and the scorer falls
+through to the capacity tiers, which score every such endpoint the same. The gauges update
+when the model server finishes loading an adapter, so requests routed during the load itself
+(hundreds of milliseconds for a 1 GB adapter) still see it as absent; the scorer's placement bonus
+sends them to the same endpoint anyway.
+
 ## Prefix Cache Reuse
 
 **Required by:** `precise-prefix-cache-producer`, `prefix-cache-scorer`, `prefix-cache-affinity-filter`
