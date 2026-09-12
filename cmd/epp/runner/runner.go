@@ -398,14 +398,8 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
-		BindAddress: fmt.Sprintf(":%d", opts.MetricsPort),
-		FilterProvider: func() func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
-			if opts.MetricsEndpointAuth {
-				return filters.WithAuthenticationAndAuthorization
-			}
-
-			return nil
-		}(),
+		BindAddress:    fmt.Sprintf(":%d", opts.MetricsPort),
+		FilterProvider: openMetricsFilterProvider(opts.MetricsEndpointAuth),
 	}
 
 	if err := runserver.ConfigureMetricsTLS(opts, &metricsServerOptions); err != nil {
@@ -530,6 +524,44 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
+}
+
+// openMetricsFilterProvider builds the metrics server's FilterProvider.
+//
+// It exists because exemplars are only representable in the OpenMetrics
+// exposition format, and controller-runtime builds its /metrics handler with
+// a hardcoded promhttp.HandlerOpts that does not set EnableOpenMetrics. That
+// handler cannot be replaced through Options: ExtraHandlers explicitly refuses
+// to override /metrics, and there is no field for handler options. The filter
+// hook is the only seam, so the filter discards the handler it is given and
+// substitutes an equivalent one with OpenMetrics negotiation enabled.
+//
+// The substituted handler serves the same registry with the same error
+// handling, so the only behavioral difference is that a scraper sending
+// "Accept: application/openmetrics-text" now receives exemplars. Any
+// authentication filter is applied on top, exactly as before.
+func openMetricsFilterProvider(authEnabled bool) func(*rest.Config, *http.Client) (metricsserver.Filter, error) {
+	return func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
+		var authFilter metricsserver.Filter
+		if authEnabled {
+			var err error
+			authFilter, err = filters.WithAuthenticationAndAuthorization(c, httpClient)
+			if err != nil {
+				return nil, fmt.Errorf("build metrics authentication filter: %w", err)
+			}
+		}
+
+		return func(log logr.Logger, _ http.Handler) (http.Handler, error) {
+			handler := promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{
+				ErrorHandling:     promhttp.HTTPErrorOnError,
+				EnableOpenMetrics: true,
+			})
+			if authFilter == nil {
+				return handler, nil
+			}
+			return authFilter(log, handler)
+		}, nil
+	}
 }
 
 // NewEndpointPoolFromOptions constructs an EndpointPool from standalone options.
