@@ -88,15 +88,45 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # upload-sbom uploads to this release, so it has to exist even when
+          # there is nothing to attach here.
+          if ! gh release view "${{ needs.set-params.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ needs.set-params.outputs.tag }} does not exist. Creating a draft release..."
+            gh release create "${{ needs.set-params.outputs.tag }}" --draft --title "${{ needs.set-params.outputs.tag }}" --notes "Release ${{ needs.set-params.outputs.tag }}"
+          fi
           files=$(find artifacts -type f -size +0c | tr '\n' ' ')
           if [ -z "$files" ]; then
             echo "No artifacts to upload."
             exit 0
           fi
-          if gh release view "${{ needs.set-params.outputs.tag }}" >/dev/null 2>&1; then
-            gh release upload "${{ needs.set-params.outputs.tag }}" $files --clobber
-          else
-            echo "Release ${{ needs.set-params.outputs.tag }} does not exist. Creating a draft release..."
-            gh release create "${{ needs.set-params.outputs.tag }}" $files --draft --title "${{ needs.set-params.outputs.tag }}" --notes "Release ${{ needs.set-params.outputs.tag }}"
-          fi
+          gh release upload "${{ needs.set-params.outputs.tag }}" $files --clobber
 
+  upload-sbom:
+    needs: [set-params, build-and-push, upload-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Collect SBOMs
+        run: |
+          scripts/collect-sboms.sh "${{ needs.set-params.outputs.tag }}" \
+            "${{ needs.set-params.outputs.epp_name }}" \
+            "${{ needs.set-params.outputs.sidecar_name }}" \
+            "${{ needs.set-params.outputs.coordinator_name }}"
+
+      - name: Upload SBOMs to the release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ needs.set-params.outputs.tag }}" sbom/* --clobber
