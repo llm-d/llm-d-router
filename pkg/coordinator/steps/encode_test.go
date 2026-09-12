@@ -286,7 +286,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 					"role": "user",
 					"content": []any{
 						map[string]any{"type": "text", "text": "describe"},
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc", "detail": "high"}},
 					},
 				},
 			},
@@ -296,6 +296,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		},
 	}
 
+	originalBody, _ := json.Marshal(reqCtx.Body)
 	err = step.Execute(context.Background(), reqCtx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -319,6 +320,15 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	part := content[0].(map[string]any)
 	if part["type"] != imageURLPartType {
 		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
+	}
+
+	imageURL := part[imageURLPartType].(map[string]any)
+	if imageURL["url"] != "data:image/jpeg;base64,abc" || imageURL["detail"] != "high" {
+		t.Fatalf("image URL options changed: %v", imageURL)
+	}
+	afterEncode, _ := json.Marshal(reqCtx.Body)
+	if string(afterEncode) != string(originalBody) {
+		t.Fatal("encode mutated the original request body")
 	}
 
 	// Verify tokens nested field

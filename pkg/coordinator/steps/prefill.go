@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -82,10 +83,8 @@ func (s *PrefillStep) Name() string { return PrefillStepName }
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
-	features := buildMMFeatures(reqCtx.MultimodalEntries, true)
-
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	body, err := s.buildPrefillBody(ctx, reqCtx, features, format)
+	body, err := s.buildPrefillBody(ctx, reqCtx, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)
 	}
@@ -130,74 +129,31 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	return nil
 }
 
-func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) (map[string]any, error) {
+func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format gateway.RequestFormat) (map[string]any, error) {
 	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err
 	}
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
+	var body map[string]any
 	switch format {
 	case gateway.FormatChatCompletions:
-		body := maps.Clone(reqCtx.Body)
-		capSingleTokenOutput(body, format)
-		tokens := map[string]any{
-			"token_ids": reqCtx.TokenIDs,
-		}
-		if features != nil {
-			tokensFeatures := map[string]any{
-				"mm_hashes":       features["mm_hashes"],
-				"mm_placeholders": features["mm_placeholders"],
-			}
-			tokens["features"] = tokensFeatures
-		}
-		body["tokens"] = tokens
-		body[reqcommon.FieldKVTransferParams] = kvParams
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-		return body, nil
-
+		body = maps.Clone(reqCtx.Body)
 	case gateway.FormatCompletions:
 		prompt := reqCtx.Body["prompt"]
 		if len(reqCtx.TokenIDs) > 0 {
 			prompt = reqCtx.TokenIDs
 		}
-		body := map[string]any{
-			"request_id":                    reqCtx.RequestID,
-			"model":                         reqCtx.Model,
-			"prompt":                        prompt,
-			reqcommon.FieldKVTransferParams: kvParams,
-		}
-		capSingleTokenOutput(body, format)
-		if features != nil {
-			body["features"] = features
-		}
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-		return body, nil
-
+		body = map[string]any{"model": reqCtx.Model, "prompt": prompt}
 	case gateway.FormatGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
-		sampling := map[string]any{reqcommon.FieldMaxTokens: 1}
-		setGenerateTransferParams(sampling, kvParams, ecParams)
-		body := map[string]any{
-			"request_id":                  reqCtx.RequestID,
-			"token_ids":                   reqCtx.TokenIDs,
-			"model":                       reqCtx.Model,
-			reqcommon.FieldSamplingParams: sampling,
-		}
-		capSingleTokenOutput(body, format)
-		if features != nil {
-			body["features"] = features
-		}
-		return body, nil
+		body = map[string]any{"model": reqCtx.Model}
+	default:
+		return nil, fmt.Errorf("prefill: unsupported request format %v", format)
 	}
-	// resolveFormat only ever yields the three formats above; a new value
-	// reaching here is a programming error, not a client fault.
-	return nil, fmt.Errorf("prefill: unsupported request format %v", format)
+	vllm.PreparePrefill(reqCtx, body, kvParams, ecParams, format)
+	capSingleTokenOutput(body, format)
+	return body, nil
 }
 
 type prefillResponse struct {
