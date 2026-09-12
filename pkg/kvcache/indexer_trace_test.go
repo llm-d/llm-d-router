@@ -142,3 +142,31 @@ func TestScoreTokensBlockHitTelemetryIgnoresEmptyEntries(t *testing.T) {
 	assert.False(t, matchAttrs[semconv.LLMDKVCachePrefixMatchWalkedKey].AsBool())
 	assert.Equal(t, int64(1), matchAttrs[semconv.LLMDKVCachePrefixMatchLongestChainKey].AsInt64())
 }
+
+// Early termination in Index.Lookup stops traversing at the first missing
+// key, so blocks after a miss are not looked up and do not count towards
+// blocks_found or block_hit_ratio for a [hit, miss, hit] sequence.
+func TestScoreTokensBlockHitTelemetryEarlyTermination(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	tp := &mockTokenProcessor{blockKeys: u64ToBlockKeys([]uint64{10, 20, 30})}
+	indexer := newTestIndexer(t, tp)
+	populateIndex(t, indexer.KVBlockIndex(), map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: testPodA, DeviceTier: "gpu"}},
+		// 20 is missing (cache miss)
+		30: {{PodIdentifier: testPodA, DeviceTier: "gpu"}},
+	})
+
+	scores, err := indexer.ScoreTokens(ctx, []uint32{1, 2, 3}, testModel, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]float64{testPodA: 1.0}, scores)
+
+	scoreAttrs := spanAttributes(t, recorder, "score_tokens")
+	assert.Equal(t, int64(1), scoreAttrs["llm_d.kv_cache.blocks_found"].AsInt64())
+	assert.InDelta(t, 1.0/3.0, scoreAttrs["llm_d.kv_cache.block_hit_ratio"].AsFloat64(), 0.0001)
+
+	matchAttrs := spanAttributes(t, recorder, "match_block_keys")
+	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.longest_chain"].AsInt64())
+	assert.Equal(t, int64(1), matchAttrs["llm_d.kv_cache.prefix_match.pods_matched"].AsInt64())
+}
