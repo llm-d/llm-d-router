@@ -312,6 +312,9 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		backend = renderBackend{tk: renderer, warmupAuth: vllmWarmupAuthHeader()}
 		backendName = backendVLLM
 		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
+		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
+			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
+		}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 		backendName = backendEstimate

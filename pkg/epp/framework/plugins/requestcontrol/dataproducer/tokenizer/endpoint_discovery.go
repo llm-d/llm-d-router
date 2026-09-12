@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -48,7 +49,10 @@ type endpointPortRule struct {
 }
 
 type endpointDiscoveryConfig struct {
-	LoadBalancer *loadBalancerConfig `json:"loadBalancer,omitempty"`
+	DiscoverModelLimits bool                `json:"discoverModelLimits,omitempty"`
+	MinModelLen         int                 `json:"minModelLen,omitempty"`
+	ContextLimitLabel   string              `json:"contextLimitLabel,omitempty"`
+	LoadBalancer        *loadBalancerConfig `json:"loadBalancer,omitempty"`
 	// AttemptTimeout optionally caps each HTTP attempt within the request timeout.
 	AttemptTimeout string `json:"attemptTimeout,omitempty"`
 	// PortRules resolve render ports as BasePort + RankIndex. An empty list uses
@@ -140,6 +144,8 @@ type compiledEndpointPortRule struct {
 
 // discoveredEndpointPicker maintains render URLs keyed by endpoint identity.
 type discoveredEndpointPicker struct {
+	config       endpointDiscoveryConfig
+	capabilities map[string]*renderCapability
 	mu           sync.RWMutex
 	endpoints    map[string]string
 	ordered      []string
@@ -149,6 +155,15 @@ type discoveredEndpointPicker struct {
 
 // newDiscoveredEndpointPicker constructs a picker with the configured algorithm.
 func newDiscoveredEndpointPicker(config *endpointDiscoveryConfig) (*discoveredEndpointPicker, error) {
+	if config == nil {
+		config = &endpointDiscoveryConfig{}
+	}
+	if config.MinModelLen < 0 {
+		return nil, errors.New("minModelLen must not be negative")
+	}
+	if config.MinModelLen > 0 && !config.DiscoverModelLimits && config.ContextLimitLabel == "" {
+		return nil, errors.New("minModelLen requires discoverModelLimits or contextLimitLabel")
+	}
 	loadBalancer, err := newEndpointLoadBalancer(config.loadBalancerType())
 	if err != nil {
 		return nil, err
@@ -158,6 +173,8 @@ func newDiscoveredEndpointPicker(config *endpointDiscoveryConfig) (*discoveredEn
 		return nil, err
 	}
 	return &discoveredEndpointPicker{
+		config:       *config,
+		capabilities: map[string]*renderCapability{},
 		endpoints:    map[string]string{},
 		loadBalancer: loadBalancer,
 		portRules:    portRules,
@@ -172,7 +189,19 @@ func (p *discoveredEndpointPicker) Pick() (string, error) {
 // PickExcluding selects a render URL that has not been attempted by the request.
 func (p *discoveredEndpointPicker) PickExcluding(excluded map[string]struct{}) (string, error) {
 	p.mu.RLock()
-	endpoints := append([]string(nil), p.ordered...)
+	eligible := make(map[string]bool, len(p.capabilities))
+	now := time.Now()
+	for _, c := range p.capabilities {
+		if p.eligible(c, now) {
+			eligible[c.url] = true
+		}
+	}
+	endpoints := make([]string, 0, len(p.ordered))
+	for _, url := range p.ordered {
+		if eligible[url] {
+			endpoints = append(endpoints, url)
+		}
+	}
 	p.mu.RUnlock()
 
 	if len(endpoints) == 0 {
@@ -196,10 +225,22 @@ func (p *discoveredEndpointPicker) Upsert(meta *fwkdl.EndpointMetadata) error {
 	if err != nil {
 		return err
 	}
+	declared := 0
+	if key := p.config.ContextLimitLabel; key != "" {
+		declared, err = strconv.Atoi(meta.Labels[key])
+		if err != nil || declared <= 0 {
+			return fmt.Errorf("discovered endpoint %s has invalid context limit label %q", meta.ID, key)
+		}
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.endpoints[meta.ID.String()] = "http://" + net.JoinHostPort(meta.Address, port)
+	id := meta.ID.String()
+	url := "http://" + net.JoinHostPort(meta.Address, port)
+	if old := p.capabilities[id]; old == nil || old.url != url || old.declared != declared {
+		p.capabilities[id] = &renderCapability{url: url, declared: declared}
+	}
+	p.endpoints[id] = url
 	p.rebuildOrdered()
 	return nil
 }
@@ -213,6 +254,7 @@ func (p *discoveredEndpointPicker) Delete(meta *fwkdl.EndpointMetadata) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.endpoints, meta.ID.String())
+	delete(p.capabilities, meta.ID.String())
 	p.rebuildOrdered()
 }
 

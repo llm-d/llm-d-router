@@ -111,6 +111,8 @@ type vllmConfig struct {
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.
 	URL string `json:"url,omitempty"`
+	// PrefillOnly reserves one output token on the render copy, without changing inference.
+	PrefillOnly bool `json:"prefillOnly,omitempty"`
 	// EndpointDiscovery sends render requests directly to endpoints published
 	// by the configured data-layer discovery provider. Mutually exclusive with URL.
 	EndpointDiscovery *endpointDiscoveryConfig `json:"endpointDiscovery,omitempty"`
@@ -143,6 +145,7 @@ type vllmHTTPRenderer struct {
 	timeout        time.Duration
 	mmTimeout      time.Duration
 	attemptTimeout time.Duration
+	prefillOnly    bool
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, error) {
@@ -197,6 +200,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 		timeout:        timeout,
 		mmTimeout:      mmTimeout,
 		attemptTimeout: attemptTimeout,
+		prefillOnly:    cfg.PrefillOnly,
 	}, nil
 }
 
@@ -286,6 +290,9 @@ func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) 
 	}
 	allTokenIDs := make([][]uint32, len(resp))
 	for i, r := range resp {
+		if len(r.TokenIDs) == 0 {
+			return nil, nil, errors.New("vLLM render returned no token IDs")
+		}
 		allTokenIDs[i] = r.TokenIDs
 	}
 	return allTokenIDs, nil, nil
@@ -308,6 +315,9 @@ func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout
 	var resp renderResponse
 	if err := r.postJSON(ctx, chatRenderPath, body, timeout, &resp); err != nil {
 		return nil, nil, err
+	}
+	if len(resp.TokenIDs) == 0 {
+		return nil, nil, errors.New("vLLM render returned no token IDs")
 	}
 	return resp.TokenIDs, toKVCacheMM(resp.Features), nil
 }
@@ -478,6 +488,19 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 
 // postJSON permits one retry on a different endpoint within the request budget.
 func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, timeout time.Duration, out any) error {
+	if r.prefillOnly {
+		if typed, ok := body.(fwkrh.PayloadMap); ok {
+			cloned := maps.Clone(typed)
+			cloned["max_tokens"] = 1
+			if _, ok := cloned["max_completion_tokens"]; ok {
+				cloned["max_completion_tokens"] = 1
+			}
+			if _, ok := cloned["min_tokens"]; ok {
+				cloned["min_tokens"] = 0
+			}
+			body = cloned
+		}
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)

@@ -50,6 +50,10 @@ Backend selection:
 | `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
 | `vllm.endpointDiscovery.loadBalancer.type` | `round-robin` | Selection algorithm; `round-robin` is the only built-in algorithm. |
 | `vllm.endpointDiscovery.attemptTimeout` | unset         | Optional positive duration limiting each render attempt, e.g. `1s`. |
+| `vllm.endpointDiscovery.discoverModelLimits` | `false` | Probe model context capacity; see [Context limits](#context-limits). |
+| `vllm.endpointDiscovery.minModelLen` | `0` | Minimum eligible renderer context capacity. |
+| `vllm.endpointDiscovery.contextLimitLabel` | unset | Label supplying a positive context capacity, optionally bounded by probes. |
+| `vllm.prefillOnly` | `false` | Use a one-token output budget only for rendering; see [Render-only output budget](#render-only-output-budget). |
 | `vllm.timeout`             | `5s`                    | Per-request timeout for text-only requests.                                  |
 | `vllm.mmTimeout`           | `30s`                   | Per-request timeout for multimodal requests.                                 |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
@@ -279,10 +283,52 @@ also has at most one second. Choose an attempt timeout that accommodates normal
 render latency, including multimodal processing. Without an attempt timeout,
 a slow endpoint can consume the request budget and leave no time for a retry.
 
-With no discovered endpoints, rendering returns an error. Failed URLs remain
-eligible for subsequent requests until discovery removes them; there is no
-circuit breaker or separate render health probe. Retry exclusions preserve
-round-robin cursor progression across the full endpoint list.
+With no eligible discovered endpoints, rendering returns an error. Render
+failures do not remove URLs from subsequent requests; there is no render
+circuit breaker. Retry exclusions preserve round-robin cursor progression
+across the eligible endpoint list.
+
+#### Context limits
+
+Set `vllm.endpointDiscovery.discoverModelLimits: true` to verify each target's
+configured model and `max_model_len` through `GET /v1/models`. Unknown targets,
+failed probes, and observations older than 90 seconds are excluded. Probes run
+every 30 seconds with at most four concurrent requests and a two-second timeout
+per target. New endpoints can wait until the next probe cycle. Probes use
+`VLLM_API_KEY` when set; they do not use an incoming request's credentials.
+The models endpoint verifies model metadata, not render-route availability.
+
+`vllm.endpointDiscovery.minModelLen` sets a nonnegative minimum context capacity
+for the renderer pool. It requires model-limit discovery or
+`vllm.endpointDiscovery.contextLimitLabel`, which names a metadata label holding
+a positive integer capacity. With both sources configured, the smaller limit
+applies. Missing or invalid labels exclude the endpoint.
+
+```yaml
+vllm:
+  endpointDiscovery:
+    discoverModelLimits: true
+    minModelLen: 265088
+    contextLimitLabel: llm-d.ai/render-context-limit
+```
+
+These options are unset by default. They select a renderer pool with a known
+minimum capacity; they do not route by each request's token count, truncate
+prompts, or validate the inference endpoint's capacity. Rendering errors retain
+the existing token-producer error behavior.
+
+#### Render-only output budget
+
+Set `vllm.prefillOnly: true` when the renderer should validate the full prompt
+without reserving the client's generation budget. The render copy uses
+`max_tokens: 1`, caps `max_completion_tokens` at one when present, and sets
+`min_tokens` to zero when present. The inference payload, prompt, and requested
+generation budget are unchanged. This option is false by default and also
+works with `vllm.url`.
+
+This avoids rejecting a prompt solely because its requested output would
+exceed the renderer's context capacity. The prompt itself must still fit;
+this option does not enable partial matching or extend inference context limits.
 
 Each named token producer maintains its own endpoint set and balancing state.
 Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
