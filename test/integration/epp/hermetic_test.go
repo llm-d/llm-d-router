@@ -476,6 +476,12 @@ dataLayer:
 					responses, err := integration.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
 					require.NoError(t, err)
 
+					if len(tc.wantSpans) > 0 {
+						setHeaders := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
+						require.NotEmpty(t, headerValue(setHeaders, "traceparent"), "expected traceparent when tracing is enabled")
+						removeW3CTraceContextHeaders(responses)
+					}
+
 					if diff := cmp.Diff(tc.wantResponses, responses,
 						protocmp.Transform(),
 						protocmp.SortRepeated(func(a, b *configPb.HeaderValueOption) bool {
@@ -550,6 +556,43 @@ func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
 			Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("test-request-id"),
 		}},
 	)
+}
+
+func removeW3CTraceContextHeaders(responses []*extProcPb.ProcessingResponse) {
+	for _, resp := range responses {
+		if mutation := resp.GetRequestHeaders().GetResponse().GetHeaderMutation(); mutation != nil {
+			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
+		}
+		if mutation := resp.GetResponseHeaders().GetResponse().GetHeaderMutation(); mutation != nil {
+			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
+		}
+		if mutation := resp.GetImmediateResponse().GetHeaders(); mutation != nil {
+			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
+		}
+	}
+}
+
+func filterOutW3CTraceContextHeaders(headers []*configPb.HeaderValueOption) []*configPb.HeaderValueOption {
+	if len(headers) == 0 {
+		return headers
+	}
+	filtered := make([]*configPb.HeaderValueOption, 0, len(headers))
+	for _, h := range headers {
+		if isW3CTraceContextHeader(h.GetHeader().GetKey()) {
+			continue
+		}
+		filtered = append(filtered, h)
+	}
+	return filtered
+}
+
+func isW3CTraceContextHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "traceparent", "tracestate", "baggage":
+		return true
+	default:
+		return false
+	}
 }
 
 // loadBaseResources parses the YAML manifest once at startup.

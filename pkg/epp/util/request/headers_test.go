@@ -51,6 +51,9 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.FlowQueueDurationHeaderKey,
 		errcommon.RequestDroppedReasonHeaderKey,
 		"Content-Length",
+		"traceparent",
+		"tracestate",
+		"baggage",
 	}
 
 	for _, header := range systemHeaders {

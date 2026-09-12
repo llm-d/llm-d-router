@@ -27,9 +27,11 @@ import (
 	"github.com/go-logr/logr/testr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/version"
 )
@@ -464,6 +466,21 @@ func TestNewTraceExporter(t *testing.T) {
 				t.Errorf("newTraceExporter(%q) = %s, want %s", tc.exporterType, got, tc.wantType)
 			}
 		})
+	}
+}
+
+func TestInitTextMapPropagator(t *testing.T) {
+	orig := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(orig) })
+
+	InitTextMapPropagator()
+
+	carrier := propagation.MapCarrier{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0c9902b7-01",
+	}
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		t.Fatal("expected InitTextMapPropagator to install a working TraceContext propagator")
 	}
 }
 
