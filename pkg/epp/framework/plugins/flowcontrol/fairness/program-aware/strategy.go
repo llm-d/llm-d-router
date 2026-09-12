@@ -35,8 +35,13 @@ func newStrategy(cfg Config) (Strategy, error) {
 			weightHeadWait:  cfg.LASWeightHeadWait,
 			halfLifeSeconds: cfg.LASHalfLifeSeconds,
 		}, nil
+	case turnPriorityStrategyName:
+		return &turnPriorityStrategy{
+			timeWeight:        cfg.TurnPriorityTimeWeight,
+			inactivitySeconds: cfg.TurnPriorityInactivitySeconds,
+		}, nil
 	default:
-		return nil, fmt.Errorf("unknown scoring strategy %q: only \"las\" is supported", cfg.Strategy)
+		return nil, fmt.Errorf("unknown scoring strategy %q: only \"las\" and \"turn-priority\" are supported", cfg.Strategy)
 	}
 }
 

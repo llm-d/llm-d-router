@@ -31,6 +31,9 @@ type Config struct {
 	LASWeightService   float64 `json:"lasWeightService,omitempty"`
 	LASWeightHeadWait  float64 `json:"lasWeightHeadWait,omitempty"`
 	LASHalfLifeSeconds float64 `json:"lasHalfLifeSeconds,omitempty"`
+
+	TurnPriorityTimeWeight        float64 `json:"turnPriorityTimeWeight,omitempty"`
+	TurnPriorityInactivitySeconds float64 `json:"turnPriorityInactivitySeconds,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -41,6 +44,9 @@ func DefaultConfig() Config {
 		LASWeightService:     0.8,
 		LASWeightHeadWait:    0.2,
 		LASHalfLifeSeconds:   60,
+
+		TurnPriorityTimeWeight:        0.05,
+		TurnPriorityInactivitySeconds: 120,
 	}
 }
 
@@ -59,6 +65,12 @@ func (c Config) validate() error {
 	}
 	if c.LASHalfLifeSeconds < 0 {
 		return fmt.Errorf("lasHalfLifeSeconds must be >= 0, got %v", c.LASHalfLifeSeconds)
+	}
+	if c.TurnPriorityTimeWeight < 0 {
+		return fmt.Errorf("turnPriorityTimeWeight must be >= 0, got %v", c.TurnPriorityTimeWeight)
+	}
+	if c.TurnPriorityInactivitySeconds < 0 {
+		return fmt.Errorf("turnPriorityInactivitySeconds must be >= 0, got %v", c.TurnPriorityInactivitySeconds)
 	}
 	return nil
 }
