@@ -201,6 +201,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		span.End()
 	}()
 
+	ctx = tracing.LoggerWithSpanContext(ctx, span)
 	logger := log.FromContext(ctx)
 
 	// Record the client-facing model for every request, including forwarded-unchanged ones.

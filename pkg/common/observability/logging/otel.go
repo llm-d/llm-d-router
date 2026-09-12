@@ -3,6 +3,7 @@ package logging
 import (
 	"context"
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
@@ -22,7 +23,6 @@ const (
 	otelServiceNameKey    = "service.name"
 	otelSeverityNumberKey = "severity_number"
 
-	severityTrace  = "TRACE"
 	severityDebug  = "DEBUG"
 	severityInfo   = "INFO"
 	severityWarn   = "WARN"
@@ -31,7 +31,6 @@ const (
 	severityPanic  = "PANIC"
 	severityFatal  = "FATAL"
 
-	severityNumberTrace  = 1
 	severityNumberDebug  = 5
 	severityNumberInfo   = 9
 	severityNumberWarn   = 13
@@ -83,9 +82,14 @@ func EncoderConfig() zapcore.EncoderConfig {
 	config.CallerKey = otelCallerKey
 	config.MessageKey = otelBodyKey
 	config.StacktraceKey = otelStacktraceKey
-	config.EncodeTime = zapcore.RFC3339NanoTimeEncoder
+	config.EncodeTime = EncodeTime
 	config.EncodeLevel = LevelEncoder
 	return config
+}
+
+// EncodeTime emits RFC 3339 timestamps in UTC.
+func EncodeTime(value time.Time, enc zapcore.PrimitiveArrayEncoder) {
+	enc.AppendString(value.UTC().Format(time.RFC3339Nano))
 }
 
 // SeverityText maps zap / logr verbosity levels to OTel severity_text.
@@ -107,17 +111,7 @@ func SeverityText(l zapcore.Level) string {
 		}
 	}
 
-	switch l {
-	case zapcore.Level(-1 * DEBUG):
-		return severityDebug
-	case zapcore.Level(-1 * TRACE):
-		return severityTrace
-	default:
-		if l >= zapcore.Level(-1*VERBOSE) {
-			return severityInfo
-		}
-		return severityTrace
-	}
+	return severityDebug
 }
 
 // SeverityNumber maps zap / logr verbosity levels to OTel severity_number.
@@ -135,8 +129,6 @@ func SeverityNumber(l zapcore.Level) int {
 		return severityNumberWarn
 	case severityDebug:
 		return severityNumberDebug
-	case severityTrace:
-		return severityNumberTrace
 	default:
 		return severityNumberInfo
 	}

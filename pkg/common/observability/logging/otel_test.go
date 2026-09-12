@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -34,6 +35,27 @@ func TestJSONRecordUsesOTelFields(t *testing.T) {
 	}
 	if rec["timestamp"] == nil || rec["timestamp"] == "" {
 		t.Error("timestamp missing")
+	}
+}
+
+func TestTimestampIsUTC(t *testing.T) {
+	enc := zapcore.NewJSONEncoder(EncoderConfig())
+	entry := zapcore.Entry{
+		Time:    time.Date(2026, time.September, 11, 12, 34, 56, 123000000, time.FixedZone("test", 3600)),
+		Level:   zapcore.InfoLevel,
+		Message: "request assembled",
+	}
+	encoded, err := enc.EncodeEntry(entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rec map[string]any
+	if err := json.Unmarshal(encoded.Bytes(), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec[otelTimestampKey] != "2026-09-11T11:34:56.123Z" {
+		t.Errorf("timestamp = %v, want UTC timestamp", rec[otelTimestampKey])
 	}
 }
 

@@ -70,17 +70,17 @@ func TestCustomLevelEncoder(t *testing.T) {
 		{
 			name:     "V(1) (-1)",
 			level:    zapcore.Level(-1),
-			expected: "INFO",
+			expected: "DEBUG",
 		},
 		{
 			name:     "V(2) Default (-2)",
 			level:    zapcore.Level(-2),
-			expected: "INFO",
+			expected: "DEBUG",
 		},
 		{
 			name:     "Verbose (-3)",
 			level:    zapcore.Level(-3),
-			expected: "INFO",
+			expected: "DEBUG",
 		},
 		{
 			name:     "Debug (-4)",
@@ -90,12 +90,12 @@ func TestCustomLevelEncoder(t *testing.T) {
 		{
 			name:     "Trace (-5)",
 			level:    zapcore.Level(-5),
-			expected: "TRACE",
+			expected: "DEBUG",
 		},
 		{
 			name:     "Extremely Verbose (-6)",
 			level:    zapcore.Level(-6),
-			expected: "TRACE",
+			expected: "DEBUG",
 		},
 	}
 
