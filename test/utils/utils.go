@@ -239,6 +239,49 @@ func EventuallyExists(testConfig *TestConfig, getResource func() error) {
 	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.Succeed())
 }
 
+// SetupNamespace creates nsName if it does not already exist and reports whether
+// it created it, so the caller knows whether to delete it on cleanup.
+func SetupNamespace(testConfig *TestConfig, nsName string) bool {
+	ginkgo.By("Setup namespace " + nsName)
+	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+	if err == nil {
+		return false
+	}
+	gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
+
+	ginkgo.By("Creating namespace " + nsName)
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nsName,
+		},
+	}
+	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	EventuallyExists(testConfig, func() error {
+		return testConfig.K8sClient.Get(testConfig.Context,
+			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
+	})
+
+	return true
+}
+
+// DeleteNamespace deletes nsName and waits until the API server reports it gone,
+// so a caller that recreates it does not race the terminating namespace. The
+// wait is ReadyTimeout, not ExistsTimeout: finalizing a namespace means reaping
+// every workload still in it, which under parallel runs sharing one node takes
+// far longer than an object needs to appear in the API server.
+func DeleteNamespace(testConfig *TestConfig, nsName string) {
+	ginkgo.By("Deleting namespace " + nsName)
+	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(func() bool {
+		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.BeTrue(),
+		"namespace %s was not fully deleted", nsName)
+}
+
 func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string) []string {
 	objNames := CreateObjsWithVerifier(testConfig, objs, nsName,
 		func(kind string, clientObj client.Object) {

@@ -242,7 +242,7 @@ func testWrapper(test func()) func() {
 	return func() {
 		ginkgo.BeforeAll(func() {
 			nsName = getNamespace()
-			createdNameSpace = setupNameSpace()
+			createdNameSpace = testutils.SetupNamespace(testConfig, nsName)
 
 			envoyObjects, portForwardSession = createEnvoy(nsName)
 
@@ -282,7 +282,7 @@ func testWrapper(test func()) func() {
 				testutils.DeleteObjects(testConfig, envoyObjects, nsName)
 
 				if createdNameSpace {
-					deleteNameSpace(nsName)
+					testutils.DeleteNamespace(testConfig, nsName)
 				}
 			}
 		})

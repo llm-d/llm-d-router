@@ -98,6 +98,28 @@ make -f Makefile.coord.mk test-e2e-coordinator-3epp   # 3-EPP
 - **single** (default): one EPP running a profile-per-phase, and one InferencePool spanning the encode, prefill, and decode workers.
 - **3epp**: one role-scoped EPP and InferencePool per phase (encode, prefill, decode), with Envoy dispatching each `EPP-Profile` request to that role's EPP.
 
+**Running the tests in parallel**
+
+By default the end to end tests are run in groups that are parallel to each other. The number of groups running in parallel at any time is controlled via the `E2E_NUM_PROCS` environment variable, which defaults to five. To run all of the tests in a serial fashion, use `E2E_NUM_PROCS=1`.
+
+```bash
+E2E_NUM_PROCS=1 make -f Makefile.coord.mk test-e2e-coordinator
+```
+
+Each parallel process gets its own namespace and its own gateway NodePort, so the groups do not interfere with each other. One vllm-render deployment is shared by every process and lives in the base namespace.
+
+**Setting the test namespace**
+
+The namespace(s) in which the tests run vary based on whether or not the tests are being run in parallel.
+
+If the tests are being run in parallel, the suite creates resources in namespaces of the form `<base>-N`, where `<base>` by default is `e2e-coordinator` and `N` is the process number of the process running the test. `<base>` can be changed by setting `NAMESPACE`.
+
+If the tests are not being run in parallel, then by default the suite creates resources in the `default` namespace. To change it, set the same variable:
+
+```bash
+export NAMESPACE=<MY_NS>
+```
+
 **Keeping the cluster on failure**
 
 Set `E2E_KEEP_CLUSTER_ON_FAILURE=true` to preserve the cluster when any test fails. This is useful for inspecting pod logs, events, or cluster state after a failure.
@@ -130,8 +152,9 @@ kubectl --context kind-e2e-coordinator-tests get pods
 
 | Variable | Default | Description |
 |---|---|---|
+| `E2E_NUM_PROCS` | `5` | Number of spec groups run in parallel. `1` runs the suite serially |
 | `E2E_KEEP_CLUSTER_ON_FAILURE` | `false` | Preserve the Kind cluster when the suite fails |
-| `E2E_GATEWAY_PORT` | `30080` | Host port mapped to the gateway NodePort |
+| `E2E_GATEWAY_PORT` | `30080` | Host port mapped to the gateway NodePort of the first process; each further process adds 100 |
 | `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, Envoy, workers) for every spec, not just on failure |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
@@ -140,7 +163,7 @@ kubectl --context kind-e2e-coordinator-tests get pods
 | `VLLM_RENDER_PORT` | `8082` | Port the vllm-render service listens on |
 | `COORDINATOR_IMAGE` | _(empty)_ | Coordinator image loaded into the Kind cluster |
 | `MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name used by the test pools |
-| `NAMESPACE` | `default` | Namespace to deploy test resources into |
+| `NAMESPACE` | `e2e-coordinator` in parallel, `default` when `E2E_NUM_PROCS=1` | Base namespace for test resources. In parallel runs each process uses `<base>-N` |
 | `K8S_CONTEXT` | _(empty)_ | Use an existing cluster context instead of creating a Kind cluster |
 | `READY_TIMEOUT` | `10m` | How long to wait for resources to become ready |
 | `E2E_EPP_TOPOLOGY` | `single` | EPP topology: `single` (one EPP + one pool) or `3epp` (per-role EPP + pool). `test-e2e-coordinator-3epp` sets `3epp` |
