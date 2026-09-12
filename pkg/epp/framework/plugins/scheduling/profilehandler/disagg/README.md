@@ -6,7 +6,6 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
 
 - [Profile Handlers](#profile-handlers)
   - [DisaggProfileHandler](#disaggprofilehandler)
-- [PreRequest Plugins](#prerequest-plugins)
 - [Decider Plugins](#decider-plugins)
   - [PrefixBasedPDDecider](#prefixbasedpddecider)
   - [AlwaysDisaggPDDecider](#alwaysdisaggpddecider)
@@ -86,7 +85,6 @@ plugins:
 
 ---
 
-## PreRequest Plugins
 ## Decider Plugins
 
 ### PrefixBasedPDDecider
