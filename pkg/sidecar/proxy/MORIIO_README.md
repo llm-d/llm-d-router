@@ -144,8 +144,8 @@ The endpoint serves plain HTTP by default. Set **`--metrics-cert-dir`** to a
 directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
 There is no self-signed fallback. This flag is independent of
 `--secure-proxy`/`--cert-path`, which secure the data-plane listener. If
-either file is missing or invalid, the error is logged and the sidecar
-keeps running without a `/metrics` endpoint; it does not fall back to HTTP.
+either file is missing or invalid, the sidecar fails at startup; it does not
+fall back to HTTP.
 
 When enabled, the following counters are exposed at `GET /metrics` (unlabeled):
 

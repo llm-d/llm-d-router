@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -106,20 +107,18 @@ func (s *Server) metricsAddr() string {
 // metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR),
 // registering the goroutine on grp so it shares the server lifecycle and shuts
 // down with ctx. When neither is set (the default) it is a no-op and the
-// counters simply go unscraped. A metrics server failure (for example an
-// invalid --metrics-cert-dir) is logged and never propagated to grp: the
-// data-plane proxy keeps running without a /metrics endpoint rather than
-// going down over an optional feature.
+// counters simply go unscraped. A metrics server failure propagates to grp and
+// stops the sidecar: the failures reachable here (an unusable
+// --metrics-cert-dir, an address already in use) are startup misconfigurations,
+// so failing immediately surfaces them during rollout instead of leaving the
+// sidecar serving traffic with no /metrics endpoint.
 func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 	addr := s.metricsAddr()
 	if addr == "" {
 		return
 	}
 	grp.Go(func() error {
-		if err := s.serveMetrics(ctx, addr); err != nil {
-			s.logger.Error(err, "metrics server failed; proxy continues without metrics")
-		}
-		return nil
+		return s.serveMetrics(ctx, addr)
 	})
 }
 
@@ -130,8 +129,8 @@ func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 // uses HTTP by default. When --metrics-cert-dir is set, or metrics-cert-dir
 // is set in the sidecar YAML, it serves /metrics over HTTPS using tls.crt and
 // tls.key from that directory, with no fallback to HTTP. Startup and serving
-// errors are returned to maybeStartMetrics, which logs them. The shutdown
-// goroutine logs shutdown errors.
+// errors are returned to maybeStartMetrics. The shutdown goroutine logs
+// shutdown errors.
 func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 	registerDNSMetrics()
 
@@ -178,8 +177,8 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 // the HTTPS metrics server. Changes to either file take effect without
 // restarting the sidecar.
 func (s *Server) metricsTLSConfig(ctx context.Context) (*tls.Config, error) {
-	certFile := s.config.MetricsCertDir + "/tls.crt"
-	keyFile := s.config.MetricsCertDir + "/tls.key"
+	certFile := filepath.Join(s.config.MetricsCertDir, "tls.crt")
+	keyFile := filepath.Join(s.config.MetricsCertDir, "tls.key")
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load metrics TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)

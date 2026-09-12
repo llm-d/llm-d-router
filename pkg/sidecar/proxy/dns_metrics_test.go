@@ -23,8 +23,10 @@ import (
 	"encoding/pem"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -120,9 +122,9 @@ func TestServeMetrics_TLS(t *testing.T) {
 	require.NoError(t, <-errCh)
 }
 
-// TestServeMetrics_TLSMissingCert checks three invalid --metrics-cert-dir
-// directories. The metrics server rejects each case, while the data-plane
-// proxy continues running without a /metrics endpoint.
+// TestServeMetrics_TLSMissingCert checks a --metrics-cert-dir missing tls.crt,
+// tls.key, or both. The metrics server rejects each case and the sidecar fails
+// to start.
 func TestServeMetrics_TLSMissingCert(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -161,11 +163,11 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 			err := s.serveMetrics(context.Background(), freeAddr(t))
 			require.Error(t, err)
 
-			// A metrics startup error must not stop the data-plane proxy.
-			// The proxy keeps running, but /metrics remains unavailable.
+			// The same error must reach the caller, so the sidecar
+			// fails at startup instead of running without metrics.
 			grp, ctx := errgroup.WithContext(context.Background())
 			s.maybeStartMetrics(ctx, grp)
-			require.NoError(t, grp.Wait())
+			require.Error(t, grp.Wait())
 		})
 	}
 }
@@ -179,4 +181,48 @@ func mustFreePort(t *testing.T) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	require.NoError(t, ln.Close())
 	return port
+}
+
+// TestStart_MetricsTLSFailureStopsDataPlane runs the full Start path with a
+// --metrics-cert-dir missing tls.crt and tls.key: Start returns the error and
+// the data-plane listener is closed.
+func TestStart_MetricsTLSFailureStopsDataPlane(t *testing.T) {
+	decoderURL, err := url.Parse("http://decoder.invalid:8000")
+	require.NoError(t, err)
+
+	s := NewProxy(Config{
+		Port:           strconv.Itoa(mustFreePort(t)),
+		DecoderURL:     decoderURL,
+		MetricsPort:    mustFreePort(t),
+		MetricsCertDir: t.TempDir(), // no tls.crt or tls.key
+	})
+	s.allowlistValidator = &AllowlistValidator{enabled: false}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(context.Background()) }()
+
+	// The data plane comes up before the metrics failure tears it down.
+	select {
+	case <-s.readyCh:
+	case err := <-errCh:
+		t.Fatalf("Start returned before the data plane was listening: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("data-plane listener never came up")
+	}
+	dataPlaneAddr := s.addr.String()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err, "expected the metrics TLS failure to fail Start")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start kept running after the metrics server failed")
+	}
+
+	// Start only returns once startHTTP has returned, so the data-plane
+	// listener is closed by then and the port accepts nothing.
+	conn, err := net.DialTimeout("tcp", dataPlaneAddr, time.Second)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("data-plane listener on %s still accepts connections", dataPlaneAddr)
+	}
 }
