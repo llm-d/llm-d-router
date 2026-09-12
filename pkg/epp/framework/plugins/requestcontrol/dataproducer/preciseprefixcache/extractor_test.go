@@ -22,9 +22,11 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -341,4 +343,122 @@ func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscri
 
 	ids, _ = p.subscribersManager.GetActiveSubscribers()
 	assert.Empty(t, ids)
+}
+
+func TestNew_PodLabelSelector(t *testing.T) {
+	cases := []struct {
+		name         string
+		selector     string
+		discoverPods bool
+		wantIDs      []string
+		wantErr      bool
+	}{
+		{name: "equality selector", selector: "llm-d.ai/role=prefill", discoverPods: true, wantIDs: []string{"ns/prefill"}},
+		{name: "set selector", selector: "llm-d.ai/role in (prefill,decode)", discoverPods: true, wantIDs: []string{"ns/prefill", "ns/decode"}},
+		{name: "empty selector", discoverPods: true, wantIDs: []string{"ns/prefill", "ns/decode", "ns/unlabeled"}},
+		{name: "invalid selector", selector: "llm-d.ai/role===", discoverPods: true, wantErr: true},
+		{name: "discovery disabled", selector: "llm-d.ai/role==="},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(discardCtx(t))
+			defer cancel()
+			indexerConfig, err := kvcache.NewDefaultConfig()
+			require.NoError(t, err)
+			cfg := kvevents.DefaultConfig()
+			cfg.DiscoverPods = tc.discoverPods
+			cfg.PodDiscoveryConfig.PodLabelSelector = tc.selector
+			p, err := New(ctx, PluginType, PluginConfig{IndexerConfig: indexerConfig, KVEventsConfig: cfg})
+			if tc.wantErr {
+				require.ErrorContains(t, err, "kvEventsConfig.podDiscoveryConfig.podLabelSelector")
+				return
+			}
+			require.NoError(t, err)
+			defer p.subscribersManager.Shutdown(ctx)
+
+			for _, endpoint := range []struct {
+				name   string
+				labels map[string]string
+			}{
+				{name: "prefill", labels: map[string]string{"llm-d.ai/role": "prefill"}},
+				{name: "decode", labels: map[string]string{"llm-d.ai/role": "decode"}},
+				{name: "unlabeled"},
+			} {
+				require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+					Type: fwkdl.EventAddOrUpdate,
+					Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+						ID:      k8stypes.NamespacedName{Namespace: "ns", Name: endpoint.name},
+						Address: "10.0.0.1",
+						Port:    "8080",
+						Labels:  endpoint.labels,
+					}, nil),
+				}))
+			}
+			ids, _ := p.subscribersManager.GetActiveSubscribers()
+			assert.ElementsMatch(t, tc.wantIDs, ids)
+		})
+	}
+}
+
+func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
+	cases := []struct {
+		name      string
+		eventType fwkdl.EventType
+		labels    map[string]string
+		address   string
+	}{
+		{name: "update with nonmatching labels", eventType: fwkdl.EventAddOrUpdate, labels: map[string]string{"llm-d.ai/role": "decode"}, address: "10.0.0.1"},
+		{name: "update without labels", eventType: fwkdl.EventAddOrUpdate, address: "10.0.0.1"},
+		{name: "delete with matching labels", eventType: fwkdl.EventDelete, labels: map[string]string{"llm-d.ai/role": "prefill"}, address: "10.0.0.1"},
+		{name: "delete with nonmatching labels", eventType: fwkdl.EventDelete, labels: map[string]string{"llm-d.ai/role": "decode"}, address: "10.0.0.1"},
+		{name: "delete without labels", eventType: fwkdl.EventDelete, address: "10.0.0.1"},
+		{name: "delete with only ID", eventType: fwkdl.EventDelete},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := discardCtx(t)
+			p := newExtractorProducer(true)
+			defer p.subscribersManager.Shutdown(ctx)
+			p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
+			var clearedPods []string
+			p.kvCacheIndexer = &fakeKVCacheIndexer{index: &fakeKVBlockIndex{
+				clearFn: func(_ context.Context, podIdentifier string) error {
+					clearedPods = append(clearedPods, podIdentifier)
+					return nil
+				},
+			}}
+			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+				ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
+				Address: "10.0.0.1",
+				Port:    "8080",
+				Labels:  map[string]string{"llm-d.ai/role": "prefill"},
+			}, nil)
+			require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
+			ids, _ := p.subscribersManager.GetActiveSubscribers()
+			require.Equal(t, []string{"ns/pod-a"}, ids)
+
+			require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
+				Type: tc.eventType,
+				Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					ID:      ep.GetMetadata().ID,
+					Address: tc.address,
+					Port:    "8080",
+					Labels:  tc.labels,
+				}, nil),
+			}))
+			ids, _ = p.subscribersManager.GetActiveSubscribers()
+			assert.Empty(t, ids)
+			if tc.address == "" {
+				assert.Empty(t, clearedPods)
+			} else {
+				assert.Equal(t, []string{"10.0.0.1:8080"}, clearedPods)
+			}
+
+			if tc.eventType == fwkdl.EventAddOrUpdate {
+				require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
+				ids, _ = p.subscribersManager.GetActiveSubscribers()
+				assert.Equal(t, []string{"ns/pod-a"}, ids)
+			}
+		})
+	}
 }
