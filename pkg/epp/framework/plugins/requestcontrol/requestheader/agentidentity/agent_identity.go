@@ -116,7 +116,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	for _, header := range p.priorityHeaders {
-		if id := request.Headers[header]; id != "" {
+		if id := strings.TrimSpace(request.Headers[header]); id != "" {
 			request.PutAttribute(AgentIdentityKey, id)
 			return nil
 		}
