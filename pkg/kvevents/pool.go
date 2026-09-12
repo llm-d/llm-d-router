@@ -571,6 +571,19 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						ev.KVCacheSpecKind = KVCacheSpecKind(meta.Kind)
 					}
 				} else {
+					if meta, found := p.groupCatalog.Get(podIdentifier, g); found &&
+						meta.Kind == string(ev.KVCacheSpecKind) && meta.BlockSize != ev.BlockSize {
+						metrics.KVEventStoresSkipped.WithLabelValues(
+							cacheKindLabel(ev.KVCacheSpecKind), "conflicting_block_size").Inc()
+						log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+							"podIdentifier", podIdentifier,
+							"groupIdx", ev.GroupIdx,
+							"cacheKind", ev.KVCacheSpecKind,
+							"reason", "conflicting_block_size",
+							"blockSize", ev.BlockSize,
+							"knownBlockSize", meta.BlockSize)
+						continue
+					}
 					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
 						Kind:              string(ev.KVCacheSpecKind),
 						BlockSize:         ev.BlockSize,

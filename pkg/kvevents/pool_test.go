@@ -874,6 +874,40 @@ func TestHMAGroupFilterRejectsSparseFullAttentionBeforeParentLookup(t *testing.T
 	assert.Error(t, err)
 }
 
+func TestHMAGroupFilterRejectsConflictingBlockSizeBeforeParentLookup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 960),
+			Tokens:          makeTokens(16),
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 961),
+			Tokens:          makeTokens(4),
+			ParentHash:      999,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.getRequestKeyCalls)
+	meta, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, ok)
+	assert.Equal(t, 16, meta.BlockSize)
+}
+
 func TestHMAGroupFilterIgnoresRejectedGroupRemoval(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, _ := newTestPool(t, 16)
