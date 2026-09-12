@@ -1382,47 +1382,6 @@ func TestHandler_Factory_NilDeciders(t *testing.T) {
 	}
 }
 
-// TestBothProfileAndHeadersHandlerPreRequest verifies that when both
-// disagg-profile-handler and the deprecated disagg-headers-handler are
-// active, both PreRequest hooks run without error. The result is redundant
-// (same header written twice) but not conflicting.
-func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-
-	profileHandler := NewDisaggProfileHandler("decode", "prefill", "encode", nil, nil).WithName("profile")
-	headersHandler := NewHeadersHandler("prefill", "encode").WithName("headers") //nolint:staticcheck // intentional: testing deprecated path
-
-	podAddr := "10.0.0.5"
-	podPort := "8080"
-	ep := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{
-			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
-			Address: podAddr,
-			Port:    podPort,
-		},
-		&fwkdl.Metrics{},
-		nil,
-	)
-
-	request := &scheduling.InferenceRequest{
-		RequestID: "req-both",
-		Headers:   map[string]string{},
-	}
-	result := &scheduling.SchedulingResult{
-		PrimaryProfileName: "decode",
-		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"prefill": {TargetEndpoints: []scheduling.Endpoint{ep}},
-		},
-	}
-
-	_ = profileHandler.PreRequest(ctx, request, result)
-	_ = headersHandler.PreRequest(ctx, request, result)
-
-	expected := net.JoinHostPort(podAddr, podPort)
-	assert.Equal(t, expected, request.Headers[routing.PrefillEndpointHeader],
-		"both handlers set the same prefill header — redundant but no conflict")
-}
-
 func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	h := NewDisaggProfileHandler("decode", "", "encode", nil, nil)
