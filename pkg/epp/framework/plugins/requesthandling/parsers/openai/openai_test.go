@@ -1198,6 +1198,23 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "audio speech request",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model": "tts-1",
+				"input": "Hello world",
+				"voice": "alloy",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "Hello world"},
+				Payload: fwkrh.PayloadMap{
+					"model": "tts-1",
+					"input": "Hello world",
+					"voice": "alloy",
+				},
+			},
+		},
+		{
 			name:    "images generations request without model",
 			headers: map[string]string{":path": "/v1/images/generations"},
 			body: map[string]any{
@@ -1209,6 +1226,23 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"prompt": "a dog",
+				},
+			},
+		},
+		{
+			name:    "audio transcriptions request",
+			headers: map[string]string{":path": "/v1/audio/transcriptions"},
+			body: map[string]any{
+				"model":    "whisper-1",
+				"language": "en",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Transcriptions: &fwkrh.TranscriptionsRequest{
+					Language: "en",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":    "whisper-1",
+					"language": "en",
 				},
 			},
 		},
@@ -1696,6 +1730,14 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 				Usage: nil,
 			},
 		},
+		{
+			name:    "image/png response returns nil without error",
+			body:    []byte("\x89PNG\r\n\x1a\nbinary"),
+			headers: map[string]string{contentType: "image/png"},
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1912,6 +1954,7 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			imagesGenerationsAPI,
 			imagesEditsAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
