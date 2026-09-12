@@ -53,10 +53,10 @@ metrics, not EPP metrics. The raw engine metrics remain available at the model s
 
 ### P/D sidecar: MoRI-IO metrics
 
-The P/D sidecar currently exposes only the `moriio_dns_*` MoRI-IO metrics through an HTTP `/metrics`
-endpoint. It exposes them only when `--metrics-port` or the backward-compatible
-`MORIIO_METRICS_ADDR` environment variable is set. The P/D sidecar metrics server does not configure
-TLS. `SecureServing` applies to the sidecar data-plane listener.
+The P/D sidecar currently exposes only the `moriio_dns_*` MoRI-IO metrics, and only when
+`--metrics-port` or the backward-compatible `MORIIO_METRICS_ADDR` environment variable is set. The
+endpoint serves plain HTTP unless `--metrics-cert-dir` is set; see
+[MoRI-IO DNS re-resolution](#mori-io-dns-re-resolution) for the enablement and TLS settings.
 
 This endpoint belongs to the sidecar process;
 its controller-runtime registry is separate from the router pod's EPP registry.
@@ -546,6 +546,12 @@ default. Pass `--metrics-port` (e.g. `--metrics-port=9090`) to the sidecar to
 expose these counters at `/metrics` on that port; `0` (the default) disables it.
 The `MORIIO_METRICS_ADDR` env var (e.g. `:9090`) is a backward-compatible
 fallback, consulted only when `--metrics-port` is unset.
+
+The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a
+directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
+Missing or invalid files stop the sidecar; the metrics listener does not fall
+back to HTTP. The metrics TLS setting is independent of `--secure-proxy` and
+`--cert-path`, which apply to the sidecar data-plane listener.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
