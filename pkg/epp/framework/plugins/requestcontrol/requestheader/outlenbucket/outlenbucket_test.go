@@ -40,6 +40,34 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 	}
 }
 
+// bodyOpts configures bodyWith for the extended signal tests. The raw-payload
+// fields (tool_choice, response_format) live in payload; continueFinal and
+// tools/kwArgs live on the typed ChatCompletions.
+type bodyOpts struct {
+	tools         []any
+	kwArgs        map[string]any
+	payload       map[string]any
+	continueFinal bool
+	maxOut        *int64
+}
+
+// bodyWith builds a request body exercising both the typed chat-completions
+// fields and the raw JSON payload map that tool_choice/response_format are read from.
+func bodyWith(o bodyOpts) *fwkrh.InferenceRequestBody {
+	b := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Tools:                o.tools,
+			ChatTemplateKWArgs:   o.kwArgs,
+			ContinueFinalMessage: o.continueFinal,
+		},
+		MaxOutputTokens: o.maxOut,
+	}
+	if o.payload != nil {
+		b.Payload = fwkrh.PayloadMap(o.payload)
+	}
+	return b
+}
+
 func TestEstimateOutlen(t *testing.T) {
 	oneTool := []any{map[string]any{"type": "function"}}
 
@@ -210,3 +238,158 @@ func TestInt64PtrFromAny(t *testing.T) {
 	require.Nil(t, int64PtrFromAny(nil))
 	require.Nil(t, int64PtrFromAny(true))
 }
+
+// namedToolChoice is an OpenAI tool_choice object forcing a specific function.
+var namedToolChoice = map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
+
+// TestEstimateOutlen_ExtendedSignals covers signals read from the raw payload
+// map (tool_choice, response_format), the typed continue_final_message,
+// vendor-specific normalizations (DeepSeek thinking.type, Nemotron reasoning_budget),
+// the tool_choice="none" veto, and the max_output_tokens bin ceiling.
+func TestEstimateOutlen_ExtendedSignals(t *testing.T) {
+	oneTool := []any{map[string]any{"type": "function"}}
+
+	tests := []struct {
+		name string
+		body *fwkrh.InferenceRequestBody
+		want Bucket
+	}{
+		// --- LONG pushers: DeepSeek thinking.type vendor normalization ---
+		{
+			name: "thinking.type=enabled -> LONG (normalizes to enable_thinking=true)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": map[string]any{"type": "enabled"}}}),
+			want: Long,
+		},
+		{
+			name: "thinking.type=disabled -> UNKNOWN (normalizes to enable_thinking=false)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": map[string]any{"type": "disabled"}}}),
+			want: Unknown,
+		},
+		// --- LONG pushers: Nemotron reasoning_budget alias ---
+		{
+			name: "reasoning_budget=5000 -> LONG (Nemotron alias for thinking_budget)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"reasoning_budget": int64(5000)}}),
+			want: Long,
+		},
+		{
+			name: "thinking_budget=100 + reasoning_budget=5000 -> UNKNOWN (thinking_budget wins; 100 < 4000)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking_budget": int64(100), "reasoning_budget": int64(5000)}}),
+			want: Unknown,
+		},
+		// --- SHORT pushers ---
+		{
+			name: "tool_choice=required -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"tool_choice": "required"}}),
+			want: Short,
+		},
+		{
+			name: "tool_choice=named object -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"tool_choice": namedToolChoice}}),
+			want: Short,
+		},
+		{
+			name: "continue_final_message=true -> SHORT",
+			body: bodyWith(bodyOpts{continueFinal: true}),
+			want: Short,
+		},
+		{
+			name: "response_format json_object -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_object"}}}),
+			want: Short,
+		},
+		{
+			name: "response_format json_schema -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_schema"}}}),
+			want: Short,
+		},
+		{
+			name: "response_format text -> UNKNOWN (not a SHORT signal)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "text"}}}),
+			want: Unknown,
+		},
+		// --- tool_choice="none" veto of the has_tools -> SHORT rule ---
+		{
+			name: "has_tools + tool_choice=none -> UNKNOWN (veto: tools won't be called)",
+			body: bodyWith(bodyOpts{tools: oneTool, payload: map[string]any{"tool_choice": "none"}}),
+			want: Unknown,
+		},
+		{
+			name: "has_tools + tool_choice=auto -> SHORT (auto does not veto)",
+			body: bodyWith(bodyOpts{tools: oneTool, payload: map[string]any{"tool_choice": "auto"}}),
+			want: Short,
+		},
+		{
+			name: "has_tools + no tool_choice -> SHORT (existing behavior preserved)",
+			body: bodyWith(bodyOpts{tools: oneTool}),
+			want: Short,
+		},
+		// --- max_output_tokens bin ceiling (downgrades a tentative LONG) ---
+		{
+			name: "enable_thinking=true + max_output=1500 -> UNKNOWN (LONG vetoed by cap<2000)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(1500))}),
+			want: Unknown,
+		},
+		{
+			name: "enable_thinking=true + max_output=100 -> SHORT (LONG vetoed by cap<500)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(100))}),
+			want: Short,
+		},
+		{
+			name: "enable_thinking=true + max_output=3000 -> LONG (cap above LONG floor)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(3000))}),
+			want: Long,
+		},
+		{
+			name: "enable_thinking=true + max_output=0 -> LONG (zero cap ignored)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(0))}),
+			want: Long,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EstimateOutlen(tc.body)
+			require.Equal(t, tc.want, got, "got %s want %s", got, tc.want)
+		})
+	}
+}
+
+func TestApplyMaxOutputCeiling(t *testing.T) {
+	// Only LONG is ever downgraded; SHORT/UNKNOWN pass through untouched.
+	require.Equal(t, Short, applyMaxOutputCeiling(Short, ptr.To(int64(50))))
+	require.Equal(t, Unknown, applyMaxOutputCeiling(Unknown, ptr.To(int64(50))))
+	// LONG with a cap below the LONG floor is downgraded by cap size.
+	require.Equal(t, Short, applyMaxOutputCeiling(Long, ptr.To(int64(499))))
+	require.Equal(t, Unknown, applyMaxOutputCeiling(Long, ptr.To(int64(500))))
+	require.Equal(t, Unknown, applyMaxOutputCeiling(Long, ptr.To(int64(1999))))
+	// LONG with a cap at/above the floor, nil, or zero is left as LONG.
+	require.Equal(t, Long, applyMaxOutputCeiling(Long, ptr.To(int64(2000))))
+	require.Equal(t, Long, applyMaxOutputCeiling(Long, nil))
+	require.Equal(t, Long, applyMaxOutputCeiling(Long, ptr.To(int64(0))))
+}
+
+func TestStringFromAny(t *testing.T) {
+	require.Equal(t, "high", stringFromAny("high"))
+	require.Equal(t, "", stringFromAny(nil))
+	require.Equal(t, "", stringFromAny(42))
+	require.Equal(t, "", stringFromAny(map[string]any{"type": "function"}))
+}
+
+func TestToolChoiceKind(t *testing.T) {
+	require.Equal(t, "none", toolChoiceKind("none"))
+	require.Equal(t, "auto", toolChoiceKind("auto"))
+	require.Equal(t, "required", toolChoiceKind("required"))
+	require.Equal(t, "named", toolChoiceKind(namedToolChoice))
+	require.Equal(t, "", toolChoiceKind(nil))
+	require.Equal(t, "", toolChoiceKind(42))
+}
+
+func TestResponseFormatType(t *testing.T) {
+	require.Equal(t, "json_object", responseFormatType(map[string]any{"type": "json_object"}))
+	require.Equal(t, "json_schema", responseFormatType(map[string]any{"type": "json_schema", "json_schema": map[string]any{}}))
+	require.Equal(t, "text", responseFormatType(map[string]any{"type": "text"}))
+	require.Equal(t, "", responseFormatType(map[string]any{}))
+	require.Equal(t, "", responseFormatType("json_object"))
+	require.Equal(t, "", responseFormatType(nil))
+}
+
