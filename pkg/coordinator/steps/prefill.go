@@ -82,10 +82,8 @@ func (s *PrefillStep) Name() string { return PrefillStepName }
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
-	features := buildMMFeatures(reqCtx.MultimodalEntries, true)
-
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	body, err := s.buildPrefillBody(ctx, reqCtx, features, format)
+	body, err := s.buildPrefillBody(ctx, reqCtx, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)
 	}
@@ -130,12 +128,16 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	return nil
 }
 
-func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, features map[string]any, format gateway.RequestFormat) (map[string]any, error) {
+func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format gateway.RequestFormat) (map[string]any, error) {
 	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err
 	}
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
+
+	// Prefer mm_metadata over kwargs_data only when EC transfer params are
+	// present. vLLM rejects metadata-only features without ec_transfer_params.
+	features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, len(ecParams) > 0)
 
 	switch format {
 	case gateway.FormatChatCompletions:
@@ -148,6 +150,12 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			tokensFeatures := map[string]any{
 				"mm_hashes":       features["mm_hashes"],
 				"mm_placeholders": features["mm_placeholders"],
+			}
+			// Chat tokens.features never carried kwargs_data. When the metadata
+			// path is active, forward mm_metadata so prefill can compute mRoPE
+			// without re-processing encoder tensors.
+			if md, ok := features["mm_metadata"]; ok {
+				tokensFeatures["mm_metadata"] = md
 			}
 			tokens["features"] = tokensFeatures
 		}

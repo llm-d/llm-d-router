@@ -70,8 +70,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		Model:     "llama-3",
 		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+			{Index: 0, Hash: "hash-a", KwargsData: testKwargsA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 1, Hash: "hash-b", KwargsData: testKwargsB, Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
 		},
 		ECTransferParams: []map[string]any{
 			{"hash-a": map[string]any{"peer_port": 5501, "size_bytes": 1228800, "nixl_agent_metadata_b64": "bml4..."}},
@@ -121,8 +121,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("expected kwargs_data map in prefill, got %T", features["kwargs_data"])
 	}
 	imageKwargs, _ := kwargsData[ModalityImage].([]any)
-	if len(imageKwargs) != 2 || imageKwargs[0] != "dGVuc29yLWE=" || imageKwargs[1] != "dGVuc29yLWI=" {
-		t.Fatalf("expected kwargs_data.image=[dGVuc29yLWE=,dGVuc29yLWI=], got %v", imageKwargs)
+	if len(imageKwargs) != 2 || imageKwargs[0] != testKwargsA || imageKwargs[1] != testKwargsB {
+		t.Fatalf("expected kwargs_data.image=[%s,%s], got %v", testKwargsA, testKwargsB, imageKwargs)
 	}
 
 	// Verify sampling_params with extra_args workaround
@@ -174,6 +174,127 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	// Verify response populated KVTransferParams
 	if reqCtx.KVTransferParams["block_id"] != "block-xyz" {
 		t.Fatalf("expected block_id=block-xyz, got %v", reqCtx.KVTransferParams["block_id"])
+	}
+}
+
+func TestPrefillStep_GenerateUsesMMMetadataWhenECPresent(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-xyz"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-meta",
+		Model:     "llama-3",
+		TokenIDs:  []int{1, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		},
+		ECTransferParams: []map[string]any{
+			{"hash-a": map[string]any{"peer_port": 5501, "size_bytes": 1228800, "nixl_agent_metadata_b64": "bml4..."}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	features, ok := prefillBody["features"].(map[string]any)
+	if !ok {
+		t.Fatal("expected features in prefill request")
+	}
+	if _, ok := features["kwargs_data"]; ok {
+		t.Fatalf("expected kwargs_data omitted when mm_metadata is used, got %v", features["kwargs_data"])
+	}
+	md, ok := features["mm_metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected mm_metadata map, got %T", features["mm_metadata"])
+	}
+	items, _ := md[ModalityImage].([]any)
+	if len(items) != 1 || items[0] != testMetadataA {
+		t.Fatalf("unexpected mm_metadata: %#v", items)
+	}
+}
+
+func TestPrefillStep_ChatForwardsMMMetadataInTokensFeatures(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-xyz"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{
+		"use_openai_format": true,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-chat-meta",
+		OriginalPath: gateway.PathChatCompletions,
+		Model:        "llama-3",
+		Body: map[string]any{
+			"model": "llama-3",
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hi"},
+			},
+		},
+		TokenIDs: []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+		ECTransferParams: []map[string]any{
+			{"hash-a": map[string]any{"peer_port": 5501}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tokens, ok := prefillBody["tokens"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tokens in chat prefill body")
+	}
+	features, ok := tokens["features"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tokens.features")
+	}
+	if _, ok := features["kwargs_data"]; ok {
+		t.Fatal("tokens.features must not include kwargs_data")
+	}
+	md, ok := features["mm_metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected tokens.features.mm_metadata, got %v", features)
+	}
+	items, _ := md[ModalityImage].([]any)
+	if len(items) != 1 || items[0] != testMetadataA {
+		t.Fatalf("unexpected mm_metadata: %#v", items)
 	}
 }
 
