@@ -1062,9 +1062,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dpRankHeader(env.decodeHandler, 0)).To(Equal(ph))
 	})
 
-	// 2P2D DP=16 multi-pod fan-out: each leg's remote_hosts is the opposite
-	// side's pod IPs (prefill leg -> decode IPs, decode leg -> prefill IPs).
-	It("parallel-dispatch 2P2D DP=EP=16 fans out remote_hosts with opposite host lists per leg", func() {
+	// 2P2D DP=16: prefill gets all decode hosts; decode gets one prefill host.
+	It("parallel-dispatch 2P2D DP=EP=16 keeps the rank pod-local and pairs pods by host", func() {
 		prefillHosts := []string{testPrefillHostIP1, testPrefillHostIP2}
 		decodeHosts := []string{testDecodeHostIP, testDecodeHostIP2}
 		env := startMoRIProxy(func(c *Config) {
@@ -1079,23 +1078,26 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(env.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 
-		By("prefill leg fans out to the DECODE-side host list")
+		By("prefill leg carries the whole DECODE-side host list")
 		pkv := kvParams(env.prefillHandler, 0)
 		Expect(pkv["remote_hosts"]).To(Equal([]any{testDecodeHostIP, testDecodeHostIP2}))
 		Expect(pkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
 		Expect(pkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 16)))
 
-		By("decode leg fans out to the PREFILL-side host list")
+		By("decode leg carries only the prefill pod this request was sent to")
 		dkv := kvParams(env.decodeHandler, 0)
-		Expect(dkv["remote_hosts"]).To(Equal([]any{testPrefillHostIP1, testPrefillHostIP2}))
+		Expect(dkv["remote_hosts"]).To(Equal([]any{dkv[requestFieldRemoteHost]}))
 		Expect(dkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
+		Expect(dkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 8)))
 		Expect(dkv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, true))
+		Expect(dkv).To(HaveKeyWithValue("is_request_leader", true))
 
-		By("both legs share one pinned DP rank in [0,16)")
+		By("both legs share one pinned rank in [0, dp_size_local)")
 		Expect(dpRankHeader(env.prefillHandler, 0)).To(Equal(dpRankHeader(env.decodeHandler, 0)))
 		pRank, ok := pkv[requestFieldRemoteDPRank].(float64)
 		Expect(ok).To(BeTrue())
-		Expect(pRank).To(And(BeNumerically(">=", 0), BeNumerically("<", 16)))
+		Expect(pRank).To(And(BeNumerically(">=", 0), BeNumerically("<", 8)))
+		Expect(dkv[requestFieldRemoteDPRank]).To(Equal(pRank))
 	})
 
 	// The concurrent-dispatch path stages its own prefill body rather than going
