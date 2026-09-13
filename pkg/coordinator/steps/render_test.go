@@ -52,7 +52,8 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {"vllm-hash-a", "vllm-hash-b"}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}},
-				"kwargs_data":     map[string][]string{ModalityImage: {"dGVuc29yLWE=", "dGVuc29yLWI="}},
+				"kwargs_data":     map[string][]string{ModalityImage: {testKwargsA, testKwargsB}},
+				"mm_metadata":     map[string][]string{ModalityImage: {testMetadataA, testMetadataB}},
 			},
 		})
 	}))
@@ -96,11 +97,14 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}
 
 	// Verify kwargs_data
-	if reqCtx.MultimodalEntries[0].KwargsData != "dGVuc29yLWE=" {
+	if reqCtx.MultimodalEntries[0].KwargsData != testKwargsA {
 		t.Fatalf("expected kwargs_data for entry 0, got %s", reqCtx.MultimodalEntries[0].KwargsData)
 	}
-	if reqCtx.MultimodalEntries[1].KwargsData != "dGVuc29yLWI=" {
+	if reqCtx.MultimodalEntries[1].KwargsData != testKwargsB {
 		t.Fatalf("expected kwargs_data for entry 1, got %s", reqCtx.MultimodalEntries[1].KwargsData)
+	}
+	if reqCtx.MultimodalEntries[0].MMMetadata != testMetadataA || reqCtx.MultimodalEntries[1].MMMetadata != testMetadataB {
+		t.Fatalf("unexpected mm_metadata: %q / %q", reqCtx.MultimodalEntries[0].MMMetadata, reqCtx.MultimodalEntries[1].MMMetadata)
 	}
 
 	// Verify placeholders

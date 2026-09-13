@@ -273,6 +273,7 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 	imageHashes := renderResp.Features.MMHashes[ModalityImage]
 	imagePlaceholders := renderResp.Features.MMPlaceholders[ModalityImage]
 	imageKwargs := renderResp.Features.KwargsData[ModalityImage]
+	imageMetadata := renderResp.Features.MMMetadata[ModalityImage]
 
 	expected := len(reqCtx.MultimodalEntries)
 	if len(imageHashes) != expected {
@@ -284,18 +285,26 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 	if len(imageKwargs) != expected {
 		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
 	}
+	// mm_metadata is optional for backward compatibility with older renderers.
+	// When present it must be parallel to mm_hashes.
+	if len(imageMetadata) > 0 && len(imageMetadata) != expected {
+		return fmt.Errorf("render returned %d mm_metadata but expected %d", len(imageMetadata), expected)
+	}
 
 	for i := range reqCtx.MultimodalEntries {
 		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
 		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
 		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
+		if i < len(imageMetadata) {
+			reqCtx.MultimodalEntries[i].MMMetadata = imageMetadata[i]
+		}
 	}
 
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
 
-	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
+	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs), "mm_metadata_len", len(imageMetadata))
 	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
 	return nil
 }
@@ -354,6 +363,7 @@ type renderFeatures struct {
 	MMHashes       map[string][]string                    `json:"mm_hashes"`
 	MMPlaceholders map[string][]pipeline.PlaceholderRange `json:"mm_placeholders"`
 	KwargsData     map[string][]string                    `json:"kwargs_data"`
+	MMMetadata     map[string][]string                    `json:"mm_metadata"`
 }
 
 // completionsRenderResponse is a minimal view of the per-prompt object returned

@@ -94,14 +94,21 @@ type RequestContext struct {
 // MultimodalEntry describes one downloaded multimodal item (e.g. an image) and
 // where it sits in the tokenized prompt. Index is its position in the request's
 // multimodal list. Base64Data and ContentType come from the media download;
-// Hash and KwargsData are filled in by the render step; Placeholder marks the
-// span of placeholder tokens the encode step replaces.
+// Hash, KwargsData, and MMMetadata are filled in by the render step; Placeholder
+// marks the span of placeholder tokens the encode step replaces.
+//
+// KwargsData is the full MultiModalKwargsItem blob (encoder tensors plus
+// metadata). MMMetadata is the sibling metadata-only blob from render
+// (placeholder_metadata_fields and keep_on_cpu fields such as image_grid_thw),
+// without encoder inputs like pixel_values. Prefill may send MMMetadata with
+// ec_transfer_params instead of KwargsData.
 type MultimodalEntry struct {
 	Index       int
 	Hash        string
 	Base64Data  string
 	ContentType string
 	KwargsData  string
+	MMMetadata  string
 	Placeholder PlaceholderRange
 }
 
