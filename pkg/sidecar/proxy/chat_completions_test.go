@@ -26,6 +26,7 @@ import (
 	"k8s.io/utils/set"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/toolcalling"
 )
 
 // testPrefillHeaderRouting is a shared table-driven helper that exercises
@@ -395,6 +396,44 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestToolCallingHeadersPreservedOnForward(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var capturedReq *http.Request
+	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ APIType) {
+		capturedReq = r
+	}
+
+	h := http.Header{
+		http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"prefill:8000"},
+		http.CanonicalHeaderKey(toolcalling.HeaderSnapshotHash):      []string{"abc123"},
+		http.CanonicalHeaderKey(toolcalling.HeaderToolPresent):       []string{"true"},
+		http.CanonicalHeaderKey(toolcalling.HeaderToolChoiceKind):    []string{"auto"},
+		http.CanonicalHeaderKey(toolcalling.HeaderToolDefsCount):     []string{"2"},
+		http.CanonicalHeaderKey(toolcalling.HeaderParallelToolCalls): []string{"false"},
+	}
+	req := &http.Request{Header: h}
+	recorder := httptest.NewRecorder()
+	s.disaggregatedPrefillHandler(APITypeChatCompletions)(recorder, req)
+
+	if capturedReq == nil {
+		t.Fatal("connector was not called")
+	}
+	for _, key := range []string{
+		toolcalling.HeaderSnapshotHash,
+		toolcalling.HeaderToolPresent,
+		toolcalling.HeaderToolChoiceKind,
+		toolcalling.HeaderToolDefsCount,
+		toolcalling.HeaderParallelToolCalls,
+	} {
+		if v := capturedReq.Header.Get(key); v == "" {
+			t.Errorf("tool-calling header %q not preserved on forwarded request", key)
+		}
 	}
 }
 
