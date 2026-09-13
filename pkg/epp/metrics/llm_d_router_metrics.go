@@ -412,6 +412,21 @@ var (
 		[]string{"detector"},
 	)
 
+	llmdFlowControlDetectorSaturation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_detector_saturation",
+			Help: metricsutil.HelpMsgWithStability(
+				"Saturation signal reported by an individual saturation detector, labeled by the detector reference "+
+					"name. Recorded by the max composite saturation detector for each of its children on every "+
+					"evaluation, so operators can tell which signal (e.g. concurrency vs queue depth) is driving "+
+					"flow_control_pool_saturation. Like flow_control_stale_endpoints, this gauge carries no stage "+
+					"label and is written on every detector call, so it reflects the most recently evaluated stage.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"detector"},
+	)
+
 	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
