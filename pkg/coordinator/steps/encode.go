@@ -30,6 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -199,40 +200,19 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 }
 
 func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
-	switch format {
-	case gateway.FormatChatCompletions:
+	body := map[string]any{"model": reqCtx.Model}
+	if format == gateway.FormatChatCompletions {
 		imageContent := buildSingleImageContent(imageParts, entry.Index)
-		body := map[string]any{
-			"model": reqCtx.Model,
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{imageContent},
-				},
-			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
+		body["messages"] = []any{
+			map[string]any{
+				"role":    "user",
+				"content": []any{imageContent},
 			},
 		}
-		capSingleTokenOutput(body, format)
-		return body
-	default:
-		body := map[string]any{
-			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
-			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
-			},
-		}
-		capSingleTokenOutput(body, format)
-		return body
 	}
+	vllm.PrepareEncode(body, tokenIDs, entry, format)
+	capSingleTokenOutput(body, format)
+	return body
 }
 
 // collectImageParts walks the request messages once and returns the image_url

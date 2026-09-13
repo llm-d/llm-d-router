@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -312,7 +313,17 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
 			"model":  "test-model",
-			"stream": false,
+			"stream": true,
+			"tools": []any{map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": "lookup", "parameters": map[string]any{"type": "object"},
+				},
+			}},
+			"response_format": map[string]any{
+				"type": "json_schema", "json_schema": map[string]any{"name": "result", "schema": map[string]any{"type": "object"}},
+			},
+			"vendor_options": map[string]any{"nested": []any{nil, "keep", true}},
 			"messages": []any{
 				map[string]any{"role": "user", "content": "hello"},
 			},
@@ -326,6 +337,11 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		KVTransferParams: make(map[string]any),
 	}
 
+	originalBody, err := json.Marshal(reqCtx.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	err = step.Execute(context.Background(), reqCtx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -336,6 +352,19 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	}
 	if _, ok := prefillBody["messages"]; !ok {
 		t.Fatal("expected messages from original body in chat format")
+	}
+
+	for _, field := range []string{"messages", "tools", "response_format", "vendor_options"} {
+		if !reflect.DeepEqual(prefillBody[field], reqCtx.Body[field]) {
+			t.Errorf("prefill changed %s: got %#v, want %#v", field, prefillBody[field], reqCtx.Body[field])
+		}
+	}
+	afterPrefill, err := json.Marshal(reqCtx.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterPrefill) != string(originalBody) {
+		t.Fatal("prefill mutated the original request body")
 	}
 
 	// Verify tokens nested field

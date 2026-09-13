@@ -26,6 +26,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/engine/vllm"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -108,13 +109,7 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, bod
 	switch format {
 	case gateway.FormatChatCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
-			tokens := map[string]any{
-				"token_ids": reqCtx.TokenIDs,
-			}
-			if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
-				tokens["features"] = features
-			}
-			body["tokens"] = tokens
+			vllm.SetTokens(body, reqCtx.TokenIDs, reqCtx.MultimodalEntries)
 		}
 	case gateway.FormatCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
