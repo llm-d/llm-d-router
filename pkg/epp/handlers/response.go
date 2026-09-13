@@ -17,8 +17,10 @@ limitations under the License.
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -77,7 +79,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		logger.Error(err, "parsing response: failed to resolve parser")
 	} else {
 		before := time.Now()
-		parsedResp, err = parser.ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+		parseBytes := responseBytes
+		if strings.Contains(reqCtx.Response.Headers["content-type"], "text/event-stream") {
+			parseBytes = reqCtx.completeUsageLines(responseBytes, endOfStream)
+		}
+		parsedResp, err = parser.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
 		metrics.RecordPluginProcessingLatency(fwkrh.ResponseParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
 		if err != nil {
 			logger.Error(err, "parsing response")
@@ -87,13 +93,15 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		reqCtx.StreamedEvents += parsedResp.StreamedEvents
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
-		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
-		// Metrics observe the values this chunk carried, not the accumulated ones: a field
-		// already reported by an earlier chunk would otherwise be observed a second time.
-		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokens)
-		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.CompletionTokens)
-		if parsedResp.Usage.PromptTokenDetails != nil {
-			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokenDetails.CachedTokens)
+		reqCtx.Usage.MergeCumulative(*parsedResp.Usage)
+		reqCtx.Usage.TotalTokens = max(reqCtx.Usage.TotalTokens, reqCtx.Usage.PromptTokens+reqCtx.Usage.CompletionTokens)
+	}
+	if endOfStream && !reqCtx.usageMetricsRecorded {
+		reqCtx.usageMetricsRecorded = true
+		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)
+		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.CompletionTokens)
+		if reqCtx.Usage.PromptTokenDetails != nil {
+			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokenDetails.CachedTokens)
 		}
 	}
 	if endOfStream {
@@ -106,29 +114,30 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	return s.director.HandleResponseBody(ctx, reqCtx, endOfStream)
 }
 
-// mergeUsage folds a parsed usage block into the usage accumulated for the request.
-// The Anthropic streaming format splits usage across events - message_start carries the
-// prompt tokens and the cached-token detail, message_delta carries the completion tokens -
-// and those events reach the parser in separate chunks, so each field is taken only from
-// the blocks that report it. Parsers that emit usage once with every field populated are
-// unaffected.
-func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
-	if src.PromptTokens != 0 {
-		dst.PromptTokens = src.PromptTokens
+// HTTP fragments need not end at SSE line boundaries. Forwarding uses the
+// original bytes; this buffer is only for response parsing.
+func (r *RequestContext) completeUsageLines(chunk []byte, end bool) []byte {
+	if r.discardUsageLine {
+		i := bytes.IndexByte(chunk, '\n')
+		if i < 0 {
+			return nil
+		}
+		chunk = chunk[i+1:]
+		r.discardUsageLine = false
 	}
-	if src.CompletionTokens != 0 {
-		dst.CompletionTokens = src.CompletionTokens
+	r.responseUsageTail = append(r.responseUsageTail, chunk...)
+	data := r.responseUsageTail
+	r.responseUsageTail = nil
+	if end {
+		return data
 	}
-	if src.PromptTokenDetails != nil {
-		dst.PromptTokenDetails = src.PromptTokenDetails
+	i := bytes.LastIndexByte(data, '\n')
+	if len(data)-i-1 > 1<<20 {
+		r.discardUsageLine = true
+	} else {
+		r.responseUsageTail = bytes.Clone(data[i+1:])
 	}
-	// A block reporting both halves of the usage owns the total it came with; a partial
-	// block carries a total covering only its own fields, so derive it from the merge.
-	if src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
-		dst.TotalTokens = src.TotalTokens
-		return
-	}
-	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+	return data[:i+1]
 }
 
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {

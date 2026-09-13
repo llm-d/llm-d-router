@@ -603,6 +603,16 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //
 // It extracts usage from events with type="response.completed" or "speech.audio.done".
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
+	var result *fwkrh.Usage
+	merge := func(usage *fwkrh.Usage) {
+		if usage == nil {
+			return
+		}
+		if result == nil {
+			result = &fwkrh.Usage{}
+		}
+		result.MergeCumulative(*usage)
+	}
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
@@ -627,23 +637,23 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 		if len(streamResponse.Usage) > 0 {
 			if strings.HasPrefix(streamResponse.Type, "speech.audio.") {
 				if streamResponse.Type == "speech.audio.done" {
-					return extractRawUsage(streamResponse.Usage)
+					merge(extractRawUsage(streamResponse.Usage))
 				}
 				continue
 			}
 			var usage *fwkrh.Usage
 			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
-				return usage
+				merge(usage)
 			}
 		}
 		// Responses API streaming format
 		if len(streamResponse.Response.Usage) > 0 && streamResponse.Type == "response.completed" {
 			if usage := extractRawUsage(streamResponse.Response.Usage); usage != nil {
-				return usage
+				merge(usage)
 			}
 		}
 	}
-	return nil
+	return result
 }
 
 func extractRawUsage(raw json.RawMessage) *fwkrh.Usage {

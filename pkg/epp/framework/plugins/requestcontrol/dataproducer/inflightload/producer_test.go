@@ -352,7 +352,7 @@ func TestInFlightLoadProducer_DeleteEndpointPrunesOnlyMatchingMetricSeries(t *te
 	require.NoError(t, err)
 
 	expectedTokens := `
-# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current token charge per endpoint from the configured in-flight load accounting mode.
 # TYPE llm_d_epp_inflight_tokens gauge
 llm_d_epp_inflight_tokens{endpoint_name="deleted-endpoint",fairness_id="fairness-id",namespace="default",priority="1",producer_name="other-producer"} 3000
 llm_d_epp_inflight_tokens{endpoint_name="deleted-endpoint",fairness_id="fairness-id",namespace="other",priority="1",producer_name="inflight-load-producer"} 2000

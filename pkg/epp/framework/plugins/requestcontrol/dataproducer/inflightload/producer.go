@@ -52,6 +52,10 @@ const (
 
 // Config controls optional behaviors of InFlightLoadProducer.
 type Config struct {
+	// TrackStreamingOutputTokens accounts for resident decode context using cumulative usage.
+	TrackStreamingOutputTokens bool `json:"trackStreamingOutputTokens,omitempty"`
+	// OutputTokenHeadroom is the positive growth allowance retained until completion.
+	OutputTokenHeadroom int64 `json:"outputTokenHeadroom,omitempty"`
 	// AddEstimatedOutputTokens controls whether estimated output tokens are added to
 	// the in-flight token counter. Defaults to false. The per-request output
 	// estimate comes from the output-length bucket published by the outlen-bucket plugin; enable
@@ -93,6 +97,13 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		}
 	}
 
+	if cfg.TrackStreamingOutputTokens {
+		if cfg.OutputTokenHeadroom <= 0 || cfg.AddEstimatedOutputTokens || cfg.MaxEstimatedOutputTokens != nil {
+			return nil, errors.New("streaming output tracking requires positive outputTokenHeadroom and no output-estimation options")
+		}
+	} else if cfg.OutputTokenHeadroom != 0 {
+		return nil, errors.New("outputTokenHeadroom requires trackStreamingOutputTokens")
+	}
 	if cfg.MaxEstimatedOutputTokens != nil && *cfg.MaxEstimatedOutputTokens < 0 {
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
@@ -107,17 +118,19 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 	}
 
 	return &InFlightLoadProducer{
-		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
-		requestTracker:            newConcurrencyTracker(),
-		tokenTracker:              newConcurrencyTracker(),
-		tokenEstimator:            NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
-		addEstimatedOutputTokens:  cfg.AddEstimatedOutputTokens,
-		dk:                        attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
-		prefixMatchInfoDK:         attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
-		uncachedRequestTokensDk:   attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
-		uncachedRequestTokensSlot: datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
-		syncCrossReplicaState:     syncCrossReplicaState,
-		PluginState:               fwkplugin.NewPluginState(ctx),
+		trackStreamingOutputTokens: cfg.TrackStreamingOutputTokens,
+		outputTokenHeadroom:        cfg.OutputTokenHeadroom,
+		typedName:                  fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
+		requestTracker:             newConcurrencyTracker(),
+		tokenTracker:               newConcurrencyTracker(),
+		tokenEstimator:             NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
+		addEstimatedOutputTokens:   cfg.AddEstimatedOutputTokens,
+		dk:                         attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
+		prefixMatchInfoDK:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
+		uncachedRequestTokensDk:    attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name),
+		uncachedRequestTokensSlot:  datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
+		syncCrossReplicaState:      syncCrossReplicaState,
+		PluginState:                fwkplugin.NewPluginState(ctx),
 	}, nil
 }
 
@@ -133,15 +146,17 @@ var (
 )
 
 type InFlightLoadProducer struct {
-	typedName                fwkplugin.TypedName
-	requestTracker           *concurrencyTracker
-	tokenTracker             *concurrencyTracker
-	tokenEstimator           TokenEstimator
-	addEstimatedOutputTokens bool
-	PluginState              *fwkplugin.PluginState
-	dk                       fwkplugin.DataKey
-	prefixMatchInfoDK        fwkplugin.DataKey
-	uncachedRequestTokensDk  fwkplugin.DataKey
+	trackStreamingOutputTokens bool
+	outputTokenHeadroom        int64
+	typedName                  fwkplugin.TypedName
+	requestTracker             *concurrencyTracker
+	tokenTracker               *concurrencyTracker
+	tokenEstimator             TokenEstimator
+	addEstimatedOutputTokens   bool
+	PluginState                *fwkplugin.PluginState
+	dk                         fwkplugin.DataKey
+	prefixMatchInfoDK          fwkplugin.DataKey
+	uncachedRequestTokensDk    fwkplugin.DataKey
 	// uncachedRequestTokensSlot pins the UncachedRequestTokens value type
 	// so a future drift surfaces at the assignment boundary, not when a
 	// scorer tries to read it.
@@ -161,7 +176,10 @@ type InFlightLoadProducer struct {
 // can race safely: whichever swaps first does the decrement, the other
 // sees 0 and is a no-op.
 type addedTokensEntry struct {
-	tokens atomic.Int64
+	// Growth and release must update the captured counter atomically with entry state.
+	mu              sync.Mutex
+	outputHighWater int64
+	tokens          atomic.Int64
 	// tokenCounter and requestCounter point at the exact tracker counter instances this request
 	// incremented in PreRequest. A release decrements these instances directly, so it always lands
 	// on the counter that received the increment. If the endpoint flaps (delete + recreate under the
@@ -187,14 +205,17 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	if e == nil {
 		return nil
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	clone := &addedTokensEntry{
-		tokenCounter:   e.tokenCounter,
-		requestCounter: e.requestCounter,
-		endpointName:   e.endpointName,
-		namespace:      e.namespace,
-		producerName:   e.producerName,
-		fairnessID:     e.fairnessID,
-		priority:       e.priority,
+		outputHighWater: e.outputHighWater,
+		tokenCounter:    e.tokenCounter,
+		requestCounter:  e.requestCounter,
+		endpointName:    e.endpointName,
+		namespace:       e.namespace,
+		producerName:    e.producerName,
+		fairnessID:      e.fairnessID,
+		priority:        e.priority,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
@@ -202,6 +223,8 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 }
 
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if t := e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
 		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
@@ -423,6 +446,23 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	}
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
+	if p.trackStreamingOutputTokens {
+		usageMode := "final_only"
+		if request.Body != nil && request.Body.Stream &&
+			(request.Body.ChatCompletions != nil || request.Body.Completions != nil) && request.Body.Payload != nil {
+			if payload, ok := request.Body.Payload.AsMap(); ok {
+				opts, _ := payload["stream_options"].(map[string]any)
+				if opts == nil {
+					opts = make(map[string]any)
+				}
+				opts["include_usage"] = true
+				opts["continuous_usage_stats"] = true
+				payload["stream_options"] = opts
+				usageMode = "continuous_requested"
+			}
+		}
+		streamingAccountingRequests.WithLabelValues(p.typedName.Name, usageMode).Inc()
+	}
 	// Bound the fairness_id label so a large number of distinct client IDs cannot grow this
 	// plugin's series set. The bounded value is stored on the entry, so the eviction-time
 	// decrement uses the same label as the increment here.
@@ -507,6 +547,12 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
+	if p.trackStreamingOutputTokens {
+		if endpointHasPrefillOnlyRole(endpoint) {
+			return uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
+		}
+		return nonNeg(inputTokens) + p.outputTokenHeadroom
+	}
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 
 	// In P/D disaggregation the load is role-specific:
@@ -590,7 +636,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// the first chunk means the prefill worker has finished and handed off, so
 	// the request is no longer in flight on that endpoint. Other profiles'
 	// request counters are released on EndOfStream below via PluginState.Delete.
-	if !p.addEstimatedOutputTokens && resp.StartOfStream {
+	if !p.addEstimatedOutputTokens && !p.trackStreamingOutputTokens && resp.StartOfStream {
 		for profileName, profileResult := range result.ProfileResults {
 			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 				continue
@@ -610,11 +656,27 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// Early prefill release (on first chunk). Frees the primary profile's
 	// prefill contribution as soon as prefill completes, while other profiles'
 	// entries remain until EndOfStream.
-	if p.addEstimatedOutputTokens && resp.StartOfStream {
+	if (p.addEstimatedOutputTokens || p.trackStreamingOutputTokens) && resp.StartOfStream {
 		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
 			endpoint := prefillResult.TargetEndpoints[0]
 			if endpoint != nil && endpoint.GetMetadata() != nil {
 				p.release(endpoint, request, profilePrefill)
+			}
+		}
+	}
+
+	if p.trackStreamingOutputTokens && !resp.EndOfStream {
+		for profileName, profileResult := range result.ProfileResults {
+			if profileName == profilePrefill || profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
+				continue
+			}
+			ep := profileResult.TargetEndpoints[0]
+			if ep == nil || ep.GetMetadata() == nil {
+				continue
+			}
+			key := fwkplugin.StateKey(addedTokensKey(ep.GetMetadata().ID.String(), profileName))
+			if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
+				entry.observeOutput(int64(resp.Usage.CompletionTokens))
 			}
 		}
 	}
@@ -675,11 +737,27 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
+		entry.mu.Lock()
+		defer entry.mu.Unlock()
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
 			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
 		}
 	}
+}
+
+func (e *addedTokensEntry) observeOutput(cumulative int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.requests.Load() == 0 || cumulative <= e.outputHighWater {
+		return
+	}
+	delta := cumulative - e.outputHighWater
+	e.outputHighWater = cumulative
+	streamingOutputObservations.WithLabelValues(e.producerName).Inc()
+	e.tokens.Add(delta)
+	e.tokenCounter.Add(delta)
+	inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Add(float64(delta))
 }
 
 func addedTokensKey(endpointID, profileName string) string {
