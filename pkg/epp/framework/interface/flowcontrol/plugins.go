@@ -126,6 +126,21 @@ type SaturationDetector interface {
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
 }
 
+type saturationStageKey struct{}
+
+// WithSaturationStage returns a context naming the pipeline stage ("prefill" or "decode") whose
+// endpoints a SaturationDetector.Saturation call evaluates.
+func WithSaturationStage(ctx context.Context, stage string) context.Context {
+	return context.WithValue(ctx, saturationStageKey{}, stage)
+}
+
+// SaturationStageFromContext returns the stage set by WithSaturationStage, or "" when the
+// endpoints were not partitioned by stage.
+func SaturationStageFromContext(ctx context.Context) string {
+	stage, _ := ctx.Value(saturationStageKey{}).(string)
+	return stage
+}
+
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
 //
 // The goal of this policy is to enable adaptive capacity management by gating lower-priority traffic

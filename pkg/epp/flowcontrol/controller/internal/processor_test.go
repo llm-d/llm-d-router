@@ -1276,18 +1276,21 @@ func TestProcessor(t *testing.T) {
 
 				// Track which endpoints each Saturation call receives.
 				var calls [][]string
-				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+				var stages []string
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
 					roles := make([]string, 0, len(endpoints))
 					for _, ep := range endpoints {
 						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
 					}
 					calls = append(calls, roles)
+					stages = append(stages, flowcontrol.SaturationStageFromContext(ctx))
 					return 0.2
 				}
 
 				h.processor.dispatchCycle(context.Background())
 
 				require.Len(t, calls, 2, "detector should be called once per stage")
+				assert.Equal(t, []string{"prefill", "decode"}, stages, "each call should name its stage in the context")
 				// Prefill pool: prefill + interleaved
 				assert.ElementsMatch(t, []string{bylabel.RolePrefill, bylabel.RolePrefillDecode}, calls[0])
 				// Decode pool: decode + interleaved

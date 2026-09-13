@@ -737,9 +737,15 @@ func RecordFlowControlStaleEndpoints(detector string, count int) {
 }
 
 // RecordFlowControlDetectorSaturation records the saturation signal reported by a single
-// saturation detector instance, as of the most recent evaluation.
-func RecordFlowControlDetectorSaturation(detector string, saturation float64) {
-	llmdFlowControlDetectorSaturation.WithLabelValues(detector).Set(saturation)
+// saturation detector instance for a pipeline stage, as of the most recent evaluation.
+func RecordFlowControlDetectorSaturation(detector, stage string, saturation float64) {
+	llmdFlowControlDetectorSaturation.WithLabelValues(detector, stage).Set(saturation)
+}
+
+// DeleteFlowControlDetectorSaturationStage removes the per-detector saturation series of every
+// detector for a pipeline stage.
+func DeleteFlowControlDetectorSaturationStage(stage string) {
+	llmdFlowControlDetectorSaturation.DeletePartialMatch(prometheus.Labels{"stage": stage})
 }
 
 // RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio

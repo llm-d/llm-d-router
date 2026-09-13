@@ -8,7 +8,7 @@ Composite saturation detection that combines the signals of other saturation det
 
 The plugin implements the `SaturationDetector` interface by delegating to a configured list of child detectors and reporting the maximum of their values. Flow control then gates dispatch on whichever load signal is the most constrained, for example in-flight concurrency (`concurrency-detector`) and scraped queue depth (`utilization-detector`) evaluated together.
 
-Each child's signal is also exported through the `flow_control_detector_saturation` gauge, labeled by the detector reference name, so operators can tell which signal is driving `flow_control_pool_saturation`.
+Each child's signal is also exported through the `flow_control_detector_saturation` gauge, labeled by the detector reference name and the pipeline stage (`prefill` or `decode`), so operators can tell which signal is driving `flow_control_pool_saturation` in each stage.
 
 The plugin implements only the `SaturationDetector` interface:
 
