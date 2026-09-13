@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -199,5 +200,44 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		Expect(hdr.Get("Content-Type")).To(ContainSubstring(eventStreamContentType))
 		Expect(body).To(ContainSubstring("hello"))
 		Expect(body).To(ContainSubstring("[DONE]"))
+	})
+
+	It("caps generate token limits under sampling_params on prefill and restores them on decode", func() {
+		// The generate API keeps its token limits under sampling_params rather
+		// than at the top level. The parallel path must route capping through
+		// the same map so the prefill leg is capped and the decode leg restored.
+		var prefillBody, decodeBody map[string]any
+		prefill := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&prefillBody)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"kv_transfer_params":{}}`))
+		})
+		decode := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&decodeBody)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[]}`))
+		})
+
+		env := startParallelCommitProxy(prefill, decode, nil)
+
+		body := `{"model":"Qwen/Qwen2-0.5B","prompt":"Hello","sampling_params":{"max_tokens":100,"min_tokens":5}}`
+		req, err := http.NewRequest(http.MethodPost, env.baseAddr+GeneratePath, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, env.prefillHost)
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		prefillSP, ok := prefillBody[requestFieldSamplingParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
+		Expect(prefillBody).ToNot(HaveKey(requestFieldMaxTokens))
+
+		decodeSP, ok := decodeBody[requestFieldSamplingParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
+		Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
 	})
 })

@@ -76,7 +76,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if s.config.MoRIIOParallelDispatch && s.config.MoRIIOWriteMode {
 		// MoRI-IO requires transfer_id to carry the "tx" prefix for message routing.
 		transferID := "tx" + uuidStr
-		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, kvCacheSource)
+		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, kvCacheSource, apiType)
 		return
 	}
 
@@ -478,6 +478,7 @@ retryLoop:
 func (s *Server) runNIXLProtocolV2WriteParallel(
 	w http.ResponseWriter, r *http.Request, original []byte,
 	body map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
+	apiType APIType,
 ) {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
@@ -490,10 +491,22 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// body; they are restored when building the decode body.
 	streamValue, streamOk := body[requestFieldStream]
 	streamOptionsValue, streamOptionsOk := body[requestFieldStreamOptions]
-	maxTokensValue, maxTokensOk := body[requestFieldMaxTokens]
-	maxCompletionTokensValue, maxCompletionTokensOk := body[requestFieldMaxCompletionTokens]
-	maxOutputTokensValue, maxOutputTokensOk := body[requestFieldMaxOutputTokens]
-	minTokensValue, minTokensOk := body[requestFieldMinTokens]
+
+	type savedField struct {
+		field   string
+		val     any
+		present bool
+	}
+	tokenLimitFields := tokenLimitFieldsForAPIType(apiType)
+	tokenMap, createdSamplingParams := tokenLimitMap(body, apiType)
+	savedTokenValues := make([]savedField, len(tokenLimitFields))
+	for i, field := range tokenLimitFields {
+		if v, ok := tokenMap[field]; ok {
+			savedTokenValues[i] = savedField{field: field, val: v, present: true}
+		} else {
+			savedTokenValues[i] = savedField{field: field}
+		}
+	}
 
 	// Pin both legs to the same DP rank (kv_transfer_params + HTTP header).
 	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
@@ -536,10 +549,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	body[requestFieldStream] = false
 	delete(body, requestFieldStreamOptions)
-	body[requestFieldMaxTokens] = 1
-	body[requestFieldMaxCompletionTokens] = 1
-	body[requestFieldMaxOutputTokens] = 1
-	body[requestFieldMinTokens] = 1
+	for _, field := range tokenLimitFields {
+		tokenMap[field] = 1
+	}
 
 	pbody, err := json.Marshal(body)
 	if err != nil {
@@ -558,21 +570,16 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	if streamOptionsOk {
 		body[requestFieldStreamOptions] = streamOptionsValue
 	}
-	delete(body, requestFieldMaxTokens)
-	if maxTokensOk {
-		body[requestFieldMaxTokens] = maxTokensValue
+	for _, sv := range savedTokenValues {
+		delete(tokenMap, sv.field)
+		if sv.present {
+			tokenMap[sv.field] = sv.val
+		}
 	}
-	delete(body, requestFieldMaxCompletionTokens)
-	if maxCompletionTokensOk {
-		body[requestFieldMaxCompletionTokens] = maxCompletionTokensValue
-	}
-	delete(body, requestFieldMaxOutputTokens)
-	if maxOutputTokensOk {
-		body[requestFieldMaxOutputTokens] = maxOutputTokensValue
-	}
-	delete(body, requestFieldMinTokens)
-	if minTokensOk {
-		body[requestFieldMinTokens] = minTokensValue
+	// Drop the sampling_params map synthesized for prefill capping if it ended up
+	// empty, so the decode request matches the caller's original (which omitted it).
+	if createdSamplingParams && len(tokenMap) == 0 {
+		delete(body, requestFieldSamplingParams)
 	}
 
 	// Synthesise decode-leg kv_transfer_params that the serial path would
