@@ -276,6 +276,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
+		metrics.Registry.MustRegister(llmdFlowControlDetectorSaturation)
 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
@@ -343,6 +344,7 @@ func Reset() {
 	flowControlPoolSaturation.Reset()
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
+	llmdFlowControlDetectorSaturation.Reset()
 	llmdFlowControlCapacityUtilizationRequests.Reset()
 	llmdFlowControlCapacityUtilizationBytes.Reset()
 	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
@@ -732,6 +734,12 @@ func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
 // detector scored as fully saturated because their metrics were missing or stale.
 func RecordFlowControlStaleEndpoints(detector string, count int) {
 	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
+}
+
+// RecordFlowControlDetectorSaturation records the saturation signal reported by a single
+// saturation detector instance, as of the most recent evaluation.
+func RecordFlowControlDetectorSaturation(detector string, saturation float64) {
+	llmdFlowControlDetectorSaturation.WithLabelValues(detector).Set(saturation)
 }
 
 // RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
