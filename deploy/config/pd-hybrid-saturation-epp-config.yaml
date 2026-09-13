@@ -1,0 +1,67 @@
+# Sample EPP configuration for running P/D with hybrid saturation detection.
+#
+# Flow control admission gates on max(pd-concurrency, pd-queue): in-flight
+# concurrency and scraped queue depth are evaluated independently, and the
+# max-saturation-detector composite reports the larger signal. Both children
+# are also listed as filters in both scheduling profiles, so endpoints past
+# their per-endpoint limits are dropped from candidate sets during routing.
+#
+# The children must be declared before pd-saturation in the plugins list:
+# the composite resolves them by name when it is instantiated.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: always-disagg-pd-decider
+- type: disagg-profile-handler
+  parameters:
+    deciders:
+      prefill: always-disagg-pd-decider
+- type: prefill-filter
+- type: decode-filter
+- type: inflight-load-producer
+- type: token-load-scorer
+- type: active-request-scorer
+- type: max-score-picker
+- name: pd-concurrency
+  type: concurrency-detector
+  parameters:
+    concurrencyMode: requests
+    maxConcurrency: 32
+    headroom: 0.1
+# kvCacheUtilThreshold: 1.0 keeps KV cache pressure out of the gating signal.
+# With the default stalenessPolicy (saturated), a stalled metrics scrape
+# scores every endpoint as saturated and halts dispatch; set
+# stalenessPolicy: ignore to fail open instead.
+- name: pd-queue
+  type: utilization-detector
+  parameters:
+    queueDepthThreshold: 5
+    kvCacheUtilThreshold: 1.0
+    headroom: 0.1
+- name: pd-saturation
+  type: max-saturation-detector
+  parameters:
+    detectors: [pd-concurrency, pd-queue]
+schedulingProfiles:
+- name: prefill
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: pd-concurrency
+  - pluginRef: pd-queue
+  - pluginRef: token-load-scorer
+  - pluginRef: max-score-picker
+- name: decode
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: pd-concurrency
+  - pluginRef: pd-queue
+  - pluginRef: active-request-scorer
+  - pluginRef: max-score-picker
+flowControl:
+  maxBytes: "10Gi"
+  maxRequests: "1k"
+  defaultRequestTTL: "60s"
+  saturationDetector:
+    pluginRef: pd-saturation
