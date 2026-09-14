@@ -9,12 +9,10 @@ spec:
   selector:
     matchLabels:
       app: ${POOL_NAME}
-      llm-d.ai/model-arch: omni-llm
   template:
     metadata:
       labels:
         app: ${POOL_NAME}
-        llm-d.ai/model-arch: omni-llm
     spec:
       containers:
       - name: vllm-omni
