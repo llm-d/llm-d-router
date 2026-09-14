@@ -285,17 +285,23 @@ func DeleteNamespace(testConfig *TestConfig, nsName string) {
 func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string) []string {
 	objNames := CreateObjsWithVerifier(testConfig, objs, nsName,
 		func(kind string, clientObj client.Object) {
-			switch kind {
-			case "CustomResourceDefinition":
-				CRDEstablished(testConfig, clientObj.(*apiextv1.CustomResourceDefinition))
-			case "Deployment":
-				DeploymentAvailable(testConfig, clientObj.(*appsv1.Deployment))
-			case "Pod":
-				PodReady(testConfig, clientObj.(*corev1.Pod))
-			}
+			VerifyObj(testConfig, kind, clientObj)
 		})
 
 	return objNames
+}
+
+// VerifyObj waits until clientObj is ready: an established CRD, an available
+// Deployment, or a ready Pod. Other kinds return at once.
+func VerifyObj(testConfig *TestConfig, kind string, clientObj client.Object) {
+	switch kind {
+	case "CustomResourceDefinition":
+		CRDEstablished(testConfig, clientObj.(*apiextv1.CustomResourceDefinition))
+	case "Deployment":
+		DeploymentAvailable(testConfig, clientObj.(*appsv1.Deployment))
+	case "Pod":
+		PodReady(testConfig, clientObj.(*corev1.Pod))
+	}
 }
 
 func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string, verifier func(kind string, clientObj client.Object)) []string {

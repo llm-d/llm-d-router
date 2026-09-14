@@ -203,8 +203,9 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 		// baseNsName holds the shared renderer, and is the only namespace still
 		// alive when the suite fails in SynchronizedBeforeSuite before any group
 		// runs. The per-process namespaces are usually already gone by now: a
-		// group's AfterAll dumps its own namespace when its specs failed (which
-		// includes specs interrupted by --fail-fast) and then deletes it.
+		// group's AfterEach dumps its own namespace when a spec failed (which
+		// includes specs interrupted by --fail-fast) and its AfterAll then
+		// deletes it.
 		testutils.DumpPodsAndLogs(testConfig, baseNsName)
 		for idx := range numProcesses {
 			if nsName := testutils.NamespaceForProcess(baseNsName, numProcesses, idx+1); nsName != baseNsName {

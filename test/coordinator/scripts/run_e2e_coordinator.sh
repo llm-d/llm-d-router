@@ -31,4 +31,7 @@ trap 'e2e_handle_interrupt "e2e-coordinator-tests"' INT TERM
 
 echo "Running coordinator end-to-end tests"
 
-run_ginkgo_suite "${DIR}/../e2e/coordinator/"
+# Every spec deploys its own encode/prefill/decode workers and coordinator, so
+# each process carries several full workload cycles, and all nine with
+# E2E_NUM_PROCS=1; 120m leaves headroom over the shared 45m default.
+run_ginkgo_suite "${DIR}/../e2e/coordinator/" 120m

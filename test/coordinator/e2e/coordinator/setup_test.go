@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	inferenceapi "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/test/coordinator/e2e/internal/e2eutil"
@@ -44,6 +46,10 @@ import (
 var coordinatorComponentDocs = sync.OnceValue(func() []string {
 	return e2eutil.RunKustomize(coordinatorComponentDir)
 })
+
+// portForwardExitTimeout bounds the wait for the port-forward process to exit
+// after SIGTERM.
+const portForwardExitTimeout = 30 * time.Second
 
 // createEnvoy applies the active topology's Envoy routing ConfigMap plus the
 // shared Envoy Deployment and Service in nsName. Against an existing cluster
@@ -102,24 +108,37 @@ func testWrapper(test func()) func() {
 	return func() {
 		ginkgo.BeforeAll(func() {
 			nsName = getNamespace()
+			// The tracker outlives a spec whose AfterEach did not drain it (an
+			// interrupt, a failed delete, or the keepClusterOnFailure return
+			// below), and this group repeats the object names, so start from empty.
+			specWorkload = nil
 			createdNameSpace = testutils.SetupNamespace(testConfig, nsName)
 			portForwardSession = createEnvoy(nsName, &envoyObjects)
 			createStableInfra(nsName, &stableInfraObjects)
 		})
 
-		ginkgo.AfterAll(func() {
+		ginkgo.AfterEach(func() {
 			if ginkgo.CurrentSpecReport().Failed() {
-				// A failing spec aborts before its inline teardown, so its workload
-				// is still up; dump it before the deletes below remove it.
+				// Dump the workload before the deletes below remove it.
 				testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
 				if keepClusterOnFailure {
 					return
 				}
 			}
-			testutils.DeleteObjects(testConfig, stableInfraObjects, nsName)
+			deleteSpecWorkload(nsName)
+		})
+
+		ginkgo.AfterAll(func() {
+			// Terminate only signals kubectl. The next group on this process rebinds
+			// the same host port, so wait for the process to exit and release it: a
+			// bind that fails surfaces only as a waitForCoordinatorReady timeout.
 			if portForwardSession != nil {
-				portForwardSession.Terminate()
+				portForwardSession.Terminate().Wait(portForwardExitTimeout)
 			}
+			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
+				return
+			}
+			testutils.DeleteObjects(testConfig, stableInfraObjects, nsName)
 			testutils.DeleteObjects(testConfig, envoyObjects, nsName)
 
 			if createdNameSpace {
@@ -129,6 +148,27 @@ func testWrapper(test func()) func() {
 
 		test()
 	}
+}
+
+// specWorkload holds the ids of the per-spec workload (InferencePool, EPPs,
+// model servers, coordinator) in creation order. The specs create it and the
+// group's AfterEach deletes it, so a spec that fails mid-assertion leaves nothing
+// behind: the namespace delete is no backstop when the suite did not create the
+// namespace. Draining after each spec also keeps the next spec from adopting
+// these objects on AlreadyExists, since it repeats their names. Ginkgo hands an
+// Ordered group to one process start to finish and runs its specs one at a
+// time, so the tracker holds one spec's workload.
+var specWorkload []string
+
+// deleteSpecWorkload deletes the tracked per-spec objects and clears the
+// tracker. It deletes in reverse creation order, so each object goes before the
+// one it was created for: the coordinator ahead of the workers it drives, the
+// pool last.
+func deleteSpecWorkload(nsName string) {
+	objects := slices.Clone(specWorkload)
+	slices.Reverse(objects)
+	testutils.DeleteObjects(testConfig, objects, nsName)
+	specWorkload = nil
 }
 
 // createCRDs installs the GIE CRDs used for testing. The ids are discarded: the
@@ -145,29 +185,25 @@ func createCRDs() {
 // single-EPP topology creates one EPP from eppConfig; the 3-EPP topology creates
 // one per role, each from its role config with a per-role ConfigMap. Each EPP's
 // ServiceAccount, RoleBinding, and Service come from createStableInfra.
-// Returns all created object ids for cleanup.
-func createEndPointPickers() []string {
-	epps := eppsToCreate()
-	objects := make([]string, 0, len(epps)*2)
-	for _, e := range epps {
-		objects = append(objects, createOneEndPointPicker(e)...)
+// It appends the created ids to objects (see createTracked).
+func createEndPointPickers(objects *[]string) {
+	for _, e := range eppsToCreate() {
+		createOneEndPointPicker(e, objects)
 	}
-	return objects
 }
 
 // createOneEndPointPicker creates a single EPP's ConfigMap and Deployment. In
 // the 3-EPP topology each role gets its own ConfigMap (epp-config-<role>) and the
 // shared Deployment's config volume is retargeted to it (see renameEPPConfigVolume),
 // so the three EPPs do not share one ConfigMap.
-func createOneEndPointPicker(e roleEPP) []string {
+func createOneEndPointPicker(e roleEPP, objects *[]string) {
 	cmName := "epp-config"
 	if threeEPP {
 		cmName = "epp-config-" + e.role
 	}
 	createEPPConfigMap(cmName, e.config)
+	*objects = append(*objects, "ConfigMap/"+cmName)
 
-	objects := make([]string, 1, 8)
-	objects[0] = "ConfigMap/" + cmName
 	// eppManifest is the EPP Deployment only; its Service, ServiceAccount, and
 	// RBAC come from createStableInfra.
 	docs := testutils.ReadYaml(eppManifest)
@@ -175,9 +211,7 @@ func createOneEndPointPicker(e roleEPP) []string {
 	if threeEPP {
 		docs = renameEPPConfigVolume(docs, cmName)
 	}
-	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())...)
-	podsInDeploymentsReady(getNamespace(), objects)
-	return objects
+	podsInDeploymentsReady(getNamespace(), createTracked(getNamespace(), docs, objects))
 }
 
 // renameEPPConfigVolume retargets the EPP Deployment's config volume, volume
@@ -203,8 +237,9 @@ func renameEPPConfigVolume(docs []string, cmName string) []string {
 // createInferencePool creates the InferencePool(s) for the active topology: one
 // pool covering all three worker roles (single-EPP), or one role-scoped pool per
 // role (3-EPP). When toDelete is set, the existing pool(s) are removed first so
-// the test starts clean.
-func createInferencePool(toDelete bool) []string {
+// the test starts clean. It appends the created ids to objects (see
+// createTracked).
+func createInferencePool(toDelete bool, objects *[]string) {
 	nsName := getNamespace()
 
 	if toDelete {
@@ -230,7 +265,7 @@ func createInferencePool(toDelete bool) []string {
 	}
 	docs := testutils.ReadYaml(manifest)
 	docs = e2eutil.SubstituteMany(docs, subs)
-	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
+	createTracked(nsName, docs, objects)
 }
 
 // deletePoolIfExists removes the named InferencePool when present so a rerun
@@ -250,8 +285,9 @@ func deletePoolIfExists(name string) {
 
 // createModelServers deploys the vLLM encode/prefill/decode workers from the
 // coordinator-epd kustomize environment with the given per-type replica counts and
-// waits for their Deployments to be ready.
-func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []string {
+// waits for their Deployments to be ready. It appends the created ids to objects
+// (see createTracked).
+func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int, objects *[]string) {
 	subs := allSubstitutions()
 	subs["${VLLM_REPLICA_COUNT_E}"] = strconv.Itoa(encodeReplicas)
 	subs["${VLLM_REPLICA_COUNT_P}"] = strconv.Itoa(prefillReplicas)
@@ -261,15 +297,14 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int) []s
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	docs = e2eutil.RemoveEmptyLabels(docs)
-	objects := testutils.CreateObjsFromYaml(testConfig, docs, getNamespace())
-	podsInDeploymentsReady(getNamespace(), objects)
-	return objects
+	podsInDeploymentsReady(getNamespace(), createTracked(getNamespace(), docs, objects))
 }
 
 // createCoordinator builds the coordinator ConfigMap from the given pipeline
 // config, deploys the coordinator Deployment, and waits for readiness. Its
-// Service and ServiceAccount come from createStableInfra.
-func createCoordinator(config string) []string {
+// Service and ServiceAccount come from createStableInfra. It appends the created
+// ids to objects (see createTracked).
+func createCoordinator(config string, objects *[]string) {
 	nsName := getNamespace()
 	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
 		"${NAMESPACE}":        nsName,
@@ -287,19 +322,16 @@ func createCoordinator(config string) []string {
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "creating coordinator ConfigMap")
 	}
-	objects := make([]string, 1, 8)
-	objects[0] = "ConfigMap/llm-d-coordinator-config"
+	*objects = append(*objects, "ConfigMap/llm-d-coordinator-config")
 
 	// Service and ServiceAccount come from createStableInfra; recreate only the
 	// Deployment per spec.
 	docs := e2eutil.FilterKinds(coordinatorComponentDocs(), "ConfigMap", "Service", "ServiceAccount")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	objects = append(objects, testutils.CreateObjsFromYaml(testConfig, docs, nsName)...)
 
-	podsInDeploymentsReady(nsName, objects)
+	podsInDeploymentsReady(nsName, createTracked(nsName, docs, objects))
 	waitForCoordinatorReady()
-	return objects
 }
 
 // waitForCoordinatorReady polls /readyz through Envoy until it returns 200,
@@ -350,6 +382,18 @@ func applyManifest(nsName, path string, subs map[string]string) []string {
 	docs := testutils.ReadYaml(path)
 	docs = e2eutil.SubstituteMany(docs, subs)
 	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
+}
+
+// createTracked creates docs in nsName and waits for them like
+// testutils.CreateObjsFromYaml, but appends each object's id to objects as soon
+// as the object exists, before its readiness wait. A wait that fails then still
+// leaves the id tracked for deletion. It returns the ids of docs.
+func createTracked(nsName string, docs []string, objects *[]string) []string {
+	objs := testutils.CreateUnstructuredObjs(testConfig, docs)
+	return testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {
+		*objects = append(*objects, kind+"/"+clientObj.GetName())
+		testutils.VerifyObj(testConfig, kind, clientObj)
+	})
 }
 
 // createStableInfra creates the coordinator and EPP Services, ServiceAccounts,

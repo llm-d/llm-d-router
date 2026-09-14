@@ -120,8 +120,9 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 
 // runCoordinatorPipeline deploys the e-p-d topology and coordinator, posts the
 // given body to path (e.g. /v1/chat/completions or /inference/v1/generate),
-// asserts a 200 with a non-empty body, verifies that the coordinator logs show
-// all expected pipeline steps completed, then tears the workload down.
+// asserts a 200 with a non-empty body, and verifies that the coordinator logs
+// show all expected pipeline steps completed. The workload it creates is tracked
+// in specWorkload for the group's AfterEach to delete.
 // expectedImages is the number of images in the request; when > 0 the encoder
 // log assertions are also verified. When wantMaxTokens > 0 the token-limit
 // contract is additionally asserted: decode forwards the client's
@@ -130,18 +131,18 @@ const inlineImageDataURI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAA
 // coordinatorConfig, when supplied, overrides the default coordinatorConfigNIXL
 // pipeline config for the coordinator deployment.
 // It returns the coordinator logs it asserted against so callers can make further
-// assertions on them; the coordinator is gone by the time it returns.
+// assertions on them.
 func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages, wantMinTokens, wantMaxTokens int, coordinatorConfig ...string) string {
 	nsName := getNamespace()
 
 	// Pool first so the EPP can resolve its --pool-name.
-	pool := createInferencePool(true)
+	createInferencePool(true, &specWorkload)
 	expectPoolExists()
 
-	epp := createEndPointPickers()
+	createEndPointPickers(&specWorkload)
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
-	modelServers := createModelServers(encodeReplicas, prefillReplicas, decodeReplicas)
+	createModelServers(encodeReplicas, prefillReplicas, decodeReplicas, &specWorkload)
 
 	encodePods := getPodNames(encodeSelector)
 	prefillPods := getPodNames(prefillSelector)
@@ -154,7 +155,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	if len(coordinatorConfig) > 0 {
 		cfg = coordinatorConfig[0]
 	}
-	coordinator := createCoordinator(cfg)
+	createCoordinator(cfg, &specWorkload)
 
 	req, err := http.NewRequest(http.MethodPost,
 		gatewayBaseURL()+path,
@@ -200,15 +201,6 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	if printLogs {
 		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
 	}
-
-	// Torn down here rather than via ginkgo.DeferCleanup: Ginkgo runs DeferCleanup
-	// after the group's AfterAll, which has already deleted the namespace by then,
-	// so the objects would be gone. A failing assertion above aborts before these
-	// deletes, leaving the workload in place for testWrapper's AfterAll to dump.
-	testutils.DeleteObjects(testConfig, coordinator, nsName)
-	testutils.DeleteObjects(testConfig, modelServers, nsName)
-	testutils.DeleteObjects(testConfig, epp, nsName)
-	testutils.DeleteObjects(testConfig, pool, nsName)
 
 	return logs
 }
@@ -410,8 +402,8 @@ func verifyTokenLimits(logs string, wantMin, wantMax int, capLegs []string) {
 // generate path. The skip marker is logged immediately before the step returns,
 // so its presence is dispositive: the prefill worker encodes inline from
 // kwargs_data and no encode sub-request is issued. It takes the logs rather than
-// fetching them: runCoordinatorPipeline deletes the coordinator Deployment before
-// returning, so they are no longer retrievable from the cluster by then.
+// fetching them again: runCoordinatorPipeline already holds the logs it asserted
+// against.
 func verifyEncodeSkipped(logs string) {
 	ginkgo.By("Verifying encode was skipped for the generate request")
 	gomega.Expect(logHasLine(logs, `"body":"skipping encode for generate request"`)).To(gomega.BeTrue(),
