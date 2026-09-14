@@ -34,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
+	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -236,15 +237,42 @@ func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *Reques
 	return parser, nil
 }
 
-// extractTraceContext returns ctx augmented with the upstream trace context
-// carried in the incoming Envoy request headers (e.g. the traceparent set by the
-// client or the Gateway), using the globally configured text map propagator.
+type grpcMetadataCarrier grpcmetadata.MD
+
+func (c grpcMetadataCarrier) Get(key string) string {
+	values := c[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func (c grpcMetadataCarrier) Set(key, value string) {
+	c[key] = []string{value}
+}
+
+func (c grpcMetadataCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for key := range c {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// extractTraceContext returns ctx augmented with upstream trace context from
+// the incoming gRPC metadata and Envoy request headers, using the globally
+// configured text map propagator. Request headers take precedence over gRPC
+// metadata when both contain trace context.
 //
 // The header wire format is the W3C Trace Context spec:
 // https://www.w3.org/TR/trace-context/
 // Extraction uses OpenTelemetry context propagation:
 // https://opentelemetry.io/docs/concepts/context-propagation/
 func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_RequestHeaders) context.Context {
+	if md, ok := grpcmetadata.FromIncomingContext(ctx); ok {
+		ctx = otel.GetTextMapPropagator().Extract(ctx, grpcMetadataCarrier(md))
+	}
+
 	carrier := make(propagation.MapCarrier)
 	if req != nil && req.RequestHeaders != nil && req.RequestHeaders.Headers != nil {
 		for _, header := range req.RequestHeaders.Headers.Headers {

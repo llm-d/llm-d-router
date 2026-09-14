@@ -31,6 +31,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	grpcmetadata "google.golang.org/grpc/metadata"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -81,6 +82,10 @@ func newRequestHeaders(headers map[string]string) *extProcPb.ProcessingRequest {
 // runProcess drives Process over a single RequestHeaders message and returns the
 // lines it logged.
 func runProcess(t *testing.T, headers map[string]string) []string {
+	return runProcessWithContext(t, context.Background(), headers)
+}
+
+func runProcessWithContext(t *testing.T, ctx context.Context, headers map[string]string) []string {
 	t.Helper()
 
 	var logged []string
@@ -89,7 +94,7 @@ func runProcess(t *testing.T, headers map[string]string) []string {
 	}, funcr.Options{Verbosity: 2})
 
 	srv := &scriptedProcessServer{
-		ctx: log.IntoContext(context.Background(), capture),
+		ctx: log.IntoContext(ctx, capture),
 		req: newRequestHeaders(headers),
 	}
 	require.NoError(t, NewStreamingServer(nil, nil, nil, 0).Process(srv))
@@ -124,6 +129,20 @@ func TestProcessCorrelatesRequestLogsWithTrace(t *testing.T) {
 	require.Contains(t, entry, upstreamTraceID, "must join the upstream trace, not start a fresh one")
 	require.Contains(t, entry, "req-correlation-1", "correlation must not displace the request ID")
 	require.Equal(t, 1, strings.Count(entry, tracing.LogKeyTraceID), "trace_id must appear once: %q", entry)
+}
+
+func TestProcessCorrelatesGatewayTraceMetadata(t *testing.T) {
+	useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample())))
+
+	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs(
+		"traceparent", upstreamTraceparent,
+	))
+	entry := entryLine(t, runProcessWithContext(t, ctx, map[string]string{
+		"x-request-id": "req-gateway-correlation",
+	}))
+
+	require.Contains(t, entry, upstreamTraceID, "must join the Gateway trace from gRPC metadata")
+	require.Contains(t, entry, "req-gateway-correlation")
 }
 
 // With tracing off the span context is invalid, so request logs are unchanged.
