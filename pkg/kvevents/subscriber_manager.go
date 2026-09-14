@@ -116,8 +116,8 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	return nil
 }
 
-// RemoveSubscriber removes a subscriber for the given pod identifier.
-func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) {
+// RemoveSubscriber removes a subscriber for the given pod identifier and reports whether it existed.
+func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) bool {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	sm.mu.Lock()
@@ -126,7 +126,7 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	entry, exists := sm.subscribers[podIdentifier]
 	if !exists {
 		debugLogger.Info("Subscriber does not exist, nothing to remove", "podIdentifier", podIdentifier)
-		return
+		return false
 	}
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
@@ -134,6 +134,7 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
+	return true
 }
 
 // cleanupSubscriberMetrics drops the per-pod series for a removed subscriber

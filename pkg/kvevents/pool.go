@@ -32,7 +32,7 @@ import (
 
 const (
 	defaultEventSourceDeviceTier = "gpu"
-	defaultPodSelector           = "llm-d.ai/inference-serving=true"
+	defaultPodSelector           = ""
 )
 
 // normalizeDeviceTier lowercases an event's device tier and defaults an empty
@@ -104,6 +104,7 @@ type Config struct {
 // PodDiscoveryConfig holds configuration for the Kubernetes pod reconciler.
 type PodDiscoveryConfig struct {
 	// PodLabelSelector is a label selector string for filtering which pods to watch.
+	// Empty matches every pod.
 	// Example: "app=vllm" or "app=vllm,tier=gpu"
 	PodLabelSelector string `json:"podLabelSelector"`
 	// PodNamespace limits the reconciler to watch pods in a specific namespace.

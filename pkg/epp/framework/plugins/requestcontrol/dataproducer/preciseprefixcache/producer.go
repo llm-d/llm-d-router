@@ -79,7 +79,7 @@ type subscriberManager interface {
 		podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter string,
 		remoteSocket bool,
 	) error
-	RemoveSubscriber(ctx context.Context, podIdentifier string)
+	RemoveSubscriber(ctx context.Context, podIdentifier string) bool
 	GetActiveSubscribers() ([]string, []string)
 	Shutdown(ctx context.Context)
 }
