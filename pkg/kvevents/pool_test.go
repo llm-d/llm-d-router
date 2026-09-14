@@ -232,6 +232,25 @@ func TestSubscriberManager_RemoveSubscriberKeepsSharedSourceUntilLastSubscriber(
 	}
 }
 
+func TestZMQSubscriber_RetireDropsMessagesWithoutSourceEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+	pool.concurrency = 1
+	defer pool.Shutdown(ctx)
+
+	subscriber := newZMQSubscriber(pool, "local-subscriber", "", "", "", "kv@", false)
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 1, []byte{1})
+	subscriber.retire(false)
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 2, []byte{2})
+
+	require.Equal(t, 1, pool.queues[0].Len())
+	msg, shutdown := pool.queues[0].Get()
+	require.False(t, shutdown)
+	assert.Equal(t, uint64(1), msg.Sequence)
+	pool.queues[0].Done(msg)
+}
+
 func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, tokenProcessor := newTestPool(t, 16)

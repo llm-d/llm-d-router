@@ -287,11 +287,6 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 }
 
 func (z *zmqSubscriber) enqueue(msg *RawMessage) {
-	if z.sourceEndpoint == "" {
-		z.pool.AddTask(msg)
-		return
-	}
-
 	z.queueMu.Lock()
 	defer z.queueMu.Unlock()
 	if z.retired {
@@ -309,14 +304,10 @@ func (z *zmqSubscriber) resetForSource(topic string) {
 // retirement. The pool shards both messages and the reset by source endpoint,
 // so the worker processes them in that order.
 func (z *zmqSubscriber) retire(resetSource bool) {
-	if z.sourceEndpoint == "" {
-		return
-	}
-
 	z.queueMu.Lock()
 	defer z.queueMu.Unlock()
 	z.retired = true
-	if resetSource {
+	if resetSource && z.sourceEndpoint != "" {
 		z.pool.resetForSource(z.topicFilter, z.sourceEndpoint)
 	}
 }
