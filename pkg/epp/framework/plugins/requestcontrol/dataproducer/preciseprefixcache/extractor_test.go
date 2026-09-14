@@ -20,6 +20,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -275,10 +276,10 @@ func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 	ctx := discardCtx(t)
 
-	var clearedPod string
+	clearedPod := make(chan string, 1)
 	fakeIndex := &fakeKVBlockIndex{
 		clearFn: func(_ context.Context, podIdentifier string) error {
-			clearedPod = podIdentifier
+			clearedPod <- podIdentifier
 			return nil
 		},
 	}
@@ -288,10 +289,13 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 	cfg.DiscoverPods = true
 	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
 	cfg.PodDiscoveryConfig.SocketPort = 5557
+	pool := kvevents.NewPool(cfg, fakeIndex, nil, nil)
+	pool.Start(ctx)
+	defer pool.Shutdown(ctx)
 
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: kvevents.NewSubscriberManager(kvevents.NewPool(cfg, nil, nil, nil)),
+		subscribersManager: kvevents.NewSubscriberManager(pool),
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     fakeIndexer,
 		subscriberCtx:      context.Background(),
@@ -310,7 +314,12 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 		Endpoint: ep,
 	}))
 
-	assert.Equal(t, "10.0.0.99:8080", clearedPod, "index should be cleared using pod IP:Port matching PodIdentifier format")
+	select {
+	case got := <-clearedPod:
+		assert.Equal(t, "10.0.0.99:8080", got, "index should be cleared using pod IP:Port matching PodIdentifier format")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for removed pod index state to clear")
+	}
 
 	ids, _ := p.subscribersManager.GetActiveSubscribers()
 	assert.Empty(t, ids)
