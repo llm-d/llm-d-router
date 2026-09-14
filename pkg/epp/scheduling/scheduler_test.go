@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -63,6 +64,7 @@ func TestSchedule(t *testing.T) {
 	profileHandler := single.NewSingleProfileHandler()
 
 	schedulerConfig := NewSchedulerConfig(profileHandler, map[string]fwksched.SchedulerProfile{"default": defaultProfile})
+	scrapedAt := time.Now()
 
 	tests := []struct {
 		name    string
@@ -100,6 +102,7 @@ func TestSchedule(t *testing.T) {
 							"foo": 1,
 							"bar": 1,
 						},
+						UpdateTime: scrapedAt,
 					}, nil),
 				fwksched.NewEndpoint(
 					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
@@ -111,6 +114,7 @@ func TestSchedule(t *testing.T) {
 							"foo":      1,
 							"critical": 1,
 						},
+						UpdateTime: scrapedAt,
 					}, nil),
 				fwksched.NewEndpoint(
 					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}},
@@ -121,6 +125,7 @@ func TestSchedule(t *testing.T) {
 						ActiveModels: map[string]int{
 							"foo": 1,
 						},
+						UpdateTime: scrapedAt,
 					}, nil),
 			},
 			wantRes: &fwksched.SchedulingResult{
@@ -138,6 +143,7 @@ func TestSchedule(t *testing.T) {
 											"foo":      1,
 											"critical": 1,
 										},
+										UpdateTime: scrapedAt,
 									}, nil),
 								Score: 2.8,
 							},
