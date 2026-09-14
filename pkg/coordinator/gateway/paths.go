@@ -22,7 +22,7 @@ const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathCompletions     = "/v1/completions"
 	VLLMGeneratePath    = "/inference/v1/generate"
-	SGLangGeneratePath = "/generate"
+	SGLangGeneratePath  = "/generate"
 
 	EPPProfileHeader  = "EPP-Profile"
 	ContentTypeHeader = "Content-Type"
