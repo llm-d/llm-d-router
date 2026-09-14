@@ -638,7 +638,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
 	mux.HandleFunc("POST "+VLLMGeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
-	mux.HandleFunc("POST "+SGlangGeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
+	mux.HandleFunc("POST "+SGLangGeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
