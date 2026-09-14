@@ -330,6 +330,9 @@ This avoids rejecting a prompt solely because its requested output would
 exceed the renderer's context capacity. The prompt itself must still fit;
 this option does not enable partial matching or extend inference context limits.
 
+Requests with a non-null `truncate_prompt_tokens` retain their original output
+budget because automatic truncation depends on it.
+
 Each named token producer maintains its own endpoint set and balancing state.
 Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
 global idle-connection cap; idle connections expire after 90 seconds.

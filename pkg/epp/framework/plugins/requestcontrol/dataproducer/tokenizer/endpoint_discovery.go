@@ -348,7 +348,7 @@ func (h *endpointDiscoveryHandler) TypedName() plugin.TypedName {
 // Extract keeps the picker synchronized with endpoint lifecycle events.
 func (h *endpointDiscoveryHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) error {
 	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
-		return nil
+		return errors.New("discovered endpoint or metadata is nil")
 	}
 
 	// Keep generation checks and picker updates atomic across lifecycle callbacks.
@@ -358,6 +358,10 @@ func (h *endpointDiscoveryHandler) Extract(_ context.Context, event fwkdl.Endpoi
 	id := meta.ID.String()
 	switch event.Type {
 	case fwkdl.EventAddOrUpdate:
+		if registered, ok := h.registeredEndpoints[id]; ok && registered != event.Endpoint {
+			// Capacity observations and in-flight probes belong to the old object.
+			h.picker.Delete(meta)
+		}
 		h.registeredEndpoints[id] = event.Endpoint
 		if err := h.picker.Upsert(meta); err != nil {
 			h.picker.Delete(meta)

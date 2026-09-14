@@ -489,7 +489,8 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 // postJSON permits one retry on a different endpoint within the request budget.
 func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, timeout time.Duration, out any) error {
 	if r.prefillOnly {
-		if typed, ok := body.(fwkrh.PayloadMap); ok {
+		// Automatic prompt truncation depends on the original output budget.
+		if typed, ok := body.(fwkrh.PayloadMap); ok && typed["truncate_prompt_tokens"] == nil {
 			cloned := maps.Clone(typed)
 			cloned["max_tokens"] = 1
 			if _, ok := cloned["max_completion_tokens"]; ok {

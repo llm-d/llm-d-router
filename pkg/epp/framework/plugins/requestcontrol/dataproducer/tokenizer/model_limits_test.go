@@ -30,6 +30,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -154,6 +156,50 @@ func TestModelLimitProbeDeadline(t *testing.T) {
 	p.refreshModelLimits(ctx, server.Client(), "glm")
 	_, err := p.Pick()
 	require.Error(t, err)
+}
+
+func TestRenderOnlyBudgetPreservesTruncation(t *testing.T) {
+	for _, path := range []string{chatRenderPath, completionsRenderPath} {
+		for _, truncate := range []any{float64(-1), json.Number("-1"), 100} {
+			t.Run(fmt.Sprintf("%s/truncate=%v", path, truncate), func(t *testing.T) {
+				payload := fwkrh.PayloadMap{"max_tokens": 20, "max_completion_tokens": 20, "min_tokens": 5, "truncate_prompt_tokens": truncate}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]any
+					if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+						return
+					}
+					assert.Equal(t, float64(20), body["max_tokens"])
+					assert.Equal(t, float64(20), body["max_completion_tokens"])
+					assert.Equal(t, float64(5), body["min_tokens"])
+					_, _ = w.Write([]byte(`{}`))
+				}))
+				defer server.Close()
+				renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: true}, "glm")
+				require.NoError(t, err)
+				var out map[string]any
+				require.NoError(t, renderer.postJSON(t.Context(), path, payload, time.Second, &out))
+			})
+		}
+	}
+}
+
+func TestModelLimitEndpointReplacement(t *testing.T) {
+	p, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{DiscoverModelLimits: true})
+	require.NoError(t, err)
+	h := newEndpointDiscoveryHandler(plugin.TypedName{Type: PluginType, Name: "test"}, p)
+	old := discoveredEndpoint("a", "127.0.0.1", "8000")
+	replacement := discoveredEndpoint("a", "127.0.0.1", "8000")
+	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: old}))
+	c := p.capabilities[old.GetMetadata().ID.String()]
+	c.observed, c.refreshed = 300000, time.Now()
+	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: old}))
+	_, err = p.Pick()
+	require.NoError(t, err, "same-object updates must preserve observations")
+	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: replacement}))
+	require.NoError(t, h.Extract(t.Context(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: old}))
+	_, err = p.Pick()
+	require.Error(t, err, "replacement must be probed before selection")
+	require.NotSame(t, c, p.capabilities[replacement.GetMetadata().ID.String()], "in-flight probes must lose their generation")
 }
 
 func TestRenderRejectsEmptyTokenIDs(t *testing.T) {
