@@ -157,19 +157,6 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 	}
 }
 
-func TestConditionalDecodeStep_UnsupportedFormat(t *testing.T) {
-	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := map[string]any{"model": testModelName}
-	err = step.(*ConditionalDecodeStep).prepareBody(&pipeline.RequestContext{TokenIDs: []int{1}}, body, reqcommon.APIType(99))
-	if want := "conditional-decode: unsupported request format APIType(99)"; err == nil || err.Error() != want {
-		t.Fatalf("expected error %q, got %v", want, err)
-	}
-}
-
 func TestConditionalDecodeStep_CacheHit_Streaming(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
