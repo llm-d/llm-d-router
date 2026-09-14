@@ -36,6 +36,14 @@ const (
 	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
 
+// ConditionalDecodeHandledAttributeKey is the request-attribute key a
+// PreRequest plugin sets when it has evaluated the "Prefer: if-available"
+// preference for a request. The director consults this after PreRequest
+// plugins run: a conditional-decode request that no plugin claimed is
+// rejected with 412 so misconfigurations (gate plugin forgotten) surface as a
+// fast fallback rather than a silent forward.
+var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
+
 // Screener performs preliminary filtering of located endpoints before data
 // production, admission, and scheduling profiles run. Every screener sees the
 // same input set, and the framework intersects their results.

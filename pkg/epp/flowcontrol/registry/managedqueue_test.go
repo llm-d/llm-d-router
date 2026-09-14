@@ -19,7 +19,6 @@ package registry
 import (
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -39,8 +38,12 @@ import (
 type mqTestHarness struct {
 	t          *testing.T
 	mq         *managedQueue
-	propagator *mockStatsPropagator
 	mockPolicy *fwkfcmocks.MockOrderingPolicy
+
+	// bandStats and registryStats are the counters handed to the queue under test; the queue must apply
+	// identical deltas to both (see assertStatsDelta).
+	bandStats     occupancyStats
+	registryStats occupancyStats
 }
 
 // newMockedMqHarness creates a harness that uses a mocked underlying queue.
@@ -67,44 +70,40 @@ func newRealMqHarness(t *testing.T, key flowcontrol.FlowKey) *mqTestHarness {
 func newMqHarness(t *testing.T, queue contracts.SafeQueue, key flowcontrol.FlowKey) *mqTestHarness {
 	t.Helper()
 
-	propagator := &mockStatsPropagator{}
-	mockPolicy := &fwkfcmocks.MockOrderingPolicy{}
-
-	mq := newManagedQueue(queue, mockPolicy, key, logr.Discard(), propagator.propagate, nil)
-	require.NotNil(t, mq, "Test setup: newManagedQueue must return a valid instance")
-
-	return &mqTestHarness{
+	h := &mqTestHarness{
 		t:          t,
-		mq:         mq,
-		propagator: propagator,
-		mockPolicy: mockPolicy,
+		mockPolicy: &fwkfcmocks.MockOrderingPolicy{},
 	}
+	h.mq = newManagedQueue(queue, h.mockPolicy, key, logr.Discard(), &h.bandStats, &h.registryStats, nil)
+	require.NotNil(t, h.mq, "Test setup: newManagedQueue must return a valid instance")
+	return h
 }
 
-// setupWithItems pre-populates the queue and resets the mock propagator for focused testing.
+// setupWithItems pre-populates the queue and resets the captured counters for focused testing.
 func (h *mqTestHarness) setupWithItems(items ...flowcontrol.QueueItemAccessor) {
 	h.t.Helper()
 	for _, item := range items {
 		err := h.mq.Add(item)
 		require.NoError(h.t, err, "Harness setup: failed to add initial item to the queue")
 	}
-	h.propagator.reset()
+	h.resetStats()
 }
 
-// mockStatsPropagator captures stat changes from the system under test.
-type mockStatsPropagator struct {
-	lenDelta      atomic.Int64
-	byteSizeDelta atomic.Int64
+// assertStatsDelta asserts the accumulated deltas on both capture targets, which must mirror each other.
+func (h *mqTestHarness) assertStatsDelta(lenDelta, byteSizeDelta int64) {
+	h.t.Helper()
+	assert.Equal(h.t, lenDelta, h.bandStats.len.Load(), "Band length delta must match the queue mutation")
+	assert.Equal(h.t, byteSizeDelta, h.bandStats.byteSize.Load(), "Band byte size delta must match the queue mutation")
+	assert.Equal(h.t, lenDelta, h.registryStats.len.Load(), "Registry length delta must mirror the band delta")
+	assert.Equal(h.t, byteSizeDelta, h.registryStats.byteSize.Load(), "Registry byte size delta must mirror the band delta")
 }
 
-func (p *mockStatsPropagator) propagate(_ int, lenDelta, byteSizeDelta int64) {
-	p.lenDelta.Add(lenDelta)
-	p.byteSizeDelta.Add(byteSizeDelta)
-}
-
-func (p *mockStatsPropagator) reset() {
-	p.lenDelta.Store(0)
-	p.byteSizeDelta.Store(0)
+// resetStats zeroes the captured counters so assertions see only the deltas from the action under test.
+func (h *mqTestHarness) resetStats() {
+	h.bandStats.len.Store(0)
+	h.bandStats.byteSize.Store(0)
+	h.registryStats.len.Store(0)
+	h.registryStats.byteSize.Store(0)
 }
 
 // --- Unit Tests ---
@@ -163,10 +162,7 @@ func TestManagedQueue_Add(t *testing.T) {
 			} else {
 				require.NoError(t, err, "Add operation must succeed when the underlying queue accepts the item")
 			}
-			assert.Equal(t, tc.expectedLenDelta, h.propagator.lenDelta.Load(),
-				"The propagated length delta must exactly match the change in queue size")
-			assert.Equal(t, tc.expectedByteSizeDelta, h.propagator.byteSizeDelta.Load(),
-				"The propagated byte size delta must exactly match the change in queue size")
+			h.assertStatsDelta(tc.expectedLenDelta, tc.expectedByteSizeDelta)
 		})
 	}
 }
@@ -231,10 +227,7 @@ func TestManagedQueue_Remove(t *testing.T) {
 			} else {
 				require.NoError(t, err, "Remove operation must succeed when the underlying queue successfully removes the item")
 			}
-			assert.Equal(t, tc.expectedLenDelta, h.propagator.lenDelta.Load(),
-				"The propagated length delta must exactly match the change in queue size")
-			assert.Equal(t, tc.expectedByteSizeDelta, h.propagator.byteSizeDelta.Load(),
-				"The propagated byte size delta must exactly match the change in queue size")
+			h.assertStatsDelta(tc.expectedLenDelta, tc.expectedByteSizeDelta)
 		})
 	}
 }
@@ -289,10 +282,7 @@ func TestManagedQueue_Cleanup(t *testing.T) {
 			h.setupWithItems(items...)
 			tc.setupMock(q, items)
 			h.mq.Cleanup(func(_ flowcontrol.QueueItemAccessor) bool { return true })
-			assert.Equal(t, tc.expectedLenDelta, h.propagator.lenDelta.Load(),
-				"The propagated length delta must exactly match the total number of items removed during cleanup")
-			assert.Equal(t, tc.expectedByteSizeDelta, h.propagator.byteSizeDelta.Load(),
-				"The propagated byte size delta must exactly match the total size of items removed during cleanup")
+			h.assertStatsDelta(tc.expectedLenDelta, tc.expectedByteSizeDelta)
 		})
 	}
 }
@@ -336,10 +326,7 @@ func TestManagedQueue_Drain(t *testing.T) {
 			tc.setupMock(q, items)
 
 			h.mq.Drain()
-			assert.Equal(t, tc.expectedLenDelta, h.propagator.lenDelta.Load(),
-				"The propagated length delta must exactly match the total number of items drained")
-			assert.Equal(t, tc.expectedByteSizeDelta, h.propagator.byteSizeDelta.Load(),
-				"The propagated byte size delta must exactly match the total size of items drained")
+			h.assertStatsDelta(tc.expectedLenDelta, tc.expectedByteSizeDelta)
 		})
 	}
 }
@@ -417,10 +404,7 @@ func TestManagedQueue_Concurrency_StatsIntegrity(t *testing.T) {
 	h.mq.Drain()
 	assert.Zero(t, h.mq.Len(), "Final queue length must be zero after draining all remaining items")
 	assert.Zero(t, h.mq.ByteSize(), "Final queue byte size must be zero after draining all remaining items")
-	assert.Equal(t, int64(0), h.propagator.lenDelta.Load(),
-		"The net length delta propagated across all operations must be exactly zero")
-	assert.Equal(t, int64(0), h.propagator.byteSizeDelta.Load(),
-		"The net byte size delta propagated across all operations must be exactly zero")
+	h.assertStatsDelta(int64(0), int64(0))
 }
 
 // --- Structural Invariant Test ---
@@ -442,15 +426,12 @@ func TestManagedQueue_MeasuredDeltas_CannotUnderflow(t *testing.T) {
 	h := newMockedMqHarness(t, q, flowKey)
 
 	require.NoError(t, h.mq.Add(item), "Test setup: Initial Add must succeed")
-	h.propagator.reset()
+	h.resetStats()
 
 	for range 3 {
 		_, err := h.mq.Remove(item.Handle())
 		require.NoError(t, err, "Remove against the misreporting mock should surface no error")
 	}
 
-	assert.Equal(t, int64(0), h.propagator.lenDelta.Load(),
-		"A queue whose reported stats never change must produce zero length delta, however many items it returns")
-	assert.Equal(t, int64(0), h.propagator.byteSizeDelta.Load(),
-		"A queue whose reported stats never change must produce zero byte size delta")
+	h.assertStatsDelta(int64(0), int64(0))
 }

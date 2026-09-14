@@ -96,6 +96,13 @@ func TestFactory_ZeroKVCacheUtilThreshold(t *testing.T) {
 	}
 }
 
+func TestFactory_KVCacheUtilThresholdAboveOne(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"kvCacheUtilThreshold":1.5}`)), nil)
+	if err == nil {
+		t.Fatal("expected error for kvCacheUtilThreshold=1.5")
+	}
+}
+
 func TestFactory_NegativePower(t *testing.T) {
 	_, err := Factory("test", fwkplugin.StrictDecoder(json.RawMessage(`{"power":-1}`)), nil)
 	if err == nil {

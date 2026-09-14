@@ -26,11 +26,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -430,7 +432,7 @@ func TestRequestSpanAttributes(t *testing.T) {
 	tests := []struct {
 		name    string
 		request *fwksched.InferenceRequest
-		keys    []string
+		keys    []attribute.Key
 		values  []string
 	}{
 		{name: "nil request"},
@@ -438,19 +440,19 @@ func TestRequestSpanAttributes(t *testing.T) {
 		{
 			name:    "model and request ID",
 			request: &fwksched.InferenceRequest{TargetModel: "model", RequestID: "request"},
-			keys:    []string{"gen_ai.request.model", "gen_ai.request.id"},
+			keys:    []attribute.Key{semconv.GenAIRequestModelKey, semconv.GenAIRequestIDKey},
 			values:  []string{"model", "request"},
 		},
 		{
 			name:    "model only",
 			request: &fwksched.InferenceRequest{TargetModel: "model"},
-			keys:    []string{"gen_ai.request.model"},
+			keys:    []attribute.Key{semconv.GenAIRequestModelKey},
 			values:  []string{"model"},
 		},
 		{
 			name:    "request ID only",
 			request: &fwksched.InferenceRequest{RequestID: "request"},
-			keys:    []string{"gen_ai.request.id"},
+			keys:    []attribute.Key{semconv.GenAIRequestIDKey},
 			values:  []string{"request"},
 		},
 	}
@@ -462,7 +464,7 @@ func TestRequestSpanAttributes(t *testing.T) {
 				t.Fatalf("requestSpanAttributes() returned %d attributes, want %d", len(got), len(test.keys))
 			}
 			for i := range got {
-				if string(got[i].Key) != test.keys[i] {
+				if got[i].Key != test.keys[i] {
 					t.Errorf("attribute %d key = %q, want %q", i, got[i].Key, test.keys[i])
 				}
 				if got[i].Value.AsString() != test.values[i] {
@@ -786,7 +788,7 @@ func spanHasAttr(span *tracetest.SpanStub, key string) bool {
 }
 
 // TestRunScorerPluginsTracing verifies the scheduler scoring path emits a parent
-// llm_d.epp.scoring span with one llm_d.epp.scorer.<type> child per scorer,
+// scoring span with one scorer.<type> child per scorer,
 // carrying the documented identity, weight, candidate-count, and aggregate
 // score attributes, and no per-endpoint attribute keys.
 func TestRunScorerPluginsTracing(t *testing.T) {
@@ -817,19 +819,19 @@ func TestRunScorerPluginsTracing(t *testing.T) {
 	}
 
 	spans := tracetest.SpanStubsFromReadOnlySpans(recorder.Ended())
-	parent := findSpan(spans, "llm_d.epp.scoring")
+	parent := findSpan(spans, "scoring")
 	if parent == nil {
-		t.Fatalf("missing parent span llm_d.epp.scoring; got %d spans", len(spans))
+		t.Fatalf("missing parent span scoring; got %d spans", len(spans))
 	}
-	if got := spanInt(t, parent, "llm_d.epp.scorer.count"); got != 2 {
-		t.Errorf("parent llm_d.epp.scorer.count = %d, want 2", got)
+	if got := spanInt(t, parent, string(semconv.LLMDEPPScorerCountKey)); got != 2 {
+		t.Errorf("parent %s = %d, want 2", semconv.LLMDEPPScorerCountKey, got)
 	}
-	if got := spanInt(t, parent, "llm_d.epp.scoring.candidate_endpoints"); got != 2 {
+	if got := spanInt(t, parent, string(semconv.LLMDEPPScoringCandidateEndpointsKey)); got != 2 {
 		t.Errorf("parent candidate_endpoints = %d, want 2", got)
 	}
 
-	childA := findSpan(spans, "llm_d.epp.scorer.scorer-a")
-	childB := findSpan(spans, "llm_d.epp.scorer.scorer-b")
+	childA := findSpan(spans, "scorer.scorer-a")
+	childB := findSpan(spans, "scorer.scorer-b")
 	if childA == nil || childB == nil {
 		t.Fatalf("missing per-scorer child spans (a=%v b=%v)", childA != nil, childB != nil)
 	}
@@ -839,20 +841,20 @@ func TestRunScorerPluginsTracing(t *testing.T) {
 		t.Errorf("scorer-a span is not a child of the scoring span")
 	}
 
-	if got := spanFloat(t, childA, "llm_d.epp.scorer.weight"); got != 0.25 {
+	if got := spanFloat(t, childA, string(semconv.LLMDEPPScorerWeightKey)); got != 0.25 {
 		t.Errorf("scorer-a weight = %v, want 0.25", got)
 	}
-	if got := spanInt(t, childA, "llm_d.epp.scorer.candidate_endpoints"); got != 2 {
+	if got := spanInt(t, childA, string(semconv.LLMDEPPScorerCandidateEndpointsKey)); got != 2 {
 		t.Errorf("scorer-a candidate_endpoints = %d, want 2", got)
 	}
 	// scorer-a scores {0.2, 0.8}: max 0.8, avg 0.5.
-	if got := spanFloat(t, childA, "llm_d.epp.scorer.score.max"); got != 0.8 {
+	if got := spanFloat(t, childA, string(semconv.LLMDEPPScorerScoreMaxKey)); got != 0.8 {
 		t.Errorf("scorer-a score.max = %v, want 0.8", got)
 	}
-	if got := spanFloat(t, childA, "llm_d.epp.scorer.score.avg"); got != 0.5 {
+	if got := spanFloat(t, childA, string(semconv.LLMDEPPScorerScoreAvgKey)); got != 0.5 {
 		t.Errorf("scorer-a score.avg = %v, want 0.5", got)
 	}
-	if got := spanInt(t, childA, "llm_d.epp.scorer.endpoints_scored"); got != 2 {
+	if got := spanInt(t, childA, string(semconv.LLMDEPPScorerEndpointsScoredKey)); got != 2 {
 		t.Errorf("scorer-a endpoints_scored = %d, want 2", got)
 	}
 
@@ -916,12 +918,12 @@ func TestRunScorerEmptyCandidateAvg(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	child := findSpan(tracetest.SpanStubsFromReadOnlySpans(recorder.Ended()), "llm_d.epp.scorer.empty")
+	child := findSpan(tracetest.SpanStubsFromReadOnlySpans(recorder.Ended()), "scorer.empty")
 	if child == nil {
 		t.Fatal("missing scorer span for empty scorer")
 	}
 	// With no scored endpoints, aggregate attributes are omitted entirely.
-	if spanHasAttr(child, "llm_d.epp.scorer.score.avg") {
+	if spanHasAttr(child, string(semconv.LLMDEPPScorerScoreAvgKey)) {
 		t.Error("empty scorer span should not carry a score.avg attribute")
 	}
 }

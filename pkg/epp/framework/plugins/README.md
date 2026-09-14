@@ -62,7 +62,8 @@ plugins:
   - type: single-profile-handler
 dataLayer:
   discovery:
-    pluginRef: discovery
+    endpoints:
+      pluginRef: discovery
   sources:
     - pluginRef: metrics-source
       extractors:

@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/felixge/httpsnoop"
 )
@@ -32,6 +31,7 @@ type cachedTokensUsageRewriter struct {
 	wroteHeader  bool
 	streaming    bool
 	streamBuffer []byte
+	jsonBuffer   []byte
 }
 
 // OpenAI-compatible chat usage reports prompt cache hits at
@@ -39,15 +39,20 @@ type cachedTokensUsageRewriter struct {
 // See: https://platform.openai.com/docs/guides/prompt-caching
 const promptTokensDetailsField = "prompt_tokens_details"
 
-func newCachedTokensResponseWriter(w http.ResponseWriter, cachedTokens int) http.ResponseWriter {
-	writer, _ := newCachedTokensResponseWriterWithFinalize(w, cachedTokens)
+func newCachedTokensResponseWriter(
+	w http.ResponseWriter, cachedTokens int, streaming bool,
+) http.ResponseWriter {
+	writer, _ := newCachedTokensResponseWriterWithFinalize(w, cachedTokens, streaming)
 	return writer
 }
 
-func newCachedTokensResponseWriterWithFinalize(w http.ResponseWriter, cachedTokens int) (http.ResponseWriter, func() error) {
+func newCachedTokensResponseWriterWithFinalize(
+	w http.ResponseWriter, cachedTokens int, streaming bool,
+) (http.ResponseWriter, func() error) {
 	rewriter := &cachedTokensUsageRewriter{
 		header:       w.Header(),
 		cachedTokens: cachedTokens,
+		streaming:    streaming,
 	}
 	// httpsnoop preserves optional ResponseWriter interfaces such as
 	// http.Flusher, http.Hijacker, http.Pusher, and io.ReaderFrom.
@@ -70,7 +75,10 @@ func newCachedTokensResponseWriterWithFinalize(w http.ResponseWriter, cachedToke
 		},
 	})
 	return writer, func() error {
-		return rewriter.flushSSEBuffer(w.Write)
+		if rewriter.streaming {
+			return rewriter.flushSSEBuffer(w.Write)
+		}
+		return rewriter.flushJSONBuffer(w.Write)
 	}
 }
 
@@ -82,7 +90,28 @@ func (r *cachedTokensUsageRewriter) writeHeader(next httpsnoop.WriteHeaderFunc, 
 }
 
 func (r *cachedTokensUsageRewriter) write(next httpsnoop.WriteFunc, body []byte) (int, error) {
-	updated := r.rewrite(body)
+	if !r.streaming {
+		return r.writeJSON(next, body)
+	}
+	updated := r.rewriteSSEChunk(body)
+	if !r.wroteHeader {
+		r.header.Del("Content-Length")
+	}
+	n, err := next(updated)
+	if err != nil {
+		return n, err
+	}
+	return len(body), nil
+}
+
+func (r *cachedTokensUsageRewriter) writeJSON(next httpsnoop.WriteFunc, body []byte) (int, error) {
+	// ReverseProxy may split one JSON document across multiple Write calls.
+	r.jsonBuffer = append(r.jsonBuffer, body...)
+	updated, ok := replaceCachedTokensJSON(r.jsonBuffer, r.cachedTokens)
+	if !ok {
+		return len(body), nil
+	}
+	r.jsonBuffer = nil
 	if !r.wroteHeader {
 		r.header.Del("Content-Length")
 	}
@@ -94,7 +123,7 @@ func (r *cachedTokensUsageRewriter) write(next httpsnoop.WriteFunc, body []byte)
 }
 
 func (r *cachedTokensUsageRewriter) readFrom(next httpsnoop.WriteFunc, src io.Reader) (int64, error) {
-	if r.isSSE(nil) {
+	if r.streaming {
 		// SSE can be long-lived, so keep it streaming and rewrite complete lines.
 		n, err := io.Copy(cachedTokensStreamWriter{
 			write:   r.write,
@@ -121,13 +150,6 @@ func (r *cachedTokensUsageRewriter) readFrom(next httpsnoop.WriteFunc, src io.Re
 	return int64(len(body)), nil
 }
 
-func (r *cachedTokensUsageRewriter) rewrite(body []byte) []byte {
-	if r.isSSE(body) {
-		return r.rewriteSSEChunk(body)
-	}
-	return replaceCachedTokens(body, r.cachedTokens)
-}
-
 type cachedTokensStreamWriter struct {
 	write   func(httpsnoop.WriteFunc, []byte) (int, error)
 	forward httpsnoop.WriteFunc
@@ -135,19 +157,6 @@ type cachedTokensStreamWriter struct {
 
 func (w cachedTokensStreamWriter) Write(body []byte) (int, error) {
 	return w.write(w.forward, body)
-}
-
-func (r *cachedTokensUsageRewriter) isSSE(body []byte) bool {
-	if r.streaming {
-		return true
-	}
-	contentType := r.header.Get("Content-Type")
-	// Some handlers may not set the content type before the first Write.
-	if strings.Contains(contentType, "text/event-stream") || bytes.HasPrefix(body, []byte("data:")) {
-		r.streaming = true
-		return true
-	}
-	return false
 }
 
 func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
@@ -176,6 +185,19 @@ func (r *cachedTokensUsageRewriter) flushSSEBuffer(next httpsnoop.WriteFunc) err
 	replacedLine, _ := replaceCachedTokensSSELine(r.streamBuffer, r.cachedTokens)
 	r.streamBuffer = nil
 	_, err := next(replacedLine)
+	return err
+}
+
+func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) error {
+	if len(r.jsonBuffer) == 0 {
+		return nil
+	}
+	updated := replaceCachedTokens(r.jsonBuffer, r.cachedTokens)
+	r.jsonBuffer = nil
+	if !r.wroteHeader {
+		r.header.Del("Content-Length")
+	}
+	_, err := next(updated)
 	return err
 }
 

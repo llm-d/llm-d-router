@@ -343,6 +343,12 @@ decode serve this directly" question. The step sends the decode request with the
 The 412 response may carry scheduling or cache-locality hints in headers or body; these
 are not yet consumed by the coordinator.
 
+The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode
+gate when configured. When no gate plugin is configured, the router still returns 412 by
+default for any `Prefer: if-available` request so a missing gate surfaces as the coordinator's
+cache-miss fallback rather than a silent forward. See
+[disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must
@@ -728,6 +734,7 @@ only the request carrier differs.
 
 | `type` | Purpose | Key params |
 | :---- | :---- | :---- |
+| `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
 | `replace-media-urls` | Download `image_url` references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and per-image hash/placeholder/kwargs. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |

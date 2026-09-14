@@ -64,7 +64,7 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
 	podID, modelName := parseTopic(msg.Topic)
 
-	var vllmBatch msgpackVLLMEventBatch
+	var vllmBatch msgpackEventBatch
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}
@@ -79,20 +79,12 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 	}
 
 	batch := kvevents.EventBatch{
-		Timestamp: vllmBatch.TS,
-		Events:    genericEvents,
+		Timestamp:        vllmBatch.TS,
+		Events:           genericEvents,
+		DataParallelRank: vllmBatch.DataParallelRank,
 	}
 
 	return podID, modelName, batch, nil
-}
-
-// vLLM msgpack event batch structure.
-// This struct uses array encoding to match vLLM's msgspec array_like=True format.
-type msgpackVLLMEventBatch struct {
-	_                struct{} `msgpack:",array"`
-	TS               float64
-	Events           []msgpack.RawMessage
-	DataParallelRank *int `msgpack:",omitempty"`
 }
 
 // decodeVLLMEvent decodes a single vLLM event from msgpack bytes and dispatches

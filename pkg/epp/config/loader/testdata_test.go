@@ -364,10 +364,14 @@ schedulingProfiles:
 featureGates:
 - flowControl
 flowControl:
+  defaultRequestTTL: 1m
   priorityBands:
   - priority: 100
+    defaultRequestTTL: 5m
     orderingPolicyRef: customFCFS
     fairnessPolicyRef: customFairness
+  - priority: -1
+    defaultRequestTTL: 0s
 `
 
 // successParserConfigText tests that configuration with parser plugin is correctly loaded.
@@ -931,6 +935,25 @@ schedulingProfiles:
   - pluginRef: scorer-Y
     weight: 20
   - pluginRef: maxScorePicker
+`
+
+// successDeprecatedDiscoveryPluginRefText tests that the deprecated bare
+// discovery.pluginRef is migrated to discovery.endpoints.pluginRef.
+const successDeprecatedDiscoveryPluginRefText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: maxScore
+  type: max-score-picker
+- name: my-disc
+  type: file-discovery
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: maxScore
+dataLayer:
+  discovery:
+    pluginRef: my-disc
 `
 
 // successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,

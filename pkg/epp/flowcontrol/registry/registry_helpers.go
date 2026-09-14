@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -39,11 +40,14 @@ type priorityBand struct {
 	// It is initialized once at creation via fairnessPolicy.NewState() and exposed via GetPolicyState().
 	policyState any
 
-	// --- State Protected by the registry's mu ---
-
-	// config is the local copy of the band's definition.
-	// It is updated during dynamic scaling events (updateConfig), protected by the registry's mutex.
+	// config is the local copy of the band's definition. It is immutable after the band is published to the
+	// registry; hot-path readers (CapacitySnapshot) rely on this to read capacities lock-free.
 	config PriorityBandConfig
+
+	// stats aggregates the occupancy of this band's queues (see occupancyStats).
+	stats occupancyStats
+
+	// --- State Protected by the registry's mu ---
 
 	// queues holds all managedQueue instances within this band, keyed by their logical ID string.
 	// The priority is implicit from the parent priorityBand.
@@ -62,10 +66,19 @@ type priorityBand struct {
 	activeQueues sync.Map
 }
 
+// capacityDimension returns this band's current occupancy against its configured limits.
+func (b *priorityBand) capacityDimension() contracts.CapacityDimension {
+	return contracts.CapacityDimension{
+		Len:              uint64(b.stats.len.Load()),
+		ByteSize:         uint64(b.stats.byteSize.Load()),
+		CapacityRequests: b.config.MaxRequests,
+		CapacityBytes:    b.config.MaxBytes,
+	}
+}
+
 // setQueueActivity is the onActiveTransition callback for this band's queues. It runs inside the
 // queue's critical section, so it must remain lock-free (sync.Map only, never the registry mutex).
-// The stats-propagation callback runs under the same constraint. applyAndPropagateLocked invokes
-// both while the queue mutex is held.
+// applyAndPropagateLocked invokes it, and applies the stats delta, while the queue mutex is held.
 func (b *priorityBand) setQueueActivity(mq *managedQueue, active bool) {
 	if active {
 		b.activeQueues.Store(mq.key.ID, mq)
@@ -101,7 +114,8 @@ func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 }
 
 // addPriorityBand dynamically provisions a new priority band.
-// It looks up the definition in fr.config, which must have been updated by the Registry via updateConfig/repartition.
+// It looks up the definition in fr.config, which the caller must already have populated
+// (see provisionPriorityBandLocked).
 // addPriorityBand must be called with the registry mutex acquired for writing
 func (fr *FlowRegistry) addPriorityBand(priority int) {
 	// Idempotency check.
@@ -112,6 +126,21 @@ func (fr *FlowRegistry) addPriorityBand(priority int) {
 	bandConfig := fr.config.PriorityBands[priority]
 	fr.initPriorityBand(bandConfig)
 	fr.logger.V(logging.DEFAULT).Info("Dynamically added priority band", "priority", priority)
+}
+
+func (fr *FlowRegistry) priorityBandDefaultRequestTTL(priority int) (time.Duration, bool) {
+	fr.mu.RLock()
+	defer fr.mu.RUnlock()
+
+	bandValue, ok := fr.priorityBands.Load(priority)
+	if !ok {
+		return 0, false
+	}
+	defaultRequestTTL := bandValue.(*priorityBand).config.DefaultRequestTTL
+	if defaultRequestTTL == nil {
+		return 0, false
+	}
+	return *defaultRequestTTL, true
 }
 
 // ManagedQueue retrieves a specific `contracts.ManagedQueue` instance from the registry.
@@ -186,7 +215,7 @@ func (fr *FlowRegistry) synchronizeFlow(
 
 	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.", "flowKey", key)
 
-	mq := newManagedQueue(q, policy, key, fr.logger, fr.propagateStatsDelta, band.setQueueActivity)
+	mq := newManagedQueue(q, policy, key, fr.logger, &band.stats, &fr.totals, band.setQueueActivity)
 	band.queues[key.ID] = mq
 }
 

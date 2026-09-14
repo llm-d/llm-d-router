@@ -32,6 +32,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -326,7 +327,9 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 		req.Header.Set(k, v)
 	}
 
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamRender)
 	resp, err := s.client.Do(req)
+	call.Done()
 	if err != nil {
 		return fmt.Errorf("render request failed: %w", err)
 	}

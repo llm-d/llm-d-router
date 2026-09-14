@@ -36,6 +36,8 @@ const (
 	DestinationEndpointServedKey = "x-gateway-destination-endpoint-served"
 	// FlowFairnessIDKey is the header key used to pass the fairness ID to be used in Flow Control.
 	FlowFairnessIDKey = "x-llm-d-inference-fairness-id"
+	// InferenceTTLHeaderKey is the header key used to set a request-specific flow control queue TTL.
+	InferenceTTLHeaderKey = "x-llm-d-inference-ttl"
 	// OldFlowFairnessIDKey is the deprecated alias for FlowFairnessIDKey.
 	OldFlowFairnessIDKey = "x-gateway-inference-fairness-id"
 	// ObjectiveKey is the header key used to specify the objective of an incoming request.
@@ -60,6 +62,9 @@ const (
 	VideoDurationHeaderKey = "x-llm-d-video-duration-seconds"
 	// VideoResolutionHeaderKey is the header key used to specify a request's video frame resolution as "WIDTHxHEIGHT".
 	VideoResolutionHeaderKey = "x-llm-d-video-resolution"
+	// FlowQueueDurationHeaderKey is the response header carrying the time a request spent in flow control admission,
+	// as integer milliseconds. It is absent when flow control did not process the request.
+	FlowQueueDurationHeaderKey = "x-llm-d-flow-queue-duration-ms"
 
 	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
 	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control

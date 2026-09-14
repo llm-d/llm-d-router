@@ -298,7 +298,28 @@ func ensureSaturationDetector(
 			}
 		}
 	}
+
+	if sd, ok := allPlugins[sdConfig.PluginRef]; ok {
+		if _, isFilter := sd.(fwksched.Filter); isFilter {
+			injectFilterIntoProfiles(cfg.SchedulingProfiles, sdConfig.PluginRef)
+		}
+	}
 	return nil
+}
+
+func injectFilterIntoProfiles(profiles []configapi.SchedulingProfile, pluginRef string) {
+	for i := range profiles {
+		found := false
+		for _, p := range profiles[i].Plugins {
+			if p.PluginRef == pluginRef {
+				found = true
+				break
+			}
+		}
+		if !found {
+			profiles[i].Plugins = append(profiles[i].Plugins, configapi.SchedulingPlugin{PluginRef: pluginRef})
+		}
+	}
 }
 
 // ensureDataLayer additively injects the default metrics source and extractor unless opted out.
@@ -308,7 +329,7 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}
-	if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, sourcemetrics.MetricsDataSourceType) {
+	if cfg.DataLayer != nil && hasSourceOfType(cfg.DataLayer, handle, sourcemetrics.MetricsDataSourceType) {
 		return nil
 	}
 
@@ -336,9 +357,9 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	return nil
 }
 
-func hasSourceOfType(dl *configapi.DataLayerConfig, pluginType string) bool {
+func hasSourceOfType(dl *configapi.DataLayerConfig, handle fwkplugin.Handle, pluginType string) bool {
 	for _, s := range dl.Sources {
-		if s.PluginRef == pluginType {
+		if p := handle.Plugin(s.PluginRef); p != nil && p.TypedName().Type == pluginType {
 			return true
 		}
 	}

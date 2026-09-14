@@ -27,10 +27,13 @@ import (
 	. "github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
-// createRedisIndexForTesting creates a new RedisIndex with a mock Redis server for testing.
+const costAwareTestNumCounters int64 = 10_000
+
+// createCostAwareIndexForTesting creates a new CostAwareMemoryIndex for testing.
 func createCostAwareIndexForTesting(t *testing.T) Index {
 	t.Helper()
 	config := DefaultCostAwareMemoryIndexConfig()
+	config.NumCounters = costAwareTestNumCounters
 	index, err := NewCostAwareMemoryIndex(config)
 	require.NoError(t, err)
 	return index
@@ -56,6 +59,7 @@ func TestCostAwareIndexSize(t *testing.T) {
 	// Test with small size to verify eviction
 	cfg := DefaultCostAwareMemoryIndexConfig()
 	cfg.Size = fmt.Sprintf("%d", cost+cost/2) // more than 1 key, less than 2 keys
+	cfg.NumCounters = costAwareTestNumCounters
 
 	index, err := NewCostAwareMemoryIndex(cfg)
 	require.NoError(t, err)
@@ -98,7 +102,7 @@ func TestSizeHumanize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.size, func(t *testing.T) {
-			config := &CostAwareMemoryIndexConfig{Size: tt.size}
+			config := &CostAwareMemoryIndexConfig{Size: tt.size, NumCounters: costAwareTestNumCounters}
 			index, err := NewCostAwareMemoryIndex(config)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, index.MaxCost())

@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -133,22 +134,22 @@ func TestRunPickerPluginSingleSpan(t *testing.T) {
 		key  attribute.Key
 		want string
 	}{
-		{"gen_ai.request.model", "m1"},
-		{"gen_ai.request.id", "r1"},
+		{semconv.GenAIRequestModelKey, "m1"},
+		{semconv.GenAIRequestIDKey, "r1"},
 	} {
 		if got := attrs[tc.key].AsString(); got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
 		}
 	}
-	if got := attrs["llm_d.epp.picker.candidate_endpoints"].AsInt64(); got != 3 {
+	if got := attrs[semconv.LLMDEPPPickerCandidateEndpointsKey].AsInt64(); got != 3 {
 		t.Errorf("candidate_endpoints = %d, want 3", got)
 	}
 	// newWeightedScores assigns score i to the i-th name, so the span records
 	// candidates highest score first.
-	if got, want := attrs["llm_d.epp.picker.top_endpoints"].AsStringSlice(), []string{"/pod3", "/pod2", "/pod1"}; !reflect.DeepEqual(got, want) {
+	if got, want := attrs[semconv.LLMDEPPPickerTopEndpointsKey].AsStringSlice(), []string{"/pod3", "/pod2", "/pod1"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("top_endpoints = %v, want %v", got, want)
 	}
-	if got, want := attrs["llm_d.epp.picker.top_scores"].AsFloat64Slice(), []float64{2, 1, 0}; !reflect.DeepEqual(got, want) {
+	if got, want := attrs[semconv.LLMDEPPPickerTopScoresKey].AsFloat64Slice(), []float64{2, 1, 0}; !reflect.DeepEqual(got, want) {
 		t.Errorf("top_scores = %v, want %v", got, want)
 	}
 }
@@ -170,10 +171,10 @@ func TestRunPickerPluginTopScoresCapped(t *testing.T) {
 		t.Fatalf("got %d pick_endpoints spans, want 1", len(spans))
 	}
 	attrs := pickerSpanAttributes(spans[0])
-	if got, want := attrs["llm_d.epp.picker.top_endpoints"].AsStringSlice(), []string{"/pod7", "/pod6", "/pod5", "/pod4", "/pod3"}; !reflect.DeepEqual(got, want) {
+	if got, want := attrs[semconv.LLMDEPPPickerTopEndpointsKey].AsStringSlice(), []string{"/pod7", "/pod6", "/pod5", "/pod4", "/pod3"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("top_endpoints = %v, want the 5 highest-scoring %v", got, want)
 	}
-	if got, want := attrs["llm_d.epp.picker.top_scores"].AsFloat64Slice(), []float64{6, 5, 4, 3, 2}; !reflect.DeepEqual(got, want) {
+	if got, want := attrs[semconv.LLMDEPPPickerTopScoresKey].AsFloat64Slice(), []float64{6, 5, 4, 3, 2}; !reflect.DeepEqual(got, want) {
 		t.Errorf("top_scores = %v, want %v", got, want)
 	}
 }
@@ -198,7 +199,7 @@ func TestRunPickerPluginNilResult(t *testing.T) {
 	}
 	// Scores are captured from the candidates before Pick, so they are recorded
 	// even when the picker selects nothing.
-	if got, want := pickerSpanAttributes(spans[0])["llm_d.epp.picker.top_scores"].AsFloat64Slice(), []float64{1, 0}; !reflect.DeepEqual(got, want) {
+	if got, want := pickerSpanAttributes(spans[0])[semconv.LLMDEPPPickerTopScoresKey].AsFloat64Slice(), []float64{1, 0}; !reflect.DeepEqual(got, want) {
 		t.Errorf("top_scores = %v, want %v", got, want)
 	}
 }
@@ -241,10 +242,10 @@ func TestRunPickerPluginOmitsEmptyGenAI(t *testing.T) {
 		t.Fatalf("got %d pick_endpoints spans, want 1", len(spans))
 	}
 	attrs := pickerSpanAttributes(spans[0])
-	if _, ok := attrs["gen_ai.request.model"]; ok {
-		t.Error("gen_ai.request.model set for empty TargetModel")
+	if _, ok := attrs[semconv.GenAIRequestModelKey]; ok {
+		t.Errorf("%s set for empty TargetModel", semconv.GenAIRequestModelKey)
 	}
-	if _, ok := attrs["gen_ai.request.id"]; ok {
-		t.Error("gen_ai.request.id set for empty RequestID")
+	if _, ok := attrs[semconv.GenAIRequestIDKey]; ok {
+		t.Errorf("%s set for empty RequestID", semconv.GenAIRequestIDKey)
 	}
 }

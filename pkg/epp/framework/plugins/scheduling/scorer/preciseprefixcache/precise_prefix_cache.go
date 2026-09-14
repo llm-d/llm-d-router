@@ -31,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -64,7 +65,7 @@ type PluginConfig struct {
 // directly.
 type Plugin struct {
 	typedName    plugin.TypedName
-	producer     *legacyProducer
+	producer     *preciseproducer.Producer
 	scorer       *prefixscorer.Plugin
 	matchInfoKey plugin.DataKey
 }
@@ -97,9 +98,8 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		return prefixscorer.New(ctx, name, existing.TypedName().Name)
 	}
 
-	// Self-host: defaults first, then overlay the operator's YAML — matches
-	// the historical factory so partial IndexerConfig (e.g. only
-	// tokenizersPoolConfig set) doesn't leave the indexer half-built.
+	// Self-host: defaults first, then overlay the operator's YAML, so a
+	// partial IndexerConfig doesn't leave the indexer half-built.
 	defaultIndexerCfg, err := kvcache.NewDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize indexer config: %w", err)
@@ -122,7 +122,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		SpeculativeTTL:       legacy.SpeculativeTTL,
 	}
 
-	producer, err := newLegacyProducer(ctx, name, producerCfg)
+	producer, err := preciseproducer.New(ctx, name, producerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create internal producer for %s: %w", PrecisePrefixCachePluginType, err)
 	}
@@ -175,13 +175,13 @@ func (p *Plugin) Score(ctx context.Context,
 	)
 	defer span.End()
 
-	span.SetAttributes(attribute.Int("llm_d.epp.scorer.candidate_endpoints", len(endpoints)))
+	span.SetAttributes(semconv.LLMDEPPScorerCandidateEndpoints(len(endpoints)))
 	if req != nil {
 		if req.TargetModel != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.model", req.TargetModel))
+			span.SetAttributes(semconv.GenAIRequestModel(req.TargetModel))
 		}
 		if req.RequestID != "" {
-			span.SetAttributes(attribute.String("gen_ai.request.id", req.RequestID))
+			span.SetAttributes(semconv.GenAIRequestID(req.RequestID))
 		}
 	}
 	span.SetAttributes(mmobs.SpanAttributes(req)...)
@@ -197,9 +197,9 @@ func (p *Plugin) Score(ctx context.Context,
 			totalScore += s
 		}
 		span.SetAttributes(
-			attribute.Float64("llm_d.epp.scorer.score.max", maxScore),
-			attribute.Float64("llm_d.epp.scorer.score.avg", totalScore/float64(len(scores))),
-			attribute.Int("llm_d.epp.scorer.endpoints_scored", len(scores)),
+			semconv.LLMDEPPScorerScoreMax(maxScore),
+			semconv.LLMDEPPScorerScoreAvg(totalScore/float64(len(scores))),
+			semconv.LLMDEPPScorerEndpointsScored(len(scores)),
 		)
 	}
 

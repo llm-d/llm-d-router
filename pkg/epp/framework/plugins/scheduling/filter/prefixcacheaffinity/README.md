@@ -22,7 +22,7 @@ candidates (no-op).
 The `prefix-cache-scorer` plugin scores endpoints by prefix cache hit ratio. It works with
 any picker, but the choice of picker creates a trade-off:
 
-- **With `max-picker`** (the default): the scorer consistently picks the single
+- **With `max-score-picker`** (the default): the scorer consistently picks the single
   highest-scoring endpoint, which maximizes cache hits but causes **hot-spotting** — many
   concurrent requests with similar prompts all land on the same endpoint, overloading it and
   degrading TTFT.
@@ -66,6 +66,46 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 - If no endpoints have the TTFT source attribute (`LatencyPredictionInfo` or `InFlightLoad`),
   the TTFT load gate is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix
   scores default to 0 and no endpoints pass the affinity threshold, so all are kept (no-op)
+
+## Composition requirements
+
+The filter narrows the candidate set or leaves it unchanged; the routing decision is made
+by the scorers and picker that run after it. When the TTFT load gate breaks stickiness, the
+filter keeps all endpoints, and the request moves off the sticky set only if downstream
+scoring prefers the less-loaded endpoints. Nothing tells the scorers that a break happened;
+they apply the same weights to whatever candidates arrive.
+
+Scorers running after this filter must not include a separately weighted prefix-affinity
+scorer. Each scorer's output is clamped to [0, 1] before weighting, so the other scorers can
+favor a non-sticky endpoint by at most the sum of their weights (loadWeightSum), while a
+prefix-affinity scorer penalizes it by its weight (prefixWeight) times the prefix cache
+score difference. The break can therefore move a request only to endpoints whose prefix
+cache score is within loadWeightSum / prefixWeight of the sticky endpoint's. A prefix weight
+at or above loadWeightSum lets a zero-match endpoint at best tie a fully matched sticky one;
+at or above loadWeightSum / affinityThreshold no zero-match endpoint can beat any sticky
+endpoint outright (at exact equality a tie, resolved at random, remains possible). The break
+still moves requests to partially warm endpoints inside the bound, so a weighted
+`prefix-cache-scorer` with `max-score-picker` attenuates the gate in proportion to the prefix
+weight, up to full inertness for cold endpoints. Breaks are counted by
+`llm_d_epp_prefix_cache_affinity_filter_decisions_total` with `outcome="load_override"`. A
+break that changed no routing decision shows as that counter climbing while the sticky
+endpoint's queue depth and TTFT hold; there is no counter for a break that left the request
+on the same endpoint.
+
+Excluding a weighted prefix scorer does not remove affinity from the post-break decision.
+The recommended load scorers count uncached tokens (the endpoint's uncached tokens in flight
+plus the tokens of this request the endpoint has not cached), so cache warmth lowers a
+request's cost on a warm endpoint in the same units as the load it is compared against.
+
+Recommended compositions pair the filter with a single load scorer and `max-score-picker`:
+`token-load-scorer` for prefill-bound workloads, `active-request-scorer` for decode-bound
+workloads. `weighted-random-picker` spreads requests across the sticky set rather than
+concentrating them on the top-scored endpoint; the picker choice does not affect the
+scorer requirement. The
+[optimized-baseline guide](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline)
+ships the prefill-bound composition, and the
+[Sticky Until Saturated post](https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing)
+documents the strategy and its calibration.
 
 ## Config
 

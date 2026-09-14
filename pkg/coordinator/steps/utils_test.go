@@ -73,26 +73,27 @@ func TestCapSingleTokenOutput(t *testing.T) {
 			},
 		},
 		{
-			name:   "max_completion_tokens is not added when the client omitted it",
+			name:   "max_completion_tokens is added even when the client omitted it",
 			format: gateway.FormatChatCompletions,
 			body:   map[string]any{"model": "m"},
 			want: map[string]any{
-				"model":      "m",
-				"max_tokens": 1,
-				"stream":     false,
+				"model":                 "m",
+				"max_tokens":            1,
+				"max_completion_tokens": 1,
+				"stream":                false,
 			},
 		},
 		{
 			name:   "completions caps max_tokens, strips min_tokens, forces non-streaming",
 			format: gateway.FormatCompletions,
 			body:   map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5},
-			want:   map[string]any{"model": "m", "max_tokens": 1, "stream": false},
+			want:   map[string]any{"model": "m", "max_tokens": 1, "max_completion_tokens": 1, "stream": false},
 		},
 		{
 			name:   "streaming is forced false and stream_options stripped",
 			format: gateway.FormatCompletions,
 			body:   map[string]any{"stream": true, "stream_options": map[string]any{"include_usage": true}},
-			want:   map[string]any{"stream": false, "max_tokens": 1},
+			want:   map[string]any{"stream": false, "max_tokens": 1, "max_completion_tokens": 1},
 		},
 		{
 			name:   "generate caps max_tokens and strips min_tokens inside sampling_params",

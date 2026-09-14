@@ -33,6 +33,13 @@ const (
 	eventTagAllBlocksCleared = "AllBlocksCleared"
 )
 
+type msgpackEventBatch struct {
+	_                struct{} `msgpack:",array"`
+	TS               float64
+	Events           []msgpack.RawMessage
+	DataParallelRank *int `msgpack:",omitempty"`
+}
+
 // parseTopic extracts pod ID and model name from the topic format "kv@<pod-id>@<model-name>".
 //
 //nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter

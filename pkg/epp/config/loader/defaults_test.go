@@ -24,20 +24,33 @@ import (
 	"k8s.io/utils/ptr"
 
 	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
+// mockFilterDetector implements both SaturationDetector and Filter, like the real utilization-detector.
+type mockFilterDetector struct{ mockPlugin }
+
+var (
+	_ fwksched.Filter = &mockFilterDetector{}
+)
+
+func (m *mockFilterDetector) Saturation(_ context.Context, _ []fwkdl.Endpoint) float64 { return 0 }
+func (m *mockFilterDetector) Filter(_ context.Context, _ *fwksched.InferenceRequest, eps []fwksched.Endpoint) []fwksched.Endpoint {
+	return eps
+}
+
 // metricsPlugins returns an allPlugins map with mock stubs for both default metrics plugins.
 // Providing them prevents ensureDataLayer from calling registerDefaultPlugin (which needs the
 // global factory registry). The function still injects the DataLayer.Sources entries.
-func metricsPlugins() map[string]fwkplugin.Plugin {
-	return map[string]fwkplugin.Plugin{
-		sourcemetrics.MetricsDataSourceType:   &mockPlugin{t: fwkplugin.TypedName{Type: sourcemetrics.MetricsDataSourceType, Name: sourcemetrics.MetricsDataSourceType}},
-		extractormetrics.MetricsExtractorType: &mockPlugin{t: fwkplugin.TypedName{Type: extractormetrics.MetricsExtractorType, Name: extractormetrics.MetricsExtractorType}},
-	}
+func metricsPlugins(handle fwkplugin.Handle) map[string]fwkplugin.Plugin {
+	handle.AddPlugin(sourcemetrics.MetricsDataSourceType, &mockPlugin{t: fwkplugin.TypedName{Type: sourcemetrics.MetricsDataSourceType, Name: sourcemetrics.MetricsDataSourceType}})
+	handle.AddPlugin(extractormetrics.MetricsExtractorType, &mockPlugin{t: fwkplugin.TypedName{Type: extractormetrics.MetricsExtractorType, Name: extractormetrics.MetricsExtractorType}})
+	return handle.GetAllPluginsWithNames()
 }
 
 func TestEnsureDataLayer(t *testing.T) {
@@ -47,7 +60,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		cfg := &configapi.EndpointPickerConfig{}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.NotNil(t, cfg.DataLayer)
@@ -63,7 +76,7 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 1)
@@ -80,13 +93,31 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 2)
 		refs := []string{cfg.DataLayer.Sources[0].PluginRef, cfg.DataLayer.Sources[1].PluginRef}
 		require.Contains(t, refs, "k8s-notification-source")
 		require.Contains(t, refs, sourcemetrics.MetricsDataSourceType)
+	})
+
+	t.Run("source of another type does not suppress injection", func(t *testing.T) {
+		cfg := &configapi.EndpointPickerConfig{
+			DataLayer: &configapi.DataLayerConfig{
+				Sources: []configapi.DataLayerSource{
+					{PluginRef: "dcgmSource"},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+		allPlugins := metricsPlugins(handle)
+		handle.AddPlugin("dcgmSource", &mockPlugin{t: fwkplugin.TypedName{Type: "dcgm-data-source", Name: "dcgmSource"}})
+
+		err := ensureDataLayer(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.DataLayer.Sources, 2)
 	})
 
 	t.Run("existing metrics-data-source is not double-injected", func(t *testing.T) {
@@ -99,10 +130,34 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Len(t, cfg.DataLayer.Sources, 1, "no duplicate metrics source")
+	})
+
+	t.Run("metrics source under a custom instance name is not double-injected", func(t *testing.T) {
+		cfg := &configapi.EndpointPickerConfig{
+			DataLayer: &configapi.DataLayerConfig{
+				Sources: []configapi.DataLayerSource{
+					{
+						PluginRef:  "metricsSource",
+						Extractors: []configapi.DataLayerExtractor{{PluginRef: "customMetricsExtractor"}},
+					},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+		handle.AddPlugin("metricsSource", &mockPlugin{t: fwkplugin.TypedName{Type: sourcemetrics.MetricsDataSourceType, Name: "metricsSource"}})
+		handle.AddPlugin("customMetricsExtractor", &mockPlugin{t: fwkplugin.TypedName{Type: extractormetrics.MetricsExtractorType, Name: "customMetricsExtractor"}})
+
+		err := ensureDataLayer(cfg, handle, handle.GetAllPluginsWithNames())
+
+		require.NoError(t, err)
+		require.Len(t, cfg.DataLayer.Sources, 1, "no duplicate metrics source")
+		require.Equal(t, "metricsSource", cfg.DataLayer.Sources[0].PluginRef)
+		require.Len(t, cfg.DataLayer.Sources[0].Extractors, 1, "no duplicate metrics extractor")
+		require.Equal(t, "customMetricsExtractor", cfg.DataLayer.Sources[0].Extractors[0].PluginRef)
 	})
 
 	t.Run("injectDefaults: false suppresses injection", func(t *testing.T) {
@@ -113,10 +168,87 @@ func TestEnsureDataLayer(t *testing.T) {
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
-		err := ensureDataLayer(cfg, handle, metricsPlugins())
+		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
 
 		require.NoError(t, err)
 		require.Empty(t, cfg.DataLayer.Sources)
 	})
 
+}
+
+func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
+	t.Run("detector implementing Filter is injected into profiles", func(t *testing.T) {
+		w := 2.0
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		detectorName := "my-detector"
+		detector := &mockFilterDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}}
+		handle.AddPlugin(detectorName, detector)
+
+		allPlugins := handle.GetAllPluginsWithNames()
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 2)
+		require.Equal(t, detectorName, cfg.SchedulingProfiles[0].Plugins[1].PluginRef)
+	})
+
+	t.Run("detector not implementing Filter is not injected", func(t *testing.T) {
+		w := 2.0
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		detectorName := "plain-detector"
+		detector := &mockSaturationDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}}
+		handle.AddPlugin(detectorName, detector)
+
+		allPlugins := handle.GetAllPluginsWithNames()
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 1, "non-filter detector should not be injected")
+	})
+
+	t.Run("detector already in profile is not duplicated", func(t *testing.T) {
+		detectorName := "my-detector"
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{Name: "default", Plugins: []configapi.SchedulingPlugin{
+					{PluginRef: detectorName},
+					{PluginRef: "picker"},
+				}},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+
+		detector := &mockFilterDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}}
+		handle.AddPlugin(detectorName, detector)
+
+		allPlugins := handle.GetAllPluginsWithNames()
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		err := ensureSaturationDetector(cfg, handle, allPlugins)
+
+		require.NoError(t, err)
+		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 2, "already present, no duplicate")
+	})
 }

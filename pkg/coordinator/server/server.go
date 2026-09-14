@@ -78,13 +78,25 @@ func logRequestResponse(next http.Handler) http.Handler {
 	})
 }
 
+// RouteRegistrar is implemented by pipeline steps that serve auxiliary HTTP
+// endpoints from the coordinator listener, beyond the built-in inference
+// routes (for example, result retrieval for a queueing step). RegisterRoutes
+// is called once per implementing step at server construction, after the
+// built-in routes are registered. chi keeps the last handler registered for
+// a pattern, so a step registering a path the server already owns would
+// silently take over that route: steps must use paths of their own.
+type RouteRegistrar interface {
+	RegisterRoutes(r chi.Router)
+}
+
 type Server struct {
 	httpServer         *http.Server
 	pipeline           *pipeline.Pipeline
 	maxRequestBodySize int64
+	passthrough        *passthroughHandler
 }
 
-func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
+func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
 	maxBodySize := cfg.MaxRequestBodySize
 	if maxBodySize == 0 {
 		// Zero means unset; Viper fills this from the config default in
@@ -101,7 +113,15 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
 		// LimitReader to receive a negative limit and return immediate EOF.
 		return nil, fmt.Errorf("server: MaxRequestBodySize must be at most %d MB, got %d", int64((math.MaxInt64-1)/config.BytesPerMB), maxBodySize)
 	}
-	s := &Server{pipeline: p, maxRequestBodySize: maxBodySize}
+	passthrough, err := newPassthroughHandler(gwClient, maxBodySize)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		pipeline:           p,
+		maxRequestBodySize: maxBodySize,
+		passthrough:        passthrough,
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -114,6 +134,13 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline) (*Server, error) {
 	r.Post(gateway.VLLMGeneratePath, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
+	r.NotFound(s.passthrough.ServeHTTP)
+
+	for _, step := range p.Steps() {
+		if rr, ok := step.(RouteRegistrar); ok {
+			rr.RegisterRoutes(r)
+		}
+	}
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,

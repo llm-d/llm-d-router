@@ -56,10 +56,10 @@ type (
 		// Defaults to "num_gpu_blocks" if empty.
 		CacheNumBlocksLabelName string `json:"cacheNumBlocksLabelName,omitempty"`
 		// CacheBlockSizeSpec defines the metric specification string for retrieving block size directly
-		// as a gauge value (alternative to CacheInfoSpec labels). Used by engines like Triton TRT-LLM.
+		// as a gauge value (alternative to CacheInfoSpec labels).
 		CacheBlockSizeSpec string `json:"cacheBlockSizeSpec,omitempty"`
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
-		// as a gauge value (alternative to CacheInfoSpec labels). Used by engines like Triton TRT-LLM.
+		// as a gauge value (alternative to CacheInfoSpec labels).
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
@@ -86,7 +86,7 @@ type (
 	}
 )
 
-// Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
+// Default engine configurations for vLLM, SGLang, ATOM, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
 		Name:                "vllm",
@@ -97,14 +97,22 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "vllm:cache_config_info",
 	},
 	{
-		Name:                    "sglang",
-		QueuedRequestsSpec:      "sglang:num_queue_reqs",
-		RunningRequestsSpec:     "sglang:num_running_reqs",
-		KVUsageSpec:             "sglang:token_usage",
-		LoRASpec:                "",
-		CacheInfoSpec:           "sglang:cache_config_info",
-		CacheBlockSizeLabelName: "page_size",
-		CacheNumBlocksLabelName: "num_pages",
+		Name:                "sglang",
+		QueuedRequestsSpec:  "sglang:num_queue_reqs",
+		RunningRequestsSpec: "sglang:num_running_reqs",
+		KVUsageSpec:         "sglang:token_usage",
+		LoRASpec:            "",
+		CacheInfoSpec:       "",
+		CacheBlockSizeSpec:  "sglang:page_size",
+		CacheNumBlocksSpec:  "sglang:num_pages",
+	},
+	{
+		Name:                "atom",
+		QueuedRequestsSpec:  "atom:requests_waiting",
+		RunningRequestsSpec: "atom:requests_running",
+		KVUsageSpec:         "atom:kv_cache_usage_ratio",
+		LoRASpec:            "",
+		CacheInfoSpec:       "atom:cache_config_info",
 	},
 	{
 		Name:                "trtllm-serve",

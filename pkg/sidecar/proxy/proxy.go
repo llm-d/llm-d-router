@@ -206,6 +206,10 @@ type Config struct {
 	SecureServing bool
 	// CertPath is the path to TLS certificates for the sidecar server.
 	CertPath string
+	// TLSMinVersion is the minimum TLS version accepted by the sidecar server.
+	TLSMinVersion uint16
+	// TLSCipherSuites are the TLS 1.2 and below cipher suites accepted by the sidecar server.
+	TLSCipherSuites []uint16
 
 	// MetricsPort is the port for the Prometheus /metrics endpoint. 0 (the
 	// default) disables it; when > 0 the sidecar serves the shared metrics
@@ -213,6 +217,11 @@ type Config struct {
 	// on a separate address from the data-plane proxy port. Takes precedence
 	// over the MORIIO_METRICS_ADDR env var (kept for backward compatibility).
 	MetricsPort int
+	// MetricsCertDir is the directory holding tls.crt and tls.key for the
+	// metrics endpoint. Empty (the default) serves metrics over plain HTTP.
+	// Independent of SecureServing/CertPath, which apply to the data-plane
+	// listener.
+	MetricsCertDir string
 
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
@@ -338,7 +347,7 @@ func (c Config) String() string {
 // (if any) need special handling.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, APIType)
 
 // Server is the reverse proxy server
 type Server struct {

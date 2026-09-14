@@ -107,7 +107,6 @@ schedulingProfiles:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: disagg-headers-handler
 - type: disagg-profile-handler
   parameters:
     deciders:
@@ -141,7 +140,6 @@ schedulingProfiles:
   - pluginRef: max-score-picker
 `,
 		expectedPlugins: []configapi.PluginSpec{
-			{Name: "disagg-headers-handler", Type: "disagg-headers-handler"},
 			{Name: "always-disagg-pd-decider", Type: "always-disagg-pd-decider"},
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
 			{Name: "prefill-filter", Type: "by-label"},
@@ -162,7 +160,6 @@ schedulingProfiles:
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
-- type: disagg-headers-handler
 - type: disagg-profile-handler
   parameters:
     deciders:
@@ -195,7 +192,6 @@ schedulingProfiles:
   - pluginRef: max-score-picker
 `,
 		expectedPlugins: []configapi.PluginSpec{
-			{Name: "disagg-headers-handler", Type: "disagg-headers-handler"},
 			{Name: "always-disagg-pd-decider", Type: "always-disagg-pd-decider"},
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
 			{Name: "prefill-filter", Type: "by-label"},
@@ -218,13 +214,15 @@ kind: EndpointPickerConfig
 plugins:
 - type: token-producer
 - type: prefix-based-pd-decider
-- type: prefill-header-handler
 - type: prefill-filter
 - type: decode-filter
 - type: prefix-cache-scorer
 - type: active-request-scorer
 - type: queue-scorer
-- type: pd-profile-handler
+- type: disagg-profile-handler
+  parameters:
+    deciders:
+      prefill: prefix-based-pd-decider
 schedulingProfiles:
 - name: prefill
   plugins:
@@ -245,7 +243,6 @@ schedulingProfiles:
 `,
 		expectedPlugins: []configapi.PluginSpec{
 			{Name: "token-producer", Type: "token-producer"},
-			{Name: "prefill-header-handler", Type: "disagg-headers-handler"},
 			{Name: "prefill-filter", Type: "by-label"},
 			{Name: "decode-filter", Type: "by-label"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
@@ -253,7 +250,7 @@ schedulingProfiles:
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
 			{Name: "active-request-scorer", Type: "active-request-scorer"},
 			{Name: "queue-scorer", Type: "queue-scorer"},
-			{Name: "pd-profile-handler", Type: "pd-profile-handler"},
+			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
 		},
 	},
 	"flow-control": {

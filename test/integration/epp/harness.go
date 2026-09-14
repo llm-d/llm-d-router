@@ -27,6 +27,7 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/google/uuid"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -41,7 +42,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	metricsutils "k8s.io/component-base/metrics/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -53,11 +53,12 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	dlmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Global State (Initialized in TestMain)
@@ -397,16 +398,16 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	return h
 }
 
-// WaitForReadyPodsMetric blocks until the prometheus metric 'inference_pool_ready_pods' matches the expected count.
+// WaitForReadyPodsMetric blocks until the prometheus metric 'llm_d_epp_ready_endpoints' matches the expected count.
 func (h *TestHarness) WaitForReadyPodsMetric(expectedCount int) {
 	h.t.Helper()
 
 	expected := cleanMetric(metricReadyPods(expectedCount))
 	require.Eventually(h.t, func() bool {
-		err := metricsutils.GatherAndCompare(crmetrics.Registry, strings.NewReader(expected),
-			"inference_pool_ready_pods")
+		err := promtestutil.GatherAndCompare(crmetrics.Registry, strings.NewReader(expected),
+			"llm_d_epp_ready_endpoints")
 		return err == nil
-	}, 10*time.Second, 50*time.Millisecond, "Timed out waiting for inference_pool_ready_pods metric to settle")
+	}, 10*time.Second, 50*time.Millisecond, "Timed out waiting for llm_d_epp_ready_endpoints metric to settle")
 }
 
 // WaitForSync blocks until the EPP Datastore has synced the expected number of pods.
@@ -440,6 +441,30 @@ func (h *TestHarness) WaitForSync(expectedPods int, checkModelObjective string) 
 	return h
 }
 
+// WaitForMetricsDelivery blocks until every tracked endpoint has received a metrics update.
+// Endpoints start with a zero UpdateTime, which the default utilization-detector filter
+// drops as stale; tests asserting on the full candidate set need it.
+func (h *TestHarness) WaitForMetricsDelivery() *TestHarness {
+	h.t.Helper()
+
+	require.Eventually(h.t, func() bool {
+		pods := h.Datastore.PodList(datastore.AllPodsPredicate)
+		if len(pods) == 0 {
+			return false
+		}
+		for _, pod := range pods {
+			// Half the staleness threshold: fresh enough that the filter still accepts
+			// the endpoint once the wait returns, loose enough to tolerate a slow polling tick.
+			if m := pod.GetMetrics(); m == nil || time.Since(m.UpdateTime) > utilization.DefaultMetricsStalenessThreshold/2 {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 50*time.Millisecond,
+		"Timed out waiting for endpoint metrics delivery")
+	return h
+}
+
 // ExpectMetrics asserts that specific metrics match the expected Prometheus output.
 // It uses Eventually to allow for slight delays in metric recording (e.g. async token counting).
 func (h *TestHarness) ExpectMetrics(expected map[string]string) {
@@ -447,7 +472,7 @@ func (h *TestHarness) ExpectMetrics(expected map[string]string) {
 	for name, value := range expected {
 		var err error
 		assert.Eventually(h.t, func() bool {
-			err = metricsutils.GatherAndCompare(crmetrics.Registry, strings.NewReader(value), name)
+			err = promtestutil.GatherAndCompare(crmetrics.Registry, strings.NewReader(value), name)
 			return err == nil
 		}, 2*time.Second, 50*time.Millisecond, "Timed out waiting for metric %s to match: %v", name)
 		if err != nil {

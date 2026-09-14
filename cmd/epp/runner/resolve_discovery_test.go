@@ -41,7 +41,9 @@ func newHandleWithPlugin(t *testing.T, name string, p fwkplugin.Plugin) fwkplugi
 func discoveryConfigRef(ref string) *configapi.EndpointPickerConfig {
 	return &configapi.EndpointPickerConfig{
 		DataLayer: &configapi.DataLayerConfig{
-			Discovery: &configapi.DiscoveryConfig{PluginRef: ref},
+			Discovery: &configapi.DiscoveryConfig{
+				Endpoints: &configapi.EndpointDiscoveryConfig{PluginRef: ref},
+			},
 		},
 	}
 }

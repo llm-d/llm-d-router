@@ -103,7 +103,7 @@ Since both charts use `routerlib` under the hood, all configurations and customi
 
 ### 1. EPP Core Configuration
 
-Core settings for the Endpoint Picker Proxy (EPP) container and pod, including scaling, images, command-line flags, custom environment variables, resources, and custom plugins configuration (`pluginsCustomConfig`).
+Core settings for the Endpoint Picker Proxy (EPP) container and pod, including scaling, images, command-line flags, custom environment variables, resources, and plugins configuration.
 
 > [!NOTE]
 > **High Availability (HA) Modes**:
@@ -112,12 +112,75 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 > *   **Active-Active Mode**: You can explicitly disable leader-election by passing `ha-enable-leader-election: false` under `router.epp.flags`. In this mode, all replicas process traffic concurrently.
 >     *   *Warning*: In active-active mode, you **must only use active-active compatible plugins**—specifically plugins that pull real-time metrics/state dynamically from the backend model servers (such as the precise prefix cache, queue, and KV-cache utilization scorers). Avoid plugins that rely on local in-memory routing state, as this state is not synchronized across replicas.
 
+##### Multi-replica EPP and Helm `--wait`
+
+In active-passive mode only the elected leader passes its readiness probe; standby
+replicas answer the `readiness` gRPC service with `NOT_SERVING` on purpose, so they
+never become Service endpoints. That is deliberate, but it means the EPP Deployment
+settles at `readyReplicas: 1` out of `replicas: N`.
+
+With the default `Recreate` strategy, Kubernetes forces `maxUnavailable` to `0`, so
+the Deployment reports `Available=False` / `MinimumReplicasUnavailable` and never
+becomes available. Anything that gates on Deployment availability blocks:
+
+```console
+$ helm install my-release . --set router.epp.replicas=2 --wait --timeout 4m
+Error: INSTALLATION FAILED: resource Deployment/.../my-release-epp not ready.
+status: InProgress, message: Available: 1/2
+```
+
+With Flux, the `HelmRelease` stays `pending-upgrade` until its timeout and then
+rolls back, and while it is pending no further EPP configuration change can start
+a new upgrade.
+
+Pick whichever of these fits your tooling:
+
+**1. Let Helm treat the standbys as expected-unavailable** (Helm 3 and Flux only)
+
+```yaml
+router:
+  epp:
+    replicas: 2
+    deploymentStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1   # must cover the standby replicas, i.e. >= replicas - 1
+        maxSurge: 0
+```
+
+Helm 3 computes readiness as `readyReplicas >= replicas - maxUnavailable`, so the
+release converges as soon as the leader is ready. Standbys remain `NotReady` and
+stay out of the Service, so no traffic reaches them before they are elected.
+
+> [!IMPORTANT]
+> This does **not** help Helm 4, which uses `kstatus`. `kstatus` compares
+> `availableReplicas` against `spec.replicas` directly and ignores `maxUnavailable`,
+> so a multi-replica EPP still reports `Available: 1/2` there. Use option 2 on Helm 4.
+>
+> Moving off `Recreate` also changes upgrade behaviour: during a rollout the old
+> leader holds the lease until it is terminated, so a new replica cannot become
+> ready until the lease expires. Keep `maxSurge: 0` so the rollout does not stall
+> waiting on a surge replica that can never be elected.
+
+**2. Do not gate on Deployment availability**
+
+Install without `--wait` (Flux: `spec.install.disableWait` and
+`spec.upgrade.disableWait`), then gate on what actually indicates a serving EPP --
+an elected leader and a Ready Service endpoint:
+
+```bash
+kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
+  endpoints/<release>-epp -n <namespace> --timeout=5m
+```
+
+
 #### EPP Core Configuration Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. | `1` |
+| `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | `{type: Recreate}` |
 | `router.epp.extProcPort` | Port EPP uses for external processing gRPC communication. | `9002` |
 | `router.epp.image.registry` | EPP container image registry. | `ghcr.io/llm-d` |
 | `router.epp.image.repository` | EPP container image repository. | `llm-d-router-endpoint-picker` |
@@ -127,12 +190,14 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 | `router.epp.extraContainerPorts` | Extra ports to expose on the EPP container. | `[]` |
 | `router.extraServicePorts` | Extra ports to expose on the EPP Service. | `[]` |
 | `router.clusterDomain` | Kubernetes cluster DNS domain used to build in-cluster Service FQDNs. | `cluster.local` |
+| `router.imagePullSecrets` | Secrets holding credentials for pulling images from private registries. | `[]` |
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
 | `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
-| `router.epp.pluginsCustomConfig` | Inline custom YAML configuration for EPP plugins. | `{}` |
+| `router.epp.pluginsConfig` | Structured EPP configuration rendered into `pluginsConfigFile`. | `{}` |
+| `router.epp.pluginsCustomConfig` | Additional raw ConfigMap entries keyed by file name. | `{}` |
 | `router.epp.volumes` | Extra volumes for EPP pod. | `[]` |
 | `router.epp.volumeMounts` | Extra volume mounts for EPP container. | `[]` |
 
@@ -206,6 +271,53 @@ router:
     - name: model-volume
       emptyDir: {}
 ```
+
+#### Structured Plugins Configuration
+
+Use `router.epp.pluginsConfig` to share an EPP configuration across Helm values files.
+It provides the complete contents of `pluginsConfigFile`; it does not inherit plugins
+from the chart's built-in configurations. An empty map leaves the built-in files unchanged.
+
+For example, `base-values.yaml` defines the plugins and scheduling profiles:
+
+```yaml
+router:
+  modelServers:
+    matchLabels:
+      app: vllm
+  epp:
+    pluginsConfigFile: custom-plugins.yaml
+    pluginsConfig:
+      apiVersion: llm-d.ai/v1alpha1
+      kind: EndpointPickerConfig
+      plugins:
+        - type: queue-scorer
+      schedulingProfiles:
+        - name: default
+          plugins:
+            - pluginRef: queue-scorer
+```
+
+An overlay, `feature-gates.yaml`, sets the feature gates:
+
+```yaml
+router:
+  epp:
+    pluginsConfig:
+      featureGates:
+        - flowControl
+```
+
+```shell
+helm template router config/charts/llm-d-router-gateway \
+  -f base-values.yaml -f feature-gates.yaml
+```
+
+Helm merges maps across values files and replaces lists as a whole. The overlay
+preserves the base plugins and profiles, but replaces any base `featureGates` list.
+YAML comments are not retained in the rendered structured configuration.
+`pluginsCustomConfig` can provide other raw configuration files alongside it.
+Defining the same filename through both settings is an error.
 
 ---
 
@@ -317,20 +429,21 @@ router:
 
 Runs a tokenizer sidecar that EPP queries to tokenize incoming requests, enabling precise, token-count-aware routing policies (e.g., precise prefix-cache matching).
 
-The sidecar runs vLLM's `vllm launch render <modelName>` and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`.
+The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and `/v1/chat/completions/render` over loopback HTTP. Wire EPP to it via `router.epp.pluginsCustomConfig` with `type: token-producer` and `vllm:`.
 
 #### Tokenizer Sidecar Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.tokenizer.enabled` | Enable the vLLM `/render` tokenizer sidecar in the EPP deployment. | `false` |
-| `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's `vllm launch render` command. | `""` |
+| `router.tokenizer.flavor` | Renderer backend: `"python"` runs `vllm launch render`; `"rust"` runs `vllm-rs render` (requires an image containing `vllm-rs`). | `"python"` |
+| `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
 | `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
-| `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]`. | `[]` |
+| `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
 | `router.tokenizer.args` | Override container args. Empty renders `["<modelName>", "--port=<port>"]`. | `[]` |
 | `router.tokenizer.extraArgs` | Extra args appended to the tokenizer container after the default or overridden args. | `[]` |
 | `router.tokenizer.initContainers` | Pod-level init containers rendered when the tokenizer is enabled. | `[]` |
@@ -376,69 +489,6 @@ router:
         name: model-cache-volume
 ```
 
-#### UDS Tokenizer Backend (deprecated)
-
-The `llm-d-uds-tokenizer` sidecar (gRPC over a Unix Domain Socket) is no longer
-templated by this chart; the render backend above supersedes it. If you still
-need it during migration, set it up in two steps.
-
-**Step 1 — inject the sidecar into the EPP deployment.** The chart does not
-render it, so patch it in yourself (e.g. via kustomize). The EPP container must
-mount the shared socket volume so it can reach the tokenizer:
-
-```yaml
-spec:
-  template:
-    spec:
-      containers:
-        # Existing EPP container — add the shared socket mount.
-        - name: epp
-          volumeMounts:
-            - name: tokenizer-uds
-              mountPath: /tmp/tokenizer
-        # The deprecated sidecar.
-        - name: tokenizer-uds
-          image: ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1
-          env:
-            - name: TOKENIZERS_DIR
-              value: /tokenizers
-            - name: HF_HOME
-              value: /tokenizers
-            # Required for gated/private tokenizers on HuggingFace.
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: llm-d-hf-token
-                  key: HF_TOKEN
-          volumeMounts:
-            - name: tokenizers
-              mountPath: /tokenizers
-            - name: tokenizer-uds
-              mountPath: /tmp/tokenizer
-      volumes:
-        - name: tokenizers
-          emptyDir: {}
-        - name: tokenizer-uds
-          emptyDir: {}
-```
-
-**Step 2 — point EPP at the socket.** Configure the tokenizer plugin via
-`router.epp.pluginsCustomConfig` (the chart writes this into the EPP config
-mounted at `/config`). Select the deprecated UDS backend with
-`udsTokenizerConfig`:
-
-```yaml
-router:
-  epp:
-    pluginsCustomConfig:
-      custom-plugins.yaml: |
-        plugins:
-          - type: token-producer
-            parameters:
-              modelName: "Qwen/Qwen3-32B"
-              udsTokenizerConfig:
-                socketFile: /tmp/tokenizer/tokenizer-uds.socket
-```
 ---
 
 ### 6. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)

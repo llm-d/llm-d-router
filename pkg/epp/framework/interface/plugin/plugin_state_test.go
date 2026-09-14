@@ -18,6 +18,8 @@ package plugin
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,7 +111,7 @@ func TestPluginState_EvictionCallback(t *testing.T) {
 	data.evictedID = ""
 	data.evictedKey = ""
 	state.Write(requestID, key, data)
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*DefaultStalenessThreshold))
 	state.cleanStaleRequests()
 	assert.Equal(t, requestID, data.evictedID)
 	assert.Equal(t, key, data.evictedKey)
@@ -128,7 +130,7 @@ func TestPluginState_Touch(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Set last access time to near-stale
-	nearStale := time.Now().Add(-defaultStalenessThreshold + time.Second*10)
+	nearStale := time.Now().Add(-DefaultStalenessThreshold + time.Second*10)
 	state.requestToLastAccessTime.Store(requestID, nearStale)
 
 	// Touch it
@@ -194,6 +196,69 @@ func TestPluginState_ReadWrite(t *testing.T) {
 	assert.Equal(t, data1, td.value)
 }
 
+func TestPluginState_ReadOrWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	requestID := "req-read-or-write"
+	key := StateKey("key")
+	first := &pluginTestData{value: "first"}
+	second := &pluginTestData{value: "second"}
+
+	actual, existed := state.ReadOrWrite(requestID, key, first)
+	assert.False(t, existed)
+	assert.Same(t, first, actual)
+
+	actual, existed = state.ReadOrWrite(requestID, key, second)
+	assert.True(t, existed)
+	assert.Same(t, first, actual)
+}
+
+func TestPluginState_ReadOrWriteIsAtomic(t *testing.T) {
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+
+	const callers = 32
+	const requestID = "req-read-or-write-atomic"
+	results := make(chan StateData, callers)
+	created := make(chan bool, callers)
+	var group sync.WaitGroup
+	for i := range callers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			actual, existed := state.ReadOrWrite(
+				requestID,
+				StateKey("key"),
+				&pluginTestData{value: fmt.Sprintf("candidate-%d", i)},
+			)
+			results <- actual
+			created <- !existed
+		}()
+	}
+	group.Wait()
+	close(results)
+	close(created)
+
+	winner := ""
+	for result := range results {
+		value := result.(*pluginTestData).value
+		if winner == "" {
+			winner = value
+		}
+		assert.Equal(t, winner, value)
+	}
+	createdCount := 0
+	for wasCreated := range created {
+		if wasCreated {
+			createdCount++
+		}
+	}
+	assert.Equal(t, 1, createdCount)
+}
+
 // TestReadPluginStateKey tests the generic helper function ReadPluginStateKey which provides
 // type-safe access to stored data. It verifies:
 // - Successful type assertion and data retrieval
@@ -220,7 +285,7 @@ func TestReadPluginStateKey(t *testing.T) {
 }
 
 // TestPluginState_Cleanup verifies the automatic cleanup of stale data.
-// It tests that data which hasn't been accessed for longer than defaultStalenessThreshold
+// It tests that data which hasn't been accessed for longer than the staleness threshold
 // is properly removed from the storage.
 func TestPluginState_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
@@ -235,7 +300,7 @@ func TestPluginState_Cleanup(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Manually set last access time to far in the past
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*DefaultStalenessThreshold))
 	// Manually CleanUp
 	state.cleanStaleRequests()
 
@@ -331,6 +396,34 @@ func TestPluginState_JanitorOptions(t *testing.T) {
 		_, ok := state.LastAccessTime(requestID)
 		return !ok
 	}, 2*time.Second, 5*time.Millisecond, "janitor should reap on the injected schedule")
+}
+
+// TestSetDefaultStalenessThreshold verifies that the process-wide default is applied to new
+// PluginState instances, that a configured value drives reaping, and that non-positive values are
+// ignored.
+func TestSetDefaultStalenessThreshold(t *testing.T) {
+	orig := defaultStalenessThreshold
+	t.Cleanup(func() { defaultStalenessThreshold = orig })
+
+	SetDefaultStalenessThreshold(30 * time.Second)
+	assert.Equal(t, 30*time.Second, defaultStalenessThreshold)
+
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	state := NewPluginState(ctx)
+	assert.Equal(t, 30*time.Second, state.stalenessThreshold, "new state should inherit the configured default")
+
+	// A one-minute-old request is stale under the 30s configured threshold (but would survive the 5m built-in default).
+	requestID := "req-configured-threshold"
+	key := StateKey("foo")
+	state.Write(requestID, key, &pluginTestData{value: "bar"})
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-time.Minute))
+	state.cleanStaleRequests()
+	_, err := state.Read(requestID, key)
+	assert.Equal(t, ErrNotFound, err, "request older than the configured threshold should be reaped")
+
+	SetDefaultStalenessThreshold(0)
+	assert.Equal(t, 30*time.Second, defaultStalenessThreshold, "non-positive value must be ignored")
 }
 
 // TestPluginState_DeleteKey verifies that DeleteKey correctly removes only the specified key for a request.

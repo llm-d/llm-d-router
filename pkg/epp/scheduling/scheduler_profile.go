@@ -29,6 +29,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -126,14 +127,10 @@ func (p *SchedulerProfile) String() string {
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
-		// Filters draining a non-empty candidate set means the pool is busy, not
-		// broken: an empty pool is rejected in the director before scheduling
-		// runs. Report it with the same status and drop-reason vocabulary as a
-		// flow control capacity rejection.
 		return nil, errcommon.Error{
-			Code:    errcommon.ResourceExhausted,
+			Code:    errcommon.ServiceUnavailable,
 			Msg:     "no endpoints available for the given request",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
 	// if we got here, there is at least one endpoint to score
@@ -161,7 +158,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	defer span.End()
 	tracingActive := span.IsRecording()
 	if tracingActive {
-		span.SetAttributes(attribute.Int("llm_d.epp.filter.candidate_endpoints", len(endpoints)))
+		span.SetAttributes(semconv.LLMDEPPFilterCandidateEndpoints(len(endpoints)))
 		span.SetAttributes(requestSpanAttributes(request)...)
 	}
 
@@ -190,7 +187,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		}
 	}
 	if tracingActive {
-		span.SetAttributes(attribute.Int("llm_d.epp.filter.filtered_endpoints", len(filteredEndpoints)))
+		span.SetAttributes(semconv.LLMDEPPFilterFilteredEndpoints(len(filteredEndpoints)))
 	}
 	if verboseEnabled {
 		verbose.Info("Completed running filter plugins", "remainingEndpoints", len(filteredEndpoints))
@@ -221,7 +218,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// The tracer is resolved once and threaded into runScorer so the per-scorer
 	// spans reuse it rather than rebuilding instrumentation options per scorer.
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "llm_d.epp.scoring", internalSpanKind)
+	ctx, span := tracer.Start(ctx, "scoring", internalSpanKind)
 	defer span.End()
 	// On the default (tracing-disabled) path Start returns a non-recording span;
 	// skip all attribute and child-span construction so the scoring hot path
@@ -229,8 +226,8 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(
-			attribute.Int("llm_d.epp.scorer.count", len(p.scorers)),
-			attribute.Int("llm_d.epp.scoring.candidate_endpoints", len(endpoints)),
+			semconv.LLMDEPPScorerCount(len(p.scorers)),
+			semconv.LLMDEPPScoringCandidateEndpoints(len(endpoints)),
 		)
 		span.SetAttributes(requestSpanAttributes(request)...)
 	}
@@ -264,7 +261,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 }
 
 // runScorer invokes a single weighted scorer and records its latency metric.
-// When tracing is active it wraps the call in an llm_d.epp.scorer.<type> span
+// When tracing is active it wraps the call in a scorer.<type> span
 // annotated with the scorer's identity, weight, candidate count, and aggregate
 // score signals; aggregates are derived from the returned score map only, with
 // no per-endpoint attribute keys, to keep span cardinality bounded. When
@@ -285,13 +282,13 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 		return scores
 	}
 
-	ctx, span := tracer.Start(ctx, "llm_d.epp.scorer."+typedName.Type, internalSpanKind)
+	ctx, span := tracer.Start(ctx, "scorer."+typedName.Type, internalSpanKind)
 	defer span.End()
 	span.SetAttributes(
-		attribute.String("llm_d.epp.scorer.type", typedName.Type),
-		attribute.String("llm_d.epp.scorer.name", typedName.Name),
-		attribute.Float64("llm_d.epp.scorer.weight", scorer.Weight()),
-		attribute.Int("llm_d.epp.scorer.candidate_endpoints", len(endpoints)),
+		semconv.LLMDEPPScorerType(typedName.Type),
+		semconv.LLMDEPPScorerName(typedName.Name),
+		semconv.LLMDEPPScorerWeight(scorer.Weight()),
+		semconv.LLMDEPPScorerCandidateEndpoints(len(endpoints)),
 	)
 
 	before := time.Now()
@@ -309,9 +306,9 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 			totalScore += s
 		}
 		span.SetAttributes(
-			attribute.Float64("llm_d.epp.scorer.score.max", maxScore),
-			attribute.Float64("llm_d.epp.scorer.score.avg", totalScore/float64(len(scores))),
-			attribute.Int("llm_d.epp.scorer.endpoints_scored", len(scores)),
+			semconv.LLMDEPPScorerScoreMax(maxScore),
+			semconv.LLMDEPPScorerScoreAvg(totalScore/float64(len(scores))),
+			semconv.LLMDEPPScorerEndpointsScored(len(scores)),
 		)
 	}
 
@@ -324,10 +321,10 @@ func requestSpanAttributes(request *fwksched.InferenceRequest) []attribute.KeyVa
 	}
 	attributes := make([]attribute.KeyValue, 0, 2)
 	if request.TargetModel != "" {
-		attributes = append(attributes, attribute.String("gen_ai.request.model", request.TargetModel))
+		attributes = append(attributes, semconv.GenAIRequestModel(request.TargetModel))
 	}
 	if request.RequestID != "" {
-		attributes = append(attributes, attribute.String("gen_ai.request.id", request.RequestID))
+		attributes = append(attributes, semconv.GenAIRequestID(request.RequestID))
 	}
 	return attributes
 }
@@ -366,7 +363,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	defer span.End()
 
 	if span.IsRecording() {
-		span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
+		span.SetAttributes(semconv.LLMDEPPPickerCandidateEndpoints(len(scoredEndpoints)))
 		// The picker almost always returns a single target, so its count carries
 		// little signal. The score distribution across the strongest candidates is
 		// what explains why an endpoint was chosen, so record the highest-scoring
@@ -374,8 +371,8 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		// pickers reorder scoredEndpoints in place.
 		if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
 			span.SetAttributes(
-				attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
-				attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
+				semconv.LLMDEPPPickerTopEndpoints(names),
+				semconv.LLMDEPPPickerTopScores(scores),
 			)
 		}
 		span.SetAttributes(requestSpanAttributes(request)...)

@@ -83,23 +83,30 @@ func (s *LoraAffinityScorer) WithName(name string) *LoraAffinityScorer {
 func (s *LoraAffinityScorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 
-	// Assign a score to each endpoint for loading the target adapter.
 	for _, endpoint := range endpoints {
-		_, active := endpoint.GetMetrics().ActiveModels[request.TargetModel]
-		_, waiting := endpoint.GetMetrics().WaitingModels[request.TargetModel]
+		m := endpoint.GetMetrics()
+		_, active := m.ActiveModels[request.TargetModel]
+		_, waiting := m.WaitingModels[request.TargetModel]
 
-		// Determine the model server's suitability score based on adapter load status and capacity.
+		// ActiveModels and WaitingModels share the same source in current vLLM,
+		// so take the union to count each adapter once. This may change later if
+		// vLLM adds native support.
+		unionCount := len(m.ActiveModels)
+		for k := range m.WaitingModels {
+			if _, ok := m.ActiveModels[k]; !ok {
+				unionCount++
+			}
+		}
+
 		switch {
-		// Ideal: The adapter is already active on this model server.
 		case active:
 			scores[endpoint] = 1.0
-		// Good: The model server has capacity to load at least one more adapter.
-		case len(endpoint.GetMetrics().ActiveModels)+len(endpoint.GetMetrics().WaitingModels) < endpoint.GetMetrics().MaxActiveModels:
+		case unionCount < m.MaxActiveModels:
 			scores[endpoint] = 0.8
-		// Moderate: The adapter is already in the queue to be loaded on this model server.
+		// Unreachable against current vLLM (waiting implies active), but
+		// reachable with the simulator and future backends.
 		case waiting:
 			scores[endpoint] = 0.6
-		// Unsuitable: The model server has reached its maximum capacity and cannot load the adapter.
 		default:
 			scores[endpoint] = 0.0
 		}

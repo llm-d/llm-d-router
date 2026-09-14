@@ -28,13 +28,26 @@ import (
 )
 
 const (
-	// defaultStalenessThreshold defines the threshold for considering data as stale.
-	// if data of a request hasn't been read/write in the last "stalenessThreshold", it is considered as stale data
-	// and will be cleaned in the next cleanup cycle.
-	defaultStalenessThreshold = time.Minute * 5
-	// defaultCleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
+	// DefaultStalenessThreshold defines the built-in threshold for considering data as stale.
+	// If a request's data has not been read/written within this duration, it is reaped in the next
+	// cleanup cycle. It applies when no process-wide override is set via SetDefaultStalenessThreshold.
+	DefaultStalenessThreshold = time.Minute * 5
+	// defaultCleanupInterval defines the periodic interval that the cleanup goroutine uses to check for stale data.
 	defaultCleanupInterval = time.Minute
 )
+
+// defaultStalenessThreshold is the process-wide default staleness threshold applied to new
+// PluginState instances. It may be overridden once at startup via SetDefaultStalenessThreshold.
+var defaultStalenessThreshold = DefaultStalenessThreshold
+
+// SetDefaultStalenessThreshold overrides the process-wide default staleness threshold used by
+// PluginState instances created via NewPluginState. It is intended to be called once at startup,
+// before any plugin is instantiated. Non-positive values are ignored.
+func SetDefaultStalenessThreshold(d time.Duration) {
+	if d > 0 {
+		defaultStalenessThreshold = d
+	}
+}
 
 // PluginStateOption configures a PluginState created by NewPluginState.
 type PluginStateOption func(*PluginState)
@@ -112,17 +125,24 @@ func (s *PluginState) Read(requestID string, key StateKey) (StateData, error) {
 // Note: overwriting an existing key does NOT trigger OnEvicted on the displaced value.
 func (s *PluginState) Write(requestID string, key StateKey, val StateData) {
 	s.requestToLastAccessTime.Store(requestID, time.Now())
-	var stateData *sync.Map
-	stateMap, ok := s.storage.Load(requestID)
-	if ok {
-		stateData = stateMap.(*sync.Map)
-	} else {
-		stateData = &sync.Map{}
-	}
-
+	// LoadOrStore applies only to the per-request map. It prevents concurrent
+	// first writes from creating competing maps and losing one writer's keys.
+	stateMap, _ := s.storage.LoadOrStore(requestID, &sync.Map{})
+	stateData := stateMap.(*sync.Map)
+	// Write itself remains unconditional and replaces any value for key.
 	stateData.Store(key, val)
+}
 
-	s.storage.Store(requestID, stateData)
+// ReadOrWrite atomically returns the data already stored for key and requestID,
+// or stores and returns val when no data exists. The boolean reports whether
+// the returned data was already present.
+func (s *PluginState) ReadOrWrite(requestID string, key StateKey, val StateData) (actual StateData, existed bool) {
+	s.requestToLastAccessTime.Store(requestID, time.Now())
+	// The outer operation chooses one per-request map. The inner operation then
+	// chooses one value for key, so concurrent callers all observe the same winner.
+	stateMap, _ := s.storage.LoadOrStore(requestID, &sync.Map{})
+	actualValue, existed := stateMap.(*sync.Map).LoadOrStore(key, val)
+	return actualValue.(StateData), existed
 }
 
 // Delete deletes data associated with the given requestID from PluginState.

@@ -24,16 +24,20 @@ import (
 
 // Metrics holds the latest metrics snapshot scraped from a pod.
 type Metrics struct {
-	// ActiveModels is a set of models(including LoRA adapters) that are currently cached to GPU.
-	ActiveModels  map[string]int
+	// ActiveModels holds only adapters that have at least one running or queued request.
+	ActiveModels map[string]int
+	// WaitingModels is intended to track adapters with only queued requests,
+	// but current vLLM populates it with the same adapters as in ActiveModels.
+	// Not useful until vLLM replaces it with a residency signal.
 	WaitingModels map[string]int
-	// MaxActiveModels is the maximum number of models that can be loaded to GPU.
+	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
 	MaxActiveModels         int
 	RunningRequestsSize     int
 	WaitingQueueSize        int
 	KVCacheUsagePercent     float64
 	KvCacheMaxTokenCapacity int
 	CacheBlockSize          int
+	CachePrefixMatchUnit    int
 	// Number of GPU blocks in the model server for KV Cache.
 	CacheNumBlocks int
 
@@ -76,6 +80,7 @@ func (m *Metrics) Clone() *Metrics {
 		KVCacheUsagePercent:     m.KVCacheUsagePercent,
 		KvCacheMaxTokenCapacity: m.KvCacheMaxTokenCapacity,
 		CacheBlockSize:          m.CacheBlockSize,
+		CachePrefixMatchUnit:    m.CachePrefixMatchUnit,
 		CacheNumBlocks:          m.CacheNumBlocks,
 		UpdateTime:              m.UpdateTime,
 	}

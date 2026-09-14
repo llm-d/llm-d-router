@@ -122,7 +122,7 @@ func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	step := newLoopbackStep(t, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
 		Body: map[string]any{
@@ -143,6 +143,16 @@ func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
 	err := step.Execute(context.Background(), reqCtx)
 	if err == nil {
 		t.Fatal("expected error for failed download")
+	}
+	var upstreamErr *pipeline.UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		t.Fatalf("expected *pipeline.UpstreamError, got %T: %v", err, err)
+	}
+	if upstreamErr.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want %d", upstreamErr.StatusCode, http.StatusNotFound)
+	}
+	if upstreamErr.Step != ReplaceMediaURLsStepName {
+		t.Errorf("Step = %q, want %q", upstreamErr.Step, ReplaceMediaURLsStepName)
 	}
 }
 
