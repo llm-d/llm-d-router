@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/llm-d/llm-d-router/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -90,16 +91,24 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			}
 		}
 
-		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			CipherSuites: []uint16{
+		minVersion := s.config.TLSMinVersion
+		if minVersion == 0 {
+			minVersion = tls.VersionTLS12
+		}
+		cipherSuites := s.config.TLSCipherSuites
+		if len(cipherSuites) == 0 {
+			cipherSuites = []uint16{
 				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			},
+			}
+		}
+		server.TLSConfig = &tls.Config{
+			MinVersion:     minVersion,
+			CipherSuites:   cipherSuites,
 			GetCertificate: getCertificate,
 		}
 		s.logger.Info("server TLS configured")
@@ -167,7 +176,7 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 	parsed, err := decodeRequestBody(raw)
 	if err != nil {
@@ -245,10 +254,8 @@ func decodeRequestBody(raw []byte) (map[string]any, error) {
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		if !errors.Is(err, errInvalidJSON) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(err.Error()))
-		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false

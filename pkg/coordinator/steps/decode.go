@@ -102,15 +102,15 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
-	case gateway.FormatChatCompletions, gateway.FormatResponses:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		s.injectTokensField(reqCtx)
-	case gateway.FormatCompletions:
+	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
-	case gateway.FormatGenerate:
+	case reqcommon.APITypeGenerate:
 		// The /inference/v1/generate engine reads transfer params only from
 		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
 		// so the decode worker never pulls the prefill KV over NIXL. Merge into
@@ -135,19 +135,19 @@ func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
 }
 
 // injectUUIDs stamps image parts with their multimodal hash, walking whichever
-// body field gateway.DetectFormat's result implies (see its doc comment for
+// body field reqcommon.DetectAPIType's result implies (see its doc comment for
 // why the field is chosen by path rather than by presence).
 //
-// DetectFormat rather than resolveFormat: decode proxies reqCtx.Body to
+// DetectAPIType rather than resolveFormat: decode proxies reqCtx.Body to
 // reqCtx.OriginalPath, so the wire shape to walk is the one the client sent,
 // independent of the encode/prefill wire-format setting resolveFormat applies.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	switch gateway.DetectFormat(reqCtx.OriginalPath) {
-	case gateway.FormatChatCompletions:
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
 		if messages, ok := reqCtx.Body["messages"].([]any); ok {
 			injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries)
 		}
-	case gateway.FormatResponses:
+	case reqcommon.APITypeResponses:
 		if input, ok := reqCtx.Body["input"].([]any); ok {
 			injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries)
 		}

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -160,7 +161,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 
 func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathResponses {
+		if r.URL.Path != reqcommon.PathResponses {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 
@@ -210,7 +211,7 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-responses",
-		OriginalPath: gateway.PathResponses,
+		OriginalPath: reqcommon.PathResponses,
 		Model:        "llama-3",
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
@@ -245,7 +246,7 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 	}
 }
 
-// See gateway.DetectFormat's doc comment for why injectUUIDs gates on path
+// See reqcommon.DetectAPIType's doc comment for why injectUUIDs gates on path
 // rather than field presence. A chat-completions request carrying a stray
 // top-level "input" array must not have that array's image part stamped
 // with a uuid.
@@ -338,7 +339,7 @@ func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-compl",
-		OriginalPath:     gateway.PathCompletions,
+		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
 		TokenIDs:         nil,
 		KVTransferParams: map[string]any{},
@@ -379,7 +380,7 @@ func TestDecodeStep_GenerateFormat_NestsKVInExtraArgs(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-gen",
-		OriginalPath:     gateway.DefaultGeneratePath,
+		OriginalPath:     reqcommon.PathGenerate,
 		Model:            "test-model",
 		TokenIDs:         []int{1, 2, 3, 4, 5},
 		KVTransferParams: map[string]any{"block_id": wantBlockID, "peer_host": "10.0.0.42", "peer_port": 7777},

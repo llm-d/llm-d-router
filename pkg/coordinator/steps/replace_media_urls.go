@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -139,15 +140,16 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	// Walk whichever body field gateway.DetectFormat's result implies (see its
-	// doc comment for why the field is chosen by path rather than by presence).
+	// Walk whichever body field reqcommon.DetectAPIType's result implies (see
+	// its doc comment for why the field is chosen by path rather than by
+	// presence).
 	var imageURLs []imageRef
-	switch gateway.DetectFormat(reqCtx.OriginalPath) {
-	case gateway.FormatChatCompletions:
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
 		if messages, ok := reqCtx.Body["messages"].([]any); ok {
 			imageURLs = collectChatCompletionsImageRefs(messages)
 		}
-	case gateway.FormatResponses:
+	case reqcommon.APITypeResponses:
 		if input, ok := reqCtx.Body["input"].([]any); ok {
 			var err error
 			imageURLs, err = collectResponsesImageRefs(input)

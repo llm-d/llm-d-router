@@ -312,3 +312,26 @@ func TestPickMaxScorePicker(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkMaxScorePicker_Pick(b *testing.B) {
+	numPods := 8
+	endpoints := make([]fwksched.Endpoint, numPods)
+	for i := 0; i < numPods; i++ {
+		endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID: k8stypes.NamespacedName{Name: fmt.Sprintf("pod%d", i)},
+		}, nil, nil)
+	}
+
+	picker := NewMaxScorePicker(1)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		scored := make([]*fwksched.ScoredEndpoint, numPods)
+		for j := 0; j < numPods; j++ {
+			scored[j] = &fwksched.ScoredEndpoint{Endpoint: endpoints[j], Score: float64(j * 10)}
+		}
+		_ = picker.Pick(ctx, scored)
+	}
+}

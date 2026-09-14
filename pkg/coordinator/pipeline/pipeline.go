@@ -86,6 +86,12 @@ func New(steps []Step) *Pipeline {
 	return &Pipeline{steps: steps}
 }
 
+// Steps returns the pipeline's steps in execution order. The server uses it
+// to discover steps that serve auxiliary HTTP routes.
+func (p *Pipeline) Steps() []Step {
+	return p.steps
+}
+
 // stepTiming holds one step's per-request timing for the summary log line
 // emitted by Execute.
 type stepTiming struct {

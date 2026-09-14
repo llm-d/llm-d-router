@@ -2,6 +2,7 @@ package disagg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -12,6 +13,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -263,6 +265,14 @@ func TestPDSchedule(t *testing.T) {
 
 			if test.err != (err != nil) {
 				t.Errorf("Unexpected error, got %v, want %v", err, test.err)
+			}
+			if test.err {
+				var typedErr errcommon.Error
+				if !errors.As(err, &typedErr) {
+					t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
+				}
+				assert.Equal(t, errcommon.ServiceUnavailable, typedErr.Code)
+				assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 			}
 
 			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),

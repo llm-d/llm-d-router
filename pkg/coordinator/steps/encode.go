@@ -95,7 +95,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
 	// avoids shipping the oversized preprocessed pixel tensor a second time
 	// (see https://github.com/vllm-project/vllm/issues/46722).
-	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+	if reqcommon.DetectAPIType(reqCtx.OriginalPath) == reqcommon.APITypeGenerate {
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
 		return nil
 	}
@@ -108,11 +108,11 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
 	switch format {
-	case gateway.FormatChatCompletions:
+	case reqcommon.APITypeChatCompletions:
 		if messages, ok := reqCtx.Body["messages"].([]any); ok {
 			imageParts = collectImageParts(messages, imageURLPartType)
 		}
-	case gateway.FormatResponses:
+	case reqcommon.APITypeResponses:
 		if input, ok := reqCtx.Body["input"].([]any); ok {
 			imageParts = collectImageParts(input, inputImagePartType)
 		}
@@ -131,7 +131,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				return err
 			}
 
-			path := gateway.PathForFormat(format)
+			path := format.Path()
 			logger.V(logutil.DEFAULT).Info("sending sub-request", "index", i, "path", path)
 
 			headers := reqCtx.ForwardedHeaders()
@@ -205,9 +205,9 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
 	switch format {
-	case gateway.FormatChatCompletions, gateway.FormatResponses:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		imageContent := buildSingleImageContent(imageParts, entry.Index, format)
 		item := map[string]any{
 			"role":    "user",
@@ -223,12 +223,12 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 				},
 			},
 		}
-		if format == gateway.FormatResponses {
+		if format == reqcommon.APITypeResponses {
 			body["input"] = []any{item}
 		} else {
 			body["messages"] = []any{item}
 		}
-		capSingleTokenOutput(body, format)
+		reqcommon.CapSingleToken(body, format)
 		return body
 	default:
 		body := map[string]any{
@@ -240,7 +240,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
 			},
 		}
-		capSingleTokenOutput(body, format)
+		reqcommon.CapSingleToken(body, format)
 		return body
 	}
 }
@@ -279,8 +279,8 @@ func collectImageParts(items []any, partType string) []map[string]any {
 // part stores it as a bare string directly on the part; Responses' optional
 // detail field is a sibling of image_url on that same part, so it is copied
 // across separately rather than coming along with the URL.
-func buildSingleImageContent(imageParts []map[string]any, index int, format gateway.RequestFormat) map[string]any {
-	if format == gateway.FormatResponses {
+func buildSingleImageContent(imageParts []map[string]any, index int, format reqcommon.APIType) map[string]any {
+	if format == reqcommon.APITypeResponses {
 		content := map[string]any{
 			"type":      inputImagePartType,
 			"image_url": "",

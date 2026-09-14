@@ -20,6 +20,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 )
 
 // drainOne pulls the single queued message off whichever shard received it.
@@ -49,10 +51,10 @@ func TestAddTask_EmitsReceiveSpanAndCarriesItsContext(t *testing.T) {
 
 	span := findEventSpan(t, recorder, "events_receive")
 	attrs := eventSpanAttrs(span)
-	assert.Equal(t, "kv@10.0.0.1:8000@test-model", attrs["llm_d.kv_cache.events.topic"].AsString())
-	assert.Equal(t, int64(42), attrs["llm_d.kv_cache.events.sequence"].AsInt64())
-	assert.Equal(t, int64(3), attrs["llm_d.kv_cache.events.payload_size_bytes"].AsInt64())
-	assert.Equal(t, "10.0.0.1:8003", attrs["llm_d.kv_cache.events.source_endpoint"].AsString())
+	assert.Equal(t, "kv@10.0.0.1:8000@test-model", attrs[semconv.LLMDKVCacheEventsTopicKey].AsString())
+	assert.Equal(t, int64(42), attrs[semconv.LLMDKVCacheEventsSequenceKey].AsInt64())
+	assert.Equal(t, int64(3), attrs[semconv.LLMDKVCacheEventsPayloadSizeBytesKey].AsInt64())
+	assert.Equal(t, "10.0.0.1:8003", attrs[semconv.LLMDKVCacheEventsSourceEndpointKey].AsString())
 
 	// The queued message must carry the span's identity, or processing starts a
 	// detached trace no matter how well the consuming side re-parents.
