@@ -126,6 +126,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 		want         *configapi.EndpointPickerConfig
 		wantFeatures map[string]bool
 		wantErr      bool
+		wantErrMsg   string
 		deprecated   bool
 	}{
 		{
@@ -333,13 +334,13 @@ func TestLoadRawConfiguration(t *testing.T) {
 			name:       "Error - Removed Top-level SaturationDetector",
 			configText: errorRemovedTopLevelSaturationDetectorText,
 			wantErr:    true,
-			deprecated: false,
+			wantErrMsg: `unknown field "saturationDetector"`,
 		},
 		{
 			name:       "Error - Removed Top-level Parser",
 			configText: errorRemovedTopLevelParserText,
 			wantErr:    true,
-			deprecated: false,
+			wantErrMsg: `unknown field "parser"`,
 		},
 		{
 			name:       "Error - Invalid YAML",
@@ -371,6 +372,9 @@ func TestLoadRawConfiguration(t *testing.T) {
 
 			if tc.wantErr {
 				require.Error(t, err, "Expected LoadRawConfig to fail")
+				if tc.wantErrMsg != "" {
+					require.ErrorContains(t, err, tc.wantErrMsg)
+				}
 				return
 			}
 			require.NoError(t, err, "Expected LoadRawConfig to succeed")
