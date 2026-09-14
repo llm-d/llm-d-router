@@ -82,7 +82,7 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"newSourceEndpoint", sourceEndpoint,
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
-		sm.stopSubscriber(entry)
+		sm.retireSubscriber(entry)
 		delete(sm.subscribers, podIdentifier)
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
@@ -130,18 +130,27 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	}
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
-	sm.stopSubscriber(entry)
+	sm.retireSubscriber(entry)
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
 }
 
-func (sm *SubscriberManager) stopSubscriber(entry *subscriberEntry) {
-	entry.cancel()
-	<-entry.done
-	if entry.sourceEndpoint != "" {
-		sm.pool.resetForSource(entry.subscriber.topicFilter, entry.sourceEndpoint)
+// retireSubscriber stops a subscriber without waiting for its socket goroutine.
+// A source reset is only safe when no other subscriber still represents the
+// same serving endpoint.
+func (sm *SubscriberManager) retireSubscriber(entry *subscriberEntry) {
+	resetSource := entry.sourceEndpoint != ""
+	if resetSource {
+		for _, other := range sm.subscribers {
+			if other != entry && other.sourceEndpoint == entry.sourceEndpoint {
+				resetSource = false
+				break
+			}
+		}
 	}
+	entry.cancel()
+	entry.subscriber.retire(resetSource)
 }
 
 // cleanupSubscriberMetrics drops the per-pod series for a removed subscriber

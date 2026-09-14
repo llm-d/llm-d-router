@@ -127,36 +127,24 @@ func TestSubscriberManager_RemoveSubscriberResetsQueuedPodState(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, tokenProcessor := newTestPool(t, 16)
 	pool.adapter = &sourceEndpointAdapter{}
-	pool.Start(ctx)
+	pool.concurrency = 1
 	defer pool.Shutdown(ctx)
 
 	const (
 		podIdentifier  = "ns/pod-1"
 		sourceEndpoint = "10.0.0.1:8000"
 	)
-	subscriberCtx, cancel := context.WithCancel(ctx)
-	canceled := make(chan struct{})
-	release := make(chan struct{})
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		<-subscriberCtx.Done()
-		close(canceled)
-		<-release
-		pool.AddTask(&RawMessage{
-			Topic:          "kv@10.0.0.1:8000@test-model",
-			Payload:        []byte{1},
-			SourceEndpoint: sourceEndpoint,
-		})
-	}()
+	subscriber := newZMQSubscriber(pool, podIdentifier, sourceEndpoint, "", "", "kv@", false)
 
 	manager := NewSubscriberManager(pool)
 	manager.subscribers[podIdentifier] = &subscriberEntry{
-		subscriber:     newZMQSubscriber(pool, podIdentifier, sourceEndpoint, "", "", "kv@", false),
-		cancel:         cancel,
+		subscriber:     subscriber,
+		cancel:         func() {},
 		sourceEndpoint: sourceEndpoint,
 		done:           done,
 	}
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 1, []byte{1})
 
 	removed := make(chan struct{})
 	go func() {
@@ -164,31 +152,84 @@ func TestSubscriberManager_RemoveSubscriberResetsQueuedPodState(t *testing.T) {
 		close(removed)
 	}()
 
-	<-canceled
-	returnedBeforeDone := false
 	select {
 	case <-removed:
-		returnedBeforeDone = true
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("endpoint reconciliation waited for the subscriber socket to close")
 	}
-	close(release)
-	<-removed
-	assert.False(t, returnedBeforeDone, "removal must wait until the subscriber stops enqueueing events")
+	// A message arriving from the closing socket after retirement must be dropped.
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 2, []byte{2})
+	close(done)
+
+	require.Equal(t, 2, pool.queues[0].Len())
+	for _, wantReset := range []bool{false, true} {
+		msg, shutdown := pool.queues[0].Get()
+		require.False(t, shutdown)
+		assert.Equal(t, wantReset, msg.reset)
+		if !wantReset {
+			assert.Equal(t, uint64(1), msg.Sequence)
+		}
+		pool.processRawMessage(ctx, msg)
+		pool.queues[0].Done(msg)
+	}
 
 	keys, err := tokenProcessor.TokensToKVBlockKeys(
 		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
-	require.Eventually(t, func() bool {
-		if pool.queueDepth.Load() != 0 {
-			return false
+	pool.dedup.mu.Lock()
+	_, tracked := pool.dedup.refs[sourceEndpoint]
+	pool.dedup.mu.Unlock()
+	assert.False(t, tracked)
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result[keys[0]])
+}
+
+func TestSubscriberManager_RemoveSubscriberKeepsSharedSourceUntilLastSubscriber(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+	pool.concurrency = 1
+	defer pool.Shutdown(ctx)
+
+	const sourceEndpoint = "10.0.0.1:8000"
+	manager := NewSubscriberManager(pool)
+	dones := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	subscribers := []*zmqSubscriber{
+		newZMQSubscriber(pool, "ns/pod-rank-0", sourceEndpoint, "", "", "kv@", false),
+		newZMQSubscriber(pool, "ns/pod-rank-1", sourceEndpoint, "", "", "kv@", false),
+	}
+	for i, podIdentifier := range []string{"ns/pod-rank-0", "ns/pod-rank-1"} {
+		manager.subscribers[podIdentifier] = &subscriberEntry{
+			subscriber:     subscribers[i],
+			cancel:         func() {},
+			sourceEndpoint: sourceEndpoint,
+			done:           dones[i],
 		}
-		pool.dedup.mu.Lock()
-		_, tracked := pool.dedup.refs[sourceEndpoint]
-		pool.dedup.mu.Unlock()
-		result, lookupErr := idx.Lookup(ctx, keys, nil)
-		return lookupErr == nil && !tracked && len(result[keys[0]]) == 0
-	}, 5*time.Second, 10*time.Millisecond)
+	}
+
+	subscribers[0].addTask(ctx, "kv@", 1, []byte{1})
+	manager.RemoveSubscriber(ctx, "ns/pod-rank-0")
+	subscribers[0].addTask(ctx, "kv@", 2, []byte{2}) // retired: dropped
+	subscribers[1].addTask(ctx, "kv@", 3, []byte{3}) // shared source: retained
+	require.Equal(t, 2, pool.queues[0].Len(), "removing one rank must not reset a source still in use")
+
+	manager.RemoveSubscriber(ctx, "ns/pod-rank-1")
+	require.Equal(t, 3, pool.queues[0].Len(), "removing the last rank must queue one source reset")
+	for _, want := range []struct {
+		reset    bool
+		sequence uint64
+	}{{false, 1}, {false, 3}, {true, 0}} {
+		msg, shutdown := pool.queues[0].Get()
+		require.False(t, shutdown)
+		assert.Equal(t, want.reset, msg.reset)
+		assert.Equal(t, want.sequence, msg.Sequence)
+		pool.queues[0].Done(msg)
+	}
+	for _, done := range dones {
+		close(done)
+	}
 }
 
 func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
