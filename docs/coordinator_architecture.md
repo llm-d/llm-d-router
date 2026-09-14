@@ -699,8 +699,10 @@ addressed.
 #### Format tradeoff
 
 The choice trades request size against worker recompute, and matters only for
-multimodal requests. In both formats the added `tokens` / `token_ids` field prevents
-re-tokenization on the worker; the difference is how the image is carried.
+multimodal requests. In the generate format, the added `token_ids` field prevents
+re-tokenization on the worker; the chat-completions format carries no equivalent
+field, so the worker re-tokenizes there regardless. The difference between the two
+formats is how the image is carried.
 
 - `/v1/chat/completions` carries the image as a raw `data:` URL. The body stays small,
   but the worker re-runs the vision preprocessor from the image bytes.

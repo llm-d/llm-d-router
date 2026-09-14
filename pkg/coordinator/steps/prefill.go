@@ -141,17 +141,6 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeChatCompletions:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
-		tokens := map[string]any{
-			"token_ids": reqCtx.TokenIDs,
-		}
-		if features != nil {
-			tokensFeatures := map[string]any{
-				"mm_hashes":       features["mm_hashes"],
-				"mm_placeholders": features["mm_placeholders"],
-			}
-			tokens["features"] = tokensFeatures
-		}
-		body["tokens"] = tokens
 		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams

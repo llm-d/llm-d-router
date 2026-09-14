@@ -210,13 +210,6 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"content": []any{imageContent},
 				},
 			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
-			},
 		}
 		reqcommon.CapSingleToken(body, format)
 		return body
