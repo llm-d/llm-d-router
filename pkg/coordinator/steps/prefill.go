@@ -191,10 +191,12 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			body["features"] = features
 		}
 		return body, nil
+
+	default:
+		// resolveFormat only ever yields the three formats above; a new value
+		// reaching here is a programming error, not a client fault.
+		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
-	// resolveFormat only ever yields the three formats above; a new value
-	// reaching here is a programming error, not a client fault.
-	return nil, fmt.Errorf("prefill: unsupported request format %v", format)
 }
 
 type prefillResponse struct {

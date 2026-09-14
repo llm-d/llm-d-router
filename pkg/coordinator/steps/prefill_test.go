@@ -687,6 +687,28 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 	}
 }
 
+func TestPrefillStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		Model:            "test",
+		Body:             map[string]any{},
+		KVTransferParams: make(map[string]any),
+	}
+
+	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, nil, reqcommon.APIType(99))
+	if err == nil {
+		t.Fatalf("expected error for unsupported format, got body %v", body)
+	}
+	if want := "unsupported request format APIType(99)"; err.Error() != want {
+		t.Fatalf("expected error %q, got %q", want, err.Error())
+	}
+}
+
 // TestPrefillStep_CoercesInvalidKVTransferParams verifies that a prefill
 // response whose kv_transfer_params is not a usable JSON object (non-object
 // type, explicit null, empty object, or absent) is coerced to no transfer

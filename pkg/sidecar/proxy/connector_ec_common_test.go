@@ -82,6 +82,20 @@ func TestECPipelineTokenLimits(t *testing.T) {
 			body:        `{"model":"m","token_ids":[1,2]}`,
 			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
+		{
+			name:        "generate with null sampling params",
+			apiType:     reqcommon.APITypeGenerate,
+			path:        reqcommon.PathGenerate,
+			body:        `{"model":"m","token_ids":[1,2],"sampling_params":null}`,
+			tokenFields: []string{reqcommon.FieldMaxTokens},
+		},
+		{
+			name:        "generate with non-object sampling params",
+			apiType:     reqcommon.APITypeGenerate,
+			path:        reqcommon.PathGenerate,
+			body:        `{"model":"m","token_ids":[1,2],"sampling_params":"not-an-object"}`,
+			tokenFields: []string{reqcommon.FieldMaxTokens},
+		},
 	}
 
 	for _, connector := range []string{ECExampleConnector, ECConnectorNIXL} {

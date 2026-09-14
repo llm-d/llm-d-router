@@ -30,8 +30,9 @@ const (
 	PathGenerate        = "/inference/v1/generate"
 )
 
-// APIType is the inference API a request was sent to. A value outside the
-// constants below degrades to APITypeChatCompletions.
+// APIType is the inference API a request was sent to. Path and the output
+// token cap treat a value outside the constants below as
+// APITypeChatCompletions; String reports it as APIType(N).
 type APIType int
 
 const (
@@ -65,7 +66,6 @@ func (a APIType) String() string {
 	}
 }
 
-// Path returns the canonical request path for the API.
 func (a APIType) Path() string {
 	switch a {
 	case APITypeCompletions:
