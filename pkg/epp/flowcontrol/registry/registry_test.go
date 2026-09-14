@@ -1026,7 +1026,7 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 
 	t.Run("ShouldCollectBand_AfterFlowIdle", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{})
+		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
 		// Create flow
