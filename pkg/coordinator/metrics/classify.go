@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"errors"
 	"net/http"
 )
@@ -58,4 +59,22 @@ func ClassifyErrorCode(err error, opts ClassifyOptions) string {
 		}
 	}
 	return ErrorCodeInternal
+}
+
+// ClassifyDownloadResult maps a media-download attempt onto the result label
+// for media_download_duration_seconds. A nil err is success. A canceled
+// request context (or an err that unwraps to context.Canceled) is cancelled.
+// Every other failure, including a client timeout that is not a parent
+// cancel, is error.
+func ClassifyDownloadResult(ctx context.Context, err error) string {
+	if err == nil {
+		return DownloadResultSuccess
+	}
+	if ctx != nil && ctx.Err() == context.Canceled {
+		return DownloadResultCancelled
+	}
+	if errors.Is(err, context.Canceled) {
+		return DownloadResultCancelled
+	}
+	return DownloadResultError
 }
