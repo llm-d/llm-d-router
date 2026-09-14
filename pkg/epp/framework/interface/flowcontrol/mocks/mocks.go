@@ -19,6 +19,7 @@ package mocks
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -215,6 +216,60 @@ func (m *MockOrderingPolicy) Less(a, b flowcontrol.QueueItemAccessor) bool {
 }
 
 var _ flowcontrol.OrderingPolicy = &MockOrderingPolicy{}
+
+// MockScoringOrderingPolicy is a behavioral mock for the ScoringOrderingPolicy interface.
+//
+// ScoreFunc is supplied by the caller and reports an item's score; the mock holds no scores of its own.
+// A test drives it from caller-owned state (e.g. a map it mutates to model a queued item's key drifting);
+// a benchmark supplies a lock-free O(1) func so the measured cost is the queue's rebuild, not the policy.
+//
+// Generation is an atomic counter advanced by Bump, standing in for a real policy's throttled latch:
+// changing an item's score without bumping models drift the queue has not been told about yet. It is
+// atomic rather than plain so concurrent Bump and Generation (a peeking goroutine) do not race.
+//
+// ScoreCalls counts Score invocations so a test can assert the queue recomputes exactly once per item per
+// generation change, and not at all without one.
+type MockScoringOrderingPolicy struct {
+	TypedNameV plugin.TypedName
+
+	// ScoreFunc reports the item's score. Required; Score panics if it is nil.
+	ScoreFunc func(item flowcontrol.QueueItemAccessor) float64
+
+	generation atomic.Uint64
+	scoreCalls atomic.Int64
+}
+
+// NewMockScoringOrderingPolicy creates a scoring policy mock with the given score function.
+func NewMockScoringOrderingPolicy(name string, scoreFunc func(item flowcontrol.QueueItemAccessor) float64) *MockScoringOrderingPolicy {
+	return &MockScoringOrderingPolicy{
+		TypedNameV: plugin.TypedName{Type: "mock-scoring-ordering-policy", Name: name},
+		ScoreFunc:  scoreFunc,
+	}
+}
+
+func (m *MockScoringOrderingPolicy) TypedName() plugin.TypedName { return m.TypedNameV }
+
+// Bump advances the generation, signalling to every queue ordered by this instance that its cached scores
+// are stale.
+func (m *MockScoringOrderingPolicy) Bump() { m.generation.Add(1) }
+
+// ScoreCalls returns the number of times Score has been called since construction.
+func (m *MockScoringOrderingPolicy) ScoreCalls() int64 { return m.scoreCalls.Load() }
+
+func (m *MockScoringOrderingPolicy) Score(item flowcontrol.QueueItemAccessor) float64 {
+	m.scoreCalls.Add(1)
+	return m.ScoreFunc(item)
+}
+
+func (m *MockScoringOrderingPolicy) Generation() uint64 { return m.generation.Load() }
+
+// Less delegates to CompareByScore, as every conforming scoring policy must, so that tests exercise the
+// same relationship between the live and cached comparison paths that a real policy has.
+func (m *MockScoringOrderingPolicy) Less(a, b flowcontrol.QueueItemAccessor) bool {
+	return flowcontrol.CompareByScore(m, a, b)
+}
+
+var _ flowcontrol.ScoringOrderingPolicy = &MockScoringOrderingPolicy{}
 
 // MockFairnessPolicy is a behavioral mock for the FairnessPolicy interface.
 // Simple accessors are configured with public value fields (e.g., NameV).

@@ -27,5 +27,8 @@ type QueueInspectionMethods interface {
 	// Peek returns the item at the "head" of the queue (the item with the highest priority according to the queue's
 	// ordering) without removing it.
 	// Returns nil if the queue is empty.
+	//
+	// Time complexity: O(1) for an OrderingPolicy. For a ScoringOrderingPolicy, amortized O(1): at most one O(n)
+	// rebuild per Generation change, bounded by the policy's throttle interval. A rebuild takes the write lock.
 	Peek() QueueItemAccessor
 }
