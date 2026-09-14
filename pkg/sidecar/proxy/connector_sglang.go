@@ -17,7 +17,6 @@ limitations under the License.
 package proxy
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,24 +26,14 @@ import (
 	"strconv"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
 var (
-	sglangBootstrapHost string
 	sglangBootstrapPort int
-	// The prefill leg must finish before buffered decode output can be committed.
-	sglangPrefillWaitTimeout = 5 * time.Minute
 )
 
 func init() {
-	sglangBootstrapHost = os.Getenv("SGLANG_BOOTSTRAP_HOST")
-
 	// Default SGLang bootstrap port
 	sglangBootstrapPort = 8998
 
@@ -83,161 +72,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.handleSGLangConcurrentRequests(w, r, body, prefillPodHostPort)
-}
-
-func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
-	tracer := tracing.Tracer(tracerScope)
-	parentCtx := r.Context()
-	dispatchCtx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
-
-	prefillCtx, prefillSpan := tracer.Start(dispatchCtx, "prefill",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
-		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
-	)
-	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
-	if err != nil {
-		prefillSpan.SetStatus(codes.Error, "failed to create prefill handler")
-		prefillSpan.End()
-		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	prefillReq := cloneRequestWithBody(prefillCtx, r, body)
-	decodeCtx, decodeSpan := tracer.Start(dispatchCtx, "decode",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
-	)
-	decodeReq := cloneRequestWithBody(decodeCtx, r, body)
-
-	var prefillResponse *bufferedResponseWriter
-	prefillDone := make(chan struct{})
-	prefillStart := time.Now()
-	go func() {
-		defer close(prefillDone)
-		defer prefillSpan.End()
-		defer func() {
-			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
-				s.logger.Error(fmt.Errorf("panic: %v", rec), "panic in prefill request")
-				cancel()
-			}
-		}()
-		pw := &bufferedResponseWriter{}
-		prefillHandler.ServeHTTP(pw, prefillReq)
-		prefillResponse = pw
-		prefillDuration := time.Since(prefillStart)
-		prefillSpan.SetAttributes(
-			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
-		)
-		if isHTTPError(pw.statusCode) {
-			prefillSpan.SetStatus(codes.Error, "prefill request failed")
-		}
-		s.logger.V(logging.TRACE).Info("prefill request completed", "status", pw.statusCode)
-	}()
-
-	decodeWriter := newDeferredCommitWriter(w)
-	decodeDone := make(chan struct{})
-	var decodePanic any
-	decodeStart := time.Now()
-	go func() {
-		defer close(decodeDone)
-		defer decodeSpan.End()
-		defer func() {
-			decodePanic = recover()
-			decodeSpan.SetAttributes(
-				attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(time.Since(decodeStart).Milliseconds())),
-			)
-			if decodePanic != nil {
-				decodeSpan.SetStatus(codes.Error, "decode request aborted")
-			}
-		}()
-		s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
-	}()
-
-	timer := time.NewTimer(sglangPrefillWaitTimeout)
-	defer timer.Stop()
-	prefillSucceeded := false
-	prefillTimedOut := false
-
-	select {
-	case <-prefillDone:
-		prefillSucceeded = prefillResponse != nil && !isHTTPError(prefillResponse.statusCode)
-		if prefillSucceeded {
-			decodeWriter.commit()
-		} else {
-			decodeWriter.abort()
-			cancel()
-		}
-	case <-timer.C:
-		prefillTimedOut = true
-		decodeWriter.abort()
-		cancel()
-	case <-parentCtx.Done():
-		decodeWriter.abort()
-		cancel()
-		<-decodeDone
-		return
-	}
-
-	<-decodeDone
-	decodeDuration := time.Since(decodeStart)
-
-	switch {
-	case prefillSucceeded:
-		if decodePanic != nil {
-			panic(decodePanic)
-		}
-	case prefillTimedOut:
-		w.WriteHeader(http.StatusGatewayTimeout)
-		if _, err := w.Write([]byte(`{"error":"SGLang prefill did not complete before the wait timeout"}`)); err != nil {
-			s.logger.Error(err, "failed to send SGLang prefill timeout to client")
-		}
-	default:
-		status := http.StatusBadGateway
-		if prefillResponse != nil {
-			status = prefillResponse.statusCode
-			for key, values := range prefillResponse.Header() {
-				w.Header()[key] = append([]string(nil), values...)
-			}
-		}
-		w.WriteHeader(status)
-		if prefillResponse != nil {
-			if _, err := w.Write(prefillResponse.bodyBytes()); err != nil {
-				s.logger.Error(err, "failed to send SGLang prefill error to client")
-			}
-		}
-	}
-
-	// Calculate end-to-end P/D timing metrics for concurrent P/D.
-	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {
-		var totalDuration time.Duration
-		var trueTTFT time.Duration
-		if requestStartValue := parentCtx.Value(requestStartTimeKey); requestStartValue != nil {
-			if requestStart, ok := requestStartValue.(time.Time); ok {
-				totalDuration = time.Since(requestStart)
-				trueTTFT = decodeStart.Sub(requestStart)
-			}
-		}
-
-		currentSpan.SetAttributes(
-			attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-			attribute.Bool("llm_d.pd_proxy.concurrent_pd", true),
-		)
-	}
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, KVConnectorSGLang, nil)
 }
 
 func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
@@ -246,10 +81,8 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 		modifiedRequest[k] = v
 	}
 
-	bootstrapHost := sglangBootstrapHost
-	if bootstrapHost == "" {
-		bootstrapHost = extractHost(prefillHostPort)
-	}
+	// Generate bootstrap host from prefill host
+	bootstrapHost := extractHost(prefillHostPort)
 
 	// Add bootstrap information
 	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
@@ -270,8 +103,8 @@ func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, er
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	requestData, err := decodeRequestBody(body)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
 
@@ -279,5 +112,5 @@ func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, er
 }
 
 func (s *Server) generateSGLangRoomID() int64 {
-	return rand.Int64()
+	return time.Now().UnixNano() + int64(rand.IntN(1000))
 }

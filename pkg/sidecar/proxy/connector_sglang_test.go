@@ -40,45 +40,6 @@ var _ = Describe("SGLang Connector", func() {
 		testInfo = sidecarConnectionTestSetup(KVConnectorSGLang)
 	})
 
-	It("should use the configured bootstrap authority without deriving the prefill rank", func() {
-		previousHost := sglangBootstrapHost
-		previousPort := sglangBootstrapPort
-		DeferCleanup(func() {
-			sglangBootstrapHost = previousHost
-			sglangBootstrapPort = previousPort
-		})
-
-		sglangBootstrapHost = "prefill-bootstrap.example"
-		sglangBootstrapPort = 8000
-
-		request := testInfo.proxy.addSGLangBootstrapInfo(map[string]interface{}{}, "10.0.0.8:8002", 9)
-
-		Expect(request[requestFieldBootstrapHost]).To(Equal("prefill-bootstrap.example"))
-		Expect(request[requestFieldBootstrapPort]).To(Equal(8000))
-		Expect(request[requestFieldBootstrapRoom]).To(Equal(int64(9)))
-		Expect(request).ToNot(HaveKey("disagg_prefill_dp_rank"))
-
-		sglangBootstrapHost = ""
-		request = testInfo.proxy.addSGLangBootstrapInfo(map[string]interface{}{}, "10.0.0.8:8002", 10)
-		Expect(request[requestFieldBootstrapHost]).To(Equal("10.0.0.8"))
-		Expect(request[requestFieldBootstrapRoom]).To(Equal(int64(10)))
-	})
-
-	It("should claim only the native generate path for the configured protocol", func() {
-		sglangMux := testInfo.proxy.createRoutes()
-		_, pattern := sglangMux.Handler(httptest.NewRequest(http.MethodPost, SGlangGeneratePath, nil))
-		Expect(pattern).To(Equal("POST " + SGlangGeneratePath))
-		_, pattern = sglangMux.Handler(httptest.NewRequest(http.MethodPost, VLLMGeneratePath, nil))
-		Expect(pattern).To(Equal("/"))
-
-		vllmProxy := NewProxy(Config{DecoderURL: testInfo.decodeURL, KVConnector: KVConnectorMooncake})
-		vllmMux := vllmProxy.createRoutes()
-		_, pattern = vllmMux.Handler(httptest.NewRequest(http.MethodPost, VLLMGeneratePath, nil))
-		Expect(pattern).To(Equal("POST " + VLLMGeneratePath))
-		_, pattern = vllmMux.Handler(httptest.NewRequest(http.MethodPost, SGlangGeneratePath, nil))
-		Expect(pattern).To(Equal("/"))
-	})
-
 	It("should successfully send concurrent requests to prefill and decode with bootstrap info", func() {
 		By("starting the proxy")
 		go func() {
@@ -94,10 +55,16 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.proxy.readyCh
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
-		By("sending a tokenized /generate request with prefill header")
-		body := `{"input_ids":[1,2,3],"sampling_params":{"max_new_tokens":8}}`
+		By("sending a /v1/chat/completions request with prefill header")
+		body := `{
+				"model": "Qwen/Qwen2-0.5B",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50
+			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+SGlangGeneratePath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -144,59 +111,6 @@ var _ = Describe("SGLang Connector", func() {
 		Expect(drq1[requestFieldBootstrapHost]).To(Equal(expectedHost))
 		Expect(drq1[requestFieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
 		Expect(drq1[requestFieldBootstrapRoom]).To(Equal(prq1[requestFieldBootstrapRoom])) // Room ID must match
-		Expect(drq1["input_ids"]).To(Equal(prq1["input_ids"]))
-
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
-	})
-
-	It("should return a prefill failure instead of an early decode success", func() {
-		testInfo.decodeBackend.Close()
-		testInfo.prefillBackend.Close()
-
-		decodeFlushed := make(chan struct{})
-		testInfo.prefillBackend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			<-decodeFlushed
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"prefill failed"}`))
-		}))
-		testInfo.decodeBackend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"text":"must not escape"}`))
-			w.(http.Flusher).Flush()
-			close(decodeFlushed)
-			<-r.Context().Done()
-			panic(http.ErrAbortHandler)
-		}))
-		decodeURL, err := url.Parse(testInfo.decodeBackend.URL)
-		Expect(err).ToNot(HaveOccurred())
-		testInfo.proxy = NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: KVConnectorSGLang})
-
-		go func() {
-			defer GinkgoRecover()
-			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
-			Expect(testInfo.proxy.Start(testInfo.ctx)).To(Succeed())
-			testInfo.stoppedCh <- struct{}{}
-		}()
-		<-testInfo.proxy.readyCh
-
-		req, err := http.NewRequest(
-			http.MethodPost,
-			"http://"+testInfo.proxy.addr.String()+SGlangGeneratePath,
-			bytes.NewBufferString(`{"input_ids":[1],"sampling_params":{"max_new_tokens":1}}`),
-		)
-		Expect(err).ToNot(HaveOccurred())
-		req.Header.Set(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
-		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-		Expect(err).ToNot(HaveOccurred())
-		defer resp.Body.Close()
-		responseBody, err := io.ReadAll(resp.Body)
-		Expect(err).ToNot(HaveOccurred())
-
-		Expect(resp.StatusCode).To(Equal(http.StatusInternalServerError))
-		Expect(string(responseBody)).To(ContainSubstring("prefill failed"))
-		Expect(string(responseBody)).ToNot(ContainSubstring("must not escape"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -241,14 +155,14 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.proxy.readyCh
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
-		body := `{"input_ids":[1],"sampling_params":{"max_new_tokens":1}}`
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+SGlangGeneratePath, bytes.NewReader([]byte(body)))
+		body := `{"model": "Qwen", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
 		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
 
-		// Submit request. Decode output remains buffered until prefill completes.
+		// Submit request. This will complete as soon as fastDecode completes.
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rp.StatusCode).To(Equal(200))
@@ -262,32 +176,5 @@ var _ = Describe("SGLang Connector", func() {
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
-	})
-
-	It("should bound a stalled prefill response", func() {
-		previousTimeout := sglangPrefillWaitTimeout
-		sglangPrefillWaitTimeout = 50 * time.Millisecond
-		DeferCleanup(func() { sglangPrefillWaitTimeout = previousTimeout })
-
-		testInfo.prefillBackend.Close()
-		testInfo.prefillBackend = httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-			<-r.Context().Done()
-		}))
-		testInfo.proxy.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-			<-r.Context().Done()
-		})
-
-		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, SGlangGeneratePath, nil)
-		started := time.Now()
-		testInfo.proxy.handleSGLangConcurrentRequests(
-			recorder,
-			request,
-			[]byte(`{"input_ids":[1]}`),
-			testInfo.prefillBackend.URL[len("http://"):],
-		)
-
-		Expect(recorder.Code).To(Equal(http.StatusGatewayTimeout))
-		Expect(time.Since(started)).To(BeNumerically("<", time.Second))
 	})
 })
