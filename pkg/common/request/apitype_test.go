@@ -26,7 +26,7 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeChatCompletions: {"chat_completions", PathChatCompletions},
 		APITypeCompletions:     {"completions", PathCompletions},
 		APITypeResponses:       {"responses", PathResponses},
-		APITypeGenerate:        {"generate", PathGenerate},
+		APITypeGenerate:        {"generate", PathVLLMGenerate},
 		APITypeMessages:        {"messages", PathMessages},
 		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
@@ -50,11 +50,11 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "completions", path: PathCompletions, want: APITypeCompletions},
 		{name: "responses", path: PathResponses, want: APITypeResponses},
 		{name: "messages", path: PathMessages, want: APITypeMessages},
-		{name: "generate", path: PathGenerate, want: APITypeGenerate},
+		{name: "generate", path: PathVLLMGenerate, want: APITypeGenerate},
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
 		{name: "prefixed messages", path: "/prefix" + PathMessages, want: APITypeMessages},
-		{name: "prefixed generate", path: "/prefix" + PathGenerate, want: APITypeGenerate},
+		{name: "prefixed generate", path: "/prefix" + PathVLLMGenerate, want: APITypeGenerate},
 		{name: "unknown path falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
 		{name: "empty path falls back to chat completions", path: "", want: APITypeChatCompletions},
 	}

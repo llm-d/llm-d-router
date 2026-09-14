@@ -27,7 +27,8 @@ const (
 	PathCompletions     = "/v1/completions"
 	PathResponses       = "/v1/responses"
 	PathMessages        = "/v1/messages"
-	PathGenerate        = "/inference/v1/generate"
+	PathVLLMGenerate    = "/inference/v1/generate"
+	PathSGLangGenerate  = "/generate"
 )
 
 // APIType is the inference API a request was sent to. Path and the output
@@ -73,7 +74,7 @@ func (a APIType) Path() string {
 	case APITypeResponses:
 		return PathResponses
 	case APITypeGenerate:
-		return PathGenerate
+		return PathVLLMGenerate
 	case APITypeMessages:
 		return PathMessages
 	default:
@@ -94,7 +95,9 @@ func DetectAPIType(path string) APIType {
 		return APITypeResponses
 	case strings.Contains(path, PathMessages):
 		return APITypeMessages
-	case strings.Contains(path, PathGenerate):
+	case strings.Contains(path, PathVLLMGenerate):
+		return APITypeGenerate
+	case strings.Contains(path, PathSGLangGenerate):
 		return APITypeGenerate
 	default:
 		return APITypeChatCompletions
