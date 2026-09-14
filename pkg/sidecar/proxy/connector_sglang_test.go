@@ -66,16 +66,16 @@ var _ = Describe("SGLang Connector", func() {
 
 	It("should claim only the native generate path for the configured protocol", func() {
 		sglangMux := testInfo.proxy.createRoutes()
-		_, pattern := sglangMux.Handler(httptest.NewRequest(http.MethodPost, sglangGeneratePath, nil))
-		Expect(pattern).To(Equal("POST " + sglangGeneratePath))
-		_, pattern = sglangMux.Handler(httptest.NewRequest(http.MethodPost, GeneratePath, nil))
+		_, pattern := sglangMux.Handler(httptest.NewRequest(http.MethodPost, SGlangGeneratePath, nil))
+		Expect(pattern).To(Equal("POST " + SGlangGeneratePath))
+		_, pattern = sglangMux.Handler(httptest.NewRequest(http.MethodPost, VLLMGeneratePath, nil))
 		Expect(pattern).To(Equal("/"))
 
 		vllmProxy := NewProxy(Config{DecoderURL: testInfo.decodeURL, KVConnector: KVConnectorMooncake})
 		vllmMux := vllmProxy.createRoutes()
-		_, pattern = vllmMux.Handler(httptest.NewRequest(http.MethodPost, GeneratePath, nil))
-		Expect(pattern).To(Equal("POST " + GeneratePath))
-		_, pattern = vllmMux.Handler(httptest.NewRequest(http.MethodPost, sglangGeneratePath, nil))
+		_, pattern = vllmMux.Handler(httptest.NewRequest(http.MethodPost, VLLMGeneratePath, nil))
+		Expect(pattern).To(Equal("POST " + VLLMGeneratePath))
+		_, pattern = vllmMux.Handler(httptest.NewRequest(http.MethodPost, SGlangGeneratePath, nil))
 		Expect(pattern).To(Equal("/"))
 	})
 
@@ -97,7 +97,7 @@ var _ = Describe("SGLang Connector", func() {
 		By("sending a tokenized /generate request with prefill header")
 		body := `{"input_ids":[1,2,3],"sampling_params":{"max_new_tokens":8}}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+sglangGeneratePath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+SGlangGeneratePath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -183,7 +183,7 @@ var _ = Describe("SGLang Connector", func() {
 
 		req, err := http.NewRequest(
 			http.MethodPost,
-			"http://"+testInfo.proxy.addr.String()+sglangGeneratePath,
+			"http://"+testInfo.proxy.addr.String()+SGlangGeneratePath,
 			bytes.NewBufferString(`{"input_ids":[1],"sampling_params":{"max_new_tokens":1}}`),
 		)
 		Expect(err).ToNot(HaveOccurred())
@@ -242,7 +242,7 @@ var _ = Describe("SGLang Connector", func() {
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
 		body := `{"input_ids":[1],"sampling_params":{"max_new_tokens":1}}`
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+sglangGeneratePath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+SGlangGeneratePath, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -278,7 +278,7 @@ var _ = Describe("SGLang Connector", func() {
 		})
 
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, sglangGeneratePath, nil)
+		request := httptest.NewRequest(http.MethodPost, SGlangGeneratePath, nil)
 		started := time.Now()
 		testInfo.proxy.handleSGLangConcurrentRequests(
 			recorder,

@@ -94,7 +94,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
 	// avoids shipping the oversized preprocessed pixel tensor a second time
 	// (see https://github.com/vllm-project/vllm/issues/46722).
-	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+	if reqCtx.OriginalPath == gateway.VLLMGeneratePath {
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
 		return nil
 	}

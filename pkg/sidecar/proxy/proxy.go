@@ -628,9 +628,9 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("POST "+CompletionsPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+MessagesPath, s.disaggregatedPrefillHandler(APITypeChatCompletions))
 	mux.HandleFunc("POST "+ResponsesPath, s.disaggregatedPrefillHandler(APITypeResponses))
-	nativeGeneratePath := GeneratePath
+	nativeGeneratePath := VLLMGeneratePath
 	if s.config.KVConnector == KVConnectorSGLang {
-		nativeGeneratePath = sglangGeneratePath
+		nativeGeneratePath = SGlangGeneratePath
 	}
 	mux.HandleFunc("POST "+nativeGeneratePath, s.disaggregatedPrefillHandler(APITypeGenerate))
 

@@ -20,7 +20,7 @@ import "testing"
 
 func TestRequestFormatString(t *testing.T) {
 	cases := map[RequestFormat]string{
-		FormatGenerate:        DefaultGeneratePath,
+		FormatGenerate:        VLLMGeneratePath,
 		FormatCompletions:     PathCompletions,
 		FormatChatCompletions: PathChatCompletions,
 		RequestFormat(99):     "unknown",

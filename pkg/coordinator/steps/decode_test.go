@@ -217,7 +217,7 @@ func TestDecodeStep_GenerateFormat_NestsKVInExtraArgs(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-gen",
-		OriginalPath:     gateway.DefaultGeneratePath,
+		OriginalPath:     gateway.VLLMGeneratePath,
 		Model:            "test-model",
 		TokenIDs:         []int{1, 2, 3, 4, 5},
 		KVTransferParams: map[string]any{"block_id": wantBlockID, "peer_host": "10.0.0.42", "peer_port": 7777},

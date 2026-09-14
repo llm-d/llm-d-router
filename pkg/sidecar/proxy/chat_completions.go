@@ -49,11 +49,11 @@ const (
 	// MessagesPath is the Anthropic Messages API path
 	MessagesPath = "/v1/messages"
 
-	// GeneratePath is vLLM's token-in generate endpoint
-	GeneratePath = "/inference/v1/generate"
+	// VLLMGeneratePath is vLLM's token-in generate endpoint
+	VLLMGeneratePath = "/inference/v1/generate"
 
-	// sglangGeneratePath is SGLang's native generation endpoint.
-	sglangGeneratePath = "/generate"
+	// SGlangGeneratePath is SGLang's native generation endpoint.
+	SGlangGeneratePath = "/generate"
 )
 
 func openAIAPIAttr(apiType APIType) attribute.KeyValue {

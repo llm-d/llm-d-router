@@ -123,7 +123,7 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+	if reqCtx.OriginalPath == gateway.VLLMGeneratePath {
 		return s.executeGenerate(ctx, reqCtx)
 	}
 	if strings.Contains(reqCtx.OriginalPath, gateway.PathCompletions) {

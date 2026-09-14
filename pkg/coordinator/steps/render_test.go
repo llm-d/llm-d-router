@@ -457,7 +457,7 @@ func TestRenderStep_GenerateFormat_TextOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: gateway.VLLMGeneratePath,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(2345), float64(6789)},
@@ -484,7 +484,7 @@ func TestRenderStep_GenerateFormat_Multimodal(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: gateway.VLLMGeneratePath,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(32000), float64(2)},
@@ -519,7 +519,7 @@ func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: gateway.VLLMGeneratePath,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(3), float64(41000), float64(41000), float64(2)},
@@ -563,7 +563,7 @@ func TestRenderStep_GenerateFormat_MalformedFeatures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step, _ := NewRenderStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
-				OriginalPath: gateway.DefaultGeneratePath,
+				OriginalPath: gateway.VLLMGeneratePath,
 				Body: map[string]any{
 					"model":     "test-model",
 					"token_ids": []any{float64(1), float64(2), float64(3)},
@@ -593,7 +593,7 @@ func TestRenderStep_GenerateFormat_PlaceholderOutOfBounds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step, _ := NewRenderStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
-				OriginalPath: gateway.DefaultGeneratePath,
+				OriginalPath: gateway.VLLMGeneratePath,
 				Body: map[string]any{
 					"model":     "test-model",
 					"token_ids": []any{float64(1), float64(32000), float64(32000), float64(2)},
@@ -628,7 +628,7 @@ func TestRenderStep_GenerateFormat_InvalidSamplingParams(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step, _ := NewRenderStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
-				OriginalPath: gateway.DefaultGeneratePath,
+				OriginalPath: gateway.VLLMGeneratePath,
 				Body: map[string]any{
 					"model":           "test-model",
 					"token_ids":       []any{float64(1), float64(2), float64(3)},
@@ -649,7 +649,7 @@ func TestRenderStep_GenerateFormat_InvalidSamplingParams(t *testing.T) {
 func TestRenderStep_GenerateFormat_NullFeatures(t *testing.T) {
 	step, _ := NewRenderStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: gateway.VLLMGeneratePath,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(2), float64(3)},
@@ -667,7 +667,7 @@ func TestRenderStep_GenerateFormat_NullFeatures(t *testing.T) {
 func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 	step, _ := NewRenderStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: gateway.VLLMGeneratePath,
 		Body:         map[string]any{"model": "test-model"},
 	}
 	err := step.Execute(context.Background(), reqCtx)

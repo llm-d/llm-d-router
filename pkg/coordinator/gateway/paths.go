@@ -21,7 +21,8 @@ import "strings"
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathCompletions     = "/v1/completions"
-	DefaultGeneratePath = "/inference/v1/generate"
+	VLLMGeneratePath    = "/inference/v1/generate"
+	SGLangGeneratePath = "/generate"
 
 	EPPProfileHeader  = "EPP-Profile"
 	ContentTypeHeader = "Content-Type"
@@ -43,7 +44,7 @@ const (
 func (f RequestFormat) String() string {
 	switch f {
 	case FormatGenerate:
-		return DefaultGeneratePath
+		return VLLMGeneratePath
 	case FormatCompletions:
 		return PathCompletions
 	case FormatChatCompletions:
@@ -75,6 +76,6 @@ func PathForFormat(format RequestFormat) string {
 	case FormatCompletions:
 		return PathCompletions
 	default:
-		return DefaultGeneratePath
+		return VLLMGeneratePath
 	}
 }

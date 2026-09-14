@@ -246,7 +246,7 @@ func TestRoutesRegistered(t *testing.T) {
 	}{
 		{"chat completions", http.MethodPost, gateway.PathChatCompletions, inferenceBody},
 		{"completions", http.MethodPost, gateway.PathCompletions, inferenceBody},
-		{"generate", http.MethodPost, gateway.DefaultGeneratePath, inferenceBody},
+		{"generate", http.MethodPost, gateway.VLLMGeneratePath, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},
 	}

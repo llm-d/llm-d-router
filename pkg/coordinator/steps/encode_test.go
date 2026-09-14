@@ -465,7 +465,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-generate",
 		Model:        "test-model",
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: gateway.VLLMGeneratePath,
 		TokenIDs:     []int{1, 32000, 32000, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
