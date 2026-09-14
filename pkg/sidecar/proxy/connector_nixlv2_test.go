@@ -19,6 +19,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -35,7 +37,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
-const eventStreamContentType = "text/event-stream"
+const (
+	eventStreamContentType    = "text/event-stream"
+	turn2SimpleDecodeResponse = `{"id":"chatcmpl-turn2","choices":[],"usage":{}}`
+)
 
 var _ = Describe("NIXL Connector (v2)", func() {
 
@@ -1294,3 +1299,307 @@ func dpRankHeader(h *mock.ChatCompletionHandler, i int) string { //nolint:unpara
 	ExpectWithOffset(1, len(hdrs)).To(BeNumerically(">", i))
 	return hdrs[i].Get(requestHeaderDataParallelRank)
 }
+
+// Bidirectional KV transfer tests — validate session token security (Blocker 2)
+// and cache hit/miss behavior for multi-turn agentic workloads.
+var _ = Describe("Bidirectional KV Transfer", func() {
+	var testInfo *sidecarTestInfo
+
+	BeforeEach(func() {
+		testInfo = sidecarConnectionTestSetup(KVConnectorNIXLV2)
+		// Enable bidirectional KV transfer with default threshold
+		testInfo.proxy.config.BidirectionalKVXfer = true
+		testInfo.proxy.config.BidirectionalSessionHeader = "x-session-token"
+		testInfo.proxy.config.BidirectionalCacheSize = 100
+		testInfo.proxy.config.BidirectionalCacheTTL = 5 * time.Minute
+		testInfo.proxy.config.BidirectionalRecomputeThreshold = 64
+		testInfo.proxy.config.PodHostname = "test-pod-123"
+		// Create conversation cache (proxy was created before config was set)
+		testInfo.proxy.conversationCache = expirable.NewLRU[string, map[string]any](
+			testInfo.proxy.config.BidirectionalCacheSize,
+			nil,
+			testInfo.proxy.config.BidirectionalCacheTTL,
+		)
+		// Enable bidirectional KV mode in mock handlers
+		testInfo.prefillHandler.BidirectionalKVMode = true
+		testInfo.decodeHandler.BidirectionalKVMode = true
+	})
+
+	startProxyWithBidirectional := func() string {
+		go func() {
+			defer GinkgoRecover()
+			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := testInfo.proxy.Start(testInfo.ctx)
+			Expect(err).ToNot(HaveOccurred())
+			testInfo.stoppedCh <- struct{}{}
+		}()
+
+		<-testInfo.proxy.readyCh
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
+		return "http://" + testInfo.proxy.addr.String()
+	}
+
+	validSessionToken := func() string {
+		// EPP-issued token: base64(pod_hostname)
+		return base64.StdEncoding.EncodeToString([]byte("test-pod-123"))
+	}
+
+	invalidSessionToken := func() string {
+		// Token from different pod - should be rejected
+		return base64.StdEncoding.EncodeToString([]byte("different-pod-456"))
+	}
+
+	sendRequestWithSessionToken := func(proxyBaseAddr, sessionToken string) (*http.Response, []byte) {
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
+			bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		if sessionToken != "" {
+			req.Header.Add("x-session-token", sessionToken)
+		}
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+
+		return rp, responseBody
+	}
+
+	It("should populate cache on Turn 1 from decode response kv_transfer_params", func() {
+		// Turn 1: decode response includes kv_transfer_params with remote_num_tokens >= threshold
+		testInfo.decodeHandler.RawResponse = `{
+			"id":"chatcmpl-123",
+			"object":"chat.completion",
+			"choices":[{"message":{"content":"Hello"}}],
+			"usage":{"prompt_tokens":100,"completion_tokens":10},
+			"kv_transfer_params":{
+				"remote_block_ids":[[1,2,3]],
+				"remote_engine_id":"engine-abc",
+				"remote_host":"10.0.1.42",
+				"remote_port":5678,
+				"remote_num_tokens":100
+			}
+		}`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+		sessionToken := validSessionToken()
+
+		By("sending Turn 1 request with valid session token")
+		rp, responseBody := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		By("verifying prefill request does NOT have cached params (Turn 1 is a cache miss)")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		prefillReq := testInfo.prefillHandler.CompletionRequests[0]
+		kvParams, ok := prefillReq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		// Turn 1: no cached params injected, only do_remote_decode=true
+		Expect(kvParams).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(kvParams).To(HaveKeyWithValue(requestFieldRemoteBlockIDs, BeNil()))
+		Expect(kvParams).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+
+		By("verifying cache was populated from decode response")
+		// Cache is internal, but Turn 2 will validate it was cached
+	})
+
+	It("should inject cached params on Turn 2 when remote_num_tokens >= threshold", func() {
+		// Turn 1: populate cache
+		testInfo.decodeHandler.RawResponse = `{
+			"id":"chatcmpl-turn1",
+			"choices":[],
+			"usage":{"prompt_tokens":100},
+			"kv_transfer_params":{
+				"remote_block_ids":[[1,2,3]],
+				"remote_engine_id":"engine-turn1",
+				"remote_host":"10.0.1.100",
+				"remote_port":9000,
+				"remote_num_tokens":100,
+				"tp_size":2,
+				"remote_blocks_expiry_time":"2026-08-19T12:00:00Z"
+			}
+		}`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+		sessionToken := validSessionToken()
+
+		By("Turn 1: populate cache")
+		rp1, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp1.StatusCode).To(Equal(http.StatusOK))
+
+		By("Turn 2: cached params should be injected into prefill request")
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-turn2","choices":[],"usage":{"prompt_tokens":50}}`
+
+		rp2, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp2.StatusCode).To(Equal(http.StatusOK))
+
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 2))
+		turn2PrefillReq := testInfo.prefillHandler.CompletionRequests[1]
+		turn2KV, ok := turn2PrefillReq[requestFieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+
+		By("verifying cached params were injected")
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteEngineID, "engine-turn1"))
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteHost, "10.0.1.100"))
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemotePort, float64(9000)))
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteNumTokens, float64(100)))
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldTPSize, float64(2)))
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteBlocksExpiry, "2026-08-19T12:00:00Z"))
+
+		remoteBlockIDs, ok := turn2KV[requestFieldRemoteBlockIDs].([]any)
+		Expect(ok).To(BeTrue())
+		Expect(remoteBlockIDs).To(HaveLen(1))
+	})
+
+	It("should reject session token with wrong hostname (Blocker 2 security validation)", func() {
+		testInfo.decodeHandler.RawResponse = `{
+			"id":"chatcmpl-123",
+			"choices":[],
+			"usage":{"prompt_tokens":100},
+			"kv_transfer_params":{
+				"remote_engine_id":"engine-xyz",
+				"remote_num_tokens":100
+			}
+		}`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+
+		By("sending request with invalid session token (different pod hostname)")
+		invalidToken := invalidSessionToken()
+		rp, responseBody := sendRequestWithSessionToken(proxyBaseAddr, invalidToken)
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		By("verifying cache was NOT populated due to invalid token")
+		// Turn 2 with the invalid token should not find cached params
+		testInfo.decodeHandler.RawResponse = turn2SimpleDecodeResponse
+
+		rp2, _ := sendRequestWithSessionToken(proxyBaseAddr, invalidToken)
+		Expect(rp2.StatusCode).To(Equal(http.StatusOK))
+
+		turn2Prefill := testInfo.prefillHandler.CompletionRequests[1]
+		kvParams := turn2Prefill[requestFieldKVTransferParams].(map[string]any)
+		// Should NOT have cached params (no remote_engine_id from cache)
+		Expect(kvParams).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+	})
+
+	It("should skip cache injection when remote_num_tokens < threshold", func() {
+		// Turn 1: cache with remote_num_tokens=30 (below threshold of 64)
+		testInfo.decodeHandler.RawResponse = `{
+			"id":"chatcmpl-turn1",
+			"choices":[],
+			"usage":{"prompt_tokens":50},
+			"kv_transfer_params":{
+				"remote_engine_id":"engine-small",
+				"remote_num_tokens":30
+			}
+		}`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+		sessionToken := validSessionToken()
+
+		By("Turn 1: populate cache with small token count")
+		rp1, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp1.StatusCode).To(Equal(http.StatusOK))
+
+		By("Turn 2: should NOT inject cached params (below threshold)")
+		testInfo.decodeHandler.RawResponse = turn2SimpleDecodeResponse
+
+		rp2, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp2.StatusCode).To(Equal(http.StatusOK))
+
+		turn2KV := testInfo.prefillHandler.CompletionRequests[1][requestFieldKVTransferParams].(map[string]any)
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteEngineID, BeNil()))
+	})
+
+	It("should work without session token (backward compatibility)", func() {
+		testInfo.decodeHandler.RawResponse = `{
+			"id":"chatcmpl-123",
+			"choices":[],
+			"usage":{"prompt_tokens":100}
+		}`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+
+		By("sending request without session token")
+		rp, responseBody := sendRequestWithSessionToken(proxyBaseAddr, "")
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+
+		By("verifying prefill request succeeded normally")
+		Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+	})
+
+	It("should skip P2P composition when bidirectional cache is used", func() {
+		// Turn 1: populate cache
+		testInfo.decodeHandler.RawResponse = `{
+			"id":"chatcmpl-turn1",
+			"choices":[],
+			"usage":{"prompt_tokens":100},
+			"kv_transfer_params":{
+				"remote_block_ids":[[1,2,3]],
+				"remote_engine_id":"engine-cached",
+				"remote_host":"10.0.1.200",
+				"remote_port":8888,
+				"remote_num_tokens":100
+			}
+		}`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+		sessionToken := validSessionToken()
+
+		rp1, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp1.StatusCode).To(Equal(http.StatusOK))
+
+		By("Turn 2: verify P2P fields are NOT added when cache is used")
+		testInfo.decodeHandler.RawResponse = turn2SimpleDecodeResponse
+
+		rp2, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp2.StatusCode).To(Equal(http.StatusOK))
+
+		turn2KV := testInfo.prefillHandler.CompletionRequests[1][requestFieldKVTransferParams].(map[string]any)
+		// Cached params should be present (D-side GPU blocks)
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteEngineID, "engine-cached"))
+		// P2P fields should NOT be present (do_remote_prefill should stay false)
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+	})
+
+	It("should handle streaming SSE response with kv_transfer_params in final chunk", func() {
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = `data: {"choices":[{"delta":{"content":"Hello"}}]}
+
+data: {"usage":{"prompt_tokens":100},"kv_transfer_params":{"remote_engine_id":"engine-stream","remote_num_tokens":100}}
+
+data: [DONE]
+`
+
+		proxyBaseAddr := startProxyWithBidirectional()
+		sessionToken := validSessionToken()
+
+		By("Turn 1: cache should be populated from SSE stream")
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
+			bytes.NewReader([]byte(`{"model":"test","messages":[],"stream":true}`)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		req.Header.Add("x-session-token", sessionToken)
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		_, err = io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Turn 2: verify cached params from SSE are injected")
+		testInfo.decodeHandler.RawResponse = `{"id":"turn2","choices":[],"usage":{}}`
+		testInfo.decodeHandler.RawResponseType = ""
+
+		rp2, _ := sendRequestWithSessionToken(proxyBaseAddr, sessionToken)
+		Expect(rp2.StatusCode).To(Equal(http.StatusOK))
+
+		turn2KV := testInfo.prefillHandler.CompletionRequests[1][requestFieldKVTransferParams].(map[string]any)
+		Expect(turn2KV).To(HaveKeyWithValue(requestFieldRemoteEngineID, "engine-stream"))
+	})
+})

@@ -31,8 +31,11 @@ import (
 	"sync"
 	"time"
 
+	"encoding/base64"
+
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -101,6 +104,11 @@ const (
 	requestFieldRemotePrefiller = "remote_prefiller"
 	requestFieldRemoteKVSource  = "remote_kv_source"
 	requestFieldKVRequestID     = "kv_request_id"
+
+	// Bidirectional KV transfer fields
+	requestFieldRemoteNumTokens    = "remote_num_tokens"
+	requestFieldTPSize             = "tp_size"
+	requestFieldRemoteBlocksExpiry = "remote_blocks_expiry_time"
 
 	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
 	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
@@ -313,6 +321,36 @@ type Config struct {
 	MoRIIORemoteHostSpecs []string
 	MoRIIODecodeHostSpecs []string
 	MoRIIODecodePodIPSpec string
+
+	// BidirectionalKVXfer enables bidirectional KV cache transfer for multi-turn
+	// agentic workloads. When enabled, the sidecar caches kv_transfer_params from
+	// decode responses and injects them into subsequent prefill requests for the
+	// same session, allowing prefill to pull existing KV from decode via NIXL RDMA
+	// instead of recomputing the full conversation history. Only meaningful with
+	// --kv-connector=nixlv2.
+	BidirectionalKVXfer bool
+	// BidirectionalSessionHeader is the HTTP request header carrying the session
+	// identifier used as the cache key. EPP's session affinity plugin auto-generates
+	// this token (e.g., base64(pod_name)) and echoes it in the response header.
+	BidirectionalSessionHeader string
+	// BidirectionalCacheSize is the maximum number of sessions in the per-sidecar
+	// kv_transfer_params cache. Size based on decode pool KV capacity, not request
+	// volume.
+	BidirectionalCacheSize int
+	// BidirectionalCacheTTL is the cache entry TTL, aligned with vLLM's
+	// decoder_kv_blocks_ttl so cached params expire when the engine evicts its KV
+	// blocks.
+	BidirectionalCacheTTL time.Duration
+	// BidirectionalRecomputeThreshold is the minimum number of remote tokens
+	// required to trigger a D to P pull. Below this, prefill recomputes locally
+	// to amortize transfer latency. Must match vLLM's kv_recompute_threshold.
+	BidirectionalRecomputeThreshold int
+
+	// PodHostname is the current pod's hostname, used to validate EPP-issued
+	// session tokens in bidirectional KV transfer. Populated from os.Hostname()
+	// at startup. Only session tokens that decode to this hostname are trusted,
+	// preventing clients from hijacking other pods' cached KV params.
+	PodHostname string
 }
 
 // MarshalJSON implements json.Marshaler for Config.
@@ -381,6 +419,12 @@ type Server struct {
 	resolverOnce sync.Once
 	hostResolver *hostResolver
 
+	// conversationCache maps EPP-issued session tokens to kv_transfer_params for
+	// bidirectional KV cache transfer. Only tokens that decode to PodHostname are
+	// trusted (security: prevents clients from hijacking other pods' cached params).
+	// Nil when BidirectionalKVXfer is disabled.
+	conversationCache *expirable.LRU[string, map[string]any]
+
 	config Config
 }
 
@@ -445,11 +489,59 @@ func (s *Server) currentDecodePodIP(ctx context.Context) string {
 	return s.resolver().resolveOne(ctx, s.config.MoRIIODecodePodIPSpec)
 }
 
+// bidirectionalSessionID extracts and validates the session token from the request
+// for bidirectional KV transfer. Returns empty string if:
+// - Feature is disabled
+// - Session header is missing
+// - Token fails security validation (doesn't decode to PodHostname)
+//
+// Security: EPP's encoded_endpoint_header strategy generates tokens as base64(pod_name).
+// Only tokens that decode to the current pod's hostname are trusted, preventing clients
+// from hijacking other pods' cached kv_transfer_params by supplying arbitrary tokens.
+func (s *Server) bidirectionalSessionID(r *http.Request) string {
+	if !s.config.BidirectionalKVXfer {
+		return ""
+	}
+
+	token := r.Header.Get(s.config.BidirectionalSessionHeader)
+	if token == "" {
+		return ""
+	}
+
+	// Validate token is EPP-issued by decoding and comparing to PodHostname.
+	// EPP's encoded_endpoint_header generates token = base64(pod_name).
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		// Invalid base64 - not an EPP-issued token
+		return ""
+	}
+
+	if string(decoded) != s.config.PodHostname {
+		// Token doesn't match current pod - client attempting cross-pod access
+		s.logger.V(4).Info("rejected session token: hostname mismatch",
+			"token_hostname", string(decoded),
+			"pod_hostname", s.config.PodHostname)
+		return ""
+	}
+
+	return token
+}
+
 // NewProxy creates a new routing reverse proxy from the given Config.
 func NewProxy(config Config) *Server {
 	prefillerCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
 	encoderCache, _ := lru.New[string, http.Handler](1024)           // nolint:errcheck
 	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024) // nolint:errcheck
+
+	// Initialize conversation cache for bidirectional KV transfer when enabled
+	var conversationCache *expirable.LRU[string, map[string]any]
+	if config.BidirectionalKVXfer {
+		conversationCache = expirable.NewLRU[string, map[string]any](
+			config.BidirectionalCacheSize,
+			nil, // no evict callback
+			config.BidirectionalCacheTTL,
+		)
+	}
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
@@ -458,6 +550,7 @@ func NewProxy(config Config) *Server {
 		mooncakeEngineIDs:   mooncakeEngineIDs,
 		prefillerURLPrefix:  "http://",
 		encoderURLPrefix:    "http://",
+		conversationCache:   conversationCache,
 		config:              config,
 		dataParallelProxies: map[string]http.Handler{},
 		forwardDataParallel: true,

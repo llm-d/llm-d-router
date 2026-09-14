@@ -50,7 +50,11 @@ type ChatCompletionHandler struct {
 	// non-nil remote_host / remote_notify_port / transfer_id fields that the
 	// sidecar populates when --moriio-write-mode is enabled.  Standard NIXLv2
 	// READ-mode validation (everything nil) still applies when this is false.
-	MoRIIOWriteMode     bool
+	MoRIIOWriteMode bool
+	// BidirectionalKVMode allows non-nil remote_engine_id and remote_block_ids
+	// in prefill requests, which the sidecar injects from cached decode responses
+	// when bidirectional KV transfer is enabled.
+	BidirectionalKVMode bool
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
 	CompletionRawBodies [][]byte
@@ -155,15 +159,19 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 				w.Write([]byte("expected do_remote_prefill:false")) //nolint:all
 				return
 			}
-			if v, ok := kvTransferParamsMap["remote_engine_id"]; !ok || v != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_engine_id:null")) //nolint:all
-				return
-			}
-			if v, ok := kvTransferParamsMap["remote_block_ids"]; !ok || v != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_block_ids:null")) //nolint:all
-				return
+			// Bidirectional KV mode allows non-nil remote_engine_id and remote_block_ids
+			// from cached decode responses (D→P transfer)
+			if !cc.BidirectionalKVMode {
+				if v, ok := kvTransferParamsMap["remote_engine_id"]; !ok || v != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_engine_id:null")) //nolint:all
+					return
+				}
+				if v, ok := kvTransferParamsMap["remote_block_ids"]; !ok || v != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_block_ids:null")) //nolint:all
+					return
+				}
 			}
 			if cc.MoRIIOWriteMode {
 				// WRITE-mode expectations: remote_host is a non-empty string
@@ -198,17 +206,21 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 					w.Write([]byte("expected transfer_id to be a non-empty string in WRITE mode")) //nolint:all
 					return
 				}
-			} else {
+			} else if !cc.BidirectionalKVMode {
+				// Standard NIXLv2 READ-mode: remote_host and remote_port must be nil
+				// (bidirectional KV mode allows these from cached decode responses)
 				if v, ok := kvTransferParamsMap["remote_host"]; !ok || v != nil {
 					w.WriteHeader(http.StatusBadRequest)
 					w.Write([]byte("expected remote_host:null")) //nolint:all
 					return
 				}
 			}
-			if v, ok := kvTransferParamsMap["remote_port"]; !ok || v != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_port:null")) //nolint:all
-				return
+			if !cc.BidirectionalKVMode {
+				if v, ok := kvTransferParamsMap["remote_port"]; !ok || v != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write([]byte("expected remote_port:null")) //nolint:all
+					return
+				}
 			}
 
 			// 2. Produce Response

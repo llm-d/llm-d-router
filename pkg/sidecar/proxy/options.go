@@ -54,34 +54,39 @@ const (
 	MoRIIOFeatureEnabled = true
 
 	// Flags
-	port                      = "port"
-	modelServerPort           = "model-server-port"
-	vllmPort                  = "vllm-port"
-	dataParallelSize          = "data-parallel-size"
-	kvConnector               = "kv-connector"
-	ecConnector               = "ec-connector"
-	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
-	p2pConnectorPortFlag      = "p2p-connector-port"
-	enableP2PPull             = "enable-p2p-pull"
-	enableSSRFProtection      = "enable-ssrf-protection"
-	enablePrefillerSampling   = "enable-prefiller-sampling"
-	enableTLS                 = "enable-tls"
-	tlsInsecureSkipVerify     = "tls-insecure-skip-verify"
-	tlsMinVersion             = "tls-min-version"
-	tlsCipherSuites           = "tls-cipher-suites"
-	secureServing             = "secure-proxy"
-	certPath                  = "cert-path"
-	inferencePool             = "inference-pool"
-	poolGroup                 = "pool-group"
-	maxIdleConnsPerHost       = "max-idle-conns-per-host"
-	prefillMaxRetries         = "prefill-max-retries"
-	prefillRetryBackoff       = "prefill-retry-backoff"
-	decodeChunkSize           = "decode-chunk-size"
-	inlineConfiguration       = "configuration"
-	configurationFile         = "configuration-file"
-	tracingFlag               = "tracing"
-	metricsPort               = "metrics-port"
-	metricsCertDir            = "metrics-cert-dir"
+	port                            = "port"
+	modelServerPort                 = "model-server-port"
+	vllmPort                        = "vllm-port"
+	dataParallelSize                = "data-parallel-size"
+	kvConnector                     = "kv-connector"
+	ecConnector                     = "ec-connector"
+	mooncakeBootstrapPortFlag       = "mooncake-bootstrap-port"
+	p2pConnectorPortFlag            = "p2p-connector-port"
+	enableP2PPull                   = "enable-p2p-pull"
+	enableSSRFProtection            = "enable-ssrf-protection"
+	enablePrefillerSampling         = "enable-prefiller-sampling"
+	enableTLS                       = "enable-tls"
+	tlsInsecureSkipVerify           = "tls-insecure-skip-verify"
+	tlsMinVersion                   = "tls-min-version"
+	tlsCipherSuites                 = "tls-cipher-suites"
+	secureServing                   = "secure-proxy"
+	certPath                        = "cert-path"
+	inferencePool                   = "inference-pool"
+	poolGroup                       = "pool-group"
+	maxIdleConnsPerHost             = "max-idle-conns-per-host"
+	prefillMaxRetries               = "prefill-max-retries"
+	prefillRetryBackoff             = "prefill-retry-backoff"
+	decodeChunkSize                 = "decode-chunk-size"
+	inlineConfiguration             = "configuration"
+	configurationFile               = "configuration-file"
+	tracingFlag                     = "tracing"
+	metricsPort                     = "metrics-port"
+	metricsCertDir                  = "metrics-cert-dir"
+	enableBidirectionalKVXfer       = "enable-bidirectional-kv-xfer"
+	bidirectionalSessionHeader      = "bidirectional-session-header"
+	bidirectionalCacheSize          = "bidirectional-cache-size"
+	bidirectionalCacheTTL           = "bidirectional-cache-ttl"
+	bidirectionalRecomputeThreshold = "bidirectional-recompute-threshold"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
@@ -249,6 +254,13 @@ func NewOptions() *Options {
 			MoRIIORemoteHosts: nil,
 			MoRIIODPSizeLocal: 0,
 			MoRIIODecodeHosts: nil,
+
+			// Bidirectional KV transfer defaults: off, preserving existing behavior.
+			BidirectionalKVXfer:             false,
+			BidirectionalSessionHeader:      "x-session-token",
+			BidirectionalCacheSize:          4096,
+			BidirectionalCacheTTL:           480 * time.Second,
+			BidirectionalRecomputeThreshold: 64,
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -340,6 +352,32 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"remote_hosts. Kubernetes DNS names (e.g., 'pod-name.namespace.svc.cluster.local') "+
 			"are resolved to IPs at startup; literal IPs are used as-is. "+
 			"Pair with --moriio-dp-size-local.")
+
+	// Bidirectional KV transfer flags. Only meaningful with --kv-connector=nixlv2.
+	fs.BoolVar(&opts.BidirectionalKVXfer, enableBidirectionalKVXfer, opts.BidirectionalKVXfer,
+		"Enable bidirectional KV cache transfer for multi-turn agentic workloads. "+
+			"Caches kv_transfer_params from decode responses and injects them into "+
+			"subsequent prefill requests for the same session, allowing prefill to pull "+
+			"existing KV from decode via NIXL RDMA instead of recomputing the full "+
+			"conversation history. Requires --kv-connector=nixlv2. Session tokens must "+
+			"be EPP-issued (validates token matches current pod hostname).")
+	fs.StringVar(&opts.BidirectionalSessionHeader, bidirectionalSessionHeader, opts.BidirectionalSessionHeader,
+		"HTTP request header carrying the EPP-issued session identifier used as cache key. "+
+			"EPP's session affinity plugin auto-generates this token (e.g., base64(pod_name)) "+
+			"and echoes it in response headers.")
+	fs.IntVar(&opts.BidirectionalCacheSize, bidirectionalCacheSize, opts.BidirectionalCacheSize,
+		"Maximum number of sessions in the per-sidecar kv_transfer_params cache. "+
+			"Size based on decode pool KV capacity, not request volume. Example: "+
+			"Llama-3.3-70B at 70K tokens per session requires approximately 23GB KV per "+
+			"session; an 8-GPU decode pod holds roughly 15-25 concurrent sessions.")
+	fs.DurationVar(&opts.BidirectionalCacheTTL, bidirectionalCacheTTL, opts.BidirectionalCacheTTL,
+		"Cache entry TTL, aligned with vLLM's decoder_kv_blocks_ttl so cached params "+
+			"expire when the engine evicts its KV blocks.")
+	fs.IntVar(&opts.BidirectionalRecomputeThreshold, bidirectionalRecomputeThreshold, opts.BidirectionalRecomputeThreshold,
+		"Minimum number of remote tokens required to trigger a D to P pull. Below this, "+
+			"prefill recomputes locally to amortize transfer latency. Note: the vLLM "+
+			"engine also enforces its own kv_recompute_threshold; both should be set to "+
+			"the same value for expected behavior.")
 
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
@@ -539,6 +577,18 @@ func (opts *Options) Complete() error {
 		opts.MoRIIODecodePodIP = resolved[0]
 	}
 
+	// Populate PodHostname for session token validation in bidirectional KV transfer.
+	// This is the hostname that EPP's encoded_endpoint_header strategy uses when
+	// generating session tokens as base64(pod_name). Only tokens that decode to this
+	// hostname are trusted, preventing clients from hijacking other pods' cached KV params.
+	if opts.BidirectionalKVXfer {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("failed to get pod hostname for bidirectional KV transfer: %w", err)
+		}
+		opts.PodHostname = hostname
+	}
+
 	return nil
 }
 
@@ -732,6 +782,25 @@ func (opts *Options) Validate() error {
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
 			return errors.New("--inference-pool flag or INFERENCE_POOL environment variable is required when --enable-ssrf-protection is true")
+		}
+	}
+
+	// Validate bidirectional KV transfer configuration
+	if opts.BidirectionalKVXfer {
+		if opts.KVConnector != KVConnectorNIXLV2 {
+			return fmt.Errorf("--enable-bidirectional-kv-xfer requires --kv-connector=%s (got %q)", KVConnectorNIXLV2, opts.KVConnector)
+		}
+		if opts.BidirectionalCacheSize <= 0 {
+			return fmt.Errorf("--bidirectional-cache-size must be positive, got %d", opts.BidirectionalCacheSize)
+		}
+		if opts.BidirectionalCacheTTL <= 0 {
+			return fmt.Errorf("--bidirectional-cache-ttl must be positive, got %v", opts.BidirectionalCacheTTL)
+		}
+		if opts.BidirectionalRecomputeThreshold < 0 {
+			return fmt.Errorf("--bidirectional-recompute-threshold must be non-negative, got %d", opts.BidirectionalRecomputeThreshold)
+		}
+		if opts.BidirectionalSessionHeader == "" {
+			return errors.New("--bidirectional-session-header cannot be empty")
 		}
 	}
 
