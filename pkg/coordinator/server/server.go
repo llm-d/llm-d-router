@@ -132,6 +132,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(gateway.PathChatCompletions, s.handleInference)
 	r.Post(gateway.PathCompletions, s.handleInference)
 	r.Post(gateway.VLLMGeneratePath, s.handleInference)
+	r.Post(gateway.SGLangGeneratePath, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
