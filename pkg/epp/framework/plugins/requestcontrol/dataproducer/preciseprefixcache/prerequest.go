@@ -119,6 +119,9 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
+	if p.sessionManager != nil {
+		return p.prepareSessionRequest(request)
+	}
 	if !p.speculativeEnabled {
 		return nil
 	}
