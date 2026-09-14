@@ -29,11 +29,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -73,9 +73,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillPodHostPort),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
+		semconv.LLMDPDProxyRequestID(uuidStr),
+		semconv.LLMDPDProxyPrefillTarget(prefillPodHostPort),
+		semconv.LLMDPDProxyConnector(KVConnectorNIXLV2),
 	)
 	prefillStart := time.Now()
 
@@ -206,8 +206,8 @@ retryLoop:
 
 	prefillDuration := time.Since(prefillStart)
 	prefillSpan.SetAttributes(
-		attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-		attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
+		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
+		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
 	if isHTTPError(pw.statusCode) {
@@ -265,8 +265,8 @@ retryLoop:
 	defer decodeSpan.End()
 
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorNIXLV2),
+		semconv.LLMDPDProxyRequestID(uuidStr),
+		semconv.LLMDPDProxyConnector(KVConnectorNIXLV2),
 	)
 	decodeStart := time.Now()
 
@@ -306,7 +306,7 @@ retryLoop:
 	}
 
 	streamingEnabled, _ := body[requestFieldStream].(bool)
-	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.streaming", streamingEnabled))
+	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeStreaming(streamingEnabled))
 
 	// WRITE mode: backfill the decode-side kv_transfer_params fields that
 	// vLLM's request_finished response does not echo back, sourcing the
@@ -369,11 +369,11 @@ retryLoop:
 	}
 	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
-	decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
+	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 
 	if !dataParallelUsed {
 		s.logger.V(logging.DEBUG).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
-		decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
+		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
 		s.dispatchDecode(decodeWriter, dreq, body)
 	}
 	if err := finalizeDecodeWriter(); err != nil {
@@ -383,7 +383,7 @@ retryLoop:
 	}
 
 	decodeDuration := time.Since(decodeStart)
-	decodeSpan.SetAttributes(attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())))
+	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
 
 	// Calculate end-to-end P/D timing metrics.
 	// True TTFT captures time from gateway request start to decode start, including
@@ -402,11 +402,11 @@ retryLoop:
 		coordinatorOverhead := decodeStart.Sub(prefillStart.Add(prefillDuration))
 
 		currentSpan.SetAttributes(
-			attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.prefill_duration_ms", float64(prefillDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.coordinator_overhead_ms", float64(coordinatorOverhead.Milliseconds())),
+			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+			semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
+			semconv.LLMDPDProxyPrefillDurationMsSummary(float64(prefillDuration.Milliseconds())),
+			semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
+			semconv.LLMDPDProxyCoordinatorOverheadMs(float64(coordinatorOverhead.Milliseconds())),
 		)
 	}
 }
@@ -549,10 +549,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillPodHostPort),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
-		attribute.Bool("llm_d.pd_proxy.parallel_dispatch", true),
+		semconv.LLMDPDProxyRequestID(uuidStr),
+		semconv.LLMDPDProxyPrefillTarget(prefillPodHostPort),
+		semconv.LLMDPDProxyConnector("nixlv2"),
+		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	preq := r.Clone(pCtx)
 	preq.Header.Set(requestHeaderRequestID, uuidStr)
@@ -567,9 +567,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	)
 	defer decodeSpan.End()
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.request_id", uuidStr),
-		attribute.String("llm_d.pd_proxy.connector", "nixlv2"),
-		attribute.Bool("llm_d.pd_proxy.parallel_dispatch", true),
+		semconv.LLMDPDProxyRequestID(uuidStr),
+		semconv.LLMDPDProxyConnector("nixlv2"),
+		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	dreq := r.Clone(dCtx)
 	dreq.Header.Set(requestHeaderRequestID, uuidStr)
@@ -603,8 +603,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		prefillHandler.ServeHTTP(pw, preq)
 		prefillResp = pw
 		prefillSpan.SetAttributes(
-			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(time.Since(prefillStartedAt).Milliseconds())),
+			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
+			semconv.LLMDPDProxyPrefillDurationMs(float64(time.Since(prefillStartedAt).Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
@@ -622,12 +622,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	go func() {
 		defer close(decodeDone)
 		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq)
-		decodeSpan.SetAttributes(attribute.Bool("llm_d.pd_proxy.decode.data_parallel", dataParallelUsed))
+		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
-			decodeSpan.SetAttributes(attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host))
+			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
 			s.decoderProxy.ServeHTTP(dcw, dreq)
 		}
-		decodeSpan.SetAttributes(attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(time.Since(decodeStartedAt).Milliseconds())))
+		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(time.Since(decodeStartedAt).Milliseconds())))
 	}()
 
 	// Commit point: wait for prefill's outcome, bounded by a KV-wait backstop
@@ -699,9 +699,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			}
 		}
 		currentSpan.SetAttributes(
-			attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.parallel_window_ms", float64(time.Since(requestStartedAt).Milliseconds())),
-			attribute.Bool("llm_d.pd_proxy.parallel_dispatch", true),
+			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+			semconv.LLMDPDProxyParallelWindowMs(float64(time.Since(requestStartedAt).Milliseconds())),
+			semconv.LLMDPDProxyParallelDispatch(true),
 		)
 	}
 	_ = original // kept for signature symmetry with the strictly-serial path

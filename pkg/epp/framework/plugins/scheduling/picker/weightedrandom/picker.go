@@ -109,14 +109,19 @@ func (p *WeightedRandomPicker) TypedName() fwkplugin.TypedName {
 // Pick selects the endpoint(s) randomly from the list of candidates, where the probability of the endpoint to get picked is derived
 // from its weighted score.
 func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
+	logger := log.FromContext(ctx)
 	// Check if there is at least one endpoint with Score > 0, if not let random picker run
 	if slices.IndexFunc(scoredEndpoints, func(scoredEndpoint *fwksched.ScoredEndpoint) bool { return scoredEndpoint.Score > 0 }) == -1 {
-		log.FromContext(ctx).V(logutil.DEBUG).Info("All scores are zero, delegating to RandomPicker for uniform selection")
+		if logger.V(logutil.DEBUG).Enabled() {
+			logger.V(logutil.DEBUG).Info("All scores are zero, delegating to RandomPicker for uniform selection")
+		}
 		return p.randomPicker.Pick(ctx, scoredEndpoints)
 	}
 
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates by random weighted picker", "max-num-of-endpoints", p.maxNumOfEndpoints,
-		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+	if logger.V(logutil.DEBUG).Enabled() {
+		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates by random weighted picker", "max-num-of-endpoints", p.maxNumOfEndpoints,
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+	}
 
 	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ)
 	weightedEndpoints := make([]weightedScoredEndpoint, len(scoredEndpoints))
