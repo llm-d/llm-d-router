@@ -190,7 +190,7 @@ schedulingProfiles:
     weight: 2
 `
 
-// kvConfig returns the EPP config for running with precise prefix scoring (i.e. KV events).
+// kvConfig returns the EPP config for precise prefix scoring with KV events.
 // The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
 func kvConfig() string {
 	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
@@ -201,7 +201,7 @@ plugins:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: http://vllm-render:%s
-- type: precise-prefix-cache-scorer
+- type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
       blockSizeTokens: 16
@@ -212,6 +212,9 @@ plugins:
       kvBlockIndexConfig:
         enableMetrics: false                  # enable kv-block index metrics (prometheus)
         metricsLoggingInterval: 60000000000   # log kv-block metrics as well (1m in nanoseconds)
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: disagg-profile-handler
@@ -220,12 +223,13 @@ schedulingProfiles:
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
-  - pluginRef: precise-prefix-cache-scorer
+  - pluginRef: prefix-cache-scorer
     weight: 10
 `, vllmRenderPort)
 }
 
-// kvExternalTokenizerConfig returns the EPP config for the external-tokenizer DataProducer variant.
+// kvExternalTokenizerConfig returns the EPP config for the KV-events test that
+// covers both completions and chat completions.
 // The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
 func kvExternalTokenizerConfig() string {
 	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
@@ -236,7 +240,7 @@ plugins:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
       url: http://vllm-render:%s
-- type: precise-prefix-cache-scorer
+- type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
       blockSizeTokens: 16
@@ -246,6 +250,9 @@ plugins:
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: disagg-profile-handler
@@ -254,7 +261,7 @@ schedulingProfiles:
   plugins:
   - pluginRef: decode-filter
   - pluginRef: max-score-picker
-  - pluginRef: precise-prefix-cache-scorer
+  - pluginRef: prefix-cache-scorer
     weight: 10
 `, vllmRenderPort)
 }

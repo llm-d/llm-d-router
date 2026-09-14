@@ -140,7 +140,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loraaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/mmcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/preciseprefixcache"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/runningrequests"
@@ -616,7 +615,6 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(tokenload.TokenLoadScorerType, fwkplugin.StabilityBeta, tokenload.TokenLoadScorerFactory)
 	fwkplugin.Register(nohitlru.NoHitLRUType, fwkplugin.StabilityBeta, nohitlru.Factory)
 	fwkplugin.Register(activerequest.ActiveRequestType, fwkplugin.StabilityBeta, activerequest.Factory)
-	fwkplugin.Register(preciseprefixcache.PrecisePrefixCachePluginType, fwkplugin.StabilityBeta, preciseprefixcache.PluginFactory)
 	fwkplugin.Register(mmcacheaffinity.Type, fwkplugin.StabilityBeta, mmcacheaffinity.Factory)
 	fwkplugin.Register(preciseproducer.PluginType, fwkplugin.StabilityBeta, preciseproducer.PluginFactory)
 	// Alpha
