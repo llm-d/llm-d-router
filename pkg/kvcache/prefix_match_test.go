@@ -139,13 +139,13 @@ func TestMatchBlockKeys(t *testing.T) {
 			},
 		},
 		{
-			name: "unconfigured tier weighs the default",
+			name: "unconfigured tier weighs zero",
 			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
 				10: {{PodIdentifier: podA, DeviceTier: "disk"}},
 			},
 			requestKeys: []kvblock.BlockHash{10},
 			want: map[string]kvcache.PodMatch{
-				podA: {WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
+				podA: {WeightedScore: 0.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
 			},
 		},
 		{
@@ -275,6 +275,58 @@ func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
 	assertPodMatches(t, map[string]kvcache.PodMatch{
 		"pod-a": {WeightedScore: 3.0, MatchedBlocks: 3, BlocksByTier: map[string]int{kvcache.SpeculativeTier: 3}},
 	}, got)
+}
+
+func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
+	tests := []struct {
+		name     string
+		backends []*kvcache.KVCacheBackendConfig
+		entry    kvblock.PodEntry
+		want     float64
+	}{
+		{
+			name:     "default backends score shared_storage at 0.4",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "shared_storage"},
+			want:     0.4,
+		},
+		{
+			name:     "default backends score object_store at 0.2",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "object_store"},
+			want:     0.2,
+		},
+		{
+			name:     "backend names match entry tiers case-insensitively",
+			backends: []*kvcache.KVCacheBackendConfig{{Name: "SHARED_STORAGE", Weight: 0.9}},
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "shared_storage"},
+			want:     0.9,
+		},
+		{
+			name:     "configured speculative weight overrides the speculative default",
+			backends: []*kvcache.KVCacheBackendConfig{{Name: kvcache.SpeculativeTier, Weight: 0.5}},
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", Speculative: true},
+			want:     0.5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(t.Context())
+			indexer, idx := newMatcher(t, tt.backends)
+			populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{10: {tt.entry}})
+
+			got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
+			require.NoError(t, err)
+			tier := tt.entry.DeviceTier
+			if tt.entry.Speculative {
+				tier = kvcache.SpeculativeTier
+			}
+			assertPodMatches(t, map[string]kvcache.PodMatch{
+				"pod-a": {WeightedScore: tt.want, MatchedBlocks: 1, BlocksByTier: map[string]int{tier: 1}},
+			}, got)
+		})
+	}
 }
 
 // lateCancelContext reports cancellation from its second poll after arm is
@@ -453,8 +505,11 @@ func legacyLongestPrefixScore(keys []kvblock.BlockHash, keyToPods map[kvblock.Bl
 	maxWeights := func(entries []kvblock.PodEntry) map[string]float64 {
 		out := map[string]float64{}
 		for _, e := range entries {
-			w := 1.0
-			if cw, ok := weights[e.DeviceTier]; ok {
+			tier, w := e.DeviceTier, 0.0
+			if e.Speculative || e.DeviceTier == kvcache.SpeculativeTier {
+				tier, w = kvcache.SpeculativeTier, 1.0
+			}
+			if cw, ok := weights[tier]; ok {
 				w = cw
 			}
 			if cur, ok := out[e.PodIdentifier]; !ok || w > cur {

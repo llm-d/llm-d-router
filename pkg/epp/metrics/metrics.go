@@ -36,9 +36,6 @@ const (
 	// --- Subsystems ---
 	inferenceExtension = "inference_extension"
 
-	// InferenceObjectiveSubsystem is retained for predicted-latency metrics.
-	InferenceObjectiveSubsystem = "inference_objective"
-
 	// InferenceExtensionSubsystem is the legacy subsystem for inference extension metrics.
 	InferenceExtensionSubsystem = inferenceExtension
 

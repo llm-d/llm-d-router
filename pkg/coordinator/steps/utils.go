@@ -27,7 +27,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -60,49 +59,21 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
-// resolveFormat maps a request path to the wire format a step emits. Completions
-// is always honored; otherwise OpenAI formats collapse to FormatGenerate unless
-// useOpenAIFormat is set.
-func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
-	detected := gateway.DetectFormat(path)
-	if detected == gateway.FormatCompletions {
-		return gateway.FormatCompletions
+// resolveFormat maps a request path to the wire format a step emits. The steps
+// build only Completions, Chat Completions, and generate bodies, so any other
+// API collapses to APITypeGenerate; Chat Completions additionally requires
+// useOpenAIFormat. Generate is the fallback because its body carries the prompt
+// as reqCtx.TokenIDs and does not depend on the client's request shape.
+func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
+	switch detected := reqcommon.DetectAPIType(path); detected {
+	case reqcommon.APITypeCompletions:
+		return detected
+	case reqcommon.APITypeChatCompletions:
+		if useOpenAIFormat {
+			return detected
+		}
 	}
-	if !useOpenAIFormat {
-		return gateway.FormatGenerate
-	}
-	return detected
-}
-
-// capSingleTokenOutput rewrites body into a single-output-token, non-streaming
-// request for the synthetic prefill and encode legs.
-//
-// Chat-completions and completions bodies carry max_tokens/max_completion_tokens/
-// stream/stream_options at the top level, same as the sidecar's synthetic
-// requests, so they share reqcommon.PrimeSingleTokenRequest verbatim. The
-// generate format's token-limit fields live under sampling_params instead
-// (vLLM's GenerateRequest schema); stream/stream_options stay top-level there
-// too, and generate has no max_completion_tokens-equivalent field, so only the
-// max_tokens/min_tokens capping (reqcommon.CapMaxTokensField) is reusable for it.
-//
-// TODO: max_output_tokens is another client-supplied output cap (Responses
-// API) that a client can send instead of max_tokens/max_completion_tokens; it
-// should be capped to 1 here as well so the synthetic legs stay single-token.
-func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
-	if format != gateway.FormatGenerate {
-		reqcommon.PrimeSingleTokenRequest(body)
-		return
-	}
-
-	sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any)
-	if !ok {
-		sp = map[string]any{}
-		body[reqcommon.FieldSamplingParams] = sp
-	}
-	reqcommon.CapMaxTokensField(sp)
-
-	body[reqcommon.FieldStream] = false
-	delete(body, reqcommon.FieldStreamOptions)
+	return reqcommon.APITypeGenerate
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,

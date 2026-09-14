@@ -115,15 +115,19 @@ func TestInFlightLoadProducer_PrefixMatchInfoProducerName(t *testing.T) {
 	// selected owner has 41,280 of 43,992 input tokens cached; charging the full
 	// prompt would make an idle cold endpoint look cheaper than a busy warm one.
 	cache := &cacheMatchTestProducer{key: preciseKey}
-	ordered, err := datagraph.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{producer, cache})
+	tokens := &tokenizedPromptTestProducer{}
+	ordered, err := datagraph.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{producer, cache, tokens})
 	require.NoError(t, err)
 	require.Less(t, slices.Index(ordered, cache.TypedName().String()), slices.Index(ordered, producer.TypedName().String()))
 	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint("warm"), newStubSchedulingEndpoint("cold")}
 	req := makeTokenRequest("warm-follow-up", 43992)
 	for _, name := range ordered {
 		var next requestcontrol.DataProducer = producer
-		if name == cache.TypedName().String() {
+		switch name {
+		case cache.TypedName().String():
 			next = cache
+		case tokens.TypedName().String():
+			next = tokens
 		}
 		require.NoError(t, next.Produce(ctx, req, endpoints))
 	}
@@ -147,6 +151,24 @@ func (p *cacheMatchTestProducer) Produces() map[fwkplugin.DataKey]any {
 func (p *cacheMatchTestProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	endpoints[0].Put(p.key, attrprefix.NewPrefixCacheMatchInfo(645, 687, 64))
 	endpoints[1].Put(p.key, attrprefix.NewPrefixCacheMatchInfo(0, 687, 64))
+	return nil
+}
+
+// tokenizedPromptTestProducer satisfies InFlightLoadProducer's Required
+// TokenizedPrompt dependency so the real dependency sorter accepts the
+// plugin set; makeTokenRequest already carries the tokenized prompt
+// directly on the request, so Produce is a no-op.
+type tokenizedPromptTestProducer struct{}
+
+func (p *tokenizedPromptTestProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "token-producer", Name: "token-producer"}
+}
+
+func (p *tokenizedPromptTestProducer) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}}
+}
+
+func (p *tokenizedPromptTestProducer) Produce(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
 	return nil
 }
 

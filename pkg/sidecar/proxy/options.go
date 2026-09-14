@@ -81,6 +81,7 @@ const (
 	configurationFile         = "configuration-file"
 	tracingFlag               = "tracing"
 	metricsPort               = "metrics-port"
+	metricsCertDir            = "metrics-cert-dir"
 
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
@@ -135,6 +136,7 @@ type yamlConfiguration struct {
 	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
 	Tracing                 *bool    `json:"tracing,omitempty"`
 	MetricsPort             int      `json:"metrics-port,omitempty"`
+	MetricsCertDir          string   `json:"metrics-cert-dir,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -288,6 +290,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
+	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty (the default) serves metrics over plain HTTP. Independent of --secure-proxy/--cert-path, which apply to the data-plane listener.")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
 	// against vLLM engines running MoRI-IO in WRITE mode.
@@ -883,6 +886,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.MetricsPort != 0 && !opts.isFlagSet(metricsPort) {
 		opts.MetricsPort = cfg.MetricsPort
+	}
+	if cfg.MetricsCertDir != "" && !opts.isFlagSet(metricsCertDir) {
+		opts.MetricsCertDir = cfg.MetricsCertDir
 	}
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing

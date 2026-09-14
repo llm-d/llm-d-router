@@ -19,6 +19,7 @@ package kvcache
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
@@ -76,7 +77,7 @@ func NewKVBlockScorer(config *KVBlockScorerConfig) (KVBlockScorer, error) {
 func tierWeightsFromBackends(backends []*KVCacheBackendConfig) map[string]float64 {
 	weights := make(map[string]float64, len(backends))
 	for _, medium := range backends {
-		weights[medium.Name] = medium.Weight
+		weights[strings.ToLower(medium.Name)] = medium.Weight
 	}
 	return weights
 }

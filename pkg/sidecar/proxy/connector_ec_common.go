@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 
 	"github.com/go-logr/logr"
@@ -95,15 +96,11 @@ func extractMMItems(logger logr.Logger, requestData map[string]any) []map[string
 	return items
 }
 
-// buildEncoderRequest creates a per-item encoder request: a deep copy of the
-// original chat-completions request with only the multimodal item in
-// messages[0].content (text removed), capped to a single output token, and
-// stream disabled.
+// buildEncoderRequest creates a per-item encoder request: a one-level copy of
+// the client's request carrying only the multimodal item in messages[0].content
+// (text removed), capped to a single output token, and stream disabled.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := make(map[string]any)
-	for k, v := range originalRequest {
-		encoderRequest[k] = v
-	}
+	encoderRequest := maps.Clone(originalRequest)
 
 	messages := []map[string]any{
 		{
@@ -115,7 +112,10 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest)
+	// The encoder request carries the item in messages and is sent to
+	// reqcommon.PathChatCompletions whatever API the client used (#2742), so it
+	// is capped as chat completions.
+	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
 
 	return encoderRequest
 }
@@ -204,7 +204,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 
-			req, err := http.NewRequestWithContext(gctx, "POST", ChatCompletionsPath, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(gctx, "POST", reqcommon.PathChatCompletions, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
@@ -249,7 +249,7 @@ func (s *Server) runPDPipeline(
 	body map[string]any,
 	prefillEndPoint string,
 	requestID string,
-	apiType APIType,
+	apiType reqcommon.APIType,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
 	body[requestFieldCacheHitThreshold] = 0

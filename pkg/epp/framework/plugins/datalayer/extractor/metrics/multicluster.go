@@ -82,6 +82,12 @@ func (e *MultiClusterMetricsExtractor) TypedName() fwkplugin.TypedName {
 
 // Extract writes each pool aggregate to its attribute. A missing metric is reported
 // but does not stop the others.
+//
+// Writes through the bare attribute key, not a *Slot, because the DataKey
+// form here (NewDataKey(key, "")) would String() to "key/" with a trailing
+// slash, and downstream readers (the multicluster scorers, the tests) look
+// up the bare key. The slot's typed Put would silently miss. Leaving as a
+// string-keyed write until the DataKey convention is unified.
 func (e *MultiClusterMetricsExtractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
 	ep := in.Endpoint
 	var errs []error

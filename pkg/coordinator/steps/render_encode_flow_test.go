@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -77,7 +78,7 @@ func TestRenderToEncode_FeaturesFlow(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "render-encode-flow",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body:         map[string]any{"model": "test-model"},
 		MultimodalEntries: []pipeline.MultimodalEntry{

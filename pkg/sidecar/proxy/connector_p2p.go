@@ -18,8 +18,7 @@ package proxy
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,11 +27,11 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -40,22 +39,11 @@ import (
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
 // prefiller stores KV under a kv_request_id with no peer address; the decoder
 // pulls it using the prefiller's OffloadingConnector P2P tier host/port. The
-// prefill leg runs to completion before decode is dispatched, so the decoder's
+// prefill request runs to completion before decode is dispatched, so the decoder's
 // fetch finds the blocks already stored, matching the NIXL path.
-func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if err := errorJSONInvalid(fmt.Errorf("failed to read request body: %w", err), w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	requestData, err := decodeRequestBody(body)
-	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -66,12 +54,9 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		"kv_request_id", kvRequestID,
 		"p2p_connector_port", prefillP2PPort)
 
-	// Prefill leg: store KV under kv_request_id, no peer address. Capped to a
+	// Prefill request: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
-	prefillData := make(map[string]any, len(requestData)+1)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
+	prefillData := maps.Clone(requestData)
 	prefillKVParams := map[string]any{
 		requestFieldRemoteDecoder: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
@@ -79,7 +64,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	reqcommon.PrimeSingleTokenRequest(prefillData)
+	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
@@ -92,12 +77,9 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		v.Info("prefill request body", logging.HTTPBodyKey, string(prefillBody))
 	}
 
-	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
+	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
-	decodeData := make(map[string]any, len(requestData)+1)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
+	decodeData := maps.Clone(requestData)
 	decodeData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldRemotePrefiller: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
@@ -147,9 +129,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
-		attribute.Bool("llm_d.pd_proxy.prefill.async", false),
+		semconv.LLMDPDProxyPrefillTarget(prefillHost),
+		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyPrefillAsync(false),
 	)
 	prefillStart := time.Now()
 
@@ -159,8 +141,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
-		attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-		attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
+		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
+		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
@@ -195,8 +177,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	)
 	defer decodeSpan.End()
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", false),
+		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyDecodeConcurrentWithPrefill(false),
 	)
 	decodeStart := time.Now()
 
@@ -204,8 +186,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	decodeDuration := time.Since(decodeStart)
 	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
+		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),
 	)
 
 	// End-to-end P/D timing. True TTFT captures time from gateway request start
@@ -218,10 +200,10 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-		attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-		attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.Bool("llm_d.pd_proxy.concurrent_pd", false),
+		semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+		semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
+		semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyConcurrentPD(false),
 	)
 }
 

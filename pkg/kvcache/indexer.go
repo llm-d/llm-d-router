@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -202,8 +201,8 @@ func (k *Indexer) ScoreTokens(
 	// holds, which is as far as a walk reads.
 	blocksFound := maxMatchedBlocks(matches)
 	span.SetAttributes(
-		attribute.Float64("llm_d.kv_cache.block_hit_ratio", float64(blocksFound)/float64(len(blockKeys))),
-		attribute.Int("llm_d.kv_cache.blocks_found", blocksFound),
+		semconv.LLMDKVCacheBlockHitRatio(float64(blocksFound)/float64(len(blockKeys))),
+		semconv.LLMDKVCacheBlocksFound(blocksFound),
 	)
 
 	return podScores, nil
