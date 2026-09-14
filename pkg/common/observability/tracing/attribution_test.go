@@ -31,6 +31,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 )
 
+const testTenantID = "tenant-a"
+
 // installAttributionRecorder makes a recording SDK provider global, with the
 // same attribution span processor InitTracing registers, and returns the
 // recorder.
@@ -91,8 +93,8 @@ func TestRequestAttributionResolution(t *testing.T) {
 		},
 		{
 			name:       "header becomes tenant identity",
-			headerID:   "tenant-a",
-			wantID:     "tenant-a",
+			headerID:   testTenantID,
+			wantID:     testTenantID,
 			wantSource: AttributionSourceHeader,
 		},
 		{
@@ -127,13 +129,13 @@ func TestRequestAttributionAbsent(t *testing.T) {
 }
 
 func TestRequestAttributionVisibleAcrossDerivedContexts(t *testing.T) {
-	root := BeginRequestAttribution(context.Background(), "tenant-a")
+	root := BeginRequestAttribution(context.Background(), testTenantID)
 	derived, cancel := context.WithCancel(root)
 	defer cancel()
 
 	for name, ctx := range map[string]context.Context{"entry point": root, "derived": derived} {
 		id, source, ok := RequestAttribution(ctx)
-		if !ok || id != "tenant-a" || source != AttributionSourceHeader {
+		if !ok || id != testTenantID || source != AttributionSourceHeader {
 			t.Errorf("%s: RequestAttribution() = (%q, %q, %v), want (tenant-a, header, true)", name, id, source, ok)
 		}
 	}
@@ -143,7 +145,7 @@ func TestSpanProcessorAttributesRequestSpanTree(t *testing.T) {
 	recorder := installAttributionRecorder(t)
 	tracer := Tracer("attribution-test")
 
-	ctx := BeginRequestAttribution(context.Background(), "tenant-a")
+	ctx := BeginRequestAttribution(context.Background(), testTenantID)
 	ctx, root := tracer.Start(ctx, "request")
 	_, child := tracer.Start(ctx, "child")
 	child.End()
@@ -154,7 +156,7 @@ func TestSpanProcessorAttributesRequestSpanTree(t *testing.T) {
 		if !present {
 			t.Fatalf("span %q carries no paired attribution", name)
 		}
-		if id != "tenant-a" || source != AttributionSourceHeader {
+		if id != testTenantID || source != AttributionSourceHeader {
 			t.Errorf("span %q attribution = (%q, %q), want (tenant-a, header)", name, id, source)
 		}
 	}
@@ -226,7 +228,7 @@ func TestBackgroundSpansCarryNoAttribution(t *testing.T) {
 func TestSpanProcessorAttributesRawProviderSpans(t *testing.T) {
 	recorder := installAttributionRecorder(t)
 
-	ctx := BeginRequestAttribution(context.Background(), "tenant-a")
+	ctx := BeginRequestAttribution(context.Background(), testTenantID)
 	_, span := otel.Tracer("raw-instrumentation").Start(ctx, "http-server")
 	span.End()
 
@@ -234,7 +236,7 @@ func TestSpanProcessorAttributesRawProviderSpans(t *testing.T) {
 	if !present {
 		t.Fatal("span started outside Tracer carries no paired attribution")
 	}
-	if id != "tenant-a" || source != AttributionSourceHeader {
+	if id != testTenantID || source != AttributionSourceHeader {
 		t.Errorf("attribution = (%q, %q), want (tenant-a, header)", id, source)
 	}
 }
@@ -246,14 +248,14 @@ func TestAttributionWithTracingDisabled(t *testing.T) {
 	otel.SetTracerProvider(tracenoop.NewTracerProvider())
 	t.Cleanup(func() { otel.SetTracerProvider(original) })
 
-	ctx := BeginRequestAttribution(context.Background(), "tenant-a")
+	ctx := BeginRequestAttribution(context.Background(), testTenantID)
 	ctx, span := Tracer("attribution-test").Start(ctx, "request")
 	if span.IsRecording() {
 		t.Fatal("noop provider returned a recording span")
 	}
 	span.End()
 
-	if id, source, ok := RequestAttribution(ctx); !ok || id != "tenant-a" || source != AttributionSourceHeader {
+	if id, source, ok := RequestAttribution(ctx); !ok || id != testTenantID || source != AttributionSourceHeader {
 		t.Errorf("RequestAttribution() = (%q, %q, %v), want (tenant-a, header, true)", id, source, ok)
 	}
 }
