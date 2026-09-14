@@ -19,12 +19,14 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -59,7 +61,9 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
 	body := maps.Clone(reqCtx.Body)
-	s.prepareBody(reqCtx, body)
+	if err := s.prepareBody(reqCtx, body, resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)); err != nil {
+		return err
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
@@ -103,10 +107,9 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
-func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any) {
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any, format reqcommon.APIType) error {
 	switch format {
-	case gateway.FormatChatCompletions:
+	case reqcommon.APITypeChatCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			tokens := map[string]any{
 				"token_ids": reqCtx.TokenIDs,
@@ -116,9 +119,15 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, bod
 			}
 			body["tokens"] = tokens
 		}
-	case gateway.FormatCompletions:
+	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
 		}
+	case reqcommon.APITypeGenerate:
+		// The client's generate body already carries token_ids.
+	default:
+		// resolveFormat only ever yields the three formats above.
+		return fmt.Errorf("conditional-decode: unsupported request format %v", format)
 	}
+	return nil
 }

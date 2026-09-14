@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -54,7 +55,7 @@ var _ = Describe("P2P KV cache source header", func() {
 	})
 
 	sendBody := func(proxyBaseAddr, body string, headers map[string]string) *http.Response {
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
 			bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		for k, v := range headers {
