@@ -15,6 +15,8 @@
 package kvevents
 
 import (
+	"strings"
+
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -98,6 +100,10 @@ type EngineAdapter interface {
 
 // BlockStoredEvent represents blocks being added to the cache.
 type BlockStoredEvent struct {
+	// SessionID identifies the request context that reported these blocks.
+	SessionID   *string
+	Locality    string
+	Ownership   string
 	BlockHashes []uint64
 	Tokens      []uint32
 	ParentHash  uint64
@@ -114,6 +120,32 @@ type BlockStoredEvent struct {
 	KVCacheSpecSlidingWindowSize *int
 }
 
+// IsLocalGPUEvent reports whether an event describes engine-local GPU
+// residency. Older vLLM events omit medium; the generic event index treats
+// that legacy value as GPU as well.
+func IsLocalGPUEvent(deviceTier, locality, ownership string) bool {
+	return (deviceTier == "" || strings.EqualFold(deviceTier, "gpu")) &&
+		ownership == "" &&
+		(locality == "" || strings.EqualFold(locality, "local"))
+}
+
+// IsIndexableLocalGPUStore applies the common admission rule for session-aware
+// consumers of BlockStored events.
+func IsIndexableLocalGPUStore(event *BlockStoredEvent) bool {
+	if event == nil || !IsLocalGPUEvent(event.DeviceTier, event.Locality, event.Ownership) ||
+		event.BlockSize <= 0 || len(event.BlockHashes) == 0 {
+		return false
+	}
+	switch event.KVCacheSpecKind {
+	case KVCacheSpecKindFullAttention, KVCacheSpecKindMlaAttention:
+		return true
+	case "":
+		return event.GroupIdx == nil
+	default:
+		return false
+	}
+}
+
 // Type returns the event type.
 func (e *BlockStoredEvent) Type() EventType {
 	return EventTypeBlockStored
@@ -121,6 +153,8 @@ func (e *BlockStoredEvent) Type() EventType {
 
 // BlockRemovedEvent represents blocks being evicted from the cache.
 type BlockRemovedEvent struct {
+	Locality    string
+	Ownership   string
 	BlockHashes []uint64
 	DeviceTier  string
 	// GroupIdx identifies the vLLM KV cache group that removed this block.

@@ -133,8 +133,9 @@ var (
 		"block_hashes", "parent_block_hash", "token_ids", "block_size",
 		"lora_id", "medium", "lora_name", "extra_keys", "group_idx",
 		"kv_cache_spec_kind", "kv_cache_spec_sliding_window",
+		"locality", "ownership", "session_id",
 	}
-	blockRemovedFieldOrder = []string{"block_hashes", "medium", "group_idx"}
+	blockRemovedFieldOrder = []string{"block_hashes", "medium", "group_idx", "locality", "ownership"}
 )
 
 // mapEventToFields normalizes a map-encoded vLLM event to positional []any.
@@ -193,6 +194,9 @@ func fieldAt(fields []any, i int) any {
 //	[9]  group_idx                    int|nil           (optional, HMA)
 //	[10] kv_cache_spec_kind           string|nil        (optional, HMA)
 //	[11] kv_cache_spec_sliding_window int|nil           (optional, HMA)
+//	[12] locality                    string|nil
+//	[13] ownership                   string|nil
+//	[14] session_id                  string|nil
 //
 // Trailing fields may be absent in older vLLM versions. Extra trailing fields
 // from newer vLLM versions are silently ignored.
@@ -307,7 +311,27 @@ func (v *VLLMAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEve
 		slidingWindow = &window
 	}
 
+	var sessionID *string
+	if raw := fieldAt(fields, 14); raw != nil {
+		stamp, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("BlockStored: session_id is not a string: %T", raw)
+		}
+		sessionID = &stamp
+	}
+	locality, err := optionalStringField(fields, 12, "locality")
+	if err != nil {
+		return nil, err
+	}
+	ownership, err := optionalStringField(fields, 13, "ownership")
+	if err != nil {
+		return nil, err
+	}
+
 	return &kvevents.BlockStoredEvent{
+		SessionID:                    sessionID,
+		Locality:                     locality,
+		Ownership:                    ownership,
 		BlockHashes:                  blockHashes,
 		Tokens:                       tokens,
 		ParentHash:                   parentHash,
@@ -364,11 +388,33 @@ func (v *VLLMAdapter) convertBlockRemovedEvent(fields []any) (kvevents.GenericEv
 		groupIdx = &group
 	}
 
+	locality, err := optionalStringField(fields, 4, "locality")
+	if err != nil {
+		return nil, err
+	}
+	ownership, err := optionalStringField(fields, 5, "ownership")
+	if err != nil {
+		return nil, err
+	}
 	return &kvevents.BlockRemovedEvent{
+		Locality:    locality,
+		Ownership:   ownership,
 		BlockHashes: blockHashes,
 		DeviceTier:  deviceTier,
 		GroupIdx:    groupIdx,
 	}, nil
+}
+
+func optionalStringField(fields []any, index int, name string) (string, error) {
+	raw := fieldAt(fields, index)
+	if raw == nil {
+		return "", nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s is not a string: %T", name, raw)
+	}
+	return value, nil
 }
 
 // convertAllBlocksClearedEvent converts a decoded []any into an AllBlocksClearedEvent.

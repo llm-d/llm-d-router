@@ -686,16 +686,16 @@ func addedTokensKey(endpointID, profileName string) string {
 	return endpointID + "|" + profileName + "|added"
 }
 
-// uncachedInputTokens returns the prompt tokens this endpoint must actually compute,
-// excluding any prefix already cached on it.
+// uncachedInputTokens estimates the prompt tokens this endpoint must compute.
 //
 // When the configured prefix producer (approximate or precise) has populated
 // PrefixCacheMatchInfo on the endpoint under prefixMatchInfoKey, the matched and
-// total block counts are in real (tokenized) units, so we use them directly:
+// total block counts determine the indexed prompt cost:
 // uncached = (TotalBlocks - MatchBlocks) * BlockSizeTokens. For very long prompts
 // where the prefix index is capped (MaxPrefixTokensToMatch), any tail beyond the
 // cap is added back from the (estimated) inputTokens so the full prompt cost is
-// still reflected.
+// still reflected. An explicit InputTokenCount overrides inputTokens to keep
+// the tail in the same units as the match.
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
 func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey fwkplugin.DataKey) int64 {
@@ -709,6 +709,9 @@ func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMa
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	if !ok || info == nil || info.BlockSizeTokens() <= 0 {
 		return nonNeg(inputTokens)
+	}
+	if count, ok := info.InputTokenCount(); ok {
+		inputTokens = int64(count)
 	}
 
 	blockSize := int64(info.BlockSizeTokens())

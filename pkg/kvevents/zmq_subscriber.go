@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
@@ -51,6 +52,8 @@ type zmqSubscriber struct {
 	replayEndpoint string
 	remote         bool
 	topicFilter    string
+	queueMu        sync.Mutex
+	retired        bool
 
 	// Replay state persists across reconnections within subscriber lifetime.
 	lastSeq           uint64
@@ -102,6 +105,13 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			// We run the subscriber in a separate function to handle socket
 			// setup/teardown and connection retries cleanly.
 			z.runSubscriber(ctx)
+			if z.pool.consumer != nil && z.sourceEndpoint != "" {
+				z.resetForSource("")
+				// Cleared availability requires a full replay on reconnect.
+				z.lastSeq, z.lastLiveSeq = 0, 0
+				z.hasLastSeq, z.hasLastLiveSeq = false, false
+				z.lastReplayFailure = time.Time{}
+			}
 			// wait before retrying, unless the context has been canceled.
 			select {
 			case <-time.After(retryInterval):
@@ -177,7 +187,9 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" {
-			z.addTask(ctx, topic, seq, payload)
+			if z.acceptLiveWithoutReplay(topic, seq) {
+				z.addTask(ctx, topic, seq, payload)
+			}
 			continue
 		}
 
@@ -186,7 +198,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			logger.Info("Detected event sequence reset, rebuilding index",
 				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
-			z.pool.resetForSource(topic, z.sourceEndpoint)
+			z.resetForSource(topic)
 			z.lastSeq = 0
 			z.hasLastSeq = false
 			z.lastReplayFailure = time.Time{}
@@ -246,6 +258,22 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 	}
 }
 
+func (z *zmqSubscriber) acceptLiveWithoutReplay(topic string, seq uint64) bool {
+	if z.pool.consumer == nil {
+		return true
+	}
+	if z.hasLastLiveSeq {
+		if seq == z.lastLiveSeq {
+			return false
+		}
+		if seq != z.lastLiveSeq+1 {
+			z.resetForSource(topic)
+		}
+	}
+	z.lastLiveSeq, z.hasLastLiveSeq = seq, true
+	return true
+}
+
 // addTask hands a received message to the pool, carrying the receive span's
 // identity so processing rejoins this trace across the worker queue. The span
 // starts after Recv returns so it measures handoff work rather than the idle
@@ -281,7 +309,34 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		carried := sc
 		msg.SpanContext = &carried
 	}
+	z.enqueue(msg)
+}
+
+func (z *zmqSubscriber) enqueue(msg *RawMessage) {
+	if z.pool.consumer != nil {
+		z.queueMu.Lock()
+		defer z.queueMu.Unlock()
+		if z.retired {
+			return
+		}
+	}
 	z.pool.AddTask(msg)
+}
+
+func (z *zmqSubscriber) resetForSource(topic string) {
+	z.enqueue(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true})
+}
+
+func (z *zmqSubscriber) retire() {
+	if z.pool.consumer == nil {
+		return
+	}
+	z.queueMu.Lock()
+	defer z.queueMu.Unlock()
+	// Queue the reset after accepted events and reject later events or resets,
+	// without waiting for socket teardown.
+	z.retired = true
+	z.pool.resetForSource(z.podIdentifier, z.sourceEndpoint)
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {
@@ -289,7 +344,7 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
-	z.pool.resetForSource(topic, z.sourceEndpoint)
+	z.resetForSource(topic)
 	z.lastSeq = 0
 	z.hasLastSeq = false
 	z.lastReplayFailure = time.Now()
@@ -389,8 +444,16 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				terminalErr = fmt.Errorf("malformed replay frame with %d frames", len(frames))
 				break
 			}
+			if attemptReplayed == 0 && seq > expectedSeq {
+				// A bounded replay buffer can lose removals for indexed blocks.
+				z.resetForSource(topic)
+				logger.Info("Rebuilding from retained replay history",
+					"requestedSeq", expectedSeq, "firstAvailableSeq", seq,
+					"replayEndpoint", z.replayEndpoint)
+				expectedSeq = seq
+			}
 			if seq != expectedSeq {
-				terminalErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
+				receiveErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
 				break
 			}
 
