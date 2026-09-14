@@ -421,7 +421,7 @@ The original request body is sent unchanged:
 **Notes:**
 - The `EPP-Profile: decode` header identifies this request as a decode attempt for routing
 - The `Prefer: if-available` header signals to the decode worker that this is a conditional request - it should only proceed if the KV cache is already available
-- For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response
+- For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response, if the render step exists
 - For `/v1/chat/completions`: the original request body is preserved unchanged
 - All other fields from the original request body (e.g., `sampling_params`, `stream`, `model`) are preserved
 
@@ -901,8 +901,8 @@ EPP-Profile: decode
 ```
 
 **Notes:**
-- For `/v1/chat/completions`: the original request body is preserved unchanged
-- For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response
+- For `/v1/chat/completions`: the original request body is preserved, apart from the `kv_transfer_params` and `uuid` fields described below
+- For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response, if the render step exists
 - `uuid` is added to each `image_url` content part (value is the mm_hash from the render step) for multimodal cache lookup
 - `image_url` retains the original base64 data URI from the replace-media-urls step so the decode worker can process images and produce the correct token sequence (matching what prefill computed)
 - `kv_transfer_params` is injected at the top level of the request body for `/v1/chat/completions` and `/v1/completions`; for `/inference/v1/generate` it is nested in `sampling_params.extra_args`, since that engine reads transfer params only from there (same as the prefill request)
@@ -982,7 +982,7 @@ A `/inference/v1/generate` client request always uses the generate wire format r
 
 | User's original path | Encode format | Prefill format | Decode format |
 |---------------------|---------------|----------------|---------------|
-| `/v1/chat/completions` | Per-image body | Original body + `ec_transfer_params` + `kv_transfer_params` | Original body + `kv_transfer_params` |
+| `/v1/chat/completions` | Per-image body | Original body + `ec_transfer_params` + `kv_transfer_params` | Original body + `kv_transfer_params` + per-image `uuid` |
 | `/v1/completions` | N/A (no images) | `{"prompt": [...], "max_tokens": 1, "kv_transfer_params": {...}, ...}` | `{"prompt": [...], "kv_transfer_params": {...}, ...}` |
 | `/inference/v1/generate` | N/A (skipped; prefill encodes inline from `kwargs_data`) | `token_ids` + `features` (incl. `kwargs_data`) + `kv_transfer_params` nested in `sampling_params.extra_args` | `token_ids` + `kv_transfer_params` nested in `sampling_params.extra_args` |
 

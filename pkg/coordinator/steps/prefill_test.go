@@ -684,7 +684,7 @@ func TestPrefillStep_UnsupportedFormat(t *testing.T) {
 		KVTransferParams: make(map[string]any),
 	}
 
-	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, nil, reqcommon.APIType(99))
+	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, reqcommon.APIType(99))
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}
