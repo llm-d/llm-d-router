@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 
@@ -60,7 +61,9 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
 	body := maps.Clone(reqCtx.Body)
-	s.prepareBody(reqCtx, body, resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath))
+	if err := s.prepareBody(reqCtx, body, resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)); err != nil {
+		return err
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
@@ -104,10 +107,21 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
-func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any, format reqcommon.APIType) {
+func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any, format reqcommon.APIType) error {
+	if format == reqcommon.APITypeChatCompletions {
+		// The client's chat-completions body is forwarded as-is.
+		return nil
+	}
 	if format == reqcommon.APITypeCompletions {
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
 		}
+		return nil
 	}
+	if format == reqcommon.APITypeGenerate {
+		// The client's generate body already carries token_ids.
+		return nil
+	}
+	// resolveFormat only ever yields the three formats above.
+	return fmt.Errorf("conditional-decode: unsupported request format %v", format)
 }
