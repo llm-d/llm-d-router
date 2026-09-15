@@ -295,9 +295,9 @@ func TestRoutesRegistered(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{"chat completions", http.MethodPost, gateway.PathChatCompletions, inferenceBody},
-		{"completions", http.MethodPost, gateway.PathCompletions, inferenceBody},
-		{"generate", http.MethodPost, gateway.DefaultGeneratePath, inferenceBody},
+		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
+		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
+		{"generate", http.MethodPost, reqcommon.PathGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},
 	}
@@ -735,10 +735,10 @@ func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
 	// through to the passthrough. Chi's default MethodNotAllowed handler
 	// produces this; the coordinator does not override it.
 	srv := newTestServer(nil)
-	req := httptest.NewRequest(http.MethodGet, gateway.PathChatCompletions, nil)
+	req := httptest.NewRequest(http.MethodGet, reqcommon.PathChatCompletions, nil)
 	rec := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 for GET on POST-only %s, got %d", gateway.PathChatCompletions, rec.Code)
+		t.Fatalf("expected 405 for GET on POST-only %s, got %d", reqcommon.PathChatCompletions, rec.Code)
 	}
 }

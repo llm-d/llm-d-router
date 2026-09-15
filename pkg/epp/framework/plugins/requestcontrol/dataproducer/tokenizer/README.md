@@ -215,5 +215,6 @@ A complete sample config that pairs this with `precise-prefix-cache-producer` an
 ---
 
 ## Related Documentation
-- [Precise Prefix Cache Scorer](../../../scheduling/scorer/preciseprefixcache/README.md)
+- [Precise Prefix Cache Producer](../preciseprefixcache/README.md)
+- [Prefix Cache Scorer](../../../scheduling/scorer/prefix/README.md)
 - [Context Length Aware Scorer](../../../scheduling/scorer/contextlengthaware/README.md)

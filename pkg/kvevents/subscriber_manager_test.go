@@ -85,16 +85,17 @@ func TestSubscriberManager_RemoveSubscriber(t *testing.T) {
 	podID := "default/test-pod-0"
 	endpoint := "tcp://127.0.0.1:5557"
 	topicFilter := "kv@"
+	assert.False(t, sm.RemoveSubscriber(ctx, podID))
 
 	err = sm.EnsureSubscriber(ctx, podID, "", endpoint, "", topicFilter, true)
 	require.NoError(t, err)
 
-	sm.RemoveSubscriber(ctx, podID)
+	assert.True(t, sm.RemoveSubscriber(ctx, podID))
 	identifiers, _ := sm.GetActiveSubscribers()
 	assert.Len(t, identifiers, 0)
 
 	// Remove again should be no-op
-	sm.RemoveSubscriber(ctx, podID)
+	assert.False(t, sm.RemoveSubscriber(ctx, podID))
 	identifiers, _ = sm.GetActiveSubscribers()
 	assert.Len(t, identifiers, 0)
 }

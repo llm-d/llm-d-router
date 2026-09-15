@@ -358,29 +358,23 @@ def scrape_scheduler_metrics(ns, pod_name):
             match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_bucket\{le="([^"]+)"\} ([\d.e+-]+)', line)
             if not match:
                 match = re.match(r'llm_d_router_epp_scheduler_e2e_duration_seconds_bucket\{le="([^"]+)"\} ([\d.e+-]+)', line)
-            if not match:
-                match = re.match(r'inference_extension_scheduler_e2e_duration_seconds_bucket\{le="([^"]+)"\} ([\d.e+-]+)', line)
-                
+
             if match:
                 le = match.group(1)
                 val = float(match.group(2))
                 metrics['buckets'][le] = val
                 continue
-                
+
             match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_sum ([\d.e+-]+)', line)
             if not match:
                 match = re.match(r'llm_d_router_epp_scheduler_e2e_duration_seconds_sum ([\d.e+-]+)', line)
-            if not match:
-                match = re.match(r'inference_extension_scheduler_e2e_duration_seconds_sum ([\d.e+-]+)', line)
             if match:
                 metrics['sum'] = float(match.group(1))
                 continue
-                
+
             match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_count ([\d.e+-]+)', line)
             if not match:
                 match = re.match(r'llm_d_router_epp_scheduler_e2e_duration_seconds_count ([\d.e+-]+)', line)
-            if not match:
-                match = re.match(r'inference_extension_scheduler_e2e_duration_seconds_count ([\d.e+-]+)', line)
             if match:
                 metrics['count'] = int(float(match.group(1)))
                 continue
