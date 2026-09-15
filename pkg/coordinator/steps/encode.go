@@ -113,9 +113,12 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	for i, entry := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
-
-			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
+			body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
+			if err != nil {
+				err = fmt.Errorf("encode[%d]: %w", i, err)
+				logger.Error(err, "encode fanout build body", "index", i)
+				return err
+			}
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
@@ -198,7 +201,7 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
 	case reqcommon.APITypeChatCompletions:
 		imageContent := buildSingleImageContent(imageParts, entry.Index)
@@ -210,20 +213,13 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"content": []any{imageContent},
 				},
 			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
-			},
 		}
 		reqcommon.CapSingleToken(body, format)
-		return body
-	default:
+		return body, nil
+	case reqcommon.APITypeGenerate:
 		body := map[string]any{
 			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
+			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
@@ -231,7 +227,15 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 			},
 		}
 		reqcommon.CapSingleToken(body, format)
-		return body
+		return body, nil
+	default:
+		// resolveFormat can also return APITypeCompletions, but a completions
+		// request never carries images: render's executeCompletions never
+		// populates MultimodalEntries, so this fan-out never runs for one. That
+		// leaves APITypeCompletions and any future format value as cases that
+		// should not reach here; treat them as a programming error instead of
+		// silently sending a generate-shaped body to the wrong endpoint.
+		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
 }
 

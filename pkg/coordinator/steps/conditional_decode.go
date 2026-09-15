@@ -110,15 +110,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any, format reqcommon.APIType) error {
 	switch format {
 	case reqcommon.APITypeChatCompletions:
-		if len(reqCtx.TokenIDs) > 0 {
-			tokens := map[string]any{
-				"token_ids": reqCtx.TokenIDs,
-			}
-			if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
-				tokens["features"] = features
-			}
-			body["tokens"] = tokens
-		}
+		// The client's chat-completions body is forwarded as-is.
 	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
