@@ -874,6 +874,112 @@ func TestHMAGroupFilterRejectsSparseFullAttentionBeforeParentLookup(t *testing.T
 	assert.Error(t, err)
 }
 
+func TestHMAGroupFilterRejectsConflictingBlockSizeBeforeParentLookup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 960),
+			Tokens:          makeTokens(16),
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 961),
+			Tokens:          makeTokens(4),
+			ParentHash:      999,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.getRequestKeyCalls)
+	meta, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, ok)
+	assert.Equal(t, 16, meta.BlockSize)
+}
+
+func TestHMAGroupFilterRecoversCanonicalBlockSizeAfterAuxiliaryEvent(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 256)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+	tokens := makeTokens(512)
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 970),
+			Tokens:          makeTokens(4),
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+	}}, "pod-hma", "test-model")
+
+	meta, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, ok)
+	require.Equal(t, 4, meta.BlockSize)
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 971),
+			Tokens:          tokens[:256],
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       256,
+		},
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 972),
+			Tokens:          makeTokens(4),
+			ParentHash:      999,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 973),
+			Tokens:          tokens[256:],
+			ParentHash:      971,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       256,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Equal(t, 1, recording.getRequestKeyCalls, "only the canonical child should look up its parent")
+	meta, ok = pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, ok)
+	assert.Equal(t, 256, meta.BlockSize)
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 2)
+	result, err := idx.Lookup(ctx, canonicalKeys, nil)
+	require.NoError(t, err)
+	for i, key := range canonicalKeys {
+		require.Len(t, result[key], 1)
+		assert.Equal(t, "pod-hma", result[key][0].PodIdentifier)
+		assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
+		requestKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(971+i*2))
+		require.NoError(t, err)
+		assert.Equal(t, key, requestKey)
+	}
+	for _, hash := range []kvblock.BlockHash{970, 972} {
+		_, err := idx.GetRequestKey(ctx, hash)
+		assert.Error(t, err, "auxiliary blocks must not be indexed")
+	}
+}
+
 func TestHMAGroupFilterIgnoresRejectedGroupRemoval(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, _ := newTestPool(t, 16)
