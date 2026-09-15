@@ -21,6 +21,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -57,6 +58,23 @@ type ModelNameRewriter interface {
 	// RewriteModelName writes model into the payload and returns it. Taking and
 	// returning a MarshalablePayload guarantees the result is repackageable.
 	RewriteModelName(payload MarshalablePayload, model string) (MarshalablePayload, error)
+}
+
+// PriorityRewriteContext carries target-specific information a parser may need
+// when translating EPP priority semantics into backend wire fields.
+type PriorityRewriteContext struct {
+	TargetEndpoint *fwkdl.EndpointMetadata
+}
+
+// PriorityRewriter is implemented by parsers whose forwarded body can carry a
+// backend-native priority field.
+type PriorityRewriter interface {
+	// RewritePriority removes any client-supplied priority field and may write the
+	// EPP-resolved priority into the payload. Taking and returning a
+	// MarshalablePayload guarantees the result is repackageable. The returned bool
+	// reports whether the payload was changed, so callers can flag it for
+	// repackaging without re-inspecting the body.
+	RewritePriority(ctx PriorityRewriteContext, payload MarshalablePayload, priority int) (MarshalablePayload, bool, error)
 }
 
 // Claims defines the matching criteria for a parser.

@@ -33,6 +33,9 @@ type Config struct {
 	DataConfig         *datalayer.Config
 	FlowControlConfig  *flowcontrol.Config
 	ParserRegistry     *handlers.ParserRegistry
+	// PropagatePriority mirrors requestHandler.propagatePriority: when true the
+	// director injects the resolved priority into the outbound request body.
+	PropagatePriority bool
 }
 
 func (c *Config) String() string {

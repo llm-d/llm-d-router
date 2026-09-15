@@ -28,8 +28,10 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
 
 var (
@@ -101,6 +103,85 @@ func TestNewOpenAIParser(t *testing.T) {
 
 	if diff := cmp.Diff(expectedName, parser.TypedName()); diff != "" {
 		t.Errorf("TypedName() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_RewritePriority(t *testing.T) {
+	tests := []struct {
+		name        string
+		ctx         fwkrh.PriorityRewriteContext
+		want        map[string]any
+		wantMutated bool
+		payload     fwkrh.MarshalablePayload
+	}{
+		{
+			name:        "strips client priority and writes resolved priority",
+			payload:     fwkrh.PayloadMap{"model": "test", "priority": 100},
+			want:        map[string]any{"model": "test", "priority": 2},
+			wantMutated: true,
+		},
+		{
+			name:        "writes priority when none supplied",
+			payload:     fwkrh.PayloadMap{"model": "test"},
+			want:        map[string]any{"model": "test", "priority": 2},
+			wantMutated: true,
+		},
+		{
+			name:    "negates priority for vllm target",
+			payload: fwkrh.PayloadMap{"model": "test"},
+			ctx: fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+				Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
+			}},
+			want:        map[string]any{"model": "test", "priority": -2},
+			wantMutated: true,
+		},
+		{
+			name:    "negates priority for legacy vllm target label",
+			payload: fwkrh.PayloadMap{"model": "test"},
+			ctx: fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+				Labels: map[string]string{"inference.networking.k8s.io/engine-type": "vllm"},
+			}},
+			want:        map[string]any{"model": "test", "priority": -2},
+			wantMutated: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, mutated, err := NewOpenAIParser().RewritePriority(tt.ctx, tt.payload, 2)
+			if err != nil {
+				t.Fatalf("RewritePriority() error = %v", err)
+			}
+			if mutated != tt.wantMutated {
+				t.Errorf("RewritePriority() mutated = %v, want %v", mutated, tt.wantMutated)
+			}
+			m, ok := got.(fwkrh.PayloadMap)
+			if !ok {
+				t.Fatalf("RewritePriority() payload = %T, want PayloadMap", got)
+			}
+			if diff := cmp.Diff(tt.want, map[string]any(m)); diff != "" {
+				t.Errorf("RewritePriority() payload mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestOpenAIParserPluginFactory(t *testing.T) {
+	plugin, err := OpenAIParserPluginFactory("test", nil, nil)
+	if err != nil {
+		t.Fatalf("OpenAIParserPluginFactory() error = %v", err)
+	}
+	parser, ok := plugin.(*OpenAIParser)
+	if !ok {
+		t.Fatalf("OpenAIParserPluginFactory() = %T, want *OpenAIParser", plugin)
+	}
+	got, _, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test"}, 2)
+	if err != nil {
+		t.Fatalf("RewritePriority() error = %v", err)
+	}
+	m := got.(fwkrh.PayloadMap)
+	if gotPriority := m["priority"]; gotPriority != 2 {
+		t.Errorf("priority = %v, want 2", gotPriority)
 	}
 }
 
