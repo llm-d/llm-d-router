@@ -504,7 +504,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	// DrainTimeout of 0 stops them as soon as the manager terminates.
 	r.draining = &atomic.Bool{}
 	r.serverRunner = serverRunner
-	r.healthGRPCPort = opts.GRPCHealthPort
+	r.healthGRPCPort = int(opts.GRPCHealthPort)
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
@@ -1178,10 +1178,10 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
+		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, int(opts.GRPCHealthPort))).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof)
+		return serveMetrics(ctx, int(opts.MetricsPort), opts.EnablePprof)
 	})
 	return g.Run(ctx)
 }
