@@ -100,7 +100,7 @@ func TestExtractTraceContextFromIncomingMetadata(t *testing.T) {
 
 	const (
 		gatewayTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
-		gatewaySpanID  = "00f067aa0ba902b7"
+		gatewaySpanID  = "00f067aa0c9902b7"
 	)
 
 	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs(

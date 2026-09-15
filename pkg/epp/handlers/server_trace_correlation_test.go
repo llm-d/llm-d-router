@@ -82,10 +82,10 @@ func newRequestHeaders(headers map[string]string) *extProcPb.ProcessingRequest {
 // runProcess drives Process over a single RequestHeaders message and returns the
 // lines it logged.
 func runProcess(t *testing.T, headers map[string]string) []string {
-	return runProcessWithContext(t, context.Background(), headers)
+	return runProcessWithContext(context.Background(), t, headers)
 }
 
-func runProcessWithContext(t *testing.T, ctx context.Context, headers map[string]string) []string {
+func runProcessWithContext(ctx context.Context, t *testing.T, headers map[string]string) []string {
 	t.Helper()
 
 	var logged []string
@@ -137,7 +137,7 @@ func TestProcessCorrelatesGatewayTraceMetadata(t *testing.T) {
 	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs(
 		"traceparent", upstreamTraceparent,
 	))
-	entry := entryLine(t, runProcessWithContext(t, ctx, map[string]string{
+	entry := entryLine(t, runProcessWithContext(ctx, t, map[string]string{
 		"x-request-id": "req-gateway-correlation",
 	}))
 
