@@ -42,6 +42,24 @@ func TestPrefixCacheMatchInfo_CachedBlockCountDefaultsToMatchBlocks(t *testing.T
 	assert.Equal(t, 5, info.ConfirmedCachedBlockCount())
 }
 
+func TestPrefixCacheMatchInfo_TotalTokens(t *testing.T) {
+	info := NewPrefixCacheMatchInfo(5952, 7200, 1).WithCachedBlockCount(0)
+	_, present := info.TotalTokens()
+	require.False(t, present)
+	info.WithTotalTokens(7200)
+	clone := info.Clone().(*PrefixCacheMatchInfo)
+	total, present := clone.TotalTokens()
+	require.True(t, present)
+	require.Equal(t, 7200, total)
+	require.Zero(t, clone.CachedBlockCount())
+	*clone.totalTokens = 0
+	total, _ = info.TotalTokens()
+	require.Equal(t, 7200, total)
+	zero, present := clone.TotalTokens()
+	require.True(t, present)
+	require.Zero(t, zero)
+}
+
 func TestPrefixCacheMatchInfo_WithCachedBlockCount(t *testing.T) {
 	info := NewPrefixCacheMatchInfo(192, 256, 16).WithCachedBlockCount(240)
 	// matchBlocks keeps the tier-weighted ranking value; cachedBlockCount holds
