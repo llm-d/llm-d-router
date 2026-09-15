@@ -301,7 +301,7 @@ each EPP call is single-phase scheduling.
 | `prefill` | `prefill` | Selects a prefill pod. |
 | `encode` | `encode` | Load-balances across encoder pods. |
 
-Each profile filters the shared pod pool down to its own role with a `by-label` role
+Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
 [deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
