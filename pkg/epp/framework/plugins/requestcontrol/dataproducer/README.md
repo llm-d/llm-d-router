@@ -40,6 +40,7 @@ The DAG order applies to every request-control hook (`PreRequest`, `ResponseBody
 | `token-producer` | [`tokenizer`](tokenizer/) | `TokenizedPrompt` | Tokenizes the request prompt via vLLM `/render`; required by precise-prefix-cache-producer and context-length-aware scorers. |
 | `approx-prefix-cache-producer` | [`approximateprefix`](approximateprefix/) | `PrefixCacheMatchInfo` | Hashes the prompt into blocks and matches against a per-pod LRU index for approximate prefix-cache affinity. |
 | `precise-prefix-cache-producer` | [`preciseprefixcache`](preciseprefixcache/) | `PrefixCacheMatchInfo` | Maintains a precise KV-block index by subscribing to vLLM KV-events; requires `token-producer` upstream. |
+| `session-prefix-cache-producer` | [`sessionprefixcache`](sessionprefixcache/) | `PrefixCacheMatchInfo` | Resolves a session producer's engine-block prefixes against residency observed from vLLM KV-events, for requests with estimated tokens; requires a `SessionCacheRequest` producer upstream. |
 | `burst-prefix-cache-producer` | [`burstprefix`](burstprefix/) | `PrefixCacheMatchInfo` | Batches requests within a time window and co-locates prompt-sharing samples (e.g. RL rollout groups) onto shared replicas; requires `token-producer` upstream. |
 | `inflight-load-producer` | [`inflightload`](inflightload/) | `InFlightLoad` | Tracks real-time in-flight request and token counts per endpoint across the full request lifecycle. |
 | `predicted-latency-producer` | [`predictedlatency`](predictedlatency/) | `LatencyPredictionInfo` | Trains XGBoost models via a sidecar and generates per-endpoint TTFT/TPOT predictions. |
@@ -53,6 +54,7 @@ The DAG order applies to every request-control hook (`PreRequest`, `ResponseBody
 The framework resolves a DAG from each plugin's `Produces` and `Consumes` declarations and runs producers in dependency order. Explicit dependencies to be aware of:
 
 - `precise-prefix-cache-producer` **requires** `token-producer` upstream (it consumes `TokenizedPrompt`).
+- `session-prefix-cache-producer` **requires** `SessionCacheRequest` from the plugin named by `sessionCacheRequestProducerName`. The repository ships no default, so configuration loading fails when that plugin is absent.
 - `burst-prefix-cache-producer` **requires** `token-producer` upstream (it consumes `TokenizedPrompt`).
 - `mm-embeddings-cache-producer` **optionally** consumes `TokenizedPrompt`; configure `token-producer` first when multimodal features need tokenizer-derived hashes.
 - `inflight-load-producer` **optionally** consumes `PrefixCacheMatchInfo` from an approx or precise prefix producer; prefix-discounting is applied automatically when the attribute is present.
@@ -65,6 +67,7 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 
 - [Approximate Prefix Cache Producer](approximateprefix/README.md)
 - [Precise Prefix Cache Producer](preciseprefixcache/README.md)
+- [Session Prefix Cache Producer](sessionprefixcache/README.md)
 - [Burst Prefix Cache Producer](burstprefix/README.md)
 - [Token Producer](tokenizer/README.md)
 - [In-Flight Load Producer](inflightload/README.md)
