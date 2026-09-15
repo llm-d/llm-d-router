@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -871,7 +873,7 @@ func TestEncodeStep_UnsupportedFormat(t *testing.T) {
 		Model:     "test",
 	}
 
-	body, err := step.(*EncodeStep).buildEncodeBody(reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
+	body, err := step.(*EncodeStep).buildEncodeBody(logr.Discard(), reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}
