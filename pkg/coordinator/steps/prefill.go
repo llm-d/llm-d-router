@@ -179,16 +179,18 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		return body, nil
 
 	case reqcommon.APITypeGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
 		body := map[string]any{
-			"request_id": reqCtx.RequestID,
-			"token_ids":  reqCtx.TokenIDs,
-			"model":      reqCtx.Model,
+			"request_id":                    reqCtx.RequestID,
+			"token_ids":                     reqCtx.TokenIDs,
+			"model":                         reqCtx.Model,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
-		setGenerateTransferParams(reqcommon.CapSingleToken(body, format), kvParams, ecParams)
+		reqcommon.CapSingleToken(body, format)
 		if features != nil {
 			body["features"] = features
+		}
+		if len(ecParams) > 0 {
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 

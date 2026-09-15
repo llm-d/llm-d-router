@@ -120,24 +120,6 @@ func mmKwargsField(kwargs []string) map[string][]any {
 	return map[string][]any{ModalityImage: items}
 }
 
-// setGenerateTransferParams nests the kv/ec transfer params under
-// sampling_params.extra_args, the only place the /inference/v1/generate engine
-// reads them (top-level kv_transfer_params/ec_transfer_params are ignored on
-// input). It get-or-creates extra_args on the given sampling map so a client's
-// existing generation fields survive. ecParams may be empty, in which case
-// ec_transfer_params is left unset.
-func setGenerateTransferParams(sampling map[string]any, kvParams any, ecParams map[string]any) {
-	extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
-	if !ok {
-		extraArgs = map[string]any{}
-		sampling[reqcommon.FieldExtraArgs] = extraArgs
-	}
-	extraArgs[reqcommon.FieldKVTransferParams] = kvParams
-	if len(ecParams) > 0 {
-		extraArgs[reqcommon.FieldECTransferParams] = ecParams
-	}
-}
-
 // coerceParamsMap coerces a transfer-params value from an upstream response to a
 // map: a non-object value is logged at debug and skipped (returns nil) rather
 // than failing the request. A missing or null value is already nil; an empty map
@@ -348,30 +330,18 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 	return entries, nil
 }
 
-// validateSamplingParams checks that sampling_params and its nested extra_args,
-// when present, are JSON objects. Both are optional. The decode step merges
-// kv_transfer_params into sampling_params.extra_args; a non-object at either
-// level would fall into its fallback branch and be silently replaced with an
-// empty map, discarding client-requested generation parameters with no error.
-// Validating once at ingestion keeps that path fail-loud, consistent with
-// token_ids and features.
+// validateSamplingParams checks that sampling_params, when present, is a JSON
+// object. The field is optional. A non-object value is rejected at ingestion
+// so it surfaces as ErrBadRequest rather than as an engine 400 downstream,
+// consistent with the token_ids and features checks.
 func validateSamplingParams(body map[string]any) error {
 	raw, ok := body[reqcommon.FieldSamplingParams]
 	if !ok || raw == nil {
 		return nil
 	}
-	sampling, ok := raw.(map[string]any)
-	if !ok {
+	if _, ok := raw.(map[string]any); !ok {
 		return fmt.Errorf("%s must be an object, got %T: %w",
 			reqcommon.FieldSamplingParams, raw, pipeline.ErrBadRequest)
-	}
-	ea, ok := sampling[reqcommon.FieldExtraArgs]
-	if !ok || ea == nil {
-		return nil
-	}
-	if _, ok := ea.(map[string]any); !ok {
-		return fmt.Errorf("%s.%s must be an object, got %T: %w",
-			reqcommon.FieldSamplingParams, reqcommon.FieldExtraArgs, ea, pipeline.ErrBadRequest)
 	}
 	return nil
 }

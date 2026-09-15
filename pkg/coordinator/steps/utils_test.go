@@ -415,11 +415,8 @@ func TestValidateSamplingParams(t *testing.T) {
 		{name: "absent", body: map[string]any{}},
 		{name: "null", body: map[string]any{"sampling_params": nil}},
 		{name: "valid_object", body: map[string]any{"sampling_params": obj(map[string]any{"max_tokens": float64(16)})}},
-		{name: "valid_with_extra_args", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": obj(map[string]any{})})}},
-		{name: "extra_args_null", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": nil})}},
 		{name: "sampling_params_array", body: map[string]any{"sampling_params": []any{float64(1), float64(2)}}, wantErr: true},
 		{name: "sampling_params_string", body: map[string]any{"sampling_params": "greedy"}, wantErr: true},
-		{name: "extra_args_array", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": []any{float64(1)}})}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
