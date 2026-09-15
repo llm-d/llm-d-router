@@ -126,7 +126,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("expected kwargs_data.image=[dGVuc29yLWE=,dGVuc29yLWI=], got %v", imageKwargs)
 	}
 
-	// Verify sampling_params with extra_args workaround
+	// Verify sampling_params carries only the capped generation fields, not the
+	// transfer params (those are top level in generate format).
 	samplingParams, ok := prefillBody["sampling_params"].(map[string]any)
 	if !ok {
 		t.Fatal("expected sampling_params in body")
@@ -139,23 +140,20 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
-	extraArgs, ok := samplingParams["extra_args"].(map[string]any)
+
+	// Verify kv_transfer_params is a top-level field in generate format.
+	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
 	if !ok {
-		t.Fatal("expected sampling_params.extra_args in generate format")
-	}
-	kvParams, ok := extraArgs["kv_transfer_params"].(map[string]any)
-	if !ok {
-		t.Fatal("expected kv_transfer_params in extra_args")
+		t.Fatal("expected top-level kv_transfer_params in generate format")
 	}
 	if kvParams["do_remote_decode"] != true {
 		t.Fatalf("expected kv_transfer_params.do_remote_decode=true, got %v", kvParams["do_remote_decode"])
 	}
 
-	// Verify ec_transfer_params is a flat map keyed by mm_hash, nested in
-	// extra_args alongside kv_transfer_params (the engine reads it only there).
-	ecParams, ok := extraArgs["ec_transfer_params"].(map[string]any)
+	// Verify ec_transfer_params is a top-level flat map keyed by mm_hash.
+	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
 	if !ok {
-		t.Fatal("expected ec_transfer_params in sampling_params.extra_args")
+		t.Fatal("expected top-level ec_transfer_params in generate format")
 	}
 	if len(ecParams) != 2 {
 		t.Fatalf("expected 2 ec_transfer_params entries, got %d: %v", len(ecParams), ecParams)
@@ -164,14 +162,6 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		if _, ok := ecParams[want]; !ok {
 			t.Errorf("missing hash %q in ec_transfer_params: %v", want, ecParams)
 		}
-	}
-
-	// Verify no top-level kv_transfer_params or ec_transfer_params in generate format
-	if _, ok := prefillBody["kv_transfer_params"]; ok {
-		t.Fatal("generate format should not have top-level kv_transfer_params")
-	}
-	if _, ok := prefillBody["ec_transfer_params"]; ok {
-		t.Fatal("generate format should not have top-level ec_transfer_params")
 	}
 
 	// Verify response populated KVTransferParams
@@ -599,14 +589,6 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 			}
 			if _, ok := parsed["ec_transfer_params"]; ok {
 				t.Errorf("ec-shared-storage must not set ec_transfer_params; body=%s", raw)
-			}
-			// Generate format nests transfer params in sampling_params.extra_args.
-			if sp, ok := parsed["sampling_params"].(map[string]any); ok {
-				if ea, ok := sp["extra_args"].(map[string]any); ok {
-					if _, ok := ea["ec_transfer_params"]; ok {
-						t.Errorf("ec-shared-storage must not set ec_transfer_params in extra_args; body=%s", raw)
-					}
-				}
 			}
 		})
 	}
