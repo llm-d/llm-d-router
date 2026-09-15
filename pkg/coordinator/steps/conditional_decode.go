@@ -118,7 +118,8 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, bod
 	case reqcommon.APITypeGenerate:
 		// The client's generate body already carries token_ids.
 	default:
-		// resolveFormat only ever yields the three formats above.
+		// resolveFormat only ever yields the formats handled above; a new value
+		// reaching here is a programming error, not a client fault.
 		return fmt.Errorf("conditional-decode: unsupported request format %v", format)
 	}
 	return nil
