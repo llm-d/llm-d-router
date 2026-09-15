@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -533,6 +534,101 @@ func TestVideoEstimator_HeaderRespectsMaxVideoTokens(t *testing.T) {
 	tp, err := b.produce(videoCtx(videoMetadata{width: 320, height: 240, duration: 3}), chatVideoBody("https://example.com/clip.mp4"))
 	require.NoError(t, err)
 	assert.Equal(t, 100, tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// chatInputAudioBody builds a chat request carrying a single input_audio block.
+func chatInputAudioBody(data, format string) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+		Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+			{Type: "input_audio", InputAudio: fwkrh.AudioBlock{Data: data, Format: format}},
+		}}}},
+	}}
+}
+
+// TestEstimateBackend_ChatAudioFeature asserts a chat audio emits a multimodal
+// feature with the audio modality and the URL content hash, occupies more than
+// one placeholder pseudo-token (weighting), and points within the token stream.
+func TestEstimateBackend_ChatAudioFeature(t *testing.T) {
+	const url = "https://example.com/speech.wav"
+	body := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{
+				Role: "user",
+				Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+					{Type: "text", Text: "transcribe this"},
+					{Type: "audio_url", AudioURL: fwkrh.AudioURLBlock{URL: url}},
+				}},
+			}},
+		},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	f := tp.Prompts[0].MultiModalFeatures[0]
+	assert.Equal(t, fwkrh.ModalityAudio, f.Modality)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(url), 16), f.Hash)
+	assert.Greater(t, f.Length, 1, "audio length must be > 1 (placeholder weighting)")
+	assert.GreaterOrEqual(t, f.Offset, 0)
+	tokens := tp.Prompts[0].TokenIDs
+	assert.LessOrEqual(t, f.Offset+f.Length, len(tokens), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tokens))
+	for i := f.Offset; i < f.Offset+f.Length; i++ {
+		assert.Equal(t, uint32(xxhash.Sum64String(url)), tokens[i], "token %d: got %d, want audio placeholder token", i, tokens[i])
+	}
+}
+
+// TestAudioEstimator_DefaultDuration asserts that without a duration header,
+// the estimator uses the default duration (10s).
+func TestAudioEstimator_DefaultDuration(t *testing.T) {
+	expected := audioOverheadTokens + audioTokensPerSecond*defaultAudioDuration
+
+	short := estimateBackend{}
+	tp, err := short.produce(context.Background(), chatInputAudioBody("AABBCCDD", "wav"))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, expected, tp.Prompts[0].MultiModalFeatures[0].Length, "short base64 uses default duration")
+
+	long := estimateBackend{}
+	longBase64 := strings.Repeat("A", 80000)
+	tp2, err := long.produce(context.Background(), chatInputAudioBody(longBase64, "wav"))
+	require.NoError(t, err)
+	require.Len(t, tp2.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, expected, tp2.Prompts[0].MultiModalFeatures[0].Length, "long base64 also uses default duration without header")
+}
+
+// TestParseAudioMetadataHeaders covers full, partial, missing, and malformed
+// header sets, matching the structure of TestParseVideoMetadataHeaders.
+func TestParseAudioMetadataHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		want    audioMetadata
+	}{
+		{
+			name:    "duration present",
+			headers: map[string]string{metadata.AudioDurationHeaderKey: "12.5"},
+			want:    audioMetadata{duration: 12.5},
+		},
+		{
+			name:    "empty",
+			headers: map[string]string{},
+			want:    audioMetadata{},
+		},
+		{
+			name:    "malformed value ignored",
+			headers: map[string]string{metadata.AudioDurationHeaderKey: "abc"},
+			want:    audioMetadata{},
+		},
+		{
+			name:    "non-positive ignored",
+			headers: map[string]string{metadata.AudioDurationHeaderKey: "-1"},
+			want:    audioMetadata{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseAudioMetadataHeaders(tc.headers))
+		})
+	}
 }
 
 // TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image
