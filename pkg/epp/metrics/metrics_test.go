@@ -960,7 +960,6 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		}
 		RecordSchedulerAttempt(nil, "modelA", result)
 		RecordSchedulerAttempt(nil, "modelA", result)
-		compareMetrics(t, "inference_extension_scheduler_attempts_total", "testdata/scheduler_attempts_with_result_metrics")
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_with_result_metrics")
 	})
 
@@ -993,7 +992,6 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		}
 		RecordSchedulerAttempt(nil, "modelA", result)
 		RecordSchedulerAttempt(nil, "modelB", result)
-		compareMetrics(t, "inference_extension_scheduler_attempts_total", "testdata/scheduler_attempts_multiple_endpoints_metrics")
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_multiple_endpoints_metrics")
 	})
 
@@ -1036,7 +1034,6 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		RecordSchedulerAttempt(nil, "modelA", resultA)
 		RecordSchedulerAttempt(nil, "modelA", resultA)
 		RecordSchedulerAttempt(nil, "modelB", resultB)
-		compareMetrics(t, "inference_extension_scheduler_attempts_total", "testdata/scheduler_attempts_different_models_metrics")
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_different_models_metrics")
 	})
 
@@ -1048,7 +1045,6 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		for range 5 {
 			RecordSchedulerAttempt(errors.New("simulated scheduling failure"), "modelA", nil)
 		}
-		compareMetrics(t, "inference_extension_scheduler_attempts_total", "testdata/scheduler_attempts_total_metrics")
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_total_metrics")
 	})
 }
@@ -1169,22 +1165,14 @@ func TestFlowControlQueueSizeMetric(t *testing.T) {
 
 	// Basic Inc/Dec
 	IncFlowControlQueueSize("user-a", "100", pool, model, target)
-	val, err := testutil.GetGaugeMetricValue(flowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 1.0, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 1.0, valNew)
-
 	DecFlowControlQueueSize("user-a", "100", pool, model, target)
-	val, err = testutil.GetGaugeMetricValue(flowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 0.0, val)
-
-	valNew, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 0.0, valNew)
 }
 
 func TestFlowControlQueueBytesMetric(t *testing.T) {
@@ -1197,22 +1185,14 @@ func TestFlowControlQueueBytesMetric(t *testing.T) {
 	)
 
 	AddFlowControlQueueBytes("user-a", "100", pool, model, target, 32)
-	val, err := testutil.GetGaugeMetricValue(flowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 32.0, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 32.0, valNew)
-
 	SubFlowControlQueueBytes("user-a", "100", pool, model, target, 32)
-	val, err = testutil.GetGaugeMetricValue(flowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 0.0, val)
-
-	valNew, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 0.0, valNew)
 }
 
 func TestFlowControlPoolSaturationMetric(t *testing.T) {

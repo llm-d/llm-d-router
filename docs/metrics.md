@@ -563,24 +563,22 @@ back to HTTP. The metrics TLS setting is independent of `--secure-proxy` and
 
 The legacy series listed here have been deprecated. Prefer the current `llm_d_epp_*` names in new
 dashboards and alerts. Series marked "no longer emitted" are removed; the table records their
-replacements so dashboards and alerts can be updated. The KV-cache rows remain dual-emitted, as do
-the three series the workload-variant autoscaler consumes
-([llm-d-autoscaling#1202](https://github.com/llm-d/llm-d-autoscaling/issues/1202)).
+replacements so dashboards and alerts can be updated. The KV-cache rows remain dual-emitted.
 
 | Legacy series | Current replacement | Notes |
 |---|---|---|
 | `llm_d_inference_scheduler_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Deprecated; no longer emitted. |
 | `llm_d_inference_scheduler_datalayer_poll_errors_total`, `llm_d_inference_scheduler_datalayer_extract_errors_total` | `llm_d_epp_datalayer_poll_errors_total`, `llm_d_epp_datalayer_extract_errors_total` | Deprecated; no longer emitted. |
 | `inference_extension_scheduler_e2e_duration_seconds` | `llm_d_epp_scheduler_e2e_duration_seconds` | Deprecated; no longer emitted. |
-| `inference_extension_scheduler_attempts_total` | `llm_d_epp_scheduler_attempts_total` | Dual emission; retained for the workload-variant autoscaler (llm-d-autoscaling#1202). |
+| `inference_extension_scheduler_attempts_total` | `llm_d_epp_scheduler_attempts_total` | Deprecated; no longer emitted. |
 | `inference_extension_plugin_duration_seconds` | `llm_d_epp_plugin_duration_seconds` | Deprecated; no longer emitted. |
 | `inference_extension_info` | `llm_d_epp_info` | Deprecated; no longer emitted. |
 | `inference_extension_model_rewrite_decisions_total` | `llm_d_epp_model_rewrite_decisions_total` | Deprecated; no longer emitted. |
 | `inference_extension_flow_control_request_queue_duration_seconds` | `llm_d_epp_flow_control_request_queue_duration_seconds` | Deprecated; no longer emitted. |
 | `inference_extension_flow_control_dispatch_cycle_duration_seconds` | `llm_d_epp_flow_control_dispatch_cycle_duration_seconds` | Deprecated; no longer emitted. |
 | `inference_extension_flow_control_request_enqueue_duration_seconds` | `llm_d_epp_flow_control_request_enqueue_duration_seconds` | Deprecated; no longer emitted. |
-| `inference_extension_flow_control_queue_size` | `llm_d_epp_flow_control_queue_size` | Dual emission; retained for the workload-variant autoscaler (llm-d-autoscaling#1202). |
-| `inference_extension_flow_control_queue_bytes` | `llm_d_epp_flow_control_queue_bytes` | Dual emission; retained for the workload-variant autoscaler (llm-d-autoscaling#1202). |
+| `inference_extension_flow_control_queue_size` | `llm_d_epp_flow_control_queue_size` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_queue_bytes` | `llm_d_epp_flow_control_queue_bytes` | Deprecated; no longer emitted. |
 | `inference_extension_flow_control_pool_saturation` | `llm_d_epp_flow_control_pool_saturation` | Deprecated; no longer emitted. |
 | `inference_extension_prefix_indexer_size` | `llm_d_epp_prefix_indexer_size` | Deprecated; no longer emitted. |
 | `inference_extension_prefix_indexer_hit_ratio` | `llm_d_epp_prefix_indexer_hit_ratio` | Deprecated; no longer emitted. |

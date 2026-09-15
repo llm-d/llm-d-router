@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	compbasemetrics "k8s.io/component-base/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -32,53 +31,10 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-const (
-	// inferenceExtension is the legacy subsystem for the deprecated series that remain
-	// dual-emitted; see the deprecated metrics block below.
-	inferenceExtension = "inference_extension"
-)
-
 var (
 	// --- Common Label Sets ---
-	modelLabels    = []string{"model_name", "target_model_name"}
-	poolLabels     = []string{"name"}
-	endpointLabels = []string{"pod_name", "namespace", "port"}
-)
-
-// --- Deprecated Metrics ---
-// The series below remain dual-emitted because the workload-variant autoscaler
-// consumes the legacy names (https://github.com/llm-d/llm-d-autoscaling/issues/1202).
-// Removal is tracked in https://github.com/llm-d/llm-d-router/issues/1070.
-var (
-	// Deprecated: Use llm_d_epp_scheduler_attempts_total instead.
-	schedulerAttemptsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: inferenceExtension,
-			Name:      "scheduler_attempts_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_scheduler_attempts_total] Total number of scheduling attempts.", compbasemetrics.ALPHA),
-		},
-		append([]string{"status", "target_model_name"}, endpointLabels...),
-	)
-
-	// Deprecated: Use llm_d_epp_flow_control_queue_size instead.
-	flowControlQueueSize = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: inferenceExtension,
-			Name:      "flow_control_queue_size",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_flow_control_queue_size] Current number of requests actively held in the Flow Control queue.", compbasemetrics.ALPHA),
-		},
-		append([]string{"fairness_id", "priority", "inference_pool"}, modelLabels...),
-	)
-
-	// Deprecated: Use llm_d_epp_flow_control_queue_bytes instead.
-	flowControlQueueBytes = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: inferenceExtension,
-			Name:      "flow_control_queue_bytes",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_flow_control_queue_bytes] Current total size in bytes of requests actively held in the Flow Control queue.", compbasemetrics.ALPHA),
-		},
-		append([]string{"fairness_id", "priority", "inference_pool"}, modelLabels...),
-	)
+	modelLabels = []string{"model_name", "target_model_name"}
+	poolLabels  = []string{"name"}
 )
 
 var registerMetrics sync.Once
@@ -108,7 +64,6 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferencePoolStdDevRunningRequests)
 		metrics.Registry.MustRegister(llmdInferencePoolReadyEndpoints)
 		metrics.Registry.MustRegister(llmdSchedulerE2ELatency)
-		metrics.Registry.MustRegister(schedulerAttemptsTotal)
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
@@ -117,9 +72,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferenceExtensionInfo)
 		metrics.Registry.MustRegister(llmdFlowControlRequestQueueDuration)
 		metrics.Registry.MustRegister(llmdFlowControlDispatchCycleDuration)
-		metrics.Registry.MustRegister(flowControlQueueSize)
 		metrics.Registry.MustRegister(llmdFlowControlQueueSize)
-		metrics.Registry.MustRegister(flowControlQueueBytes)
 		metrics.Registry.MustRegister(llmdFlowControlQueueBytes)
 		metrics.Registry.MustRegister(llmdFlowControlPoolSaturation)
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
@@ -169,7 +122,6 @@ func Reset() {
 	llmdInferencePoolStdDevRunningRequests.Reset()
 	llmdInferencePoolReadyEndpoints.Reset()
 	llmdSchedulerE2ELatency.Reset()
-	schedulerAttemptsTotal.Reset()
 	llmdSchedulerAttemptsTotal.Reset()
 	llmdPluginProcessingLatencies.Reset()
 	llmdPluginDataScopeViolations.Reset()
@@ -177,9 +129,7 @@ func Reset() {
 	llmdResponseProcessingLatency.Reset()
 	llmdInferenceExtensionInfo.Reset()
 	llmdFlowControlRequestQueueDuration.Reset()
-	flowControlQueueSize.Reset()
 	llmdFlowControlQueueSize.Reset()
-	flowControlQueueBytes.Reset()
 	llmdFlowControlQueueBytes.Reset()
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
@@ -421,7 +371,6 @@ func RecordResponseProcessingLatency(duration time.Duration) {
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.
 func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.SchedulingResult) {
 	if err != nil {
-		schedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "").Inc()
 		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "").Inc()
 		return
 	}
@@ -434,7 +383,6 @@ func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.
 			if len(primaryResults.TargetEndpoints) > 0 {
 				metadata := primaryResults.TargetEndpoints[0].GetMetadata()
 				if metadata != nil {
-					schedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, metadata.Name, metadata.ID.Namespace, metadata.Port).Inc()
 					llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, metadata.Name, metadata.ID.Namespace, metadata.Port).Inc()
 					return
 				}
@@ -442,7 +390,6 @@ func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.
 		}
 	}
 
-	schedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, "", "", "").Inc()
 	llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, "", "", "").Inc()
 }
 
@@ -508,7 +455,6 @@ func RecordFlowControlRequestEnqueueDuration(
 func IncFlowControlQueueSize(fairnessID, priority, inferencePool, modelName, targetModelName string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	flowControlQueueSize.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Inc()
 	llmdFlowControlQueueSize.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Inc()
 }
 
@@ -516,7 +462,6 @@ func IncFlowControlQueueSize(fairnessID, priority, inferencePool, modelName, tar
 func DecFlowControlQueueSize(fairnessID, priority, inferencePool, modelName, targetModelName string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	flowControlQueueSize.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Dec()
 	llmdFlowControlQueueSize.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Dec()
 }
 
@@ -524,7 +469,6 @@ func DecFlowControlQueueSize(fairnessID, priority, inferencePool, modelName, tar
 func AddFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, targetModelName string, bytes uint64) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	flowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Add(float64(bytes))
 	llmdFlowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Add(float64(bytes))
 }
 
@@ -532,7 +476,6 @@ func AddFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, targetModelName string, bytes uint64) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	flowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Sub(float64(bytes))
 	llmdFlowControlQueueBytes.WithLabelValues(fairnessID, priority, inferencePool, modelName, targetModelName).Sub(float64(bytes))
 }
 
@@ -634,8 +577,6 @@ func DeleteFlowControlFlowSeries(fairnessID, priority string) {
 		return
 	}
 	labels := prometheus.Labels{"fairness_id": fairnessID, "priority": priority}
-	flowControlQueueSize.DeletePartialMatch(labels)
-	flowControlQueueBytes.DeletePartialMatch(labels)
 	llmdFlowControlRequestQueueDuration.DeletePartialMatch(labels)
 	llmdFlowControlRequestEnqueueDuration.DeletePartialMatch(labels)
 	llmdFlowControlQueueSize.DeletePartialMatch(labels)
