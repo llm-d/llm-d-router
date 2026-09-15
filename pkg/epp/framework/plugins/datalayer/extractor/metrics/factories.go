@@ -46,6 +46,15 @@ type (
 		KVUsageSpec string `json:"kvUsageSpec"`
 		// LoRASpec defines the metric specification string for retrieving LoRA availability.
 		LoRASpec string `json:"loraSpec"`
+		// LoRALoadedSpec defines the metric specification string for the per-adapter residency
+		// gauge family (one series per resident adapter, labelled adapter_name, level, pinned).
+		LoRALoadedSpec string `json:"loraLoadedSpec,omitempty"`
+		// LoRAGPULoadedSpec defines the metric specification string for the gauge counting
+		// adapters resident in GPU slots.
+		LoRAGPULoadedSpec string `json:"loraGPULoadedSpec,omitempty"`
+		// LoRAGPUSlotsSpec defines the metric specification string for the gauge holding the
+		// number of GPU adapter slots (max_loras). Overrides the max_lora label of LoRASpec.
+		LoRAGPUSlotsSpec string `json:"loraGPUSlotsSpec,omitempty"`
 		// CacheInfoSpec defines the metric specification string for retrieving KV cache configuration
 		// from an info-style gauge where block_size and num_gpu_blocks are label values.
 		CacheInfoSpec string `json:"cacheInfoSpec"`
@@ -94,6 +103,9 @@ var defaultEngineConfigs = []engineConfigParams{
 		RunningRequestsSpec: "vllm:num_requests_running",
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
+		LoRALoadedSpec:      "vllm:lora_adapter_loaded",
+		LoRAGPULoadedSpec:   "vllm:num_gpu_loaded_lora_adapters",
+		LoRAGPUSlotsSpec:    "vllm:max_gpu_lora_adapters",
 		CacheInfoSpec:       "vllm:cache_config_info",
 	},
 	{
@@ -225,6 +237,9 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			Running:             engineConfig.RunningRequestsSpec,
 			KVUsage:             engineConfig.KVUsageSpec,
 			Lora:                engineConfig.LoRASpec,
+			LoraLoaded:          engineConfig.LoRALoadedSpec,
+			LoraGPULoaded:       engineConfig.LoRAGPULoadedSpec,
+			LoraGPUSlots:        engineConfig.LoRAGPUSlotsSpec,
 			CacheInfo:           engineConfig.CacheInfoSpec,
 			CacheBlockSizeLabel: engineConfig.CacheBlockSizeLabelName,
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
