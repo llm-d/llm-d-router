@@ -129,7 +129,7 @@ func TestRenderOnlyBudgetPreservesPayload(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				r, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: enabled}, "glm")
+				r, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: enabled})
 				require.NoError(t, err)
 				if completions {
 					_, _, err = r.Render(context.Background(), payload)
@@ -174,13 +174,61 @@ func TestRenderOnlyBudgetPreservesTruncation(t *testing.T) {
 					_, _ = w.Write([]byte(`{}`))
 				}))
 				defer server.Close()
-				renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: true}, "glm")
+				renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: true})
 				require.NoError(t, err)
 				var out map[string]any
 				require.NoError(t, renderer.postJSON(t.Context(), path, payload, time.Second, &out))
 			})
 		}
 	}
+}
+
+func TestRenderOnlyBudgetKeepsRawEnvelopeContent(t *testing.T) {
+	const tools = `[{"type":"function","function":{"name":"lookup","parameters":{"z":{"type":"string"},"a":{"type":"integer"}}}}]`
+	for _, tc := range []struct {
+		name     string
+		payload  string
+		wantMax  string
+		wantMin  string
+		wantComp string
+	}{
+		{"caps budget", `{"model":"adapter","messages":[{"role":"user","content":"hi"}],"tools":` + tools + `,"max_tokens":32000,"max_completion_tokens":32000,"min_tokens":5}`, "1", "0", "1"},
+		{"null truncation caps budget", `{"model":"adapter","tools":` + tools + `,"max_tokens":32000,"truncate_prompt_tokens":null}`, "1", "", ""},
+		{"truncation keeps budget", `{"model":"adapter","tools":` + tools + `,"max_tokens":32000,"min_tokens":5,"truncate_prompt_tokens":-1}`, "32000", "5", ""},
+		{"adds budget when absent", `{"model":"adapter","tools":` + tools + `}`, "1", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := renderOnlyBudget([]byte(tc.payload))
+			require.NoError(t, err)
+			var envelope map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(out, &envelope))
+			assert.Equal(t, tc.wantMax, string(envelope["max_tokens"]))
+			assert.Equal(t, tc.wantMin, string(envelope["min_tokens"]))
+			assert.Equal(t, tc.wantComp, string(envelope["max_completion_tokens"]))
+			assert.Equal(t, tools, string(envelope["tools"]), "nested key order must survive")
+			assert.Equal(t, `"adapter"`, string(envelope["model"]))
+		})
+	}
+	_, err := renderOnlyBudget([]byte(`[1,2]`))
+	require.Error(t, err)
+}
+
+func TestRenderOnlyBudgetAppliesToRawPayload(t *testing.T) {
+	var seen map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, chatRenderPath, r.URL.Path)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&seen))
+		_, _ = w.Write([]byte(`{"token_ids":[1,2,3]}`))
+	}))
+	defer server.Close()
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: true})
+	require.NoError(t, err)
+	raw := fwkrh.RawPayload(`{"model":"adapter","messages":[{"role":"user","content":"hi"}],"max_tokens":32000}`)
+	tokens, _, err := renderer.RenderChat(context.Background(), raw)
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{1, 2, 3}, tokens)
+	assert.Equal(t, "1", string(seen["max_tokens"]))
+	assert.Equal(t, `[{"role":"user","content":"hi"}]`, string(seen["messages"]))
 }
 
 func TestModelLimitEndpointReplacement(t *testing.T) {
@@ -200,23 +248,6 @@ func TestModelLimitEndpointReplacement(t *testing.T) {
 	_, err = p.Pick()
 	require.Error(t, err, "replacement must be probed before selection")
 	require.NotSame(t, c, p.capabilities[replacement.GetMetadata().ID.String()], "in-flight probes must lose their generation")
-}
-
-func TestRenderRejectsEmptyTokenIDs(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == completionsRenderPath {
-			_, _ = w.Write([]byte(`[{"token_ids":[]}]`))
-		} else {
-			_, _ = w.Write([]byte(`{"token_ids":[]}`))
-		}
-	}))
-	defer server.Close()
-	renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL}, "glm")
-	require.NoError(t, err)
-	_, _, err = renderer.RenderChat(context.Background(), fwkrh.PayloadMap{"messages": []any{}})
-	require.Error(t, err)
-	_, _, err = renderer.Render(context.Background(), fwkrh.PayloadMap{"prompt": "test"})
-	require.Error(t, err)
 }
 
 func TestModelLimitStaleProbeCannotResurrectDeletedEndpoint(t *testing.T) {

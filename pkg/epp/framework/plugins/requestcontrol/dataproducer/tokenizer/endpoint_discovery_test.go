@@ -280,7 +280,7 @@ func TestVLLMHTTPRenderer_DiscoveryRoundRobin(t *testing.T) {
 	serverB := newRenderServer(2)
 	t.Cleanup(serverB.Close)
 
-	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}}, testHTTPModel)
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}})
 	require.NoError(t, err)
 	picker := renderer.endpointPicker.(*discoveredEndpointPicker)
 	for name, server := range map[string]*httptest.Server{"rank-a": serverA, "rank-b": serverB} {
@@ -310,7 +310,7 @@ func TestVLLMHTTPRenderer_DiscoveryRetriesDifferentEndpoint(t *testing.T) {
 	}))
 	t.Cleanup(successfulServer.Close)
 
-	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}}, testHTTPModel)
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}})
 	require.NoError(t, err)
 	picker := renderer.endpointPicker.(*discoveredEndpointPicker)
 	for name, server := range map[string]*httptest.Server{"rank-a": failedServer, "rank-b": successfulServer} {
@@ -323,12 +323,6 @@ func TestVLLMHTTPRenderer_DiscoveryRetriesDifferentEndpoint(t *testing.T) {
 	assert.Equal(t, [][]uint32{{42}}, tokens)
 	assert.Equal(t, int32(1), failedCalls.Load())
 	assert.Equal(t, int32(1), successfulCalls.Load())
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return f(request)
 }
 
 func TestVLLMHTTPRenderer_DiscoveryRetriesTransportFailureWithinRequestTimeout(t *testing.T) {
@@ -354,7 +348,6 @@ func TestVLLMHTTPRenderer_DiscoveryRetriesTransportFailureWithinRequestTimeout(t
 			}, nil
 		})},
 		endpointPicker: picker,
-		modelName:      testHTTPModel,
 		timeout:        time.Second,
 	}
 
@@ -510,7 +503,7 @@ func TestVLLMHTTPRenderer_DiscoveryAttemptTimeoutConfiguration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			renderer, err := newVLLMHTTPRenderer(&vllmConfig{
 				EndpointDiscovery: &endpointDiscoveryConfig{AttemptTimeout: value},
-			}, testHTTPModel)
+			})
 			switch value {
 			case "":
 				require.NoError(t, err)
@@ -609,7 +602,7 @@ func TestVLLMHTTPRenderer_DiscoveryDoesNotRetryDeterministicClientError(t *testi
 	}))
 	t.Cleanup(alternateServer.Close)
 
-	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}}, testHTTPModel)
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{EndpointDiscovery: &endpointDiscoveryConfig{}})
 	require.NoError(t, err)
 	picker := renderer.endpointPicker.(*discoveredEndpointPicker)
 	for name, server := range map[string]*httptest.Server{"rank-a": clientErrorServer, "rank-b": alternateServer} {
@@ -644,7 +637,7 @@ func TestVLLMHTTPRenderer_EndpointPickErrorHasContext(t *testing.T) {
 	pickErr := errors.New("picker failed")
 	renderer := &vllmHTTPRenderer{endpointPicker: errorEndpointPicker{err: pickErr}}
 
-	err := renderer.postJSON(context.Background(), completionsRenderPath, map[string]any{}, time.Second, &renderResponse{})
+	err := renderer.postJSON(context.Background(), completionsRenderPath, fwkrh.PayloadMap{}, time.Second, &renderResponse{})
 	require.ErrorContains(t, err, "pick render endpoint")
 	assert.ErrorIs(t, err, pickErr)
 }

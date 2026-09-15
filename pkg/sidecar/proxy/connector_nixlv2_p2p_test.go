@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -63,7 +64,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 	}
 
 	sendRequest := func(proxyBaseAddr string, headers map[string]string) {
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
 			bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		for k, v := range headers {
@@ -145,7 +146,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 			c.P2PConnectorPort = p2pConnectorPort
 		})
 
-		req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath,
+		req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions,
 			bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, env.prefillBackend.URL[len("http://"):])

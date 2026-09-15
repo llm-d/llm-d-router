@@ -62,20 +62,6 @@ type EndpointPickerConfig struct {
 	// +optional
 	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
-
-	// +optional
-	// SaturationDetector specifies which saturation detector plugin to use.
-	//
-	// Deprecated: use flowControl.saturationDetector instead. If both are set, the new field is used.
-	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
-	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
-
-	// +optional
-	// Parser specifies the parsing logic used by the EPP to process protocol messages.
-	//
-	// Deprecated: use requestHandler.parser instead. If both are set, the new field is used.
-	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
-	Parser *ParserConfig `json:"parser,omitempty"`
 }
 
 func (cfg EndpointPickerConfig) String() string {
@@ -97,12 +83,6 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.RequestHandler != nil {
 		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
-	}
-	if cfg.SaturationDetector != nil {
-		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
-	}
-	if cfg.Parser != nil {
-		parts = append(parts, fmt.Sprintf("Parser: %v", cfg.Parser))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
