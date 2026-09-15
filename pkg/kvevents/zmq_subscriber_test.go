@@ -715,6 +715,54 @@ func TestZMQSubscriber_SequenceResetClearsAndRebuildsPod(t *testing.T) {
 		"restart must replace stale pod state with the replayed epoch")
 }
 
+func TestZMQSubscriber_SequenceResetWithoutReplayClearsPod(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
+	require.NoError(t, err)
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
+	pool.Start(ctx)
+	defer pool.Shutdown(ctx)
+
+	pubEndpoint := availableEndpoint(t, ctx)
+	subManager := kvevents.NewSubscriberManager(pool)
+	require.NoError(t, subManager.EnsureSubscriber(
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, "", "kv@", false))
+	defer subManager.Shutdown(ctx)
+
+	pub := zmq4.NewPub(ctx)
+	defer pub.Close()
+	require.NoError(t, pub.Dial(pubEndpoint))
+	time.Sleep(100 * time.Millisecond)
+
+	topic := []byte("kv@10.0.0.1:8000@TestModel")
+	send := func(seq uint64, payload []byte) {
+		require.NoError(t, pub.Send(zmq4.NewMsgFrom(topic, seqFrame(seq), payload)))
+	}
+	send(0, buildDistinctBlockStoredPayload(t, 100))
+	send(1, buildDistinctBlockStoredPayload(t, 200))
+	require.Eventually(t, func() bool {
+		_, firstErr := index.GetRequestKey(ctx, kvblock.BlockHash(100))
+		_, secondErr := index.GetRequestKey(ctx, kvblock.BlockHash(200))
+		return firstErr == nil && secondErr == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	oldRequestKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(100))
+	require.NoError(t, err)
+
+	// The engine restarted at the same address: its publisher numbers from zero again.
+	send(0, buildDistinctBlockStoredPayload(t, 300))
+	require.Eventually(t, func() bool {
+		oldHits, lookupErr := index.Lookup(ctx, []kvblock.BlockHash{oldRequestKey}, nil)
+		_, newErr := index.GetRequestKey(ctx, kvblock.BlockHash(300))
+		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && newErr == nil
+	}, 5*time.Second, 50*time.Millisecond,
+		"restart must drop the pod's stale blocks without a replay endpoint")
+}
+
 func TestZMQSubscriber_ReplayedLiveEventsDoNotTriggerAnotherReplay(t *testing.T) {
 	payload := buildEventBatchPayload(t)
 	h := newReplayHarness(t, []replayMessage{
