@@ -19,7 +19,6 @@ package steps
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -49,17 +48,12 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 
 		switch phase {
 		case gateway.PhaseEncode:
-			body, _ := io.ReadAll(r.Body)
-			var parsed map[string]any
-			_ = json.Unmarshal(body, &parsed)
-			tokens, _ := parsed["tokens"].(map[string]any)
-			features, _ := tokens["features"].(map[string]any)
-			mmHashes, _ := features["mm_hashes"].(map[string]any)
-			imageHashes, _ := mmHashes[ModalityImage].([]any)
-			hash, _ := imageHashes[0].(string)
+			// The chat/completions sub-request carries no per-image hash (that
+			// only travels through MultimodalEntries), so key the fake response
+			// off the single entry's known hash.
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
-					hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+					"h1": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 				},
 			})
 		case gateway.PhasePrefill:

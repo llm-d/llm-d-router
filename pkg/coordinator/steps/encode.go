@@ -120,9 +120,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	for i, entry := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
-
-			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
+			body := s.buildEncodeBody(reqCtx, entry, format, imageParts)
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
@@ -205,7 +203,7 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		imageContent := buildSingleImageContent(imageParts, entry.Index, format)
@@ -215,13 +213,6 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 		}
 		body := map[string]any{
 			"model": reqCtx.Model,
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
-			},
 		}
 		if format == reqcommon.APITypeResponses {
 			body["input"] = []any{item}
@@ -233,7 +224,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 	default:
 		body := map[string]any{
 			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
+			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},

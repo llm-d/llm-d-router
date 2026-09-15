@@ -252,15 +252,12 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
-		// Extract hash from tokens.features
-		tokens, _ := receivedBody["tokens"].(map[string]any)
-		features, _ := tokens["features"].(map[string]any)
-		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
-		hash, _ := imageHashes[0].(string)
+		// The chat/completions sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
-				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			},
 		})
 	}))
@@ -322,25 +319,9 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
 	}
 
-	// Verify tokens nested field
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 4 { // BOS + 3 placeholders
-		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data in chat format")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions format should not have a tokens field")
 	}
 
 	// Verify no top-level token_ids or features
@@ -359,14 +340,12 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
-		tokens, _ := receivedBody["tokens"].(map[string]any)
-		features, _ := tokens["features"].(map[string]any)
-		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
-		hash, _ := imageHashes[0].(string)
+		// The responses sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
-				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			},
 		})
 	}))
@@ -428,13 +407,9 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
 	}
 
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in responses format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 4 { // BOS + 3 placeholders
-		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("responses format should not have a tokens field")
 	}
 }
 

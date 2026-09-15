@@ -72,14 +72,9 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 			t.Errorf("kv_transfer_params.do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
 		}
 
-		// Verify tokens field present for chat completions format
-		tokens, ok := parsed["tokens"].(map[string]any)
-		if !ok {
-			t.Fatal("expected tokens field in chat/completions decode request")
-		}
-		tokenIDs, _ := tokens["token_ids"].([]any)
-		if len(tokenIDs) != 5 {
-			t.Fatalf("expected 5 token_ids in tokens field, got %d", len(tokenIDs))
+		// Verify no tokens field (dead field, never consumed downstream)
+		if _, ok := parsed["tokens"]; ok {
+			t.Fatal("decode request should not have a tokens field")
 		}
 
 		// Verify uuid was injected into the image_url content part
@@ -177,13 +172,9 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 			t.Errorf("kv_transfer_params.block_id = %v, want xyz", kvParams["block_id"])
 		}
 
-		tokens, ok := parsed["tokens"].(map[string]any)
-		if !ok {
-			t.Fatal("expected tokens field in responses decode request")
-		}
-		tokenIDs, _ := tokens["token_ids"].([]any)
-		if len(tokenIDs) != 5 {
-			t.Fatalf("expected 5 token_ids in tokens field, got %d", len(tokenIDs))
+		// Verify no tokens field (dead field, never consumed downstream)
+		if _, ok := parsed["tokens"]; ok {
+			t.Fatal("responses decode request should not have a tokens field")
 		}
 
 		input := parsed["input"].([]any)
