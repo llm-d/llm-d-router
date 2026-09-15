@@ -98,7 +98,7 @@ func eppPodReady(oldPodName string, nsName string, selector map[string]string) f
 // completionRoutedToNamespace sends one completion and reports an error on any
 // failure or namespace-header mismatch, for use inside Eventually blocks.
 func completionRoutedToNamespace(nsName string) error {
-	nsHdr, _, err := tryCompletion(simplePrompt, simModelName)
+	nsHdr, _, err := tryCompletion()
 	if err != nil {
 		return err
 	}
@@ -134,7 +134,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			ginkgo.By("Verifying new requests eventually route to a pod other than the killed one")
 			gomega.Eventually(func() error {
-				nsHdr, podHdr, err := tryCompletion(simplePrompt, simModelName)
+				nsHdr, podHdr, err := tryCompletion()
 				if err != nil {
 					return err
 				}
@@ -291,7 +291,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 					ginkgo.By("Verifying requests route to the aggregated fallback")
 					gomega.Eventually(func() string {
-						_, pod, err := tryCompletion(simplePrompt, simModelName)
+						_, pod, err := tryCompletion()
 						if err != nil {
 							return ""
 						}
@@ -306,7 +306,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 					ginkgo.By("Verifying requests return to P/D")
 					gomega.Eventually(func() string {
-						_, pod, err := tryCompletion(simplePrompt, simModelName)
+						_, pod, err := tryCompletion()
 						if err != nil {
 							return ""
 						}
