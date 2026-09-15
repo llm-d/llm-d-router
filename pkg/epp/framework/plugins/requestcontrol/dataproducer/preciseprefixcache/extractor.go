@@ -18,14 +18,9 @@ package preciseprefixcache
 
 import (
 	"context"
-	"fmt"
-	"net"
-	"strconv"
 
-	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
@@ -35,7 +30,7 @@ var _ fwkdl.EndpointExtractor = &Producer{}
 // enabled. Deleted endpoints and endpoints that stop matching lose their
 // subscriber and cached index entries.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
-	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
+	if !p.subscriptions.Enabled() {
 		return nil
 	}
 	meta := event.Endpoint.GetMetadata()
@@ -44,48 +39,14 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 	}
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
+	ctx = log.IntoContext(ctx, logger)
 	endpointKey := meta.ID.String()
 
-	matchesSelector := p.podSelector == nil || p.podSelector.Matches(labels.Set(meta.Labels))
 	switch {
-	case event.Type == fwkdl.EventAddOrUpdate && matchesSelector:
-		return p.ensureSubscriber(ctx, meta)
+	case event.Type == fwkdl.EventAddOrUpdate && p.subscriptions.Matches(meta.Labels):
+		return p.subscriptions.Ensure(ctx, endpointKey, meta.Address, meta.Port, meta.GetRankIndex())
 	case event.Type == fwkdl.EventAddOrUpdate || event.Type == fwkdl.EventDelete:
-		removed := p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
-		if !removed && event.Type == fwkdl.EventAddOrUpdate {
-			return nil
-		}
-		logger.V(logging.DEBUG).Info("Removed KV-events subscriber", "endpoint", endpointKey)
+		p.subscriptions.Remove(ctx, endpointKey)
 	}
-	return nil
-}
-
-// ensureSubscriber idempotently installs a KV-events subscriber for the given
-// endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
-// (one ZMQ PUB socket per DP rank on the same pod IP).
-func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
-	if meta == nil || meta.Address == "" {
-		return nil
-	}
-	endpointKey := meta.ID.String()
-	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
-	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
-	replayEndpoint := ""
-	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
-	}
-	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
-
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
-	// down on request completion.
-	if err := p.subscribersManager.EnsureSubscriber(p.subscriberCtx, endpointKey,
-		sourceEndpoint, zmqEndpoint, replayEndpoint, p.kvEventsConfig.TopicFilter, true); err != nil {
-		logger.Error(err, "Failed to ensure KV-events subscriber for endpoint",
-			"endpoint", endpointKey, "address", meta.Address)
-		return fmt.Errorf("ensure subscriber for %s: %w", endpointKey, err)
-	}
-	logger.V(logging.DEBUG).Info("Ensured KV-events subscriber",
-		"endpoint", endpointKey, "zmq", zmqEndpoint, "replay", replayEndpoint)
 	return nil
 }
