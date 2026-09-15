@@ -240,9 +240,8 @@ flowchart TD
 
     subgraph coord["Coordinator"]
         Handler["handleInference\nRead x-llm-d-tenant/user/workload-id\nStore on RequestContext"]:::obs
-        Pipeline["Pipeline steps\n(render, conditional-decode,\nencode, prefill, decode)\n→ streams final response to client"]:::coord
-        Attribution["attribution step\nParse serving_model + token counts\nfrom decode response body\nEmit Prometheus metrics\nEmit structured log record"]:::obs
-        Handler --> Pipeline --> Attribution
+        Pipeline["Pipeline steps\n(render, conditional-decode,\nencode, prefill, decode)\nModifyResponse hook captures token counts\nEmit Prometheus metrics + structured log"]:::coord
+        Handler --> Pipeline
     end
 
     Pipeline -->|"one call per phase"| GWPhase
@@ -260,8 +259,8 @@ flowchart TD
         Log[("Structured log\n(Elasticsearch / Loki)")]:::obs
     end
 
-    Attribution --> Prom
-    Attribution --> Log
+    Pipeline --> Prom
+    Pipeline --> Log
 ```
 
 > The metric are generated synchronously **after the response is returned to the client**. The reasons for this approach are described in
@@ -280,19 +279,24 @@ UserID     string
 WorkloadID string
 ```
 
-Two additional fields accumulate values set by the `attribution` step after decode
-completes:
+Three additional fields are populated by the attribution hook inside the decode steps
+after the response is received:
 
 ```go
 // ServingModel is the authoritative model name from the decode response body
-// (the vLLM "model" field). Populated by the attribution step; defaults to
+// (the vLLM "model" field). Populated by the attribution hook; defaults to
 // RequestContext.Model (the requested model) when the response body is unavailable.
 ServingModel string
 
 // CompletionTokens is the completion token count from the decode response body.
-// Populated by the attribution step from the vLLM "usage.completion_tokens" field.
+// Populated by the attribution hook from the vLLM "usage.completion_tokens" field.
 // Zero when the decode response body was unavailable or unparseable.
 CompletionTokens int
+
+// PromptTokensFromBody is the prompt token count read from the decode response body's
+// usage.prompt_tokens field. Used when the render step is not in the pipeline and
+// len(TokenIDs) is zero. Populated by the attribution hook.
+PromptTokensFromBody int
 ```
 
 ### `handleInference`
@@ -330,7 +334,7 @@ are handled).
 When `stream == true` and `requestAttribution.enabled == true`, inject
 `stream_options.include_usage = true` into the parsed body before the pipeline runs.
 This ensures the upstream model returns a usage object in the final SSE chunk, which
-the `attribution` step reads after decode:
+the attribution hook reads from the `ModifyResponse` callback:
 
 ```go
 if stream && s.attributionCfg.Enabled {
@@ -355,55 +359,47 @@ This is gated on `requestAttribution.enabled: true` so operators without attribu
 are unaffected. It is idempotent: clients that already send `include_usage: true` are
 not changed.
 
-### The `attribution` Pipeline Step
+### The Attribution Hook
 
-A new built-in step, `attribution`, is registered in
-[`pkg/coordinator/steps/`](../../pkg/coordinator/steps/). It is a **post-decode
-observation step**: it must be placed in the pipeline **after** `decode` (and after
-`conditional-decode` when that is present). It does two things:
+Attribution data is captured via a **`ModifyResponse` hook injected into `DecodeStep`
+and `ConditionalDecodeStep` at construction time**. Both steps already accept an
+optional `modifyResponse func(*http.Response) error` parameter through `newDecodeProxy`;
+they pass `nil` today. When attribution is enabled, the builder passes a closure that
+intercepts the upstream response inside the proxy, before `ServeHTTP` returns.
 
-#### 1. Decode response body capture
+#### Decode response body capture
 
-The attribution step wraps the decode phase to intercept the response body. Because
-decode uses a streaming reverse proxy (`httputil.ReverseProxy`), the body cannot be
-buffered without breaking streaming to the client.
+Because decode uses a streaming reverse proxy (`httputil.ReverseProxy`), the body
+cannot be read directly inside `ModifyResponse` without consuming it and leaving nothing
+for the proxy to forward to the client. Instead, `resp.Body` is replaced in place with
+an `io.TeeReader` that copies bytes to a side buffer as the proxy reads them:
 
-Instead, the attribution step uses the same `ModifyResponse` hook pattern already
-present in `conditional-decode`:
+- For **non-streaming** responses: vLLM always includes a `usage` object in non-streaming
+  responses. The `TeeReader` accumulates a full copy in a `bytes.Buffer`. After
+  `ServeHTTP` returns, parse `usage.prompt_tokens`, `usage.completion_tokens`, and `model`
+  from the buffer. Store on `RequestContext` as `CompletionTokens`, `ServingModel`, and
+  `PromptTokensFromBody`.
+- For **streaming** responses (SSE): the `TeeReader` copies bytes to a
+  `lastChunkTracker` — a writer that keeps only the last non-empty `data:` line it has
+  seen. The final `data:` chunk before `data: [DONE]` carries a `usage` object when
+  `stream_options.include_usage: true` is set. After `ServeHTTP` returns, the tracker's
+  captured line is parsed for `usage.completion_tokens` and `model`. The full stream is
+  **never** buffered.
 
-- For **non-streaming** responses: the body is fully available in `ModifyResponse`.
-  Parse `usage.prompt_tokens`, `usage.completion_tokens`, and `model` from the JSON
-  body. Store on `RequestContext` as `CompletionTokens` and `ServingModel`.
-- For **streaming** responses (SSE): the final `data:` chunk before `data: [DONE]`
-  carries a `usage` object when `stream_options.include_usage: true` is set. The
-  attribution step buffers only the last SSE chunk (the usage chunk) through a
-  lightweight response wrapper; it does **not** buffer the full stream.
+The hook fires for both cache-hit and cache-miss paths:
 
-> [!NOTE]
-> The attribution step is a **wrapper** around decode, not a step that runs after
-> decode returns. This is because the decode step uses `ServeHTTP` (a streaming
-> reverse proxy) and returns only after the full response has been forwarded to the
-> client. The attribution step wraps the decode call by temporarily replacing
-> `reqCtx.ResponseWriter` with an intercepting writer, then restores the original after
-> decode returns.
->
-> Concretely: the attribution step's `Execute` calls the `decode` step's `Execute`
-> (or `conditional-decode` when present), then reads `reqCtx.ServingModel` and
-> `reqCtx.CompletionTokens` that the intercepting writer populated, then emits metrics
-> and the log record.
+- **Cache hit** (`conditional-decode` returns `ErrPipelineDone`): `ModifyResponse` fires
+  on the 200 response before `ServeHTTP` returns, which is before `ErrPipelineDone` is
+  returned by `Execute`. Attribution is captured correctly.
+- **Cache miss** (`conditional-decode` returns `nil` after a 412): `ModifyResponse` is
+  not called by the proxy (the `ErrorHandler` swallows `errCacheMiss`). The
+  `conditional-decode` hook therefore does nothing. The pipeline continues to `decode`,
+  whose hook captures and emits attribution for the actual response.
 
-**Alternative — simpler approach without a wrapper step**: Rather than a wrapper step,
-the `decode` step itself can be extended to optionally call a post-decode attribution
-hook (a function pointer injected at construction time when attribution is enabled).
-This avoids the ResponseWriter swap complexity at the cost of a small coupling between
-decode and attribution. Both approaches are valid; the wrapper step is cleaner but the
-hook is simpler. The final implementation choice is left to the implementer; this
-document describes both options and the decision should be captured as a comment in the
-code.
+#### Metric and log emission
 
-#### 3. Metric and log emission
-
-After `CompletionTokens` and `ServingModel` are populated, the attribution step emits:
+After `CompletionTokens` and `ServingModel` are populated by the hook, the decode step
+calls `hook.Emit(reqCtx)` immediately after `proxy.ServeHTTP` returns:
 
 **Prometheus** (in [`pkg/coordinator/metrics/record.go`](../../pkg/coordinator/metrics/record.go)):
 
@@ -420,15 +416,15 @@ label dimension is omitted (the metric is registered without it when the config 
 
 ```go
 logger.Info("request.complete",
-    "tenant_id", reqCtx.TenantID,
-    "user_id",   reqCtx.UserID,
-    "workload_id", reqCtx.WorkloadID,
+    "tenant_id",       reqCtx.TenantID,
+    "user_id",         reqCtx.UserID,
+    "workload_id",     reqCtx.WorkloadID,
     "requested_model", reqCtx.Model,
-    "serving_model", reqCtx.ServingModel,
-    "namespace", cfg.Namespace,
-    "prompt_tokens", promptTokens,   // from render step via len(reqCtx.TokenIDs) or existing metric
+    "serving_model",   reqCtx.ServingModel,
+    "namespace",       cfg.Namespace,
+    "prompt_tokens",   promptTokens, // len(reqCtx.TokenIDs) if render ran, else PromptTokensFromBody
     "completion_tokens", reqCtx.CompletionTokens,
-    "request_id", reqCtx.RequestID,
+    "request_id",      reqCtx.RequestID,
 )
 ```
 
@@ -436,9 +432,9 @@ logger.Info("request.complete",
 
 | Token type | Source | Notes |
 |---|---|---|
-| Prompt tokens | `len(reqCtx.TokenIDs)` after the render step, or the `usage.prompt_tokens` field from the decode response body | When `render` is not in the pipeline (no tokenization pass), fall back to the response body. |
-| Completion tokens | `usage.completion_tokens` from the decode response body | Always from the response body; not available before decode. |
-| Serving model | `model` field from the decode response body | Falls back to `reqCtx.Model` (requested model) on error or unavailability. |
+| Prompt tokens | `len(reqCtx.TokenIDs)` after the render step, or `reqCtx.PromptTokensFromBody` parsed by the attribution hook | When `render` is not in the pipeline, the hook reads `usage.prompt_tokens` from the decode response body and stores it in `PromptTokensFromBody`. |
+| Completion tokens | `usage.completion_tokens` from the decode response body | Parsed by the attribution hook; not available before decode. |
+| Serving model | `model` field from the decode response body | Parsed by the attribution hook; falls back to `reqCtx.Model` on error or unavailability. |
 
 For streaming responses, vLLM emits a final SSE chunk containing only `usage` when
 `stream_options.include_usage: true` is set:
@@ -449,8 +445,8 @@ data: {"id":"...","object":"chat.completion.chunk","model":"Qwen3-32B","usage":{
 data: [DONE]
 ```
 
-The intercepting writer watches for this pattern and stores the usage fields before
-passing the chunk through to the client.
+The `lastChunkTracker` in the `TeeReader` side-path watches for this pattern and retains
+it for parsing after `ServeHTTP` returns.
 
 ### Prompt Token Count — Interaction with Existing Metric
 
@@ -462,9 +458,10 @@ changed.
 
 When the `render` step is not in the pipeline (text-only OpenAI-format requests where
 tokenization happens on the worker), `len(reqCtx.TokenIDs)` is zero. In that case, the
-attribution step reads `usage.prompt_tokens` from the decode response body for both the
-attributed metric and the log record. The un-attributed `request_input_tokens` metric is
-also zero in this case (it is populated only by the render step).
+attribution hook reads `usage.prompt_tokens` from the decode response body and stores it
+in `reqCtx.PromptTokensFromBody`, which `Emit` uses for both the attributed metric and
+the log record. The un-attributed `request_input_tokens` metric is also zero in this case
+(it is populated only by the render step).
 
 ### Configuration
 
@@ -495,7 +492,8 @@ variable; it is not in the YAML config because it is typically injected by Kuber
 via the Downward API.
 
 When `enabled: false`, no header extraction, no metric emission, no log record, and no
-`stream_options` injection are performed. The attribution step is a no-op.
+`stream_options` injection are performed. The attribution hook is `nil` and both decode
+steps behave identically to their pre-attribution state.
 
 ### Output Tiers Summary
 
@@ -552,7 +550,7 @@ The trust boundary requirement and recommended mitigations are documented in App
 
 | Repository | Change |
 |---|---|
-| `llm-d/llm-d-router` | `RequestContext`: add `TenantID`, `UserID`, `WorkloadID`, `ServingModel`, `CompletionTokens`, `ReceivedAt` fields. `handleInference`: extract three attribution headers; inject `stream_options.include_usage` on streaming requests when attribution enabled. `config.go`: add `RequestAttributionConfig`. New step `pkg/coordinator/steps/attribution.go`: decode response body parsing, metric and log emission. `pkg/coordinator/metrics/`: two new attributed histogram families + recording functions. |
+| `llm-d/llm-d-router` | `RequestContext`: add `TenantID`, `UserID`, `WorkloadID`, `ServingModel`, `CompletionTokens`, `PromptTokensFromBody` fields. `handleInference`: extract three attribution headers; inject `stream_options.include_usage` on streaming requests when attribution enabled. `config.go`: add `RequestAttributionConfig`. New file `pkg/coordinator/steps/attribution.go`: `AttributionHook` type, `ModifyResponse` closure, `Emit` function. Modify `pkg/coordinator/steps/decode.go` and `conditional_decode.go`: accept and invoke the hook. `pkg/coordinator/metrics/`: two new attributed histogram families + recording functions. `pkg/coordinator/pipeline/builder/builder.go`: inject hook into decode steps when enabled. |
 | `llm-d/llm-d` | New doc `docs/operations/observability/attribution.md`; update `docs/api-reference/coordinator-http-headers.md` to list the three attribution headers; update metrics docs; add example PromQL queries. |
 | `opencost/opencost` | Update metric names from `llm_d_epp_*` to `llm_d_coordinator_*` in `QueryInferenceDimensionTokens` — see [`open-cost-new-dimensions-plan-coordinator.md`](open-cost-new-dimensions-plan-coordinator.md) |
 
@@ -763,12 +761,13 @@ client). The sequence on the request goroutine is:
 ```
 1. proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
    └── streams full response to client; returns when done
-2. histogram.Observe(promptTokens)      ← microseconds; in-process memory write
-3. histogram.Observe(completionTokens)  ← microseconds; in-process memory write
-4. logger.Info("request.complete", ...)  ← synchronous write to the logger's sink
-5. attribution step returns nil
-6. handleInference defer runs (IncRequestTotal, RecordRequestDuration, etc.)
-7. request goroutine exits
+2. hook.Emit(reqCtx) is called by the decode step
+   ├── histogram.Observe(promptTokens)      ← microseconds; in-process memory write
+   ├── histogram.Observe(completionTokens)  ← microseconds; in-process memory write
+   └── logger.Info("request.complete", ...)  ← synchronous write to the logger's sink
+3. decode step Execute returns
+4. handleInference defer runs (IncRequestTotal, RecordRequestDuration, etc.)
+5. request goroutine exits
 ```
 
 The client is fully served before steps 2–4 run. The **client-perceived latency is
@@ -814,3 +813,58 @@ its configured sink (typically `stderr` or a buffered file writer), which is fas
 > that path should be async with an explicit bounded buffer and a drop-or-block policy
 > under backpressure — but that change should be scoped to that sink, not retrofitted
 > onto the Prometheus and log paths.
+
+---
+
+## Appendix C: Wrapper Step — Considered and Rejected
+
+An earlier iteration of this design implemented attribution as a **wrapper pipeline
+step** (`AttributionStep`) that sat in the step slice and delegated to the decode step
+as its inner step. This approach was rejected after review.
+
+### What the wrapper step did
+
+`AttributionStep.Execute` would:
+
+1. Replace `reqCtx.ResponseWriter` with an intercepting writer that teed bytes through
+   to the original while capturing data for attribution parsing.
+2. Delegate to `innerStep.Execute` (the decode or conditional-decode step), which ran
+   the proxy and streamed the response through the intercepting writer.
+3. Read `ServingModel` and `CompletionTokens` from the captured data after the inner
+   step returned.
+4. Emit metrics and the log record.
+
+### Why it was rejected
+
+**Problem 1 — `execution_path_total` and step metrics break silently.**
+`pipeline.Execute` tracks which steps ran in `started[step.Name()]` and
+`executed[step.Name()]` maps. `classifyExecutionPath` checks for the literal strings
+`"decode"` and `"conditional-decode"` to classify the request's execution path. A wrapper
+step whose `Name()` returns `"attribution"` means `started["decode"]` and
+`started["conditional-decode"]` are never set. `execution_path_total` stops recording
+for all requests, and `step_running`/`step_duration_seconds` metrics are recorded under
+`"attribution"` instead of the actual decode step name. This is a silent regression in
+observability.
+
+**Problem 2 — `conditional-decode` cache-miss path is broken.**
+`ConditionalDecodeStep.Execute` returns `nil` on a 412 cache miss, allowing the pipeline
+to continue to `decode`. A wrapper around only `conditional-decode` would fire attribution
+on the cache-miss `nil` return — before the actual response has been produced. A wrapper
+around only `decode` would miss cache-hit responses entirely (since on a cache hit the
+pipeline exits via `ErrPipelineDone` before `decode` runs). A dual-wrapper solution —
+wrapping both steps — requires coordination state on `RequestContext`, still has the
+`Name()` problem, and doubles the complexity.
+
+### Why the `ModifyResponse` hook is the right answer
+
+The `ModifyResponse` hook pattern (see [The Attribution Hook](#the-attribution-hook))
+avoids both problems:
+
+- Neither decode step changes its `Name()`. All existing pipeline observability is
+  unaffected.
+- The hook fires inside the proxy response path for whichever step actually served the
+  request. Cache-hit and cache-miss paths are both handled correctly with no coordination
+  required.
+- The `io.TeeReader` approach (wrapping `resp.Body` inside `ModifyResponse`) is cleaner
+  than the `ResponseWriter` swap: it operates at the HTTP response layer rather than the
+  writer layer, and the proxy already owns the body-copy loop.
