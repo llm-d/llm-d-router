@@ -345,25 +345,9 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatal("expected messages from original body in chat format")
 	}
 
-	// Verify tokens nested field
-	tokens, ok := prefillBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 5 {
-		t.Fatalf("expected 5 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("chat format should not have a tokens field")
 	}
 
 	// Verify ec_transfer_params is forwarded in chat format
@@ -380,12 +364,67 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	if _, ok := prefillBody["kv_transfer_params"]; !ok {
 		t.Fatal("expected kv_transfer_params in chat format")
 	}
-	// Verify no top-level token_ids (should be in tokens field)
+	// Verify no top-level token_ids
 	if _, ok := prefillBody["token_ids"]; ok {
 		t.Fatal("chat format should not have top-level token_ids")
 	}
 	if _, ok := prefillBody["request_id"]; ok {
 		t.Fatal("chat format should not have request_id (uses original body)")
+	}
+}
+
+func TestPrefillStep_ResponsesFormat(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-3"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 2345},
+		Body: map[string]any{
+			"model": "test-model",
+			"input": "hello",
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["model"] != "test-model" {
+		t.Fatalf("expected model from original body, got %v", prefillBody["model"])
+	}
+	if _, ok := prefillBody["input"]; !ok {
+		t.Fatal("expected input from original body in responses format")
+	}
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("responses format should not have a tokens field")
+	}
+	if _, ok := prefillBody["kv_transfer_params"]; !ok {
+		t.Fatal("expected kv_transfer_params in responses format")
 	}
 }
 
@@ -700,7 +739,7 @@ func TestPrefillStep_UnsupportedFormat(t *testing.T) {
 		KVTransferParams: make(map[string]any),
 	}
 
-	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, nil, reqcommon.APIType(99))
+	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, reqcommon.APIType(99))
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}

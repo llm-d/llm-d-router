@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -141,6 +142,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 
+	if r.URL.Path == reqcommon.PathResponses {
+		dropStatefulResponsesFields(logger, parsed)
+	}
+
 	if requestIDReplaced && clientRequestID != "" {
 		// Log the rejected length, never the raw value, to avoid reflecting
 		// attacker-controlled content into the log.
@@ -187,6 +192,31 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
 	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
+}
+
+// dropStatefulResponsesFields removes stateful Responses fields the
+// pipeline cannot honor: prefill, encode, and decode run on independent
+// worker pods with no shared response store, so previous_response_id cannot
+// be resolved and store/background would silently no-op rather than persist
+// or backgroundize anything. All three are removed whenever present,
+// regardless of value.
+func dropStatefulResponsesFields(logger logr.Logger, body map[string]any) {
+	var dropped []string
+	if _, ok := body["previous_response_id"]; ok {
+		delete(body, "previous_response_id")
+		dropped = append(dropped, "previous_response_id")
+	}
+	if _, ok := body["store"]; ok {
+		delete(body, "store")
+		dropped = append(dropped, "store")
+	}
+	if _, ok := body["background"]; ok {
+		delete(body, "background")
+		dropped = append(dropped, "background")
+	}
+	if len(dropped) > 0 {
+		logger.V(logutil.DEFAULT).Info("dropping unsupported responses fields", "fields", dropped)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

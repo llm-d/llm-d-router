@@ -156,6 +156,97 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 	}
 }
 
+func TestHandleInference_ResponsesDropsUnsupportedStatefulFields(t *testing.T) {
+	// prefill, encode, and decode run on independent worker pods with no
+	// shared response store: previous_response_id can't be resolved and
+	// store/background would silently no-op. The handler strips them before
+	// the pipeline sees the body, rather than forwarding a promise it can't
+	// keep.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","input":"hi","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	for _, field := range []string{"previous_response_id", "store", "background"} {
+		if _, ok := seenBody[field]; ok {
+			t.Errorf("expected %q to be dropped from the body the pipeline sees", field)
+		}
+	}
+	if seenBody["input"] != "hi" {
+		t.Errorf("expected unrelated fields to survive, got input=%v", seenBody["input"])
+	}
+}
+
+func TestHandleInference_ResponsesDropsStoreRegardlessOfValue(t *testing.T) {
+	// store is removed whenever present, regardless of value: the field's
+	// value doesn't change whether the pipeline can honor it, so there's
+	// nothing to gain by keeping store: false around.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","input":"hi","store":false}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if _, ok := seenBody["store"]; ok {
+		t.Errorf("expected store to be dropped regardless of value, got %v", seenBody["store"])
+	}
+}
+
+func TestHandleInference_ResponsesFieldStrippingScopedToPath(t *testing.T) {
+	// The stripping in dropStatefulResponsesFields must not run for other
+	// paths: a chat-completions client is free to send its own store/
+	// previous_response_id/background fields (even if meaningless there)
+	// without the coordinator silently rewriting its request.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	for _, field := range []string{"previous_response_id", "store", "background"} {
+		if _, ok := seenBody[field]; !ok {
+			t.Errorf("expected %q to survive on a non-responses path", field)
+		}
+	}
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
@@ -297,6 +388,7 @@ func TestRoutesRegistered(t *testing.T) {
 	}{
 		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
 		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
+		{"responses", http.MethodPost, reqcommon.PathResponses, inferenceBody},
 		{"generate", http.MethodPost, reqcommon.PathGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},

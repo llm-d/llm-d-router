@@ -306,7 +306,9 @@ jobs:
             archive: llm-d-router-disagg-sidecar
           - name: renderer
             source: pull
-            image: vllm/vllm-openai-cpu:v0.21.0
+            # Switches to the simulator deployments once
+            # https://github.com/llm-d/llm-d-inference-sim/issues/708 lands.
+            image: vllm/vllm-openai-cpu:nightly
             archive: vllm-openai-cpu
     name: e2e-image-router (${{ matrix.image.name }})
     steps:

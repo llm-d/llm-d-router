@@ -38,8 +38,10 @@ import (
 )
 
 const (
-	testChatCompletionsPath = reqcommon.PathChatCompletions
-	testModelName           = "test-model"
+	testChatCompletionsPath  = reqcommon.PathChatCompletions
+	testModelName            = "test-model"
+	testImageHash            = "hash-a"
+	testImageJPEGContentType = "image/jpeg"
 )
 
 func TestConditionalDecodeStep_CacheHit(t *testing.T) {
@@ -97,14 +99,9 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		t.Fatalf("expected Prefer: if-available header, got %q", receivedPreferHeader)
 	}
 
-	// Verify tokens field is present for chat completions format
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions conditional-decode request")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 3 {
-		t.Fatalf("expected 3 token_ids in tokens field, got %v", tokenIDs)
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions conditional-decode request should not have a tokens field")
 	}
 
 	result := recorder.Result()
@@ -118,47 +115,83 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	}
 }
 
-// Generate and Responses both resolve to the generate format, whose body is
-// forwarded without a tokens or prompt rewrite.
+// Generate's body is forwarded without a tokens or prompt rewrite.
 func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
-	for _, path := range []string{reqcommon.PathGenerate, reqcommon.PathResponses} {
-		t.Run(path, func(t *testing.T) {
-			var receivedBody map[string]any
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				_ = json.Unmarshal(body, &receivedBody)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{}`))
-			}))
-			defer srv.Close()
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
 
-			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			reqCtx := &pipeline.RequestContext{
-				RequestID:      "req-1",
-				OriginalPath:   path,
-				Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
-				TokenIDs:       []int{1, 2345},
-				ResponseWriter: httptest.NewRecorder(),
-			}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   reqcommon.PathGenerate,
+		Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
+		TokenIDs:       []int{1, 2345},
+		ResponseWriter: httptest.NewRecorder(),
+	}
 
-			err = step.Execute(context.Background(), reqCtx)
-			if !errors.Is(err, pipeline.ErrPipelineDone) {
-				t.Fatalf("expected ErrPipelineDone, got %v", err)
-			}
-			if _, ok := receivedBody["tokens"]; ok {
-				t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
-			}
-			if _, ok := receivedBody["prompt"]; ok {
-				t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
-			}
-			if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
-				t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
-			}
-		})
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
+	}
+	if _, ok := receivedBody["prompt"]; ok {
+		t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
+	}
+	if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
+	}
+}
+
+func TestConditionalDecodeStep_ResponsesFormat(t *testing.T) {
+	var receivedBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer srv.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-responses",
+		OriginalPath:   reqcommon.PathResponses,
+		Body:           map[string]any{"model": testModelName, "input": "hello"},
+		TokenIDs:       []int{1, 2345, 6789},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("responses conditional-decode request should not have a tokens field")
 	}
 }
 

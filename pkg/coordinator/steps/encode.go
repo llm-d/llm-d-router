@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -107,15 +108,20 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
-	if format == reqcommon.APITypeChatCompletions {
-		imageParts = collectImageParts(reqCtx.Body)
+	switch format {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			imageParts = collectImageParts(messages, imageURLPartType)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			imageParts = collectImageParts(input, inputImagePartType)
+		}
 	}
 
 	for i, entry := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
-
-			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
+			body := s.buildEncodeBody(logger, reqCtx, entry, format, imageParts)
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
@@ -198,32 +204,28 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeBody(logger logr.Logger, reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		imageContent := buildSingleImageContent(imageParts, entry.Index)
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		imageContent := buildSingleImageContent(logger, imageParts, entry.Index, format)
+		item := map[string]any{
+			"role":    "user",
+			"content": []any{imageContent},
+		}
 		body := map[string]any{
 			"model": reqCtx.Model,
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{imageContent},
-				},
-			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
-			},
+		}
+		if format == reqcommon.APITypeResponses {
+			body["input"] = []any{item}
+		} else {
+			body["messages"] = []any{item}
 		}
 		reqcommon.CapSingleToken(body, format)
 		return body
 	default:
 		body := map[string]any{
 			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
+			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
@@ -235,18 +237,18 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 	}
 }
 
-// collectImageParts walks the request messages once and returns the image_url
-// parts in order, so the fan-out loop can index by position instead of
-// re-walking all parts per image (O(N*M) -> O(N+M)).
-func collectImageParts(body map[string]any) []map[string]any {
-	messages, _ := body["messages"].([]any)
+// collectImageParts walks a chat-completions messages array or a Responses
+// input array once and returns the content parts matching partType in order,
+// so the fan-out loop can index by position instead of re-walking all parts
+// per image (O(N*M) -> O(N+M)).
+func collectImageParts(items []any, partType string) []map[string]any {
 	var parts []map[string]any
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
+		content, ok := itemMap["content"].([]any)
 		if !ok {
 			continue
 		}
@@ -255,7 +257,7 @@ func collectImageParts(body map[string]any) []map[string]any {
 			if !ok {
 				continue
 			}
-			if partMap["type"] == imageURLPartType {
+			if partMap["type"] == partType {
 				parts = append(parts, partMap)
 			}
 		}
@@ -263,7 +265,31 @@ func collectImageParts(body map[string]any) []map[string]any {
 	return parts
 }
 
-func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
+// buildSingleImageContent builds a synthetic single-image content part for
+// the encode sub-request. The image value's shape differs by format:
+// chat-completions nests it as image_url.url, while Responses' input_image
+// part stores it as a bare string directly on the part; Responses' optional
+// detail field is a sibling of image_url on that same part, so it is copied
+// across separately rather than coming along with the URL.
+func buildSingleImageContent(logger logr.Logger, imageParts []map[string]any, index int, format reqcommon.APIType) map[string]any {
+	if format == reqcommon.APITypeResponses {
+		content := map[string]any{
+			"type":      inputImagePartType,
+			"image_url": "",
+		}
+		if index >= 0 && index < len(imageParts) {
+			if url, ok := imageParts[index][imageURLPartType].(string); ok {
+				content["image_url"] = url
+			} else {
+				logger.V(logutil.DEBUG).Info("input_image part has no string image_url; sending blank image_url to encode worker",
+					"index", index, "type", fmt.Sprintf("%T", imageParts[index][imageURLPartType]))
+			}
+			if detail, ok := imageParts[index][inputImageDetailField]; ok {
+				content[inputImageDetailField] = detail
+			}
+		}
+		return content
+	}
 	if index >= 0 && index < len(imageParts) {
 		return map[string]any{
 			"type":      imageURLPartType,

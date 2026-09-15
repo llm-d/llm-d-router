@@ -252,15 +252,12 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
-		// Extract hash from tokens.features
-		tokens, _ := receivedBody["tokens"].(map[string]any)
-		features, _ := tokens["features"].(map[string]any)
-		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
-		hash, _ := imageHashes[0].(string)
+		// The chat/completions sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
-				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			},
 		})
 	}))
@@ -322,25 +319,9 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
 	}
 
-	// Verify tokens nested field
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 4 { // BOS + 3 placeholders
-		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data in chat format")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions format should not have a tokens field")
 	}
 
 	// Verify no top-level token_ids or features
@@ -349,6 +330,141 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 	if _, ok := receivedBody["features"]; ok {
 		t.Fatal("chat format should not have top-level features")
+	}
+}
+
+func TestEncodeStep_ResponsesFormat(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		// The responses sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe"},
+						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedBody["model"] != testModelName {
+		t.Fatalf("expected model from body, got %v", receivedBody["model"])
+	}
+
+	input, ok := receivedBody["input"].([]any)
+	if !ok {
+		t.Fatal("expected input in responses format")
+	}
+	item := input[0].(map[string]any)
+	content := item["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content part (image only), got %d", len(content))
+	}
+	part := content[0].(map[string]any)
+	if part["type"] != inputImagePartType {
+		t.Fatalf("expected %s content part, got %v", inputImagePartType, part["type"])
+	}
+	if _, ok := part["image_url"].(string); !ok {
+		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
+	}
+
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("responses format should not have a tokens field")
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_PreservesDetail verifies that a client's
+// optional detail field on an input_image part survives onto the synthetic
+// encode sub-request. It is a sibling of image_url on the Responses part
+// rather than nested inside it, so it needs its own copy in
+// buildSingleImageContent instead of coming along for free.
+func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-detail": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-detail",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc", "detail": "low"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-detail", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	input := receivedBody["input"].([]any)
+	part := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["detail"] != "low" {
+		t.Fatalf("expected detail=low preserved on the encode sub-request, got %v", part["detail"])
 	}
 }
 

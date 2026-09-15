@@ -2,8 +2,8 @@
 
 The coordinator is a Go service that accepts inference requests and drives them through
 a configurable pipeline of steps. It currently supports the OpenAI-compatible API
-(`/v1/chat/completions`, `/v1/completions`), and the entry layer is designed to be
-extended to other inference protocols. Each step performs one unit of
+(`/v1/chat/completions`, `/v1/completions`, `/v1/responses`), and the entry layer is
+designed to be extended to other inference protocols. Each step performs one unit of
 work (download media, tokenize, encode, prefill, decode). The pre-processing steps call
 side services directly (media download, and the render service for tokenization); the
 encode, prefill, and decode steps forward sub-requests to vLLM worker pools through an
@@ -33,7 +33,9 @@ The goals the design serves:
   phase at a time, or let a worker serve a request directly when it already holds the
   needed state.
 - Tokenize the prompt once (in the render step) and reuse the token IDs across encode,
-  prefill, and decode, so workers never re-tokenize.
+  prefill, and decode in the tokens-in (`/inference/v1/generate`) format, so workers
+  never re-tokenize; the OpenAI-format (`/v1/chat/completions`) fallback re-tokenizes
+  on each worker instead.
 - Tokens-in / tokens-out operation: steps can exchange token IDs directly instead of
   raw text, cutting per-step tokenization to a single render pass. This is also
   beneficial for reinforcement learning (RL), where the training loop works in token
@@ -219,7 +221,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi HTTP server. Accepts `/v1/chat/completions` and `/v1/completions`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi HTTP server. Accepts `/v1/chat/completions`, `/v1/completions`, and `/v1/responses`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
@@ -677,7 +679,7 @@ single step may override the default in its own `params` (`kv_connector:` /
 always forward on the client's original OpenAI path and are unaffected by this setting:
 
 - `true` (default): forward the client's original OpenAI path (`/v1/chat/completions`,
-  `/v1/completions`).
+  `/v1/completions`, `/v1/responses`).
 - `false`: the tokens-in format. Rewrite to the internal `/inference/v1/generate`
   token-array endpoint, sending `token_ids` and `features` (including `kwargs_data`)
   directly in the body.
@@ -698,9 +700,12 @@ addressed.
 
 #### Format tradeoff
 
-The choice trades request size against worker recompute, and matters only for
-multimodal requests. In both formats the added `tokens` / `token_ids` field prevents
-re-tokenization on the worker; the difference is how the image is carried.
+The choice trades request size against worker recompute. The recompute half applies
+to every request, multimodal or not: in the generate format, the added `token_ids`
+field prevents re-tokenization on the worker; the chat-completions format carries no
+equivalent field, so the worker re-tokenizes there regardless. The request-size half
+matters only for multimodal requests, where the two formats differ in how the image
+is carried.
 
 - `/v1/chat/completions` carries the image as a raw `data:` URL. The body stays small,
   but the worker re-runs the vision preprocessor from the image bytes.
@@ -735,7 +740,7 @@ only the request carrier differs.
 | `type` | Purpose | Key params |
 | :---- | :---- | :---- |
 | `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
-| `replace-media-urls` | Download `image_url` references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
+| `replace-media-urls` | Download `image_url` (chat completions) or `input_image` (Responses) references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and per-image hash/placeholder/kwargs. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
