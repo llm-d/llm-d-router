@@ -108,20 +108,18 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 }
 
 func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any, format reqcommon.APIType) error {
-	if format == reqcommon.APITypeChatCompletions {
+	switch format {
+	case reqcommon.APITypeChatCompletions:
 		// The client's chat-completions body is forwarded as-is.
-		return nil
-	}
-	if format == reqcommon.APITypeCompletions {
+	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
 		}
-		return nil
-	}
-	if format == reqcommon.APITypeGenerate {
+	case reqcommon.APITypeGenerate:
 		// The client's generate body already carries token_ids.
-		return nil
+	default:
+		// resolveFormat only ever yields the three formats above.
+		return fmt.Errorf("conditional-decode: unsupported request format %v", format)
 	}
-	// resolveFormat only ever yields the three formats above.
-	return fmt.Errorf("conditional-decode: unsupported request format %v", format)
+	return nil
 }

@@ -609,3 +609,23 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
 }
+
+func TestEncodeStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test",
+	}
+
+	body, err := step.(*EncodeStep).buildEncodeBody(reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
+	if err == nil {
+		t.Fatalf("expected error for unsupported format, got body %v", body)
+	}
+	if want := "unsupported request format APIType(99)"; err.Error() != want {
+		t.Fatalf("expected error %q, got %q", want, err.Error())
+	}
+}
