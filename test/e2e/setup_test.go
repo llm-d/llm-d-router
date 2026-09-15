@@ -228,7 +228,7 @@ func createEndPointPickerHelper(eppConfig string, replicas int, isLeaderElection
 	objects = append(objects, testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {})...)
 
 	gomega.Eventually(func() error {
-		_, _, err := tryCompletion(simplePrompt, simModelName)
+		_, _, err := tryCompletion()
 		return err
 	}, readyTimeout, 1*time.Second).Should(gomega.Succeed())
 

@@ -143,11 +143,11 @@ func runCompletionWithModelRewrite(prompt, incomingModel, targetModel string) st
 
 // tryCompletion is like runCompletion but returns an error instead of asserting,
 // intended for use inside Eventually blocks where transient failures are acceptable.
-func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (string, string, error) {
+func tryCompletion() (string, string, error) {
 	var httpResp *http.Response
 	completionParams := openai.CompletionNewParams{
-		Prompt: openai.CompletionNewParamsPromptUnion{OfString: openai.String(prompt)},
-		Model:  theModel,
+		Prompt: openai.CompletionNewParamsPromptUnion{OfString: openai.String(simplePrompt)},
+		Model:  simModelName,
 	}
 	resp, err := newOpenAIClient().Completions.New(
 		testConfig.Context,
@@ -168,7 +168,7 @@ func tryCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 		return "", "", fmt.Errorf("expected finish reason %q, got %q",
 			openai.CompletionChoiceFinishReasonStop, resp.Choices[0].FinishReason)
 	}
-	if resp.Choices[0].Text != prompt {
+	if resp.Choices[0].Text != simplePrompt {
 		return "", "", fmt.Errorf("expected echoed prompt, got %q", resp.Choices[0].Text)
 	}
 	ns, pod, _ := extractInferenceHeaders(httpResp)
