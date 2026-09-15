@@ -51,12 +51,12 @@ func (i *recordingIndex) GetRequestKey(ctx context.Context, engineKey kvblock.Bl
 
 func (i *recordingIndex) Evict(
 	ctx context.Context,
-	key kvblock.BlockHash,
 	keyType kvblock.KeyType,
+	keys []kvblock.BlockHash,
 	entries []kvblock.PodEntry,
 ) error {
 	i.evictCalls++
-	return i.Index.Evict(ctx, key, keyType, entries)
+	return i.Index.Evict(ctx, keyType, keys, entries)
 }
 
 // makeTokens creates a token slice [1, 2, ..., n].

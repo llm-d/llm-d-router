@@ -132,10 +132,12 @@ type Index interface {
 	//   many:1 (engine=16, canonical=64) -> 16 eng, 4 req -> E0..E3->R0, E4..E7->R1, ...
 	//   1:many (engine=128, canonical=64) -> 2 eng, 4 req -> E0->[R0,R1], E1->[R2,R3]
 	Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error
-	// Evict removes a key and its associated pod entries from the index backend.
-	// keyType indicates whether the key is an EngineKey (requires engine→request lookup)
-	// or a RequestKey (used directly).
-	Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error
+	// Evict removes keys and their associated pod entries from the index backend.
+	// keyType indicates whether the keys are EngineKeys (each resolved
+	// independently via the engine→request mapping) or RequestKeys (used directly).
+	// The interface does not define whether a failed call leaves the index untouched
+	// or partially evicted; each implementation documents its own failure semantics.
+	Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error
 	// GetRequestKey returns the requestKey associated with the given engineKey.
 	GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error)
 	// Clear removes all index entries for the given pod, across every device tier.
