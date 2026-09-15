@@ -8,21 +8,13 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-const (
-	// LabelSelectorFilterType is the canonical type of the label selector filter.
-	LabelSelectorFilterType = "label-selector-filter"
-
-	// ByLabelSelectorType is the type of the Selector filter.
-	//
-	// Deprecated: Use LabelSelectorFilterType instead.
-	ByLabelSelectorType = "by-label-selector"
-)
+// LabelSelectorFilterType is the canonical type of the label selector filter.
+const LabelSelectorFilterType = "label-selector-filter"
 
 // compile-time type assertion
 var _ scheduling.Filter = &Selector{}
@@ -39,24 +31,6 @@ func SelectorFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) 
 		}
 	}
 	return NewSelector(name, &parameters)
-}
-
-// DeprecatedSelectorFactory creates a Selector but preserves the legacy TypedName.Type
-// so that plugins created through this factory report "by-label-selector"
-// rather than the canonical "label-selector-filter". It also logs a deprecation warning.
-//
-// Deprecated: Use SelectorFactory instead.
-func DeprecatedSelectorFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	if handle != nil {
-		log.FromContext(handle.Context()).Info("Deprecated: plugin type 'by-label-selector' is deprecated, use 'label-selector-filter' instead")
-	}
-	p, err := SelectorFactory(name, rawParameters, handle)
-	if err != nil {
-		return nil, err
-	}
-	s := p.(*Selector)
-	s.typedName.Type = ByLabelSelectorType
-	return s, nil
 }
 
 // NewSelector returns a new filter instance, configured with the provided

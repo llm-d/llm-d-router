@@ -562,8 +562,6 @@ func (r *Runner) registerInTreePlugins() {
 	// bylabel role filters
 	// Beta
 	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityBeta, bylabel.SelectorFactory)
-	fwkplugin.RegisterDeprecated(bylabel.ByLabelSelectorType, fwkplugin.StabilityBeta, bylabel.DeprecatedSelectorFactory, "v0.9.0", "v0.11.0", bylabel.LabelSelectorFilterType) //nolint:staticcheck // deprecated in v0.9.0 (#842)
-	fwkplugin.RegisterDeprecated(bylabel.ByLabelType, fwkplugin.StabilityBeta, bylabel.Factory, "v0.9.0", "v0.11.0", bylabel.LabelSelectorFilterType)                           //nolint:staticcheck // deprecated in v0.9.0 (#842)
 	fwkplugin.Register(bylabel.EncodeRoleType, fwkplugin.StabilityBeta, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, fwkplugin.StabilityBeta, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, fwkplugin.StabilityBeta, bylabel.PrefillRoleFactory)
