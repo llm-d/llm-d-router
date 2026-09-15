@@ -36,11 +36,13 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -257,6 +259,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var backend tokenInputProducer
 	var backendName string
+	var endpointPicker *discoveredEndpointPicker
 	switch {
 	case config.VLLM != nil || config.ModelName != "":
 		cfg := config.VLLM
@@ -273,16 +276,24 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer, modelName: config.ModelName, legacyMessages: legacyMessages, warmupAuth: vllmWarmupAuthHeader()}
 		backendName = backendVLLM
+		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
+		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
+			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
+		}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 		backendName = backendEstimate
 	}
 
+	typedName := plugin.TypedName{Type: PluginType, Name: name}
 	p := &Plugin{
-		typedName:   plugin.TypedName{Type: PluginType, Name: name},
+		typedName:   typedName,
 		backend:     backend,
 		backendName: backendName,
 		dk:          TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+	}
+	if endpointPicker != nil {
+		p.endpointDiscovery = newEndpointDiscoveryHandler(typedName, endpointPicker)
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -296,14 +307,16 @@ type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
 	// backendName identifies the configured backend on the tokenize span.
-	backendName string
-	dk          plugin.DataKey
+	backendName       string
+	dk                plugin.DataKey
+	endpointDiscovery *endpointDiscoveryHandler
 }
 
 // compile-time assertions.
 var (
 	_ requestcontrol.DataProducer         = &Plugin{}
 	_ requestcontrol.TimeoutAwareProducer = &Plugin{}
+	_ datalayer.Registrant                = &Plugin{}
 )
 
 // TypedName returns the typed name of the plugin.
@@ -314,6 +327,19 @@ func (p *Plugin) TypedName() plugin.TypedName {
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+}
+
+// RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.
+func (p *Plugin) RegisterDependencies(r datalayer.Registrar) error {
+	if p.endpointDiscovery == nil {
+		return nil
+	}
+	return r.Register(datalayer.PendingRegistration{
+		Owner:         p.TypedName(),
+		SourceType:    sourcenotifications.EndpointNotificationSourceType,
+		Extractor:     p.endpointDiscovery,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
 }
 
 // ProduceTimeout surfaces the backend's render timeout when it manages one, so
