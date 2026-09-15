@@ -33,13 +33,23 @@ import (
 )
 
 const (
-	defaultInMemoryIndexSize = 1e8 // TODO: change to memory-size based configuration
-	defaultPodsPerKey        = 10  // number of pods per key
+	// defaultInMemoryIndexSize caps the index by entry count, not memory: the
+	// underlying LRU evicts on count and has no notion of byte cost. To size
+	// Size against available memory, estimate per-entry cost as roughly
+	// PodCacheSize pod entries times the PodIdentifier and DeviceTier string
+	// lengths, plus map/LRU bookkeeping overhead, and divide the memory budget
+	// by that. CostAwareMemoryIndex tracks actual byte cost per entry and
+	// evicts against a configured memory budget directly; prefer it when the
+	// workload's per-entry size is hard to predict up front.
+	defaultInMemoryIndexSize = 1e8
+	defaultPodsPerKey        = 10 // number of pods per key
 )
 
 // InMemoryIndexConfig holds the configuration for the InMemoryIndex.
 type InMemoryIndexConfig struct {
-	// Size is the maximum number of keys that can be stored in the index.
+	// Size is the maximum number of keys that can be stored in the index. It
+	// bounds entry count, not memory; see defaultInMemoryIndexSize for sizing
+	// it against available memory.
 	Size int `json:"size"`
 	// PodCacheSize is the maximum number of pod entries per key.
 	// A non-positive value selects defaultPodsPerKey.
