@@ -288,6 +288,14 @@ failures do not remove URLs from subsequent requests; there is no render
 circuit breaker. Retry exclusions preserve round-robin cursor progression
 across the eligible endpoint list.
 
+Each named token producer maintains its own endpoint set and balancing state.
+Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
+global idle-connection cap; idle connections expire after 90 seconds.
+Alternative algorithms can be implemented in the tokenizer package through
+`endpointLoadBalancer` and registered in `endpointLoadBalancerFactories`.
+The picker supplies an independent snapshot without holding its endpoint lock;
+algorithms must support concurrent calls to `Pick` and skip excluded URLs.
+
 #### Context limits
 
 Set `vllm.endpointDiscovery.discoverModelLimits: true` to verify each target's
@@ -332,14 +340,6 @@ this option does not enable partial matching or extend inference context limits.
 
 Requests with a non-null `truncate_prompt_tokens` retain their original output
 budget because automatic truncation depends on it.
-
-Each named token producer maintains its own endpoint set and balancing state.
-Its HTTP/1.1 transport retains up to 16 idle connections per endpoint, with no
-global idle-connection cap; idle connections expire after 90 seconds.
-Alternative algorithms can be implemented in the tokenizer package through
-`endpointLoadBalancer` and registered in `endpointLoadBalancerFactories`.
-The picker supplies an independent snapshot without holding its endpoint lock;
-algorithms must support concurrent calls to `Pick` and skip excluded URLs.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
