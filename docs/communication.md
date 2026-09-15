@@ -56,7 +56,7 @@ Client Request (/v1/chat/completions, /v1/completions, or /inference/v1/generate
 [encode] - Fan-out: one request per image, runs ViT encoder
     |
     v
-[prefill] - Single request with full token sequence + encoder outputs
+[prefill] - Single request with encoder outputs; full token sequence too, in the generate format
     |
     v
 [decode] - Forwards to decode worker, streams response back to client
@@ -581,14 +581,14 @@ The `ec_transfer_params` map is keyed by mm_hash, with each value containing:
 
 ## Stage 5: prefill
 
-Sends a single prefill request with the full token sequence, all image metadata, and the EC transfer parameters from the encode stage. The prefill worker computes KV cache and stores it for the decode worker.
+Sends a single prefill request combining the EC transfer parameters from the encode stage with the request body. In the generate format the body carries the full token sequence and image metadata (`features`); in the chat-completions format the original messages are forwarded unchanged, and the worker re-tokenizes and re-encodes images itself. The prefill worker computes KV cache and stores it for the decode worker.
 
 Two request formats are supported (see [Request Format Configuration](#request-format-configuration)).
 
 **Common notes:**
 - `ec_transfer_params` is a flat map keyed by mm_hash (same format as the encode response), merging all per-image entries from the encode stage
 - `kv_transfer_params.do_remote_decode = true, do_remote_prefill = false` tells the prefill worker to store KV cache for remote decode
-- `mm_placeholders` use the original offsets from the render response (positions in the full token sequence)
+- In the generate format, `mm_placeholders` use the original offsets from the render response (positions in the full token sequence)
 
 ---
 
