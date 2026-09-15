@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -92,6 +93,53 @@ func TestExtractTraceContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractTraceContextFromIncomingMetadata(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	const (
+		gatewayTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+		gatewaySpanID  = "00f067aa0c9902b7"
+	)
+
+	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs(
+		"traceparent", "00-"+gatewayTraceID+"-"+gatewaySpanID+"-01",
+	))
+
+	got := extractTraceContext(ctx, nil)
+	sc := trace.SpanContextFromContext(got)
+
+	assert.True(t, sc.IsValid())
+	assert.Equal(t, gatewayTraceID, sc.TraceID().String())
+	assert.True(t, sc.IsRemote())
+}
+
+func TestExtractTraceContextHeaderTakesPrecedenceOverIncomingMetadata(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	const (
+		metadataTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+		headerTraceID   = "0af7651916cd43dd8448eb211c80319c"
+		spanID          = "b7ad6b7169203331"
+	)
+
+	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs(
+		"traceparent", "00-"+metadataTraceID+"-00f067aa0c9902b7-01",
+	))
+	req := &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{
+			Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+				{Key: "traceparent", Value: "00-" + headerTraceID + "-" + spanID + "-01"},
+			}},
+		},
+	}
+
+	got := extractTraceContext(ctx, req)
+	sc := trace.SpanContextFromContext(got)
+
+	assert.True(t, sc.IsValid())
+	assert.Equal(t, headerTraceID, sc.TraceID().String())
 }
 
 func TestHandleRequestHeaders(t *testing.T) {
