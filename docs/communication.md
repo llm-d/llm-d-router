@@ -581,7 +581,7 @@ The `ec_transfer_params` map is keyed by mm_hash, with each value containing:
 
 ## Stage 5: prefill
 
-Sends a single prefill request combining the EC transfer parameters from the encode stage with the request body. In the generate format the body carries the full token sequence and image metadata (`features`); in the chat-completions format the original messages are forwarded unchanged, and the worker re-tokenizes and re-encodes images itself. The prefill worker computes KV cache and stores it for the decode worker.
+Sends a single prefill request combining the request body with either `ec_transfer_params` from the encode stage or the image metadata needed to encode inline, depending on format. In the generate format, no encode stage ran (see [Generate Requests](#generate-requests-inferencev1generate)): the body carries the full token sequence and image metadata (`features`, including `kwargs_data`), and the prefill worker encodes the images itself. In the chat-completions format, the original messages are forwarded unchanged and the worker re-tokenizes the text prompt itself, but does not re-encode images: `ec_transfer_params` from the separate encode stage lets it retrieve the already-computed embeddings instead. The prefill worker computes KV cache and stores it for the decode worker.
 
 Two request formats are supported (see [Request Format Configuration](#request-format-configuration)).
 
