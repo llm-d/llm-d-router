@@ -135,9 +135,11 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	}
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
-	// Prefer mm_metadata over kwargs_data only when EC transfer params are
-	// present. vLLM rejects metadata-only features without ec_transfer_params.
-	features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, len(ecParams) > 0)
+	// Per-entry decision: an entry ships mm_metadata[i] when its hash has an
+	// EC descriptor and carries non-empty metadata, otherwise kwargs_data[i].
+	// Both fields are always emitted with complementary nulls so vLLM's
+	// per-item merge (merge_mm_kwargs_items) reconstructs each entry.
+	features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, ecParams)
 
 	switch format {
 	case gateway.FormatChatCompletions:

@@ -115,28 +115,47 @@ func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map
 	return buildMMFeaturesOpts(entries, includeKwargs, false)
 }
 
-// buildPrefillMMFeatures builds features for the prefill request.
+// buildPrefillMMFeatures builds features for the prefill request, deciding
+// per entry whether to ship mm_metadata or kwargs_data. An entry whose hash
+// has a descriptor in ecTransferParams and carries non-empty MMMetadata is
+// emitted as mm_metadata[i] with a null kwargs_data[i]; every other entry is
+// emitted as kwargs_data[i] with a null mm_metadata[i]. Both fields are
+// always present so vLLM's per-item merge (merge_mm_kwargs_items) can
+// reconstruct each entry from whichever side is non-null.
 //
-// When preferMetadata is true and every entry carries non-empty MMMetadata,
-// the result includes mm_metadata and omits kwargs_data. That path is only
-// valid together with ec_transfer_params (vLLM rejects metadata-only features
-// without EC params). Otherwise kwargs_data is included for backward
-// compatibility with renders that do not emit mm_metadata.
-func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, preferMetadata bool) map[string]any {
-	useMetadata := preferMetadata && allEntriesHaveMMMetadata(entries)
-	return buildMMFeaturesOpts(entries, !useMetadata, useMetadata)
-}
-
-func allEntriesHaveMMMetadata(entries []pipeline.MultimodalEntry) bool {
+// The whole-request "drop kwargs_data" decision that the previous version of
+// this function used silently broke the partial-coverage case: one encode
+// sub-request can return no descriptor (nixlEC.MergeEncodeResponse logs a
+// warning and continues rather than failing), leaving some entries with no
+// EC path. vLLM's own _require_ec_for_metadata_only is a request-level
+// validator and does not catch this, so partial coverage must be reconciled
+// here.
+func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams map[string]any) map[string]any {
 	if len(entries) == 0 {
-		return false
+		return nil
 	}
-	for _, e := range entries {
-		if e.MMMetadata == "" {
-			return false
+	hashes := make([]string, len(entries))
+	placeholders := make([]any, len(entries))
+	kwargs := make([]string, len(entries))
+	metadata := make([]string, len(entries))
+	for i, entry := range entries {
+		hashes[i] = entry.Hash
+		placeholders[i] = map[string]any{
+			"offset": entry.Placeholder.Offset,
+			"length": entry.Placeholder.Length,
+		}
+		if _, hasEC := ecTransferParams[entry.Hash]; hasEC && entry.MMMetadata != "" {
+			metadata[i] = entry.MMMetadata
+		} else {
+			kwargs[i] = entry.KwargsData
 		}
 	}
-	return true
+	return map[string]any{
+		"mm_hashes":       map[string][]string{ModalityImage: hashes},
+		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
+		"kwargs_data":     mmBase64Field(kwargs),
+		"mm_metadata":     mmBase64Field(metadata),
+	}
 }
 
 func buildMMFeaturesOpts(entries []pipeline.MultimodalEntry, includeKwargs, includeMetadata bool) map[string]any {

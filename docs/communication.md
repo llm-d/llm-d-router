@@ -825,11 +825,27 @@ Prefill only needs the metadata sibling plus `ec_transfer_params` to load those
 embeddings. For large images the pixel tensors dominate payload size, so dropping
 `kwargs_data` on prefill cuts coordinator-to-prefill traffic.
 
+The decision is **per entry**, not per request: an entry whose hash has a
+descriptor in `ec_transfer_params` and carries non-empty metadata ships only
+`mm_metadata[i]`; every other entry keeps `kwargs_data[i]`. Both fields are
+always present in the prefill body with complementary nulls so vLLM's
+per-item zip merge (`merge_mm_kwargs_items`) reconstructs each entry from
+whichever side is non-null.
+
+A single encode sub-request can return no descriptor for one image while
+another image in the same batch is covered (`nixlEC.MergeEncodeResponse`
+logs a warning and continues rather than failing the request). The per-entry
+decision handles this: the covered entry takes the metadata path and the
+uncovered entry keeps its pixel tensor. vLLM's `_require_ec_for_metadata_only`
+is a request-level check and does not catch partial coverage, so the
+reconciliation has to be coordinator-side.
+
 The multimodal data each stage sends:
 
 ```text
 Encode              = kwargs_data
-Prefill (optimized) = mm_metadata + ec_transfer_params
+Prefill (optimized) = mm_metadata[i] (covered entries) + ec_transfer_params
+                   + kwargs_data[i] (uncovered entries), both arrays present
 Prefill (fallback)  = kwargs_data
 ```
 
@@ -840,24 +856,26 @@ Prefill (fallback)  = kwargs_data
    as `mm_hashes` / `kwargs_data`) and store it on each `MultimodalEntry`.
 2. **Encode step** (`pkg/coordinator/steps/encode.go`): unchanged; encode still
    sends full `kwargs_data`.
-3. **Prefill step** (`pkg/coordinator/steps/prefill.go`): when
-   `ec_transfer_params` is non-empty and every multimodal entry has
-   `MMMetadata`, emit `mm_metadata` and omit `kwargs_data`. Otherwise keep
-   sending `kwargs_data` so older renderers and non-EC paths (for example
-   generate-path encode skip) stay compatible.
+3. **Prefill step** (`pkg/coordinator/steps/prefill.go`): per entry, ship
+   `mm_metadata[i]` with a null `kwargs_data[i]` when the entry has both an EC
+   descriptor and render metadata; ship `kwargs_data[i]` with a null
+   `mm_metadata[i]` otherwise. Both fields stay present so vLLM's per-item
+   merge can reassemble each entry.
 
-Example prefill features when the metadata path is active:
+Example prefill features with mixed coverage (entry 0 covered, entry 1 not):
 
 ```json
 "features": {
   "mm_hashes": {"image": ["abc123hash", "def456hash"]},
   "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-  "mm_metadata": {"image": ["<base64-metadata-only-msgpack-1>", "<base64-metadata-only-msgpack-2>"]}
+  "kwargs_data": {"image": [null, "<base64-pixel-tensor-2>"]},
+  "mm_metadata": {"image": ["<base64-metadata-only-msgpack-1>", null]}
 }
 ```
 
-vLLM rejects metadata-only `features` without `ec_transfer_params`, so the
-coordinator never takes this path when the EC connector emits no transfer map.
+vLLM rejects metadata-only entries without `ec_transfer_params`, so the
+per-entry decision never sends `mm_metadata[i]` to a non-null slot without an
+EC descriptor for `mm_hashes.image[i]`.
 
 ### Output (mutates RequestContext)
 

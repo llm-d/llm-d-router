@@ -664,58 +664,137 @@ func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	})
 }
 
-func TestBuildPrefillMMFeatures_PreferMetadata(t *testing.T) {
-	entry := func(kwargs, metadata string) pipeline.MultimodalEntry {
+func TestBuildPrefillMMFeatures_PerEntryDecision(t *testing.T) {
+	entry := func(hash, kwargs, metadata string) pipeline.MultimodalEntry {
 		return pipeline.MultimodalEntry{
-			Hash:        testHash,
+			Hash:        hash,
 			KwargsData:  kwargs,
 			MMMetadata:  metadata,
 			Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3},
 		}
 	}
+	ec := func(hashes ...string) map[string]any {
+		m := make(map[string]any, len(hashes))
+		for _, h := range hashes {
+			m[h] = map[string]any{"peer_port": 5501}
+		}
+		return m
+	}
 
-	t.Run("with EC prefers mm_metadata and omits kwargs_data", func(t *testing.T) {
-		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
-			entry(testKwargsA, testMetadataA),
-			entry(testKwargsB, testMetadataB),
-		}, true)
-		if _, ok := features["kwargs_data"]; ok {
-			t.Fatalf("expected kwargs_data omitted, got %v", features["kwargs_data"])
-		}
-		md, ok := features["mm_metadata"].(map[string][]any)
-		if !ok {
-			t.Fatalf("expected mm_metadata map, got %T", features["mm_metadata"])
-		}
-		items := md[ModalityImage]
-		if len(items) != 2 || items[0] != testMetadataA || items[1] != testMetadataB {
-			t.Fatalf("unexpected mm_metadata: %#v", items)
+	t.Run("empty entries returns nil", func(t *testing.T) {
+		if got := buildPrefillMMFeatures(nil, nil); got != nil {
+			t.Errorf("expected nil for empty entries, got %#v", got)
 		}
 	})
 
-	t.Run("without EC keeps kwargs_data even when metadata is present", func(t *testing.T) {
+	t.Run("all entries covered -> all metadata, all kwargs null", func(t *testing.T) {
 		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
-			entry(testKwargsA, testMetadataA),
-		}, false)
-		if _, ok := features["mm_metadata"]; ok {
-			t.Fatalf("expected mm_metadata omitted without EC, got %v", features["mm_metadata"])
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, testMetadataB),
+		}, ec("h1", "h2"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != nil {
+			t.Errorf("expected kwargs_data=[null,null], got %#v", kw)
 		}
-		kwargs := mmImageKwargs(t, features)
-		if len(kwargs) != 1 || kwargs[0] != testKwargsA {
-			t.Fatalf("expected kwargs_data fallback, got %#v", kwargs)
+		if len(md) != 2 || md[0] != testMetadataA || md[1] != testMetadataB {
+			t.Errorf("expected mm_metadata=[A,B], got %#v", md)
 		}
 	})
 
-	t.Run("partial metadata falls back to kwargs_data", func(t *testing.T) {
+	t.Run("no EC -> all kwargs, all metadata null", func(t *testing.T) {
 		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
-			entry(testKwargsA, testMetadataA),
-			entry(testKwargsB, ""),
-		}, true)
-		if _, ok := features["mm_metadata"]; ok {
-			t.Fatalf("expected mm_metadata omitted on partial metadata, got %v", features["mm_metadata"])
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, ""),
+		}, ec())
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != testKwargsA || kw[1] != testKwargsB {
+			t.Errorf("expected kwargs_data=[A,B], got %#v", kw)
 		}
-		kwargs := mmImageKwargs(t, features)
-		if len(kwargs) != 2 || kwargs[0] != testKwargsA || kwargs[1] != testKwargsB {
-			t.Fatalf("expected kwargs_data fallback, got %#v", kwargs)
+		if len(md) != 2 || md[0] != nil || md[1] != nil {
+			t.Errorf("expected mm_metadata=[null,null], got %#v", md)
 		}
 	})
+
+	t.Run("partial EC -> per-entry split with complementary nulls", func(t *testing.T) {
+		// Regression for the partial-coverage case: one encode sub-request
+		// returned no descriptor (nixlEC.MergeEncodeResponse logs a warning
+		// and continues). The covered entry ships mm_metadata with a null
+		// kwargs_data slot; the uncovered entry ships kwargs_data with a
+		// null mm_metadata slot. vLLM's per-item merge reassembles each.
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, testMetadataB),
+		}, ec("h1"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != testKwargsB {
+			t.Errorf("expected kwargs_data=[null,B], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != testMetadataA || md[1] != nil {
+			t.Errorf("expected mm_metadata=[A,null], got %#v", md)
+		}
+	})
+
+	t.Run("partial metadata -> covered-but-empty entry falls back to kwargs", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, ""),
+		}, ec("h1", "h2"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != testKwargsB {
+			t.Errorf("expected kwargs_data=[null,B], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != testMetadataA || md[1] != nil {
+			t.Errorf("expected mm_metadata=[A,null], got %#v", md)
+		}
+	})
+
+	t.Run("both fields absent (cache-hit everywhere) -> all null in both arrays", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", "", ""),
+			entry("h2", "", ""),
+		}, ec("h1", "h2"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != nil {
+			t.Errorf("expected kwargs_data=[null,null], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != nil || md[1] != nil {
+			t.Errorf("expected mm_metadata=[null,null], got %#v", md)
+		}
+	})
+
+	t.Run("mm_hashes and mm_placeholders parallel to per-entry arrays", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, testMetadataB),
+		}, ec("h1"))
+		hashes := features["mm_hashes"].(map[string][]string)[ModalityImage]
+		if len(hashes) != 2 || hashes[0] != "h1" || hashes[1] != "h2" {
+			t.Errorf("unexpected mm_hashes: %#v", hashes)
+		}
+		placeholders := features["mm_placeholders"].(map[string][]any)[ModalityImage]
+		if len(placeholders) != 2 {
+			t.Fatalf("expected 2 placeholders, got %d", len(placeholders))
+		}
+	})
+}
+
+// mmImageField reads features[field].image as []any after a JSON round-trip,
+// so the test sees the on-wire shape (the cache-hit sentinel must be null,
+// not ""). Reused across kwargs_data and mm_metadata assertions.
+func mmImageField(t *testing.T, features map[string]any, field string) []any {
+	t.Helper()
+	raw, err := json.Marshal(features[field])
+	if err != nil {
+		t.Fatalf("marshal %s: %v", field, err)
+	}
+	var decoded map[string][]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal %s: %v", field, err)
+	}
+	return decoded[ModalityImage]
 }
