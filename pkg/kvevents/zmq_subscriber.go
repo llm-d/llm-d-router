@@ -105,6 +105,13 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			// We run the subscriber in a separate function to handle socket
 			// setup/teardown and connection retries cleanly.
 			z.runSubscriber(ctx)
+			if z.pool.consumer != nil && z.sourceEndpoint != "" {
+				z.resetForSource("")
+				// Cleared availability requires a full replay on reconnect.
+				z.lastSeq, z.lastLiveSeq = 0, 0
+				z.hasLastSeq, z.hasLastLiveSeq = false, false
+				z.lastReplayFailure = time.Time{}
+			}
 			// wait before retrying, unless the context has been canceled.
 			select {
 			case <-time.After(retryInterval):
@@ -180,7 +187,9 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" {
-			z.addTask(ctx, topic, seq, payload)
+			if z.acceptLiveWithoutReplay(topic, seq) {
+				z.addTask(ctx, topic, seq, payload)
+			}
 			continue
 		}
 
@@ -247,6 +256,22 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		z.lastSeq = seq
 		z.hasLastSeq = true
 	}
+}
+
+func (z *zmqSubscriber) acceptLiveWithoutReplay(topic string, seq uint64) bool {
+	if z.pool.consumer == nil {
+		return true
+	}
+	if z.hasLastLiveSeq {
+		if seq == z.lastLiveSeq {
+			return false
+		}
+		if seq != z.lastLiveSeq+1 {
+			z.resetForSource(topic)
+		}
+	}
+	z.lastLiveSeq, z.hasLastLiveSeq = seq, true
+	return true
 }
 
 // addTask hands a received message to the pool, carrying the receive span's
@@ -418,8 +443,16 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				terminalErr = fmt.Errorf("malformed replay frame with %d frames", len(frames))
 				break
 			}
+			if attemptReplayed == 0 && seq > expectedSeq {
+				// A bounded replay buffer can lose removals for indexed blocks.
+				z.resetForSource(topic)
+				logger.Info("Rebuilding from retained replay history",
+					"requestedSeq", expectedSeq, "firstAvailableSeq", seq,
+					"replayEndpoint", z.replayEndpoint)
+				expectedSeq = seq
+			}
 			if seq != expectedSeq {
-				terminalErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
+				receiveErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
 				break
 			}
 
