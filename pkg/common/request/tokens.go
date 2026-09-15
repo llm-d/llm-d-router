@@ -16,26 +16,37 @@ limitations under the License.
 
 package request
 
-// CapMaxTokensField caps target's max_tokens to 1 and strips min_tokens.
-// min_tokens is stripped rather than clamped: it defaults to 0 in vLLM, so
-// removing it keeps min_tokens <= max_tokens=1 without raising the floor
-// above the cap (vLLM's SamplingParams rejects min_tokens > max_tokens).
-func CapMaxTokensField(target map[string]any) {
-	target[FieldMaxTokens] = 1
-	delete(target, FieldMinTokens)
-}
+import "maps"
 
-// PrimeSingleTokenRequest mutates target in place into a synthetic,
-// non-streaming, single-output-token chat-completions or completions
-// request. max_completion_tokens is unconditionally capped to 1 alongside
-// max_tokens: vLLM and SGLang both accept the two fields together
-// (max_completion_tokens takes precedence over max_tokens when present),
-// so setting both guarantees the cap regardless of which field the serving
-// engine consults.
-func PrimeSingleTokenRequest(target map[string]any) {
-	CapMaxTokensField(target)
-	target[FieldMaxCompletionTokens] = 1
+// CapSingleToken rewrites body into a synthetic, non-streaming,
+// single-output-token prefill or encode request. It returns the map
+// the caps were written into: sampling_params for the generate API, body itself
+// otherwise. The generate API also expects transfer params in that map, so a
+// caller adding them needs no second lookup.
+//
+// The caps to rewrite come from APIType.tokenLimitFields, so each API's output
+// caps are named in one place. min_tokens is a floor rather than a cap, so it is
+// stripped instead of capped: it defaults to 0 in vLLM, so removing it keeps
+// min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
+// SamplingParams rejects min_tokens > max_tokens).
+//
+// body is rewritten in place, so the caller passes its own copy. A one-level
+// copy is enough: the generate sampling_params is always replaced with a map
+// body owns, so the rewrite never reaches a nested map the body was cloned from.
+func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
+	limits := body
+	if apiType == APITypeGenerate {
+		sp, _ := body[FieldSamplingParams].(map[string]any)
+		limits = make(map[string]any, len(sp)+1)
+		maps.Copy(limits, sp)
+		body[FieldSamplingParams] = limits
+	}
+	for _, field := range apiType.tokenLimitFields() {
+		limits[field] = 1
+	}
+	delete(limits, FieldMinTokens)
 
-	target[FieldStream] = false
-	delete(target, FieldStreamOptions)
+	body[FieldStream] = false
+	delete(body, FieldStreamOptions)
+	return limits
 }
