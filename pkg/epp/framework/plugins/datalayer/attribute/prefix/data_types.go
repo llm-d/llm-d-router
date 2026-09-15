@@ -69,6 +69,10 @@ type PrefixCacheMatchInfo struct {
 	// per tier. Speculative index entries count under SpeculativeTierKey.
 	// Nil when the producer supplies no tier data.
 	cachedBlocksByTier map[string]int
+	// totalTokens is the full prompt length in the token units of this match,
+	// including any tail beyond the indexed blocks. Nil when the producer
+	// supplies block counts only.
+	totalTokens *int
 	// optional multimodal block-match attribution
 	mm *MMMatchInfo
 }
@@ -143,6 +147,20 @@ func (p *PrefixCacheMatchInfo) CachedBlocksByTier() map[string]int {
 	return p.cachedBlocksByTier
 }
 
+// WithTotalTokens sets the full prompt length in the token units of this
+// match. Consumers that account prompt cost use it instead of their own
+// length estimate, so cost and match share units.
+func (p *PrefixCacheMatchInfo) WithTotalTokens(count int) *PrefixCacheMatchInfo {
+	p.totalTokens = ptr.To(count)
+	return p
+}
+
+// TotalTokens returns the full prompt length set by WithTotalTokens and
+// whether the producer set one.
+func (p *PrefixCacheMatchInfo) TotalTokens() (int, bool) {
+	return ptr.Deref(p.totalTokens, 0), p.totalTokens != nil
+}
+
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	if p == nil {
 		return nil
@@ -157,6 +175,9 @@ func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 	}
 	if p.mm != nil {
 		clone.mm = ptr.To(*p.mm)
+	}
+	if p.totalTokens != nil {
+		clone.totalTokens = ptr.To(*p.totalTokens)
 	}
 	return clone
 }

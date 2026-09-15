@@ -15,8 +15,10 @@ limitations under the License.
 */
 
 // Package session declares the SessionID attribute that carries per-request
-// session identity for affinity scoring and filtering. The value is published
-// once per request on the InferenceRequest attribute store.
+// session identity for affinity scoring and filtering, and the
+// SessionCacheRequest attribute that carries a session producer's engine-block
+// prefixes for session prefix-cache lookup. Both are published once per
+// request on the InferenceRequest attribute store.
 package session
 
 import (
@@ -42,4 +44,46 @@ type SessionID string
 func ReadSessionID(r *fwksched.InferenceRequest) (SessionID, bool) {
 	key := SessionIDDataKey.WithNonEmptyProducerName(sessionidconstants.SessionIDProducerType)
 	return fwksched.ReadRequestAttribute[SessionID](r, key)
+}
+
+// SessionCacheRequestDataKey identifies the SessionCacheRequest published on
+// the request attribute store. It has no default producer; the
+// session-prefix-cache-producer names the producer it consumes.
+var SessionCacheRequestDataKey = plugin.NewDataKey("SessionCacheRequestDataKey", "")
+
+// SessionCacheRequest is a session producer's cache lookup for one request:
+// the identity the engine reports this request's blocks under, and the
+// candidate prompt prefixes whose residency the session-prefix-cache-producer
+// resolves. Absence or an empty SessionID gives the request no session cache
+// preference and leaves its body unchanged.
+type SessionCacheRequest struct {
+	// SessionID is written to the request body's session_id field, replacing
+	// any client value, and returns in the KV events for the blocks this
+	// request stores. A producer that must tell concurrent requests of one
+	// logical session apart uses a per-request value here.
+	SessionID string
+	// FullReport asks the engine to report reused blocks as well as newly
+	// stored ones for this request.
+	FullReport bool
+	// TotalTokens is the full prompt length in engine-token units, measured
+	// or estimated by the producer. It bounds matched coverage and is the
+	// prompt length for load accounting.
+	TotalTokens int
+	// Prefixes are the candidate prompt prefixes for this request, typically
+	// the block paths recorded for the session's earlier turns. Each candidate
+	// is resolved on its own and the best match per endpoint is published;
+	// candidates are never concatenated.
+	Prefixes []SessionCachePrefix
+}
+
+// SessionCachePrefix is a run of engine block hashes from the start of a
+// prompt, as the engine reports them in its KV events.
+type SessionCachePrefix struct {
+	BlockHashes     []uint64
+	BlockSizeTokens int
+	// Exact asserts that the request's prompt begins with these blocks, so
+	// matched blocks count as cached tokens for prefill-versus-decode
+	// decisions. Leave it false for a similarity estimate or an uncertain
+	// continuation: the match then contributes a routing affinity score only.
+	Exact bool
 }
