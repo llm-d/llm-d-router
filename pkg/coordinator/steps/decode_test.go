@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -177,7 +178,7 @@ func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-compl",
-		OriginalPath:     gateway.PathCompletions,
+		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
 		TokenIDs:         nil,
 		KVTransferParams: map[string]any{},
@@ -218,7 +219,7 @@ func TestDecodeStep_GenerateFormat_NestsKVInExtraArgs(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-gen",
-		OriginalPath:     gateway.DefaultGeneratePath,
+		OriginalPath:     reqcommon.PathGenerate,
 		Model:            "test-model",
 		TokenIDs:         []int{1, 2, 3, 4, 5},
 		KVTransferParams: map[string]any{"block_id": wantBlockID, "peer_host": "10.0.0.42", "peer_port": 7777},

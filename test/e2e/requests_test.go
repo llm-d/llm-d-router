@@ -400,8 +400,6 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	// Define the metrics we expect to see
 	preset := []string{ //nolint:prealloc
-		"inference_extension_info",
-
 		// llm_d metrics
 		"llm_d_epp_request_total",
 		"llm_d_epp_request_error_total",

@@ -21,7 +21,9 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // fanoutEncoderPrimer sends concurrent encoder requests for each multimodal
@@ -38,7 +40,7 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
-func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType APIType) {
+func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)

@@ -90,8 +90,6 @@ func (d *dataSource) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	d.mu.Unlock()
 	for _, ext := range exts {
 		if err := ext.Extract(ctx, fwkdl.PollInput[any]{Payload: struct{}{}, Endpoint: ep}); err != nil {
-			//nolint:staticcheck // SA1019: mock mirrors production's dual-record during deprecation window.
-			metrics.DataLayerExtractErrorsTotal.WithLabelValues(d.kind, ext.kind).Inc()
 			metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(d.kind, ext.kind).Inc()
 		}
 	}

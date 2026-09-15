@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -38,30 +39,13 @@ type contextKey string
 
 const requestStartTimeKey contextKey = "request_start_time"
 
-const (
-	// ChatCompletionsPath is the OpenAI chat completions path
-	ChatCompletionsPath = "/v1/chat/completions"
-
-	// CompletionsPath is the legacy completions path
-	CompletionsPath = "/v1/completions"
-
-	// ResponsesPath is the OpenAI Responses API path
-	ResponsesPath = "/v1/responses"
-
-	// MessagesPath is the Anthropic Messages API path
-	MessagesPath = "/v1/messages"
-
-	// GeneratePath is vLLM's token-in generate endpoint
-	GeneratePath = "/inference/v1/generate"
-)
-
-func openAIAPIAttr(apiType APIType) attribute.KeyValue {
+func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
 	return semconv.LLMDOpenAIAPI(apiType.String())
 }
 
 // disaggregatedPrefillHandler routes OpenAI-style requests: optional encoder (EPD) stage,
 // optional P/D prefill when the prefill header is set, otherwise decoder (or data-parallel).
-func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
+func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
 		tracer := tracing.Tracer(tracerScope)
@@ -221,7 +205,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType APIType) http.HandlerFunc {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
 				return
 			}
-			if s.config.DecodeChunkSize > 0 && r.URL.Path == ChatCompletionsPath {
+			if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
 				s.runChunkedDecode(w, r)
 				return
 			}
