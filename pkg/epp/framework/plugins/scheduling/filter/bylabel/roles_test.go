@@ -158,7 +158,7 @@ func TestRoleFilterFactory(t *testing.T) {
 				require.True(t, ok, "factory should return *ByLabel")
 			}
 
-			assert.Equal(t, ByLabelType, rf.TypedName().Type)
+			assert.Equal(t, roleFilterType, rf.TypedName().Type)
 			assert.Equal(t, tt.expectedName, rf.TypedName().Name)
 		})
 	}
@@ -167,11 +167,11 @@ func TestRoleFilterFactory(t *testing.T) {
 func TestRoleFilterWithName(t *testing.T) {
 	rf := NewDecodeRole()
 	assert.Equal(t, DecodeRoleType, rf.TypedName().Name)
-	assert.Equal(t, ByLabelType, rf.TypedName().Type)
+	assert.Equal(t, roleFilterType, rf.TypedName().Type)
 
 	rf.WithName("my-custom-name")
 	assert.Equal(t, "my-custom-name", rf.TypedName().Name)
-	assert.Equal(t, ByLabelType, rf.TypedName().Type)
+	assert.Equal(t, roleFilterType, rf.TypedName().Type)
 }
 
 func TestRoleFilterEmptyEndpoints(t *testing.T) {

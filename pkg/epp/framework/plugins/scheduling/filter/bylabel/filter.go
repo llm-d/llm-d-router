@@ -2,59 +2,17 @@ package bylabel
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-const (
-	// ByLabelType is the type of the ByLabel filter.
-	//
-	// Deprecated: Use LabelSelectorFilterType for generic label-based filtering,
-	// or the role-specific filters (decode-filter, prefill-filter, encode-filter) for role-based filtering.
-	ByLabelType = "by-label"
-)
-
-type byLabelParameters struct {
-	Label         string   `json:"label"`
-	ValidValues   []string `json:"validValues"`
-	AllowsNoLabel bool     `json:"allowsNoLabel"`
-}
+// roleFilterType is the stable internal type reported by the role filters
+// (decode-filter, prefill-filter, encode-filter). It is not a registered
+// plugin type.
+const roleFilterType = "by-label"
 
 var _ scheduling.Filter = &ByLabel{} // validate interface conformance
-
-// Factory defines the factory function for the ByLabel filter.
-//
-// Deprecated: Use SelectorFactory for generic label-based filtering,
-// or the role-specific filters (decode-filter, prefill-filter, encode-filter) for role-based filtering.
-func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	if handle != nil {
-		log.FromContext(handle.Context()).Info("Deprecated: plugin type 'by-label' is deprecated, " +
-			"use 'label-selector-filter' for generic label filtering or " +
-			"'decode-filter'/'prefill-filter'/'encode-filter' for role-based filtering")
-	}
-	parameters := byLabelParameters{}
-	if rawParameters != nil {
-		if err := rawParameters.Decode(&parameters); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", ByLabelType, err)
-		}
-	}
-	if name == "" {
-		return nil, fmt.Errorf("invalid configuration for '%s' filter: name cannot be empty", ByLabelType)
-	}
-	if parameters.Label == "" {
-		return nil, fmt.Errorf("invalid configuration for '%s' filter: 'label' must be specified", ByLabelType)
-	}
-	if len(parameters.ValidValues) == 0 && !parameters.AllowsNoLabel {
-		return nil, fmt.Errorf("invalid configuration for '%s' "+
-			"filter: either 'validValues' must be non-empty or 'allowsNoLabel' must be true", ByLabelType)
-	}
-	return NewByLabel(name, parameters.Label, parameters.AllowsNoLabel, parameters.ValidValues...), nil
-}
 
 // NewByLabel creates and returns an instance of the ByLabel filter based on the input parameters
 // name - the filter name
@@ -69,7 +27,7 @@ func NewByLabel(name string, labelName string, allowsNoLabel bool, validValues .
 	}
 
 	return &ByLabel{
-		typedName:     plugin.TypedName{Type: ByLabelType, Name: name},
+		typedName:     plugin.TypedName{Type: roleFilterType, Name: name},
 		labelName:     labelName,
 		allowsNoLabel: allowsNoLabel,
 		validValues:   validValuesMap,

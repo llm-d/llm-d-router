@@ -246,7 +246,7 @@ role: decode
 To accommodate this **without code changes**, you can configure the **EndpointPickerConfig** to use the generic `label-selector-filter` plugin instead of the hardcoded `encode-filter` / `prefill-filter` / `decode-filter`.
 
 > [!NOTE]
-> The previous filter type `by-label` is deprecated. Use `label-selector-filter` with standard Kubernetes label selector syntax instead.
+> For generic label-based filtering, use `label-selector-filter` with standard Kubernetes label selector syntax.
 
 ### Configuration Examples
 
