@@ -142,8 +142,8 @@ schedulingProfiles:
 		expectedPlugins: []configapi.PluginSpec{
 			{Name: "always-disagg-pd-decider", Type: "always-disagg-pd-decider"},
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
-			{Name: "prefill-filter", Type: "by-label"},
-			{Name: "decode-filter", Type: "by-label"},
+			{Name: "prefill-filter", Type: "prefill-filter"},
+			{Name: "decode-filter", Type: "decode-filter"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
@@ -194,8 +194,8 @@ schedulingProfiles:
 		expectedPlugins: []configapi.PluginSpec{
 			{Name: "always-disagg-pd-decider", Type: "always-disagg-pd-decider"},
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
-			{Name: "prefill-filter", Type: "by-label"},
-			{Name: "decode-filter", Type: "by-label"},
+			{Name: "prefill-filter", Type: "prefill-filter"},
+			{Name: "decode-filter", Type: "decode-filter"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
@@ -243,8 +243,8 @@ schedulingProfiles:
 `,
 		expectedPlugins: []configapi.PluginSpec{
 			{Name: "token-producer", Type: "token-producer"},
-			{Name: "prefill-filter", Type: "by-label"},
-			{Name: "decode-filter", Type: "by-label"},
+			{Name: "prefill-filter", Type: "prefill-filter"},
+			{Name: "decode-filter", Type: "decode-filter"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
