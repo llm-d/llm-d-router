@@ -251,7 +251,9 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 			carrier[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
 		}
 	}
-	return otel.GetTextMapPropagator().Extract(ctx, carrier)
+	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+	id, _ := metadata.GetLowerCaseHeaderValue(carrier, metadata.FlowFairnessIDKey)
+	return tracing.BeginRequestAttribution(ctx, id)
 }
 
 // terminationCause classifies a stream that ended without completing. ctxErr is the request

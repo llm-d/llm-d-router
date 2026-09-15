@@ -191,6 +191,10 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
+	if _, _, ok := tracing.RequestAttribution(ctx); !ok {
+		id, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
+		ctx = tracing.BeginRequestAttribution(ctx, id)
+	}
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	defer func() {

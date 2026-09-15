@@ -31,6 +31,10 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,6 +48,8 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -426,6 +432,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		wantTenantID            string // If non-empty, asserted against request_orchestration span tenant ID.
+		wantSource              string // If non-empty, asserted against request_orchestration span source.
 		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
@@ -500,6 +508,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 			fairnessIDHeader:       "user-123",
 			wantFairnessID:         "user-123",
+			wantTenantID:           "user-123",
+			wantSource:             tracing.AttributionSourceHeader,
 		},
 		{
 			name: "fairness ID falls back to default when header absent",
@@ -514,9 +524,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
 			wantFairnessID:         metadata.DefaultFairnessID,
+			wantSource:             tracing.AttributionSourceDefault,
 		},
 		{
-			name: "fairness ID derived from agent-identity attribute",
+			name: "agent identity remains scheduling fallback but tenant defaults",
 			reqBodyMap: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
@@ -533,6 +544,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				attributeValue: "session-abc",
 			},
 			wantFairnessID: "session-abc",
+			wantTenantID:   metadata.DefaultFairnessID,
+			wantSource:     tracing.AttributionSourceDefault,
 		},
 		{
 			name: "explicit fairness header takes precedence over agent-identity attribute",
@@ -553,6 +566,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				attributeValue: "session-abc",
 			},
 			wantFairnessID: "explicit-id",
+			wantTenantID:   "explicit-id",
+			wantSource:     tracing.AttributionSourceHeader,
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -941,12 +956,14 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName:  objectiveNameSheddable,
 			mockAdmissionController: &mockAdmissionController{admitErr: errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "simulated admission rejection"}},
 			wantErrCode:             errcommon.ResourceExhausted,
+			wantSource:              tracing.AttributionSourceDefault,
 		},
 		{
 			name:                    "model not found, expect err",
 			reqBodyMap:              map[string]any{"prompt": "p"},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			wantErrCode:             errcommon.BadRequest,
+			wantSource:              tracing.AttributionSourceDefault,
 		},
 		{
 			name:                    "missing model field resolved by generic rewrite",
@@ -1113,6 +1130,17 @@ func TestDirector_HandleRequest(t *testing.T) {
 					datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{test.dataProducerPlugin})
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
+				var recorder *tracetest.SpanRecorder
+				if test.wantSource != "" {
+					recorder = tracetest.NewSpanRecorder()
+					previousProvider := otel.GetTracerProvider()
+					provider := sdktrace.NewTracerProvider(
+						sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+						sdktrace.WithSpanProcessor(recorder),
+					)
+					otel.SetTracerProvider(provider)
+					t.Cleanup(func() { otel.SetTracerProvider(previousProvider); _ = provider.Shutdown(context.Background()) })
+				}
 				if test.screener != nil {
 					config = config.WithScreeners(test.screener)
 				}
@@ -1176,6 +1204,26 @@ func TestDirector_HandleRequest(t *testing.T) {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 				} else {
 					returnedReqCtx, err = director.HandleRequest(ctx, reqCtx, parseResult.Body)
+				}
+				if parseErr == nil && test.wantSource != "" {
+					wantID := test.wantTenantID
+					if wantID == "" {
+						wantID = metadata.DefaultFairnessID
+					}
+					found := false
+					for _, span := range recorder.Ended() {
+						if span.Name() != "request_orchestration" {
+							continue
+						}
+						found = true
+						attrs := attribute.NewSet(span.Attributes()...)
+						id, hasID := attrs.Value(semconv.LLMDRequestAttributionIDKey)
+						source, hasSource := attrs.Value(semconv.LLMDRequestAttributionSourceKey)
+						require.True(t, hasID && hasSource, "attribution must be paired")
+						assert.Equal(t, wantID, id.AsString())
+						assert.Equal(t, test.wantSource, source.AsString())
+					}
+					require.True(t, found, "request orchestration span must exist")
 				}
 
 				if test.wantErrCode != "" {

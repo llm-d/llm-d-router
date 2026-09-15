@@ -23,11 +23,17 @@ import (
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -380,5 +386,50 @@ func (m *mockDirectorRequest) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	return &datalayer.EndpointMetadata{
 		Address: "1.2.3.4",
 		Port:    "80",
+	}
+}
+
+// Attribution must be established from the incoming headers before the Director
+// runs, so a request that fails or returns early is still attributed.
+func TestRequestAttributionAtIngress(t *testing.T) {
+	previous := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	// Mirror InitTracing: the processor is what attributes spans in production.
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
+
+	for _, tc := range []struct {
+		name               string
+		headers            []*configPb.HeaderValue
+		wantID, wantSource string
+	}{
+		{"canonical header", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
+		{"deprecated alias", []*configPb.HeaderValue{{Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
+		{"empty canonical shadows alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, tracing.DefaultAttributionID, tracing.AttributionSourceDefault},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers:     &configPb.HeaderMap{Headers: tc.headers},
+					EndOfStream: true,
+				},
+			})
+
+			_, span := tracing.Tracer().Start(ctx, "request")
+			span.End()
+
+			ended := recorder.Ended()
+			attrs := attribute.NewSet(ended[len(ended)-1].Attributes()...)
+			id, hasID := attrs.Value(semconv.LLMDRequestAttributionIDKey)
+			source, hasSource := attrs.Value(semconv.LLMDRequestAttributionSourceKey)
+
+			require.True(t, hasID && hasSource, "identity and source are recorded together")
+			assert.Equal(t, tc.wantID, id.AsString())
+			assert.Equal(t, tc.wantSource, source.AsString())
+		})
 	}
 }

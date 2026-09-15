@@ -401,6 +401,13 @@ Configures metrics scraping via Prometheus (compatible with Google Managed Prome
 | `router.tracing.sampling.sampler` | Trace sampler type. | `parentbased_traceidratio` |
 | `router.tracing.sampling.samplerArg` | Sampler argument (e.g., sampling ratio `"0.1"`). | `"0.1"` |
 
+When tracing is enabled, EPP request-associated spans carry `llm_d.epp.tenant_id` and
+`llm_d.epp.tenant_id.source` together. Tenant identity comes only from the
+`x-llm-d-inference-fairness-id` header, with source `header`. If the header is absent,
+the pair is `default-flow` and `default`, even when an agent identity supplies the
+request's scheduling FairnessID. Source `header` identifies the resolution branch, not
+producer authentication. The pair is not propagated as request headers.
+
 #### Complete Monitoring & Tracing Example
 
 ```yaml
