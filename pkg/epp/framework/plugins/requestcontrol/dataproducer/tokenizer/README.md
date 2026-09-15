@@ -13,10 +13,6 @@ phase, before filters and scorers. The plugin is idempotent: if
 producer, tokenization is skipped. Multi-modal features are flattened into the
 upstream list shape, sorted by placeholder offset.
 
-> [!NOTE]
-> Legacy alias `tokenizer` is still accepted but logs a deprecation warning at
-> instantiation. Prefer `token-producer` in new configs.
-
 ## Backend
 
 Backend selection:

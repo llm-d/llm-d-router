@@ -35,7 +35,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -56,12 +55,6 @@ type tokenizer interface {
 const (
 	// PluginType is the canonical type name used to register the plugin.
 	PluginType = "token-producer"
-
-	// LegacyPluginType is the previous type name. Existing YAML configs that
-	// reference it continue to work. Will be removed in a future release.
-	//
-	// Deprecated: use PluginType ("token-producer") instead.
-	LegacyPluginType = "tokenizer"
 
 	tokenizedPromptKeyID = "TokenizedPrompt"
 
@@ -275,19 +268,6 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	}
 
 	return p, nil
-}
-
-// LegacyPluginFactory wraps PluginFactory for the deprecated `tokenizer` type
-// name. It logs a one-time-per-instantiation deprecation warning and delegates
-// to PluginFactory. Will be removed when LegacyPluginType is removed.
-//
-// Deprecated: register PluginType ("token-producer") instead.
-func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	log.FromContext(handle.Context()).Info(
-		"DEPRECATION: plugin type '"+LegacyPluginType+"' is deprecated; use '"+PluginType+"' instead",
-		"pluginName", name,
-	)
-	return PluginFactory(name, rawParameters, handle)
 }
 
 // NewPlugin constructs the configured backend: vllm /render (selected by
