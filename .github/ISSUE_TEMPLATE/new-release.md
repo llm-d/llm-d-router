@@ -108,6 +108,10 @@ This document defines the process for releasing llm-d-router.
 
 ### Create the release!
 
+Publishing the GitHub release sets the title, notes, and pre-release flag.
+It does not start the image pipeline.
+The tag push already built and published the images and uploaded the artifacts.
+
 1. Create a [new release]:
     1. Choose the tag that you created for the release.
     1. Use the tag as the release title, e.g. `v0.1.0`.
