@@ -19,10 +19,6 @@ package metrics
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-
-	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
@@ -67,8 +63,9 @@ type metricsDatasourceParams struct {
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
+	parser := newFamilyFilteringParser()
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
-		MetricsDataSourceType, name, parseMetrics)
+		MetricsDataSourceType, name, parser.parse, http.WithExtractorHook(parser.observeExtractor))
 }
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
@@ -96,6 +93,9 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
+	parser := newFamilyFilteringParser()
+	opts = append(opts, http.WithExtractorHook(parser.observeExtractor))
+
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
 			SkipVerify:     cfg.InsecureSkipVerify,
@@ -103,7 +103,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MetricsDataSourceType, name, parseMetrics, opts...)
+		MetricsDataSourceType, name, parser.parse, opts...)
 }
 
 func defaultDataSourceConfigParams() *metricsDatasourceParams {
@@ -112,9 +112,4 @@ func defaultDataSourceConfigParams() *metricsDatasourceParams {
 		Path:               defaultMetricsPath,
 		InsecureSkipVerify: defaultMetricsInsecureSkipVerify,
 	}
-}
-
-func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {
-	parser := expfmt.NewTextParser(model.LegacyValidation)
-	return parser.TextToMetricFamilies(data)
 }
