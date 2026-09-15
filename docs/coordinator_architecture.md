@@ -265,11 +265,16 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`.
+it as the base header set, then stamp the request ID and `EPP-Profile`. The pipeline can
+allowlist response headers with `forward_response_headers`; values returned by any
+response-producing step are stored on the request context for later requests. A fan-out
+step selects the most frequent value for each configured header independently. Configured
+names are reserved for this relay, so client-provided values are not sent upstream.
 
 ### EPP-Profile routing
 
@@ -312,6 +317,31 @@ selection swaps in `header-profile-handler` for that one plugin.
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
+
+### Cross-phase scheduling headers
+
+An EPP plugin can stamp scheduling metadata from a selected endpoint onto its
+response. Configure the pipeline once to carry selected headers through every
+later phase:
+
+```yaml
+pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
+```
+
+Only listed response headers are carried, and client-provided values for those
+names are discarded. Encode requests run in parallel. After the fan-out completes,
+each response contributes its first value for each configured header. The most
+frequent value is forwarded to later phases; missing values are ignored, and ties
+use the value from the lowest encode index. This lets prefill prefer the slice that
+handled the largest number of encoded items. A later single-response phase can
+replace the carried value, so decode can prefer the prefill slice.
+
+Aggregation happens after the fan-out and cannot constrain sibling encode requests.
+Strict constraints shared by those requests, such as revision selection, require
+coordination before the fan-out begins.
 
 ### Decode disaggregation deciders
 
