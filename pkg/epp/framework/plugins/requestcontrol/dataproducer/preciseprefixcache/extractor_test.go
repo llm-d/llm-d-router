@@ -28,7 +28,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -54,12 +53,15 @@ func newExtractorProducer(t *testing.T, discoverPods bool) *Producer {
 	pool, err := kvevents.NewPool(cfg, nil, nil, nil)
 	require.NoError(t, err)
 
+	manager := kvevents.NewSubscriberManager(pool)
+	subscriptions, err := kvevents.NewEndpointSubscriptions(context.Background(), cfg, manager)
+	require.NoError(t, err)
+
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: kvevents.NewSubscriberManager(pool),
-		kvEventsConfig:     cfg,
+		subscribersManager: manager,
+		subscriptions:      subscriptions,
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: &fakeKVBlockIndex{}},
-		subscriberCtx:      context.Background(),
 	}
 }
 
@@ -153,10 +155,7 @@ func TestProducer_EnsureSubscriber_SurvivesRequestCtxCancel(t *testing.T) {
 
 	reqCtx, cancel := context.WithCancel(context.Background())
 
-	require.NoError(t, p.ensureSubscriber(reqCtx, &fwkdl.EndpointMetadata{
-		ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
-		Address: "10.0.0.1", Port: "8080",
-	}))
+	require.NoError(t, p.subscriptions.Ensure(reqCtx, "ns/pod-a", "10.0.0.1", "8080", 0))
 
 	cancel()
 
@@ -214,11 +213,14 @@ func TestProducer_EnsureSubscriber_PassesServingEndpoint(t *testing.T) {
 	cfg.PodDiscoveryConfig.SocketPort = 5557
 
 	subscribers := &fakeSubscriberManager{}
+	manager := kvevents.NewSubscriberManager(pool)
+	subscriptions, err := kvevents.NewEndpointSubscriptions(context.Background(), cfg, manager)
+	require.NoError(t, err)
+
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
 		subscribersManager: subscribers,
-		kvEventsConfig:     cfg,
-		subscriberCtx:      context.Background(),
+		subscriptions:      subscriptions,
 	}
 
 	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
@@ -244,8 +246,7 @@ func TestProducer_EnsureSubscriber_IPv6BracketsEndpoint(t *testing.T) {
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
 		subscribersManager: subscribers,
-		kvEventsConfig:     cfg,
-		subscriberCtx:      context.Background(),
+		subscriptions:      subscriptions,
 	}
 
 	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
@@ -304,10 +305,9 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: kvevents.NewSubscriberManager(pool),
-		kvEventsConfig:     cfg,
+		subscribersManager: manager,
+		subscriptions:      subscriptions,
 		kvCacheIndexer:     fakeIndexer,
-		subscriberCtx:      context.Background(),
 	}
 	defer p.subscribersManager.Shutdown(ctx)
 
@@ -456,7 +456,11 @@ func TestProducer_ExtractEndpoint_ExcludedUpdatesManageSubscriber(t *testing.T) 
 	ctx := discardCtx(t)
 	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
-	p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
+	cfg := kvevents.DefaultConfig()
+	cfg.PodDiscoveryConfig.PodLabelSelector = "llm-d.ai/role=prefill"
+	var err error
+	p.subscriptions, err = kvevents.NewEndpointSubscriptions(ctx, cfg, p.subscribersManager.(*kvevents.SubscriberManager))
+	require.NoError(t, err)
 
 	steps := []struct {
 		name            string
@@ -505,7 +509,11 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 			ctx := discardCtx(t)
 			p := newExtractorProducer(t, true)
 			defer p.subscribersManager.Shutdown(ctx)
-			p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
+			cfg := kvevents.DefaultConfig()
+	cfg.PodDiscoveryConfig.PodLabelSelector = "llm-d.ai/role=prefill"
+	var err error
+	p.subscriptions, err = kvevents.NewEndpointSubscriptions(ctx, cfg, p.subscribersManager.(*kvevents.SubscriberManager))
+	require.NoError(t, err)
 			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 				ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 				Address: "10.0.0.1",
