@@ -69,6 +69,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
+	redisstore "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
@@ -589,6 +590,10 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityBeta, extmodels.ModelServerExtractorFactory)
 	// Alpha
 	fwkplugin.Register(attrtopology.TopologyExtractorType, fwkplugin.StabilityAlpha, exttopology.Factory)
+
+	// cross-replica syncers
+	// Beta
+	fwkplugin.Register(redisstore.RedisStateStoreType, fwkplugin.StabilityBeta, redisstore.RedisStateStoreFactory)
 
 	// data layer DCGM source/extractor
 	// Alpha
