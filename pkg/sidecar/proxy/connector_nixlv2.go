@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -641,6 +642,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// semantics but still route through the deferred writer.
 	decodeDone := make(chan struct{})
 	decodeStartedAt := time.Now()
+	// Swallowing the abort here keeps the process alive but hides the failure
+	// from the client, so record it and replay it on the request goroutine.
+	var decodeAborted atomic.Bool
 	go func() {
 		defer close(decodeDone)
 		// Same recover: abort this request, do not kill the process.
@@ -650,6 +654,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 					panic(rec)
 				}
 				decodeSpan.SetStatus(codes.Error, "decode handler aborted")
+				decodeAborted.Store(true)
 				dcw.abort()
 				s.logger.Error(nil, "concurrent-dispatch decode handler aborted",
 					"request_id", uuidStr)
@@ -672,6 +677,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 	timer := time.NewTimer(waitTimeout)
 	defer timer.Stop()
+
+	// Set once this goroutine has written a terminal response of its own, so an
+	// aborted decode cannot write a second status over it.
+	clientResponded := false
 
 	select {
 	case <-prefillDone:
@@ -701,6 +710,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		}
 		s.logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
 			"request_id", uuidStr, "p_status", status, "p_body_snippet", bodySnippet)
+		clientResponded = true
 		w.WriteHeader(status)
 		if prefillResp != nil {
 			if _, writeErr := w.Write(prefillResp.bodyBytes()); writeErr != nil {
@@ -714,6 +724,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		dcw.abort()
 		s.logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 			"request_id", uuidStr, "timeout", waitTimeout.String())
+		clientResponded = true
 		w.WriteHeader(http.StatusGatewayTimeout)
 		if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
@@ -739,6 +750,24 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		)
 	}
 	_ = original // kept for signature symmetry with the strictly-serial path
+
+	// Replay the decode abort here, on the request goroutine, so it reaches the
+	// client the way it does on the strictly-serial path. Skipped when the
+	// commit point already wrote the prefill error or the KV-wait timeout,
+	// which own the response.
+	if decodeAborted.Load() && !clientResponded {
+		if dcw.responseStarted() {
+			// Decode's response is already on the wire, so the status cannot be
+			// changed; net/http recovers this and drops the connection, leaving
+			// the client a truncated stream rather than a clean terminator.
+			panic(http.ErrAbortHandler)
+		}
+		// Nothing was relayed, so the response is still ours to write. Returning
+		// without one would let net/http synthesise an empty 200.
+		if err := errorBadGateway(errDecodeAborted, w); err != nil {
+			s.logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
+		}
+	}
 }
 
 // truncate shortens s to at most n characters, appending "..." if truncated.
