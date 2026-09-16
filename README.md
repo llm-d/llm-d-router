@@ -45,7 +45,7 @@ See the [Helm chart documentation] for configuration examples.
 ### 2. Gateway Mode (Inference Gateway)
 The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
 
-For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide].
+For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide]. The [OpenTelemetry JSON stdout logs] document describes the log record format used by the EPP and routing sidecar.
 
 ---
 
@@ -68,6 +68,7 @@ To ensure clarity across the project, we use the following standard terminology:
 [Architecture Documentation]:docs/architecture.md
 [Disaggregation Documentation]:docs/disaggregation.md
 [EPP Container Sizing Guide]:docs/operations.md
+[OpenTelemetry JSON stdout logs]:docs/otel-json-stdout.md
 [InferencePool]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Gateway API Inference Extension (GIE)]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Kubernetes Gateway API Inference Extensions]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
