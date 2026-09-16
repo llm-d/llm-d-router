@@ -49,8 +49,9 @@ const (
 	imagesGenerationsAPI = "images/generations"
 	// imagesEditsAPI is the OpenAI-compatible image edit (image-to-image) endpoint.
 	// Requests are multipart/form-data.
-	imagesEditsAPI = "images/edits"
-	audioSpeechAPI = "audio/speech"
+	imagesEditsAPI         = "images/edits"
+	audioSpeechAPI         = "audio/speech"
+	audioTranscriptionsAPI = "audio/transcriptions"
 
 	streamingRespPrefix = "data: "
 	streamingEndMsg     = "data: [DONE]"
@@ -117,6 +118,7 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			imagesGenerationsAPI,
 			imagesEditsAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -222,7 +224,7 @@ func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
 // ParseResponse extracts usage metadata from JSON, SSE, and binary audio responses.
 func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*fwkrh.ParsedResponse, error) {
 	mediaType := responseMediaType(headers)
-	if strings.HasPrefix(mediaType, "audio/") || mediaType == octetStreamType {
+	if strings.HasPrefix(mediaType, "audio/") || strings.HasPrefix(mediaType, "image/") || mediaType == octetStreamType {
 		if !endOfStream {
 			return &fwkrh.ParsedResponse{}, nil
 		}
@@ -348,6 +350,9 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/audio/speech") {
 		return audioSpeechAPI
 	}
+	if request.MatchPathSuffix(path, "/audio/transcriptions") {
+		return audioTranscriptionsAPI
+	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
 	return completionsAPI
@@ -437,6 +442,14 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 			return nil, validationErr
 		}
 		return &fwkrh.InferenceRequestBody{Images: &images}, nil
+
+	case audioTranscriptionsAPI:
+		var transcriptions fwkrh.TranscriptionsRequest
+		if err := json.Unmarshal(rawBody, &transcriptions); err != nil {
+			return nil, requestBodyDecodeError(err, errors.New("invalid audio transcriptions request"))
+		}
+		return &fwkrh.InferenceRequestBody{Transcriptions: &transcriptions}, nil
+
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}
