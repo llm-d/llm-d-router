@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -100,7 +101,7 @@ func isRenderAuthError(err error) bool {
 }
 
 // vllmConfig configures the vLLM /render backend. Future protocol fields
-// (e.g., grpc) can be added alongside url.
+// (e.g., grpc) can be added under the same vllm block.
 type vllmConfig struct {
 	// MessagesRenderMode selects "auto" (default), "native" or "legacy" Messages rendering.
 	// The "legacy" value is deprecated.
@@ -109,6 +110,11 @@ type vllmConfig struct {
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.
 	URL string `json:"url,omitempty"`
+	// PrefillOnly reserves one output token on the render copy, without changing inference.
+	PrefillOnly bool `json:"prefillOnly,omitempty"`
+	// EndpointDiscovery sends render requests directly to endpoints published
+	// by the configured data-layer discovery provider. Mutually exclusive with URL.
+	EndpointDiscovery *endpointDiscoveryConfig `json:"endpointDiscovery,omitempty"`
 	// Timeout is the per-request timeout for completions
 	// (Go duration string, e.g. "5s"). Defaults to 5s.
 	Timeout string `json:"timeout,omitempty"`
@@ -133,16 +139,42 @@ type vllmConfig struct {
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
 // native render endpoints.
 type vllmHTTPRenderer struct {
-	client    *http.Client
-	baseURL   string
-	timeout   time.Duration
-	mmTimeout time.Duration
+	client         *http.Client
+	endpointPicker renderEndpointPicker
+	timeout        time.Duration
+	mmTimeout      time.Duration
+	attemptTimeout time.Duration
+	prefillOnly    bool
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
-	url := strings.TrimRight(cfg.URL, "/")
-	if url == "" {
-		url = defaultHTTPRenderURL
+	if cfg.URL != "" && cfg.EndpointDiscovery != nil {
+		return nil, errors.New("only one of 'url' or 'endpointDiscovery' may be set")
+	}
+
+	var endpointPicker renderEndpointPicker
+	var attemptTimeout time.Duration
+	if cfg.EndpointDiscovery != nil {
+		if cfg.hasTLS() {
+			return nil, errors.New("endpointDiscovery uses HTTP and cannot be combined with TLS settings; use 'url' for HTTPS")
+		}
+		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery)
+		if err != nil {
+			return nil, err
+		}
+		endpointPicker = discovered
+		if value := cfg.EndpointDiscovery.AttemptTimeout; value != "" {
+			attemptTimeout, err = time.ParseDuration(value)
+			if err != nil || attemptTimeout <= 0 {
+				return nil, fmt.Errorf("invalid 'endpointDiscovery.attemptTimeout' %q: must be a positive duration", value)
+			}
+		}
+	} else {
+		url := strings.TrimRight(cfg.URL, "/")
+		if url == "" {
+			url = defaultHTTPRenderURL
+		}
+		endpointPicker = fixedEndpointPicker(url)
 	}
 	timeout, err := parseHTTPDuration(cfg.Timeout, defaultHTTPRenderTimeout)
 	if err != nil {
@@ -162,9 +194,11 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
 		))},
-		baseURL:   url,
-		timeout:   timeout,
-		mmTimeout: mmTimeout,
+		endpointPicker: endpointPicker,
+		timeout:        timeout,
+		mmTimeout:      mmTimeout,
+		attemptTimeout: attemptTimeout,
+		prefillOnly:    cfg.PrefillOnly,
 	}, nil
 }
 
@@ -304,6 +338,7 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 	return out
 }
 
+// postJSON permits one retry on a different endpoint within the request budget.
 func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh.RequestPayload, timeout time.Duration, out any) error {
 	var payload []byte
 	switch body := body.(type) {
@@ -318,33 +353,96 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	default:
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	}
+	if r.prefillOnly {
+		var err error
+		if payload, err = renderOnlyBudget(payload); err != nil {
+			return fmt.Errorf("apply render-only output budget: %w", err)
+		}
+	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.baseURL+path, bytes.NewReader(payload))
+	baseURL, err := r.endpointPicker.Pick()
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("pick render endpoint: %w", err)
+	}
+	picker, canRetry := r.endpointPicker.(retryingRenderEndpointPicker)
+	retryable, attemptErr := r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
+	if attemptErr == nil || !retryable || !canRetry || reqCtx.Err() != nil {
+		return attemptErr
+	}
+	baseURL, err = picker.PickExcluding(map[string]struct{}{baseURL: {}})
+	if errors.Is(err, errNoRenderEndpoints) {
+		return attemptErr
+	}
+	if err != nil {
+		return fmt.Errorf("pick alternate render endpoint: %w", err)
+	}
+	_, err = r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
+	return err
+}
+
+// renderOnlyBudget caps the output budget on the render copy of a JSON
+// envelope. Nested values stay raw JSON, so message and tool content reaches
+// the renderer with its key order intact.
+func renderOnlyBudget(payload []byte) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, err
+	}
+	// Automatic prompt truncation depends on the original output budget.
+	if truncate, ok := envelope["truncate_prompt_tokens"]; ok && !bytes.Equal(bytes.TrimSpace(truncate), []byte("null")) {
+		return payload, nil
+	}
+	envelope["max_tokens"] = json.RawMessage("1")
+	if _, ok := envelope["max_completion_tokens"]; ok {
+		envelope["max_completion_tokens"] = json.RawMessage("1")
+	}
+	if _, ok := envelope["min_tokens"]; ok {
+		envelope["min_tokens"] = json.RawMessage("0")
+	}
+	return json.Marshal(envelope)
+}
+
+// postJSONAttempt sends one render request and reports whether another endpoint may succeed.
+func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
+	if r.attemptTimeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(reqCtx, r.attemptTimeout)
+		defer cancel()
+	}
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return false, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// The render endpoint may require the same credential as inference;
 	// forward the inbound Authorization when present.
-	if auth := authHeaderFromContext(ctx); auth != "" {
+	if auth := authHeaderFromContext(reqCtx); auth != "" {
 		httpReq.Header.Set("Authorization", auth)
 	}
 
 	httpResp, err := r.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("post %s: %w", path, err)
+		return true, fmt.Errorf("post %s: %w", path, err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodySnippetBytes))
-		return &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
+		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
+		// Connection failures can surface after successful response headers.
+		var networkErr net.Error
+		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		return retryable, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return nil
+	return false, nil
+}
+
+// isRetryableRenderStatus reports whether a different endpoint may succeed.
+func isRetryableRenderStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 && status <= 599
 }

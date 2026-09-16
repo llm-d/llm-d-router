@@ -82,7 +82,7 @@ type evictionScenario struct {
 	grace    time.Duration
 	maxRevoc int
 	burst    burstShape
-	// evictionOff disables reclamation for baseline arms.
+	// evictionOff disables reclamation for baseline variants.
 	evictionOff bool
 	// churnMean, when non-zero, gives sheddable leases a natural completion time drawn
 	// deterministically from a truncated exponential-like ladder with this mean.

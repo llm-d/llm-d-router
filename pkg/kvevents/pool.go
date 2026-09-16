@@ -195,9 +195,12 @@ type Pool struct {
 // Registration is idempotent (guarded by a sync.Once).
 func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProcessor,
 	adapter EngineAdapter,
-) *Pool {
+) (*Pool, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
+	}
+	if cfg.Concurrency <= 0 {
+		return nil, fmt.Errorf("kvEventsConfig.concurrency must be positive, got %d", cfg.Concurrency)
 	}
 
 	p := &Pool{
@@ -217,7 +220,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 
 	metrics.Register()
 
-	return p
+	return p, nil
 }
 
 // Span start options are built once. Passing them variadically at each call

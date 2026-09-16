@@ -15,6 +15,7 @@ import (
 	"github.com/openai/openai-go/packages/param"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/test/e2e/utils"
 )
 
 func newOpenAIClient() *openai.Client {
@@ -31,7 +32,7 @@ func extractInferenceHeaders(httpResp *http.Response) (string, string, string) {
 func generateAndCheckLoad(count int) {
 	nsName := getNamespace()
 	for range count {
-		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
+		prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 		gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -355,7 +356,7 @@ func runCompletionWithCacheThreshold(prompt string, cacheHitThreshold float64, f
 	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10,"cache_hit_threshold":%v}`, simModelName, prompt, cacheHitThreshold)
 	extraHeaders := cacheThresholdHeaders(forceCacheThresholdFinishReason)
 	ns, pod, respBody := doPost("/v1/completions", body, extraHeaders)
-	finishReason := extractFinishReason(string(respBody))
+	finishReason := utils.ExtractFinishReason(string(respBody))
 	ginkgo.By(fmt.Sprintf("Completion Response: ns=%s, pod=%s, finish_reason=%s", ns, pod, finishReason))
 	return ns, pod, finishReason
 }
@@ -366,7 +367,7 @@ func runStreamingCompletionWithCacheThreshold(prompt string, cacheHitThreshold f
 	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10,"stream":true,"cache_hit_threshold":%v}`, simModelName, prompt, cacheHitThreshold)
 	extraHeaders := cacheThresholdHeaders(forceCacheThresholdFinishReason)
 	ns, pod, respBody := doPost("/v1/completions", body, extraHeaders)
-	finishReason := extractFinishReasonFromStreaming(string(respBody))
+	finishReason := utils.ExtractFinishReasonFromStreaming(string(respBody))
 	ginkgo.By(fmt.Sprintf("Streaming Completion Response: ns=%s, pod=%s, finish_reason=%s", ns, pod, finishReason))
 	return ns, pod, finishReason
 }
@@ -390,13 +391,11 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-	startEPPMetricsPortForward()
-
-	theMetrics := getMetrics(metricsURL)
+	theMetrics := utils.GetMetrics(metricsURL)
 	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
 	metricsAsString := strings.Join(theMetrics, "\n")
 
-	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, getNamespace())
+	_, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, getNamespace())
 
 	// Define the metrics we expect to see
 	preset := []string{ //nolint:prealloc

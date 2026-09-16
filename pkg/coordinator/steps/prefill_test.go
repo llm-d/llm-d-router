@@ -345,25 +345,9 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatal("expected messages from original body in chat format")
 	}
 
-	// Verify tokens nested field
-	tokens, ok := prefillBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 5 {
-		t.Fatalf("expected 5 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("chat format should not have a tokens field")
 	}
 
 	// Verify ec_transfer_params is forwarded in chat format
@@ -380,7 +364,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	if _, ok := prefillBody["kv_transfer_params"]; !ok {
 		t.Fatal("expected kv_transfer_params in chat format")
 	}
-	// Verify no top-level token_ids (should be in tokens field)
+	// Verify no top-level token_ids
 	if _, ok := prefillBody["token_ids"]; ok {
 		t.Fatal("chat format should not have top-level token_ids")
 	}
@@ -700,7 +684,7 @@ func TestPrefillStep_UnsupportedFormat(t *testing.T) {
 		KVTransferParams: make(map[string]any),
 	}
 
-	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, nil, reqcommon.APIType(99))
+	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, reqcommon.APIType(99))
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}

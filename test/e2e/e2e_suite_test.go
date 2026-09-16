@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,36 +23,23 @@ import (
 
 	infextv1a2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
+	"github.com/llm-d/llm-d-router/test/e2e/utils"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 const (
 	// kindClusterName is the name of the Kind cluster created for e2e tests.
 	kindClusterName = "e2e-tests"
-	// eppName is the value of the app label on the EPP pods
-	eppName = "e2e-epp"
+	// eppName is the chart's EPP Deployment and Service name.
+	eppName = simModelName + "-inference-pool-epp"
 	// defaultReadyTimeout is the default timeout for a resource to report a ready state.
 	defaultReadyTimeout = 3 * time.Minute
-	// defaultInterval is the default interval to check if a resource exists or ready conditions.
-	defaultInterval = time.Millisecond * 250
 	// crdKustomizePath is the kustomize path for all CRDs (upstream GIE + local llm-d.ai).
 	crdKustomizePath = "../../config/crd"
-	// inferExtManifest is the manifest for the inference extension test resources.
-	inferExtManifest = "../../deploy/components/inference-gateway/inference-pools.yaml"
 	// simModelName is the test model name.
 	simModelName = "food-review"
 	// kvModelName is the model name used in KV tests.
 	kvModelName = "Qwen/Qwen2.5-1.5B-Instruct"
-	// envoyManifest is the manifest for the envoy proxy test resources.
-	envoyManifest = "../../deploy/environments/dev/e2e-infra/envoy.yaml"
-	// eppManifest is the manifest for the deployment of the EPP
-	eppManifest = "../../deploy/components/inference-gateway/deployment.yaml"
-	// rbacManifest is the manifest for the EPP's RBAC resources.
-	rbacManifest = "../../deploy/components/inference-gateway/rbac.yaml"
-	// serviceAccountManifest is the manifest for the EPP's service account resources.
-	serviceAccountManifest = "../../deploy/components/inference-gateway/service-accounts.yaml"
-	// servicesManifest is the manifest for the EPP's service resources.
-	servicesManifest = "../../deploy/environments/dev/e2e-infra/services.yaml"
 	// renderManifest is the manifest for the standalone vLLM render deployment and service.
 	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
 
@@ -92,13 +78,10 @@ var (
 	k8sContext = env.GetEnvString("K8S_CONTEXT", "", ginkgo.GinkgoLogr)
 
 	readyTimeout = env.GetEnvDuration("READY_TIMEOUT", defaultReadyTimeout, ginkgo.GinkgoLogr)
-	interval     = defaultInterval
 
 	crdObjects        []string
 	renderObjects     []string
 	createdRendererNS bool
-
-	eppPortForwardSession *gexec.Session
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -294,84 +277,8 @@ func deleteNameSpace(nsName string) {
 
 // createCRDs creates the Inference Extension CRDs used for testing.
 func createCRDs() {
-	crds := runKustomize(crdKustomizePath)
+	crds := utils.RunKustomize(crdKustomizePath)
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
-}
-
-func createEnvoy(nsName string) ([]string, *gexec.Session) {
-	infraSubs := map[string]string{
-		"${NAMESPACE}":       nsName,
-		"${ENVOY_NODE_PORT}": strconv.Itoa(getPort()),
-	}
-	manifests := testutils.ReadYaml(envoyManifest)
-	manifests = substituteMany(manifests, infraSubs)
-	ginkgo.By("Creating envoy proxy resources from manifest: " + envoyManifest)
-	envoyObjects := testutils.CreateObjsFromYaml(testConfig, manifests, nsName)
-	var portForwardSession *gexec.Session
-
-	if k8sContext != "" {
-		envoyName := ""
-		for _, obj := range envoyObjects {
-			splitObj := strings.Split(obj, "/")
-			if strings.ToLower(splitObj[0]) == "deployment" {
-				envoyName = splitObj[1]
-			}
-		}
-		gomega.Expect(envoyName).ToNot(gomega.BeEmpty())
-
-		command := exec.Command("kubectl", "port-forward", "deployment/"+envoyName, strconv.Itoa(getPort())+":8081",
-			"--context="+k8sContext, "--namespace="+getNamespace())
-		var err error
-		portForwardSession, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	}
-	return envoyObjects, portForwardSession
-}
-
-func createInferencePool(numTargetPorts int) []string {
-	poolName := simModelName + "-inference-pool"
-	nsName := getNamespace()
-
-	infPoolYaml := testutils.ReadYaml(inferExtManifest)
-	// targetPorts is substituted into `targetPorts: ${TARGET_PORTS}` in inference-pools.yaml.
-	// Each item must use 2-space indentation to match that field's level in the YAML.
-	// If the field is ever reindented in inference-pools.yaml, update the format string here too.
-	var targetPortsBuilder strings.Builder
-	for idx := range numTargetPorts {
-		fmt.Fprintf(&targetPortsBuilder, "\n  - number: %d", 8000+idx)
-	}
-	targetPorts := targetPortsBuilder.String()
-	infPoolYaml = substituteMany(infPoolYaml,
-		map[string]string{
-			"${POOL_NAME}":    poolName,
-			"${EPP_NAME}":     "e2e-epp",
-			"${TARGET_PORTS}": targetPorts,
-		})
-
-	return testutils.CreateObjsFromYaml(testConfig, infPoolYaml, nsName)
-}
-
-// startEPPMetricsPortForward is a no-op outside an existing-cluster run (k8sContext
-// unset) and safe to call repeatedly; it starts at most one port-forward session,
-// reused until AfterSuite terminates it.
-func startEPPMetricsPortForward() {
-	if k8sContext == "" || eppPortForwardSession != nil {
-		return
-	}
-
-	pods, err := testConfig.KubeCli.CoreV1().Pods(getNamespace()).List(testConfig.Context, metav1.ListOptions{
-		LabelSelector: "app=e2e-epp",
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(pods.Items).NotTo(gomega.BeEmpty())
-
-	eppPodName := pods.Items[0].Name
-	command := exec.Command("kubectl", "port-forward", "pod/"+eppPodName, strconv.Itoa(getMetricsPort())+":9090",
-		"--context="+k8sContext, "--namespace="+getNamespace())
-	eppPortForwardSession, err = gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	// Give it a moment to establish
-	time.Sleep(3 * time.Second)
 }
 
 // getPort returns the envoy service's NodePort for this process. See testutils.ProcessPort.

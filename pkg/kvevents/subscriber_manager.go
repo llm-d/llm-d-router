@@ -83,7 +83,16 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
 		entry.cancel()
+		select {
+		case <-entry.done:
+		case <-ctx.Done():
+		}
 		delete(sm.subscribers, podIdentifier)
+		if err := ctx.Err(); err != nil {
+			metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
+			cleanupSubscriberMetrics(podIdentifier, entry.done)
+			return err
+		}
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
 	}
@@ -166,12 +175,7 @@ func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 	sm.mu.Unlock()
 
 	for _, done := range dones {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			debugLogger.Info("Shutdown context canceled while waiting for subscribers to exit")
-			return
-		}
+		<-done
 	}
 	debugLogger.Info("All subscribers shut down")
 }

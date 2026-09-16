@@ -42,15 +42,20 @@ func discardCtx(t *testing.T) context.Context {
 	return log.IntoContext(context.Background(), logr.Discard())
 }
 
-func newExtractorProducer(discoverPods bool) *Producer {
+func newExtractorProducer(t *testing.T, discoverPods bool) *Producer {
+	t.Helper()
+
 	cfg := kvevents.DefaultConfig()
 	cfg.DiscoverPods = discoverPods
 	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
 	cfg.PodDiscoveryConfig.SocketPort = 5557
 
+	pool, err := kvevents.NewPool(cfg, nil, nil, nil)
+	require.NoError(t, err)
+
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: kvevents.NewSubscriberManager(kvevents.NewPool(cfg, nil, nil, nil)),
+		subscribersManager: kvevents.NewSubscriberManager(pool),
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: &fakeKVBlockIndex{}},
 		subscriberCtx:      context.Background(),
@@ -67,7 +72,7 @@ func newEndpoint(name, addr string) fwkdl.Endpoint {
 
 func TestProducer_EndpointExtractor_InterfaceContract(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	var _ fwkdl.EndpointExtractor = p
@@ -76,7 +81,7 @@ func TestProducer_EndpointExtractor_InterfaceContract(t *testing.T) {
 
 func TestProducer_ExtractEndpoint_AddAndDelete(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	ep := newEndpoint("pod-a", "10.0.0.1")
@@ -110,7 +115,7 @@ func TestProducer_ExtractEndpoint_AddAndDelete(t *testing.T) {
 // DiscoverPods=false → global-socket mode, per-pod discovery off.
 func TestProducer_ExtractEndpoint_DiscoverPodsDisabledIsNoOp(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(false)
+	p := newExtractorProducer(t, false)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
@@ -124,7 +129,7 @@ func TestProducer_ExtractEndpoint_DiscoverPodsDisabledIsNoOp(t *testing.T) {
 
 func TestProducer_ExtractEndpoint_IgnoresMissingMetadata(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
@@ -142,7 +147,7 @@ func TestProducer_ExtractEndpoint_IgnoresMissingMetadata(t *testing.T) {
 
 // Regression: subscribers must survive request-ctx cancellation.
 func TestProducer_EnsureSubscriber_SurvivesRequestCtxCancel(t *testing.T) {
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(context.Background())
 
 	reqCtx, cancel := context.WithCancel(context.Background())
@@ -161,7 +166,7 @@ func TestProducer_EnsureSubscriber_SurvivesRequestCtxCancel(t *testing.T) {
 // Per-rank subscribers at SocketPort + RankIndex (vLLM offset_endpoint_port).
 func TestProducer_ExtractEndpoint_OffsetsZMQPortByRankIndex(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	endpoints := []struct {
@@ -256,7 +261,7 @@ func TestProducer_EnsureSubscriber_IPv6BracketsEndpoint(t *testing.T) {
 // RankIndex=0 must dial the base SocketPort unchanged.
 func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
@@ -292,9 +297,12 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
 	cfg.PodDiscoveryConfig.SocketPort = 5557
 
+	pool, err := kvevents.NewPool(cfg, nil, nil, nil)
+	require.NoError(t, err)
+
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: kvevents.NewSubscriberManager(kvevents.NewPool(cfg, nil, nil, nil)),
+		subscribersManager: kvevents.NewSubscriberManager(pool),
 		kvEventsConfig:     cfg,
 		kvCacheIndexer:     fakeIndexer,
 		subscriberCtx:      context.Background(),
@@ -322,7 +330,7 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 // Delete by NamespacedName must work even when the event has no address.
 func TestProducer_ExtractEndpoint_DeleteWithMissingAddressRemovesExistingSubscriber(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
@@ -439,7 +447,7 @@ func TestNew_PodLabelSelector(t *testing.T) {
 
 func TestProducer_ExtractEndpoint_ExcludedUpdatesDoNotClearIndex(t *testing.T) {
 	ctx := discardCtx(t)
-	p := newExtractorProducer(true)
+	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 	p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
 	var clearedPods []string
@@ -498,7 +506,7 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := discardCtx(t)
-			p := newExtractorProducer(true)
+			p := newExtractorProducer(t, true)
 			defer p.subscribersManager.Shutdown(ctx)
 			p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
 			var clearedPods []string

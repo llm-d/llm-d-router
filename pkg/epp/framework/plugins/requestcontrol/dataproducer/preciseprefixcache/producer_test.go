@@ -720,6 +720,36 @@ func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 	require.Contains(t, err.Error(), `unknown field "tokenizersPoolConfig"`)
 }
 
+// A null kvEventsConfig resets the seeded defaults to a nil pointer; the
+// producer falls back to the kvevents defaults instead of dereferencing nil.
+func TestPluginFactory_NullKVEventsConfigUsesDefaults(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	handle := plugin.NewEppHandle(ctx, nil)
+	raw := json.RawMessage(`{"kvEventsConfig":null}`)
+
+	result, err := PluginFactory("test", plugin.StrictDecoder(raw), handle)
+	require.NoError(t, err)
+	p := result.(*Producer)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	require.Equal(t, kvevents.DefaultConfig(), p.kvEventsConfig)
+}
+
+// A non-positive kvEventsConfig.concurrency fails plugin creation with a
+// config error naming the field.
+func TestPluginFactory_RejectsNonPositiveKVEventsConcurrency(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"kvEventsConfig":{"concurrency":0}}`),
+		json.RawMessage(`{"kvEventsConfig":{"concurrency":-1}}`),
+	} {
+		handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
+
+		_, err := PluginFactory("test", plugin.StrictDecoder(raw), handle)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "concurrency")
+	}
+}
+
 // Key built from string literals so an upstream rename trips the test.
 func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	p := &Producer{

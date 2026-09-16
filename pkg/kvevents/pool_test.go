@@ -34,7 +34,8 @@ func newTestPool(t *testing.T, blockSize int) (
 	require.NoError(t, err)
 
 	cfg := DefaultConfig()
-	pool := NewPool(cfg, idx, tp, nil)
+	pool, err := NewPool(cfg, idx, tp, nil)
+	require.NoError(t, err)
 	return pool, idx, tp
 }
 
@@ -1297,6 +1298,20 @@ func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, erro
 
 func (stubAdapter) ShardingKey(_ *RawMessage) string { return "pod-1" }
 
+// A non-positive worker count leaves no shard for AddTask to select; the
+// first event would divide by zero in the subscriber goroutine. The
+// constructor rejects such configs instead of building the pool.
+func TestNewPool_RejectsNonPositiveConcurrency(t *testing.T) {
+	for _, concurrency := range []int{0, -1} {
+		cfg := DefaultConfig()
+		cfg.Concurrency = concurrency
+
+		_, err := NewPool(cfg, nil, nil, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "concurrency")
+	}
+}
+
 // TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
 // enqueues and dequeues, and is reset once the pool shuts down.
 func TestPool_QueueDepthAccounting(t *testing.T) {
@@ -1310,7 +1325,8 @@ func TestPool_QueueDepthAccounting(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Concurrency = 2
-	pool := NewPool(cfg, idx, tp, stubAdapter{})
+	pool, err := NewPool(cfg, idx, tp, stubAdapter{})
+	require.NoError(t, err)
 
 	const tasks = 3
 	for i := range uint64(tasks) {

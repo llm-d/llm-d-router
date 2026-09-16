@@ -33,15 +33,16 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -55,12 +56,6 @@ type tokenizer interface {
 const (
 	// PluginType is the canonical type name used to register the plugin.
 	PluginType = "token-producer"
-
-	// LegacyPluginType is the previous type name. Existing YAML configs that
-	// reference it continue to work. Will be removed in a future release.
-	//
-	// Deprecated: use PluginType ("token-producer") instead.
-	LegacyPluginType = "tokenizer"
 
 	tokenizedPromptKeyID = "TokenizedPrompt"
 )
@@ -258,25 +253,13 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	return p, nil
 }
 
-// LegacyPluginFactory wraps PluginFactory for the deprecated `tokenizer` type
-// name. It logs a one-time-per-instantiation deprecation warning and delegates
-// to PluginFactory. Will be removed when LegacyPluginType is removed.
-//
-// Deprecated: register PluginType ("token-producer") instead.
-func LegacyPluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	log.FromContext(handle.Context()).Info(
-		"DEPRECATION: plugin type '"+LegacyPluginType+"' is deprecated; use '"+PluginType+"' instead",
-		"pluginName", name,
-	)
-	return PluginFactory(name, rawParameters, handle)
-}
-
 // NewPlugin constructs the configured backend: vllm /render (selected by
 // 'vllm' or 'modelName'), or estimate byte-packing (the default when no
 // backend is set).
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
 	var backend tokenInputProducer
 	var backendName string
+	var endpointPicker *discoveredEndpointPicker
 	switch {
 	case config.VLLM != nil || config.ModelName != "":
 		cfg := config.VLLM
@@ -293,16 +276,24 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		backend = renderBackend{tk: renderer, modelName: config.ModelName, legacyMessages: legacyMessages, warmupAuth: vllmWarmupAuthHeader()}
 		backendName = backendVLLM
+		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
+		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
+			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
+		}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
 		backendName = backendEstimate
 	}
 
+	typedName := plugin.TypedName{Type: PluginType, Name: name}
 	p := &Plugin{
-		typedName:   plugin.TypedName{Type: PluginType, Name: name},
+		typedName:   typedName,
 		backend:     backend,
 		backendName: backendName,
 		dk:          TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+	}
+	if endpointPicker != nil {
+		p.endpointDiscovery = newEndpointDiscoveryHandler(typedName, endpointPicker)
 	}
 	if w, ok := backend.(warmer); ok {
 		go w.warmup(ctx)
@@ -316,14 +307,16 @@ type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
 	// backendName identifies the configured backend on the tokenize span.
-	backendName string
-	dk          plugin.DataKey
+	backendName       string
+	dk                plugin.DataKey
+	endpointDiscovery *endpointDiscoveryHandler
 }
 
 // compile-time assertions.
 var (
 	_ requestcontrol.DataProducer         = &Plugin{}
 	_ requestcontrol.TimeoutAwareProducer = &Plugin{}
+	_ datalayer.Registrant                = &Plugin{}
 )
 
 // TypedName returns the typed name of the plugin.
@@ -334,6 +327,19 @@ func (p *Plugin) TypedName() plugin.TypedName {
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+}
+
+// RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.
+func (p *Plugin) RegisterDependencies(r datalayer.Registrar) error {
+	if p.endpointDiscovery == nil {
+		return nil
+	}
+	return r.Register(datalayer.PendingRegistration{
+		Owner:         p.TypedName(),
+		SourceType:    sourcenotifications.EndpointNotificationSourceType,
+		Extractor:     p.endpointDiscovery,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
 }
 
 // ProduceTimeout surfaces the backend's render timeout when it manages one, so

@@ -33,4 +33,7 @@ echo "Running end to end tests"
 
 export VLLM_RENDER_IMAGE=${VLLM_IMAGE}
 
+# Prepare the local chart dependency before parallel workers render it.
+helm dependency build --skip-refresh "${DIR}/../../config/charts/llm-d-router-standalone"
+
 run_ginkgo_suite "${DIR}/../e2e/"
