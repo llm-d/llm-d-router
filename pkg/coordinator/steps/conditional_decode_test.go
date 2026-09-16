@@ -420,3 +420,53 @@ func probeCount(t *testing.T, reg *prometheus.Registry, result string) float64 {
 	}
 	return 0
 }
+
+// TestConditionalDecodeStep_EntryWithoutModalityFails is the conditional-decode
+// counterpart of TestPrefillStep_EntryWithoutModalityFails: it covers the
+// validateEntryModalities guard at this step's boundary, not the guard itself
+// (utils_test.go does that).
+//
+// This step is the earliest one that can serve a client directly, so an untagged
+// entry reaching the worker here could return a cache hit built on a mispaired
+// entry before prefill's guard ever runs. The upstream handler fails the test if
+// it runs, and nothing may be written to the client.
+func TestConditionalDecodeStep_EntryWithoutModalityFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("conditional-decode must not reach the upstream with an untagged entry")
+	}))
+	defer srv.Close()
+
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: testChatCompletionsPath,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+		Body:           map[string]any{"model": testModelName, "stream": false, "messages": []any{}},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected an error for an entry with no modality")
+	}
+	// Not ErrPipelineDone either: the request must not be reported as served.
+	if errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Errorf("expected a failure, not a served response, got %v", err)
+	}
+	// A coordinator-side invariant break, so a 5xx rather than blaming the client.
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("expected a non-ErrBadRequest failure, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Errorf("expected nothing written to the client, got %q", recorder.Body.String())
+	}
+}
