@@ -23,6 +23,7 @@ limitations under the License.
 package picker
 
 import (
+	"math"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -44,7 +45,7 @@ type PickerParameters struct {
 type lockedRand struct {
 	mu      sync.Mutex
 	rand    *rand.Rand
-	counter int // round-robin counter for deterministic tie-breaking, reset when it reaches endpoint count
+	counter int // round-robin counter for deterministic tie-breaking
 }
 
 func newLockedRand() *lockedRand {
@@ -69,6 +70,17 @@ func (r *lockedRand) Shuffle(n int, swap func(i, j int)) {
 	r.rand.Shuffle(n, swap)
 }
 
+// NextCounter returns a monotonically increasing counter for deterministic
+// round-robin tie-breaking across requests.
+func (r *lockedRand) NextCounter() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	c := r.counter
+	r.counter = (r.counter + 1) % math.MaxInt
+	return c
+}
+
 // PickerRand is a thread-safe random number generator shared by all pickers to avoid seeding
 // overhead and ensure controlled randomization.
 var PickerRand = newLockedRand()
@@ -84,23 +96,19 @@ func ShuffleScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint) {
 // equal-score endpoints. Under concurrent load with prefix cache affinity,
 // multiple requests can see identical scores simultaneously. Pure random
 // shuffling causes them to converge on the same winner, creating severe
-// routing imbalance. The round-robin counter ensures each call rotates
-// through the endpoints evenly.
-func RotateScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint) {
+// routing imbalance. The caller supplies a counter drawn once per request,
+// ensuring independent rotation across multiple tie groups.
+func RotateScoredEndpoints(scoredEndpoints []*fwksched.ScoredEndpoint, counter int) {
 	n := len(scoredEndpoints)
 	if n <= 1 {
 		return
 	}
 
-	PickerRand.mu.Lock()
-	defer PickerRand.mu.Unlock()
-
-	PickerRand.counter = (PickerRand.counter + 1) % n
-
-	if PickerRand.counter > 0 {
+	shift := counter % n
+	if shift > 0 {
 		rotated := make([]*fwksched.ScoredEndpoint, n)
-		copy(rotated, scoredEndpoints[PickerRand.counter:])
-		copy(rotated[n-PickerRand.counter:], scoredEndpoints[:PickerRand.counter])
+		copy(rotated, scoredEndpoints[shift:])
+		copy(rotated[n-shift:], scoredEndpoints[:shift])
 		copy(scoredEndpoints, rotated)
 	}
 }

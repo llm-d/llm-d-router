@@ -23,6 +23,7 @@ import (
 	"slices"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -30,15 +31,25 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
+// nonWalkerIndex hides the walk capability of the index it wraps, so the
+// matcher takes the materialized Lookup path.
+type nonWalkerIndex struct{ kvblock.Index }
+
 // newMatcher builds an Indexer over an in-memory index whose per-key pod
-// cache is large enough that no fixture entry is evicted.
+// cache is large enough that no fixture entry is evicted. The matcher walks
+// the index; newMaterializedMatcher over the same index takes the fallback.
 func newMatcher(t *testing.T, backends []*kvcache.KVCacheBackendConfig) (*kvcache.Indexer, kvblock.Index) {
 	t.Helper()
 	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 256})
 	require.NoError(t, err)
 	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, idx, backends), idx
+}
+
+func newMaterializedMatcher(idx kvblock.Index, backends []*kvcache.KVCacheBackendConfig) *kvcache.Indexer {
+	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, nonWalkerIndex{idx}, backends)
 }
 
 func assertPodMatches(t *testing.T, want, got map[string]kvcache.PodMatch) {
@@ -128,13 +139,13 @@ func TestMatchBlockKeys(t *testing.T) {
 			},
 		},
 		{
-			name: "unconfigured tier weighs the default",
+			name: "unconfigured tier weighs zero",
 			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
 				10: {{PodIdentifier: podA, DeviceTier: "disk"}},
 			},
 			requestKeys: []kvblock.BlockHash{10},
 			want: map[string]kvcache.PodMatch{
-				podA: {WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
+				podA: {WeightedScore: 0.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"disk": 1}},
 			},
 		},
 		{
@@ -152,10 +163,14 @@ func TestMatchBlockKeys(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := logging.NewTestLoggerIntoContext(t.Context())
-			indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+			walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
 			populateIndex(t, idx, tt.entries)
 
-			got, err := indexer.MatchBlockKeys(ctx, tt.requestKeys, tt.podFilter)
+			got, err := walked.MatchBlockKeys(ctx, tt.requestKeys, tt.podFilter)
+			require.NoError(t, err)
+			assertPodMatches(t, tt.want, got)
+
+			got, err = newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()).MatchBlockKeys(ctx, tt.requestKeys, tt.podFilter)
 			require.NoError(t, err)
 			assertPodMatches(t, tt.want, got)
 		})
@@ -190,14 +205,74 @@ func TestMatchBlockKeysConfirmedPrefix(t *testing.T) {
 
 func TestMatchBlockKeysCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(logging.NewTestLoggerIntoContext(t.Context()))
-	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
 	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
 		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
 	})
 	cancel()
 
-	_, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
-	require.ErrorIs(t, err, context.Canceled)
+	for name, indexer := range map[string]*kvcache.Indexer{
+		"walked":       walked,
+		"materialized": newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
+func counterValue(t *testing.T, counter interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, counter.Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+// Both feeders record the longest contiguous chain of the match as the hit
+// metrics, once per call.
+func TestMatchBlockKeysRecordsHitMetrics(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}, {PodIdentifier: "pod-b", DeviceTier: "gpu"}},
+		20: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
+	})
+
+	for name, indexer := range map[string]*kvcache.Indexer{
+		"walked":       walked,
+		"materialized": newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			hits, longest := counterValue(t, metrics.LookupHits), counterValue(t, metrics.MaxPodHitCount)
+
+			_, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30}, nil)
+			require.NoError(t, err)
+
+			assert.InDelta(t, 2, counterValue(t, metrics.LookupHits)-hits, 0)
+			assert.InDelta(t, 2, counterValue(t, metrics.MaxPodHitCount)-longest, 0)
+		})
+	}
+}
+
+// Without EnableMetrics the matcher leaves the hit counters alone, like the
+// uninstrumented index leaves the request counters.
+func TestMatchBlockKeysWithoutMetricsRecordsNothing(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 256})
+	require.NoError(t, err)
+	populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
+	})
+	indexer := kvcache.NewIndexerForTestWithoutMetrics(&mockTokenProcessor{}, idx, kvcache.DefaultKVCacheBackendConfig())
+
+	hits, longest := counterValue(t, metrics.LookupHits), counterValue(t, metrics.MaxPodHitCount)
+	matches, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+
+	assert.InDelta(t, hits, counterValue(t, metrics.LookupHits), 0)
+	assert.InDelta(t, longest, counterValue(t, metrics.MaxPodHitCount), 0)
 }
 
 // A device tier reported under the speculative tier's name and speculative
@@ -218,20 +293,72 @@ func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
 	}, got)
 }
 
-// lateCancelContext reports cancellation from its second poll after arm is
+func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
+	tests := []struct {
+		name     string
+		backends []*kvcache.KVCacheBackendConfig
+		entry    kvblock.PodEntry
+		want     float64
+	}{
+		{
+			name:     "default backends score shared_storage at 0.4",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "shared_storage"},
+			want:     0.4,
+		},
+		{
+			name:     "default backends score object_store at 0.2",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "object_store"},
+			want:     0.2,
+		},
+		{
+			name:     "backend names match entry tiers case-insensitively",
+			backends: []*kvcache.KVCacheBackendConfig{{Name: "SHARED_STORAGE", Weight: 0.9}},
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "shared_storage"},
+			want:     0.9,
+		},
+		{
+			name:     "configured speculative weight overrides the speculative default",
+			backends: []*kvcache.KVCacheBackendConfig{{Name: kvcache.SpeculativeTier, Weight: 0.5}},
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", Speculative: true},
+			want:     0.5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(t.Context())
+			indexer, idx := newMatcher(t, tt.backends)
+			populateIndex(t, idx, map[kvblock.BlockHash][]kvblock.PodEntry{10: {tt.entry}})
+
+			got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10}, nil)
+			require.NoError(t, err)
+			tier := tt.entry.DeviceTier
+			if tt.entry.Speculative {
+				tier = kvcache.SpeculativeTier
+			}
+			assertPodMatches(t, map[string]kvcache.PodMatch{
+				"pod-a": {WeightedScore: tt.want, MatchedBlocks: 1, BlocksByTier: map[string]int{tier: 1}},
+			}, got)
+		})
+	}
+}
+
+// lateCancelContext reports cancellation from its second poll after enable is
 // called. The matcher polls once at its first checkpoint and once at
 // completion, so the cancellation lands between them, as one arriving
 // mid-walk would.
 type lateCancelContext struct {
 	context.Context
-	armed bool
-	polls int
+	enabled bool
+	polls   int
 }
 
-func (c *lateCancelContext) arm() { c.armed = true }
+func (c *lateCancelContext) enable() { c.enabled = true }
 
 func (c *lateCancelContext) Err() error {
-	if !c.armed {
+	if !c.enabled {
 		return c.Context.Err()
 	}
 	c.polls++
@@ -241,17 +368,17 @@ func (c *lateCancelContext) Err() error {
 	return nil
 }
 
-// armingIndex arms the request context once the index has been read, so the
+// enablingIndex enables the request context once the index has been read, so the
 // matcher folds the materialized entries under a context about to be
 // cancelled.
-type armingIndex struct {
+type enablingIndex struct {
 	kvblock.Index
 	ctx *lateCancelContext
 }
 
-func (a armingIndex) Lookup(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+func (a enablingIndex) Lookup(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
 	result, err := a.Index.Lookup(ctx, keys, podFilter)
-	a.ctx.arm()
+	a.ctx.enable()
 	return result, err
 }
 
@@ -265,7 +392,7 @@ func TestMatchBlockKeysCancelledBetweenCheckpoints(t *testing.T) {
 		10: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
 		20: {{PodIdentifier: "pod-a", DeviceTier: "gpu"}},
 	})
-	indexer := kvcache.NewIndexerForTest(&mockTokenProcessor{}, armingIndex{Index: idx, ctx: ctx}, kvcache.DefaultKVCacheBackendConfig())
+	indexer := kvcache.NewIndexerForTest(&mockTokenProcessor{}, enablingIndex{Index: idx, ctx: ctx}, kvcache.DefaultKVCacheBackendConfig())
 
 	_, err = indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20}, nil)
 	require.ErrorIs(t, err, context.Canceled)
@@ -317,10 +444,11 @@ func TestMatchBlockKeysManyTiers(t *testing.T) {
 	}, got)
 }
 
-// The matcher reproduces the three algorithms it replaces (the longest-prefix
-// scorer and the producer's contiguous block counters, kept below as
-// oracles) on random fixtures: filters, gaps, duplicate pod entries at a
-// key, unconfigured tiers, and speculative entries.
+// Both feeders reproduce the three algorithms the matcher replaces (the
+// longest-prefix scorer and the producer's contiguous block counters, kept
+// below as oracles) on random fixtures: filters, gaps, duplicate pod entries
+// at a key (tiers and rank groups), unconfigured tiers, and speculative
+// entries.
 func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 	rng := rand.New(rand.NewSource(1))
@@ -340,8 +468,11 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 				if rng.Float64() >= 0.7 {
 					continue
 				}
-				for n := 1 + rng.Intn(2); n > 0; n-- {
+				for n := 1 + rng.Intn(3); n > 0; n-- {
 					entry := kvblock.PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", p), DeviceTier: tiers[rng.Intn(len(tiers))]}
+					if rng.Intn(2) == 0 {
+						entry.HasGroup, entry.GroupIdx = true, kvblock.GroupID(rng.Intn(3))
+					}
 					if rng.Float64() < 0.15 {
 						entry.Speculative = true
 						entry.DeviceTier = ""
@@ -359,10 +490,12 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 			}
 		}
 
-		indexer, idx := newMatcher(t, backends)
+		walked, idx := newMatcher(t, backends)
 		populateIndex(t, idx, fixture)
 
-		got, err := indexer.MatchBlockKeys(ctx, keys, filter)
+		gotWalked, err := walked.MatchBlockKeys(ctx, keys, filter)
+		require.NoError(t, err)
+		gotMaterialized, err := newMaterializedMatcher(idx, backends).MatchBlockKeys(ctx, keys, filter)
 		require.NoError(t, err)
 		keyToPods, err := idx.Lookup(ctx, keys, filter)
 		require.NoError(t, err)
@@ -375,7 +508,8 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 				BlocksByTier:  legacyMatchedBlockCountByTier(keys, keyToPods, pod),
 			}
 		}
-		assertPodMatches(t, want, got)
+		assertPodMatches(t, want, gotWalked)
+		assertPodMatches(t, want, gotMaterialized)
 	}
 }
 
@@ -387,8 +521,11 @@ func legacyLongestPrefixScore(keys []kvblock.BlockHash, keyToPods map[kvblock.Bl
 	maxWeights := func(entries []kvblock.PodEntry) map[string]float64 {
 		out := map[string]float64{}
 		for _, e := range entries {
-			w := 1.0
-			if cw, ok := weights[e.DeviceTier]; ok {
+			tier, w := e.DeviceTier, 0.0
+			if e.Speculative || e.DeviceTier == kvcache.SpeculativeTier {
+				tier, w = kvcache.SpeculativeTier, 1.0
+			}
+			if cw, ok := weights[tier]; ok {
 				w = cw
 			}
 			if cur, ok := out[e.PodIdentifier]; !ok || w > cur {

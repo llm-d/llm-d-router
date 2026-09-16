@@ -24,6 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -47,6 +48,20 @@ func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error)
 		}
 		if consumer, ok := p.(plugin.ConsumerPlugin); ok {
 			consumers[name] = consumer
+		}
+	}
+	// Build the attribute registry from producer declarations, then check
+	// every consumer against it. This is the value-safety complement to PR
+	// 2190's key-safety: it catches typos in consumed DataKeys and value-
+	// type mismatches between producer and consumer declarations before
+	// the DAG is built. Run before buildDAG so its errors surface first.
+	reg, err := fwkdl.BuildRegistry(plugins)
+	if err != nil {
+		return nil, err
+	}
+	for _, consumer := range consumers {
+		if err := reg.ValidateConsumer(consumer); err != nil {
+			return nil, err
 		}
 	}
 	dag, err := buildDAG(producers, consumers)
@@ -222,9 +237,13 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 				continue
 			}
 			dependencies := consumer.Consumes()
-			if producer.Produces() != nil && dependencies.Required != nil {
+			if producer.Produces() != nil {
 				for producedKey, producedData := range producer.Produces() {
-					if consumedData, ok := dependencies.Required[producedKey]; ok {
+					consumedData, ok := dependencies.Required[producedKey]
+					if !ok {
+						consumedData, ok = dependencies.Optional[producedKey]
+					}
+					if ok {
 						// Check types are same.
 						if reflect.TypeOf(producedData) != reflect.TypeOf(consumedData) {
 							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())

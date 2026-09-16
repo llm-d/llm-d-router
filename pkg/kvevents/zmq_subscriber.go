@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
@@ -43,7 +45,6 @@ var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
 
 // zmqSubscriber connects to a ZMQ publisher and forwards messages to a pool.
 type zmqSubscriber struct {
-	stream         *eventStream
 	pool           *Pool
 	podIdentifier  string
 	sourceEndpoint string
@@ -51,6 +52,8 @@ type zmqSubscriber struct {
 	replayEndpoint string
 	remote         bool
 	topicFilter    string
+	queueMu        sync.Mutex
+	retired        bool
 
 	// Replay state persists across reconnections within subscriber lifetime.
 	lastSeq           uint64
@@ -257,13 +260,13 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	defer span.End()
 	if span.IsRecording() {
 		attrs := []attribute.KeyValue{
-			attribute.String("llm_d.kv_cache.events.topic", topic),
-			attribute.Int64("llm_d.kv_cache.events.sequence", int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
-			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(payload)),
+			semconv.LLMDKVCacheEventsTopic(topic),
+			semconv.LLMDKVCacheEventsSequence(int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
+			semconv.LLMDKVCacheEventsPayloadSizeBytes(len(payload)),
 		}
 		// Empty unless the subscriber was created by pod discovery.
 		if z.sourceEndpoint != "" {
-			attrs = append(attrs, attribute.String("llm_d.kv_cache.events.source_endpoint", z.sourceEndpoint))
+			attrs = append(attrs, semconv.LLMDKVCacheEventsSourceEndpoint(z.sourceEndpoint))
 		}
 		span.SetAttributes(attrs...)
 	}
@@ -273,7 +276,6 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
-		stream:         z.stream,
 	}
 	// carried is bound inside the branch on purpose. Taking &sc directly makes
 	// sc escape, so it heap-allocates on every message including the ones the
@@ -282,11 +284,33 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		carried := sc
 		msg.SpanContext = &carried
 	}
+	z.enqueue(msg)
+}
+
+func (z *zmqSubscriber) enqueue(msg *RawMessage) {
+	z.queueMu.Lock()
+	defer z.queueMu.Unlock()
+	if z.retired {
+		return
+	}
 	z.pool.AddTask(msg)
 }
 
 func (z *zmqSubscriber) resetForSource(topic string) {
-	z.pool.AddTask(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true, stream: z.stream})
+	z.enqueue(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true})
+}
+
+// retire prevents any later messages from this subscriber from being queued.
+// When resetSource is true, it queues a reset after all messages accepted before
+// retirement. The pool shards both messages and the reset by source endpoint,
+// so the worker processes them in that order.
+func (z *zmqSubscriber) retire(resetSource bool) {
+	z.queueMu.Lock()
+	defer z.queueMu.Unlock()
+	z.retired = true
+	if resetSource && z.sourceEndpoint != "" {
+		z.pool.resetForSource(z.topicFilter, z.sourceEndpoint)
+	}
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {

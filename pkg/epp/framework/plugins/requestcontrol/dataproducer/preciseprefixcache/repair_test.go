@@ -72,7 +72,6 @@ func TestValidateFullReportRepairPrerequisites(t *testing.T) {
 func TestFullReportRepairForceBypassesMinimumDeficit(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
 	const endpoint = "10.0.0.1:8000"
-	r.observe(endpoint, kvevents.StreamEventAttached)
 	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 
@@ -88,7 +87,6 @@ func TestFullReportRepairCooldown(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 10*time.Second)
 	r.clock = clk
 	const endpoint = "10.0.0.1:8000"
-	r.observe(endpoint, kvevents.StreamEventAttached)
 	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	match := repairMatch{total: 200, confirmed: 100}
 
@@ -112,7 +110,6 @@ func TestFullReportRepairCooldown(t *testing.T) {
 func TestFullReportRepairIntegritySurvivesUnrelatedRequest(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
 	const endpoint = "10.0.0.1:8000"
-	r.observe(endpoint, kvevents.StreamEventAttached)
 	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	requested, _ := r.shouldRequest(endpoint, repairMatch{total: 200, confirmed: 168})
@@ -125,7 +122,6 @@ func TestFullReportRepairIntegritySurvivesUnrelatedRequest(t *testing.T) {
 func TestFullReportRepairIntegrityAllowsShortPrompt(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.80, MinMissingBlocks: 32}, 0)
 	const endpoint = "10.0.0.1:8000"
-	r.observe(endpoint, kvevents.StreamEventAttached)
 	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	requested, reason := r.shouldRequest(endpoint, repairMatch{total: 8, confirmed: 7})
@@ -136,23 +132,20 @@ func TestFullReportRepairIntegrityAllowsShortPrompt(t *testing.T) {
 func TestFullReportRepairRequiresOriginSupport(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.8, MinMissingBlocks: 1}, 0)
 	const endpoint = "pod"
-	r.observe(endpoint, kvevents.StreamEventAttached)
 	r.observe(endpoint, kvevents.StreamEventMissingParent, kvevents.StreamBlock{Hash: 42})
 	requested, _ := r.shouldRequest(endpoint, repairMatch{total: 8})
 	assert.False(t, requested, "untagged reports cannot be safely reference-counted")
 	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	requested, _ = r.shouldRequest(endpoint, repairMatch{total: 8})
 	assert.True(t, requested)
-	r.observe(endpoint, kvevents.StreamEventDetached)
-	r.observe(endpoint, kvevents.StreamEventAttached)
+	r.observe(endpoint, kvevents.StreamEventCleared)
 	requested, _ = r.shouldRequest(endpoint, repairMatch{total: 8})
-	assert.False(t, requested, "a replacement must advertise its own support")
+	assert.False(t, requested, "a reset stream must advertise support again")
 }
 
 func TestFullReportRepairResolvesOnlyAffectedBlocks(t *testing.T) {
 	r := newFullReportRepair(FullReportRepairConfig{FullReportThreshold: 0.8, MinMissingBlocks: 32}, 0)
 	const endpoint = "pod"
-	r.observe(endpoint, kvevents.StreamEventAttached)
 	r.observe(endpoint, kvevents.StreamEventReportSupported)
 	a := kvevents.StreamBlock{Hash: 42, DeviceTier: "gpu", GroupIdx: 0}
 	b := kvevents.StreamBlock{Hash: 43, DeviceTier: "gpu", GroupIdx: 0}

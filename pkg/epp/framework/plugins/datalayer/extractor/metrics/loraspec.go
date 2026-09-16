@@ -53,7 +53,7 @@ func parseStringToLoRASpec(spec string) (*LoRASpec, error) {
 // vanilla deployment scrape legitimately has no family present. Both "family
 // missing" and "family present but no matching labels" are reported as a nil
 // metric so the extractor can skip the LoRA section silently rather than
-// incrementing DataLayerExtractErrorsTotal on every poll (#926).
+// incrementing LlmdDataLayerExtractErrorsTotal on every poll (#926).
 func (spec *LoRASpec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) *dto.Metric {
 	family, exists := families[spec.Name]
 	if !exists || len(family.GetMetric()) == 0 {

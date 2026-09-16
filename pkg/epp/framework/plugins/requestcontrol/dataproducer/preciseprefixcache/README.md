@@ -51,14 +51,16 @@ at least `minMissingBlocks` are missing and coverage is below
 `fullReportThreshold`. A missing-parent fault bypasses both conditions for
 requests containing at least one complete block. The fault remains armed until
 the dropped blocks are indexed, removed in the same cache tier and group, or
-cleared by a cache reset. Unrelated reports cannot resolve it. Both paths share
+cleared by a cache reset or subscriber removal. Unrelated reports cannot resolve
+it. Both paths share
 the per-endpoint `cooldown` to bound report frequency.
 
 This option requires vLLM pod discovery without replay. Global ZMQ and replay
 configurations are rejected. It also requires vLLM to distinguish newly cached
 blocks from reused-block reports using `BlockStored.origin` (`NEW` or `REUSED`),
 as proposed in [vLLM #51699](https://github.com/vllm-project/vllm/pull/51699).
-Repair stays inactive until the subscriber receives an event with either origin.
+Repair stays inactive for an endpoint until its stream delivers a store with
+either origin, including after a cache reset.
 Reused-block reports restore residency without incrementing physical reference
 counts, so the final removal can evict the block from the index.
 

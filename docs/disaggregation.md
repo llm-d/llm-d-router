@@ -245,9 +245,6 @@ role: decode
 
 To accommodate this **without code changes**, you can configure the **EndpointPickerConfig** to use the generic `label-selector-filter` plugin instead of the hardcoded `encode-filter` / `prefill-filter` / `decode-filter`.
 
-> [!NOTE]
-> The previous filter type `by-label` is deprecated. Use `label-selector-filter` with standard Kubernetes label selector syntax instead.
-
 ### Configuration Examples
 
 #### P/D Configuration
@@ -599,7 +596,7 @@ When the request also carries the `x-kv-cache-source-host-port` header (set by
 the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod
 computing the prefix), the sidecar injects an additional `remote_kv_source` key
 so vLLM pulls that cached prefix over the P2P tier instead of recomputing it.
-Under disaggregation the prefiller leg carries `{"remote_decoder": {...},
+Under disaggregation the prefill request carries `{"remote_decoder": {...},
 "remote_kv_source": {"kv_request_id": <own id>, "remote_host": <source host>,
 "remote_port": <p2p-connector-port>}}` (the only supported multi-key
 combination); without a prefiller the decoder-only request carries
@@ -685,6 +682,8 @@ batches are unchanged.
 |---|---|---|---|---|
 | `--enable-tls` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Enable TLS for the specified stages. Example: `--enable-tls=prefiller,decoder` |
 | `--tls-insecure-skip-verify` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Skip TLS certificate verification for the specified stages. Example: `--tls-insecure-skip-verify=prefiller` |
+| `--tls-min-version` | — | `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | Set the minimum TLS version accepted by the sidecar's secure proxy. |
+| `--tls-cipher-suites` | — | Go `crypto/tls` cipher suite names (comma-separated or repeated) | existing secure suite set | Set the TLS cipher suites accepted by the sidecar's secure proxy. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. |
 | `--enable-prefiller-sampling` | `ENABLE_PREFILLER_SAMPLING` | `true` / `false` | `false` | If true, the prefill instance is selected randomly from the provided prefill host values. |
 | `--enable-ssrf-protection` | — | `true` / `false` | `false` | Enable SSRF protection using InferencePool allowlisting. |
 
@@ -694,7 +693,7 @@ batches are unchanged.
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
-| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---

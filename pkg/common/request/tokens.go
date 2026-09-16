@@ -16,24 +16,37 @@ limitations under the License.
 
 package request
 
-const (
-	FieldMaxTokens           = "max_tokens"
-	FieldMaxCompletionTokens = "max_completion_tokens"
-	FieldStream              = "stream"
-	FieldStreamOptions       = "stream_options"
-)
+import "maps"
 
-// PrimeSingleTokenRequest mutates target in place into a synthetic,
-// non-streaming, single-output-token chat-completions request derived from
-// original (which may be the same map as target). max_tokens is always
-// capped to 1; max_completion_tokens is only added when original already
-// carries it, and leaves it untached otherwise.
-func PrimeSingleTokenRequest(target, original map[string]any) {
-	target[FieldMaxTokens] = 1
-	if _, ok := original[FieldMaxCompletionTokens]; ok {
-		target[FieldMaxCompletionTokens] = 1
+// CapSingleToken rewrites body into a synthetic, non-streaming,
+// single-output-token prefill or encode request. It returns the map
+// the caps were written into: sampling_params for the generate API, body itself
+// otherwise. The generate API also expects transfer params in that map, so a
+// caller adding them needs no second lookup.
+//
+// The caps to rewrite come from APIType.tokenLimitFields, so each API's output
+// caps are named in one place. min_tokens is a floor rather than a cap, so it is
+// stripped instead of capped: it defaults to 0 in vLLM, so removing it keeps
+// min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
+// SamplingParams rejects min_tokens > max_tokens).
+//
+// body is rewritten in place, so the caller passes its own copy. A one-level
+// copy is enough: the generate sampling_params is always replaced with a map
+// body owns, so the rewrite never reaches a nested map the body was cloned from.
+func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
+	limits := body
+	if apiType == APITypeGenerate {
+		sp, _ := body[FieldSamplingParams].(map[string]any)
+		limits = make(map[string]any, len(sp)+1)
+		maps.Copy(limits, sp)
+		body[FieldSamplingParams] = limits
 	}
+	for _, field := range apiType.tokenLimitFields() {
+		limits[field] = 1
+	}
+	delete(limits, FieldMinTokens)
 
-	target[FieldStream] = false
-	delete(target, FieldStreamOptions)
+	body[FieldStream] = false
+	delete(body, FieldStreamOptions)
+	return limits
 }

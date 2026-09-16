@@ -48,6 +48,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"log_level", cfg.LogLevel, 2},
 		{"server.listen_addr", cfg.Server.ListenAddr, ":8080"},
 		{"server.metrics_port", cfg.Server.MetricsPort, 9090},
+		{"server.metrics_cert_dir", cfg.Server.MetricsCertDir, ""},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
 		{"server.write_timeout", cfg.Server.WriteTimeout, 120 * time.Second},
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},
@@ -61,6 +62,9 @@ func TestLoadDefaults(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
+	}
+	if got := cfg.Pipeline.ForwardResponseHeaders; len(got) != 1 || got[0] != "x-llm-d-disagg-revision" {
+		t.Errorf("pipeline.forward_response_headers = %v, want default revision header", got)
 	}
 }
 
@@ -87,6 +91,12 @@ func TestLoadEnvOverride(t *testing.T) {
 			envVal: "false",
 			check:  func(c *Config) (any, any) { return c.Pipeline.UseOpenAIFormat, false },
 		},
+		{
+			name:   "metrics certificate path",
+			envKey: "COORDINATOR_SERVER_METRICS_CERT_DIR",
+			envVal: "/etc/coordinator-metrics",
+			check:  func(c *Config) (any, any) { return c.Server.MetricsCertDir, "/etc/coordinator-metrics" },
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,9 +112,22 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadMetricsCertDir(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "server:\n  metrics_cert_dir: /etc/coordinator-metrics\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got, want := cfg.Server.MetricsCertDir, "/etc/coordinator-metrics"; got != want {
+		t.Errorf("server.metrics_cert_dir = %q, want %q", got, want)
+	}
+}
+
 func TestLoadStepParams(t *testing.T) {
 	const body = `log_level: 2
 pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
   steps:
     - type: replace-media-urls
       params:
@@ -122,6 +145,9 @@ pipeline:
 
 	if len(cfg.Pipeline.Steps) != 2 {
 		t.Fatalf("got %d steps, want 2", len(cfg.Pipeline.Steps))
+	}
+	if got := cfg.Pipeline.ForwardResponseHeaders; len(got) != 2 || got[0] != "x-llm-d-disagg-revision" || got[1] != "x-disagg-slice" {
+		t.Fatalf("pipeline.forward_response_headers = %v, want revision and slice headers", got)
 	}
 
 	first := cfg.Pipeline.Steps[0]
@@ -149,6 +175,16 @@ pipeline:
 	}
 	if len(cfg.Pipeline.Steps[1].Params) != 0 {
 		t.Errorf("step[1].params = %#v, want empty", cfg.Pipeline.Steps[1].Params)
+	}
+}
+
+func TestLoadExplicitEmptyForwardResponseHeaders(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "pipeline:\n  forward_response_headers: []\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Pipeline.ForwardResponseHeaders) != 0 {
+		t.Fatalf("pipeline.forward_response_headers = %v, want explicitly disabled", cfg.Pipeline.ForwardResponseHeaders)
 	}
 }
 

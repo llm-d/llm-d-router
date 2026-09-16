@@ -25,7 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -47,16 +47,18 @@ const (
 
 	completionsRenderPath = "/v1/completions/render"
 	chatRenderPath        = "/v1/chat/completions/render"
+	messagesRenderPath    = "/v1/messages/render"
 
 	// maxErrorBodySnippetBytes truncates non-2xx response bodies before
 	// embedding them in the returned error, so a misconfigured upstream that
 	// returns a large HTML error page can't blow up log size.
 	maxErrorBodySnippetBytes = 1024
-)
 
-// arrayContentMarker detects an array-valued "content" field inside a
-// pre-marshaled chat message (multimodal parts).
-var arrayContentMarker = []byte(`"content":[`)
+	// vllmAPIKeyEnvVar names the environment variable holding the render
+	// endpoint's API key, sent by the warmup probe as a Bearer token. Request
+	// paths forward the inbound client's Authorization header instead.
+	vllmAPIKeyEnvVar = "VLLM_API_KEY"
+)
 
 // authHeaderCtxKey carries the inbound request's Authorization header from
 // Plugin.Produce to the render call without widening tokenInputProducer.produce.
@@ -71,6 +73,15 @@ func withAuthHeader(ctx context.Context, value string) context.Context {
 func authHeaderFromContext(ctx context.Context) string {
 	value, _ := ctx.Value(authHeaderCtxKey{}).(string)
 	return value
+}
+
+// vllmWarmupAuthHeader returns the Authorization header value for the warmup
+// probe, from VLLM_API_KEY; empty when the variable is unset.
+func vllmWarmupAuthHeader() string {
+	if key := os.Getenv(vllmAPIKeyEnvVar); key != "" {
+		return "Bearer " + key
+	}
+	return ""
 }
 
 // renderStatusError is a non-2xx response from the render endpoint.
@@ -90,17 +101,26 @@ func isRenderAuthError(err error) bool {
 }
 
 // vllmConfig configures the vLLM /render backend. Future protocol fields
-// (e.g., grpc) can be added alongside url.
+// (e.g., grpc) can be added under the same vllm block.
 type vllmConfig struct {
+	// MessagesRenderMode selects "auto" (default), "native" or "legacy" Messages rendering.
+	// The "legacy" value is deprecated.
+	MessagesRenderMode string `json:"messagesRenderMode,omitempty"`
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.
 	URL string `json:"url,omitempty"`
-	// Timeout is the per-request timeout for text-only requests
+	// PrefillOnly reserves one output token on the render copy, without changing inference.
+	PrefillOnly bool `json:"prefillOnly,omitempty"`
+	// EndpointDiscovery sends render requests directly to endpoints published
+	// by the configured data-layer discovery provider. Mutually exclusive with URL.
+	EndpointDiscovery *endpointDiscoveryConfig `json:"endpointDiscovery,omitempty"`
+	// Timeout is the per-request timeout for completions
 	// (Go duration string, e.g. "5s"). Defaults to 5s.
 	Timeout string `json:"timeout,omitempty"`
-	// MMTimeout is the per-request timeout for multimodal requests
-	// (image download/processing). Defaults to 30s.
+	// MMTimeout allows image download/processing for Chat and Messages requests.
+	// These endpoints use max(Timeout, MMTimeout) without inspecting content.
+	// Defaults to 30s.
 	MMTimeout string `json:"mmTimeout,omitempty"`
 	// CACertPath is a PEM CA bundle used to verify the render endpoint's
 	// server certificate when the URL scheme is https. When empty, the
@@ -117,19 +137,44 @@ type vllmConfig struct {
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
-// /v1/completions/render and /v1/chat/completions/render endpoints.
+// native render endpoints.
 type vllmHTTPRenderer struct {
-	client    *http.Client
-	baseURL   string
-	modelName string
-	timeout   time.Duration
-	mmTimeout time.Duration
+	client         *http.Client
+	endpointPicker renderEndpointPicker
+	timeout        time.Duration
+	mmTimeout      time.Duration
+	attemptTimeout time.Duration
+	prefillOnly    bool
 }
 
-func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, error) {
-	url := strings.TrimRight(cfg.URL, "/")
-	if url == "" {
-		url = defaultHTTPRenderURL
+func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
+	if cfg.URL != "" && cfg.EndpointDiscovery != nil {
+		return nil, errors.New("only one of 'url' or 'endpointDiscovery' may be set")
+	}
+
+	var endpointPicker renderEndpointPicker
+	var attemptTimeout time.Duration
+	if cfg.EndpointDiscovery != nil {
+		if cfg.hasTLS() {
+			return nil, errors.New("endpointDiscovery uses HTTP and cannot be combined with TLS settings; use 'url' for HTTPS")
+		}
+		discovered, err := newDiscoveredEndpointPicker(cfg.EndpointDiscovery)
+		if err != nil {
+			return nil, err
+		}
+		endpointPicker = discovered
+		if value := cfg.EndpointDiscovery.AttemptTimeout; value != "" {
+			attemptTimeout, err = time.ParseDuration(value)
+			if err != nil || attemptTimeout <= 0 {
+				return nil, fmt.Errorf("invalid 'endpointDiscovery.attemptTimeout' %q: must be a positive duration", value)
+			}
+		}
+	} else {
+		url := strings.TrimRight(cfg.URL, "/")
+		if url == "" {
+			url = defaultHTTPRenderURL
+		}
+		endpointPicker = fixedEndpointPicker(url)
 	}
 	timeout, err := parseHTTPDuration(cfg.Timeout, defaultHTTPRenderTimeout)
 	if err != nil {
@@ -149,10 +194,11 @@ func newVLLMHTTPRenderer(cfg *vllmConfig, modelName string) (*vllmHTTPRenderer, 
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
 		))},
-		baseURL:   url,
-		modelName: modelName,
-		timeout:   timeout,
-		mmTimeout: mmTimeout,
+		endpointPicker: endpointPicker,
+		timeout:        timeout,
+		mmTimeout:      mmTimeout,
+		attemptTimeout: attemptTimeout,
+		prefillOnly:    cfg.PrefillOnly,
 	}, nil
 }
 
@@ -218,23 +264,10 @@ func parseHTTPDuration(s string, def time.Duration) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// Render calls /v1/completions/render. The PayloadMap is forwarded verbatim
-// (preserving backend-specific fields such as reasoning) with the configured
-// model name stamped in. Char offsets are not returned by vLLM's render endpoint.
+// Render forwards a completions request, including token arrays, to vLLM.
 func (r *vllmHTTPRenderer) Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
-	pm, ok := payload.AsMap()
-	if !ok {
-		return nil, nil, errors.New("vLLM HTTP tokenizer requires a parsed PayloadMap")
-	}
-	// Shallow copy is sufficient because only the top-level model field is stamped in.
-	body := maps.Clone(pm)
-	body["model"] = r.modelName // `vllm launch render` requires the base model name
-	return r.postCompletionsRender(ctx, body)
-}
-
-func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) ([][]uint32, [][]tokenizerTypes.Offset, error) {
 	var resp []renderResponse
-	if err := r.postJSON(ctx, completionsRenderPath, body, r.timeout, &resp); err != nil {
+	if err := r.postJSON(ctx, completionsRenderPath, payload, r.timeout, &resp); err != nil {
 		return nil, nil, err
 	}
 	if len(resp) == 0 {
@@ -247,153 +280,26 @@ func (r *vllmHTTPRenderer) postCompletionsRender(ctx context.Context, body any) 
 	return allTokenIDs, nil, nil
 }
 
-// RenderChat calls /v1/chat/completions/render. The PayloadMap is forwarded
-// verbatim with the configured model name stamped in.
 func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
-	pm, ok := payload.AsMap()
-	if !ok {
-		return nil, nil, errors.New("vLLM HTTP tokenizer requires a parsed PayloadMap")
-	}
-	// Shallow copy is sufficient because only the top-level model field is stamped in.
-	body := maps.Clone(pm)
-	body["model"] = r.modelName // `vllm launch render` requires the base model name
-	return r.postChatRender(ctx, body, r.chatTimeout(pm))
+	return r.renderConversation(ctx, chatRenderPath, payload)
 }
 
-func (r *vllmHTTPRenderer) postChatRender(ctx context.Context, body any, timeout time.Duration) ([]uint32, *tokenization.MultiModalFeatures, error) {
+// RenderMessages leaves Anthropic conversion to vLLM.
+func (r *vllmHTTPRenderer) RenderMessages(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	return r.renderConversation(ctx, messagesRenderPath, payload)
+}
+
+func (r *vllmHTTPRenderer) renderConversation(ctx context.Context, path string, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	var resp renderResponse
-	if err := r.postJSON(ctx, chatRenderPath, body, timeout, &resp); err != nil {
+	if err := r.postJSON(ctx, path, payload, r.produceTimeout(), &resp); err != nil {
 		return nil, nil, err
 	}
 	return resp.TokenIDs, toKVCacheMM(resp.Features), nil
 }
 
-func (r *vllmHTTPRenderer) chatTimeout(payload fwkrh.PayloadMap) time.Duration {
-	messages, ok := payload["messages"].([]any)
-	if !ok {
-		return r.timeout
-	}
-	for _, rawMessage := range messages {
-		// Array-shaped content may require multimodal rendering; use the longer timeout.
-		switch message := rawMessage.(type) {
-		case map[string]any:
-			if parts, ok := message["content"].([]any); ok && len(parts) > 0 {
-				return r.mmTimeout
-			}
-		case json.RawMessage:
-			// Rebuilt payloads (Anthropic messages) carry pre-marshaled messages;
-			// an array-valued content field signals multimodal parts.
-			if bytes.Contains(message, arrayContentMarker) {
-				return r.mmTimeout
-			}
-		}
-	}
-	return r.timeout
-}
-
-// produceTimeout returns the worst-case configured render timeout (multimodal),
-// surfaced so the data-producer executor extends its budget past the default.
+// produceTimeout permits multimodal rendering without inspecting content.
 func (r *vllmHTTPRenderer) produceTimeout() time.Duration {
-	if r.mmTimeout > r.timeout {
-		return r.mmTimeout
-	}
-	return r.timeout
-}
-
-// chatRenderRequest is the wire body for POST /v1/chat/completions/render.
-// Used by the non-PayloadMap fallback path (gRPC, warmup). The model is
-// stamped in by the renderer, not carried here.
-type chatRenderRequest struct {
-	Messages             []chatMessage  `json:"messages"`
-	Tools                []any          `json:"tools,omitempty"`
-	Documents            []any          `json:"documents,omitempty"`
-	ChatTemplate         string         `json:"chat_template,omitempty"`
-	AddGenerationPrompt  bool           `json:"add_generation_prompt,omitempty"`
-	ContinueFinalMessage bool           `json:"continue_final_message,omitempty"`
-	ChatTemplateKWArgs   map[string]any `json:"chat_template_kwargs,omitempty"`
-}
-
-// chatMessage is one OpenAI-shaped message. Content is either a plain string
-// or an array of parts; chatContent's MarshalJSON picks the right wire form.
-// A nil Content omits the key entirely, matching messages that carry only
-// tool_calls or reasoning.
-type chatMessage struct {
-	Role       string       `json:"role"`
-	Content    *chatContent `json:"content,omitempty"`
-	ToolCalls  []any        `json:"tool_calls,omitempty"`
-	Reasoning  string       `json:"reasoning,omitempty"`
-	ToolCallID string       `json:"tool_call_id,omitempty"`
-}
-
-// chatContent serializes either Raw (string) or Parts (array of typed parts).
-// When both are empty it serializes as "" (an empty user message).
-type chatContent struct {
-	Raw   string
-	Parts []chatPart
-}
-
-func (c chatContent) MarshalJSON() ([]byte, error) {
-	if len(c.Parts) > 0 {
-		return json.Marshal(c.Parts)
-	}
-	return json.Marshal(c.Raw)
-}
-
-// chatPart is one OpenAI content part. Only the field matching Type is set.
-type chatPart struct {
-	Type     string        `json:"type"`
-	Text     string        `json:"text,omitempty"`
-	ImageURL *chatImageURL `json:"image_url,omitempty"`
-}
-
-type chatImageURL struct {
-	URL string `json:"url"`
-}
-
-// buildChatRenderRequest projects the kvcache RenderChatRequest into the
-// OpenAI-shaped wire body expected by vLLM's /v1/chat/completions/render.
-// Unknown content-block types are skipped.
-func buildChatRenderRequest(req *tokenizerTypes.RenderChatRequest) chatRenderRequest {
-	msgs := make([]chatMessage, len(req.Conversation))
-	for idx, c := range req.Conversation {
-		msgs[idx] = chatMessage{
-			Role:       c.Role,
-			Content:    toChatContent(c.Content),
-			ToolCalls:  c.ToolCalls,
-			Reasoning:  c.Reasoning,
-			ToolCallID: c.ToolCallID,
-		}
-	}
-	return chatRenderRequest{
-		Messages:             msgs,
-		Tools:                req.Tools,
-		Documents:            req.Documents,
-		ChatTemplate:         req.ChatTemplate,
-		AddGenerationPrompt:  req.AddGenerationPrompt,
-		ContinueFinalMessage: req.ContinueFinalMessage,
-		ChatTemplateKWArgs:   req.ChatTemplateKWArgs,
-	}
-}
-
-func toChatContent(c *tokenizerTypes.Content) *chatContent {
-	if c == nil {
-		return nil
-	}
-	if len(c.Structured) == 0 {
-		return &chatContent{Raw: c.Raw}
-	}
-	parts := make([]chatPart, 0, len(c.Structured))
-	for _, b := range c.Structured {
-		switch b.Type {
-		case blockTypeText:
-			parts = append(parts, chatPart{Type: blockTypeText, Text: b.Text})
-		case blockTypeImageURL:
-			parts = append(parts, chatPart{Type: blockTypeImageURL, ImageURL: &chatImageURL{URL: b.ImageURL.URL}})
-		default:
-			// Unsupported by the kvcache ContentBlock schema; skip.
-		}
-	}
-	return &chatContent{Parts: parts}
+	return max(r.timeout, r.mmTimeout)
 }
 
 // renderResponse is the subset of vLLM's GenerateRequest we consume.
@@ -432,38 +338,111 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 	return out
 }
 
-func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body any, timeout time.Duration, out any) error {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+// postJSON permits one retry on a different endpoint within the request budget.
+func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh.RequestPayload, timeout time.Duration, out any) error {
+	var payload []byte
+	switch body := body.(type) {
+	case fwkrh.RawPayload:
+		payload = body
+	case fwkrh.Marshaler:
+		var err error
+		payload, err = body.Marshal()
+		if err != nil {
+			return fmt.Errorf("marshal request: %w", err)
+		}
+	default:
+		return errors.New("native vLLM rendering requires an HTTP JSON payload")
+	}
+	if r.prefillOnly {
+		var err error
+		if payload, err = renderOnlyBudget(payload); err != nil {
+			return fmt.Errorf("apply render-only output budget: %w", err)
+		}
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.baseURL+path, bytes.NewReader(payload))
+	baseURL, err := r.endpointPicker.Pick()
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("pick render endpoint: %w", err)
+	}
+	picker, canRetry := r.endpointPicker.(retryingRenderEndpointPicker)
+	retryable, attemptErr := r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
+	if attemptErr == nil || !retryable || !canRetry || reqCtx.Err() != nil {
+		return attemptErr
+	}
+	baseURL, err = picker.PickExcluding(map[string]struct{}{baseURL: {}})
+	if errors.Is(err, errNoRenderEndpoints) {
+		return attemptErr
+	}
+	if err != nil {
+		return fmt.Errorf("pick alternate render endpoint: %w", err)
+	}
+	_, err = r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
+	return err
+}
+
+// renderOnlyBudget caps the output budget on the render copy of a JSON
+// envelope. Nested values stay raw JSON, so message and tool content reaches
+// the renderer with its key order intact.
+func renderOnlyBudget(payload []byte) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, err
+	}
+	// Automatic prompt truncation depends on the original output budget.
+	if truncate, ok := envelope["truncate_prompt_tokens"]; ok && !bytes.Equal(bytes.TrimSpace(truncate), []byte("null")) {
+		return payload, nil
+	}
+	envelope["max_tokens"] = json.RawMessage("1")
+	if _, ok := envelope["max_completion_tokens"]; ok {
+		envelope["max_completion_tokens"] = json.RawMessage("1")
+	}
+	if _, ok := envelope["min_tokens"]; ok {
+		envelope["min_tokens"] = json.RawMessage("0")
+	}
+	return json.Marshal(envelope)
+}
+
+// postJSONAttempt sends one render request and reports whether another endpoint may succeed.
+func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
+	if r.attemptTimeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(reqCtx, r.attemptTimeout)
+		defer cancel()
+	}
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return false, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// The render endpoint may require the same credential as inference;
 	// forward the inbound Authorization when present.
-	if auth := authHeaderFromContext(ctx); auth != "" {
+	if auth := authHeaderFromContext(reqCtx); auth != "" {
 		httpReq.Header.Set("Authorization", auth)
 	}
 
 	httpResp, err := r.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("post %s: %w", path, err)
+		return true, fmt.Errorf("post %s: %w", path, err)
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodySnippetBytes))
-		return &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
+		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
+		// Connection failures can surface after successful response headers.
+		var networkErr net.Error
+		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		return retryable, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return nil
+	return false, nil
+}
+
+// isRetryableRenderStatus reports whether a different endpoint may succeed.
+func isRetryableRenderStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 && status <= 599
 }

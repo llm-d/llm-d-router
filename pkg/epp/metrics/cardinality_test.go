@@ -39,10 +39,10 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
 	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
-	requestCounter.Reset()
+	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
-		requestCounter.Reset()
+		llmdRequestCounter.Reset()
 	})
 
 	PreAdmitModelLabels("llama-70b", "llama-70b-canary")
@@ -51,7 +51,7 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 	}
 	RecordRequestCounter("llama-70b", "llama-70b-canary", "fairness", 0)
 
-	series := promtestutil.CollectAndCount(requestCounter)
+	series := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, series, testCap+2, "cardinality must stay bounded, got %d series", series)
 	require.Equal(t, "llama-70b", boundModel("llama-70b"),
 		"configured model emits its real label after the flood")
@@ -65,17 +65,17 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	const testCap = 5
 	old := modelLabelLimiter
 	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
-	requestCounter.Reset()
+	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = old
-		requestCounter.Reset()
+		llmdRequestCounter.Reset()
 	})
 
 	for i := 0; i < 1000; i++ {
 		RecordRequestCounter(fmt.Sprintf("model-%d", i), "target", "fairness", 0)
 	}
 
-	count := promtestutil.CollectAndCount(requestCounter)
+	count := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, count, testCap+1,
 		"model_name cardinality must stay bounded by the cap, got %d series", count)
 }
@@ -87,10 +87,8 @@ func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 	const testCap = 5
 	resetFairnessLabelLimit(t)
 	metricsutil.SetFairnessIDLabelLimit(testCap)
-	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
-		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
 
@@ -98,11 +96,9 @@ func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 		RecordFlowControlRequestEnqueueDuration(fmt.Sprintf("tenant-%d", i), "0", "Dispatched", time.Millisecond)
 	}
 
-	// testCap admitted IDs + 1 overflow series, per family.
-	require.Equal(t, testCap+1, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
-		"1000 distinct fairness IDs must collapse to cap+overflow series, not one series each")
+	// testCap admitted IDs + 1 overflow series.
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
-		"the llm_d_epp family must be bounded identically")
+		"1000 distinct fairness IDs must collapse to cap+overflow series, not one series each")
 }
 
 // DeleteFlowControlFlowSeries backs the flow registry's GC hook: once a flow is collected, its
@@ -110,25 +106,21 @@ func TestFairnessLabelFloodCollapsesToOverflow(t *testing.T) {
 func TestDeleteFlowControlFlowSeries(t *testing.T) {
 	resetFairnessLabelLimit(t)
 	metricsutil.SetFairnessIDLabelLimit(10)
-	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
-		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
 
 	RecordFlowControlRequestEnqueueDuration("tenant-a", "0", "Dispatched", time.Millisecond)
 	RecordFlowControlRequestEnqueueDuration("tenant-a", "0", "Rejected", time.Millisecond)
 	RecordFlowControlRequestEnqueueDuration("tenant-b", "0", "Dispatched", time.Millisecond)
-	require.Equal(t, 3, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+	require.Equal(t, 3, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
 		"setup: expected one series per (fairness_id, outcome) pair")
 
 	DeleteFlowControlFlowSeries("tenant-a", "0")
 
-	require.Equal(t, 1, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
-		"all of tenant-a's series (every outcome) must be pruned; tenant-b's must survive")
 	require.Equal(t, 1, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
-		"the llm_d_epp family must be pruned identically")
+		"all of tenant-a's series (every outcome) must be pruned; tenant-b's must survive")
 }
 
 // The bound is applied mechanically in every record function that takes a fairness ID; this guards
@@ -140,11 +132,9 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 	metricsutil.SetFairnessIDLabelLimit(testCap)
 	oldModels := modelLabelLimiter
 	modelLabelLimiter = metricsutil.NewBoundedLabel(10)
-	requestCounter.Reset()
 	llmdRequestCounter.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = oldModels
-		requestCounter.Reset()
 		llmdRequestCounter.Reset()
 	})
 
@@ -154,8 +144,6 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdRequestCounter),
 		"100 distinct fairness IDs must collapse to cap+overflow series on the request family")
-	require.Equal(t, 1, promtestutil.CollectAndCount(requestCounter),
-		"the deprecated family has no fairness_id label and must stay a single series")
 }
 
 // RecordFlowControlRequestQueueDuration takes request-body model names; they must flow through the
@@ -166,11 +154,9 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
 	resetFairnessLabelLimit(t)
 	metricsutil.SetFairnessIDLabelLimit(10)
-	flowControlRequestQueueDuration.Reset()
 	llmdFlowControlRequestQueueDuration.Reset()
 	t.Cleanup(func() {
 		modelLabelLimiter = oldModels
-		flowControlRequestQueueDuration.Reset()
 		llmdFlowControlRequestQueueDuration.Reset()
 	})
 
@@ -179,10 +165,8 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 		RecordFlowControlRequestQueueDuration("tenant", "0", "Dispatched", "pool", m, m, time.Millisecond)
 	}
 
-	require.Equal(t, testCap+1, promtestutil.CollectAndCount(flowControlRequestQueueDuration),
-		"100 distinct model names must collapse to cap+overflow series, not one series each")
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestQueueDuration),
-		"the llm_d_epp family must be bounded identically")
+		"100 distinct model names must collapse to cap+overflow series, not one series each")
 }
 
 // A client can choose the overflow value itself as its fairness ID; GC of that flow must not
@@ -190,32 +174,27 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
 	resetFairnessLabelLimit(t)
 	metricsutil.SetFairnessIDLabelLimit(1)
-	flowControlRequestEnqueueDuration.Reset()
 	llmdFlowControlRequestEnqueueDuration.Reset()
 	t.Cleanup(func() {
-		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
 
 	// tenant-a fills the single cap slot; tenant-b folds to the overflow series.
 	RecordFlowControlRequestEnqueueDuration("tenant-a", "0", "Dispatched", time.Millisecond)
 	RecordFlowControlRequestEnqueueDuration("tenant-b", "0", "Dispatched", time.Millisecond)
-	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
+	require.Equal(t, 2, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
 		"setup: expected the admitted series plus the overflow series")
 
 	DeleteFlowControlFlowSeries(metricsutil.OverflowValue, "0")
 
-	require.Equal(t, 2, promtestutil.CollectAndCount(flowControlRequestEnqueueDuration),
-		"deleting the overflow value must be a no-op; the shared overflow series must survive")
 	require.Equal(t, 2, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration),
-		"the llm_d_epp family must be preserved identically")
+		"deleting the overflow value must be a no-op; the shared overflow series must survive")
 }
 
 // The configured cap propagates through the record functions to the emitted series.
 func TestFairnessIDLabelLimitAppliesToRecordedMetrics(t *testing.T) {
 	resetFairnessLabelLimit(t)
 	t.Cleanup(func() {
-		flowControlRequestEnqueueDuration.Reset()
 		llmdFlowControlRequestEnqueueDuration.Reset()
 	})
 
@@ -233,7 +212,6 @@ func TestFairnessIDLabelLimitAppliesToRecordedMetrics(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			metricsutil.SetFairnessIDLabelLimit(test.limit)
-			flowControlRequestEnqueueDuration.Reset()
 			llmdFlowControlRequestEnqueueDuration.Reset()
 
 			for i := 0; i < 100; i++ {

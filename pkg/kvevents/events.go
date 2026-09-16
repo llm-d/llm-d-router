@@ -71,8 +71,7 @@ type RawMessage struct {
 	// SourceEndpoint is the serving endpoint associated with the subscriber.
 	SourceEndpoint string
 	// reset clears the message's pod before later messages on the same queue.
-	reset  bool
-	stream *eventStream
+	reset bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and
@@ -84,12 +83,13 @@ type RawMessage struct {
 }
 
 // StreamEvent describes an endpoint KV-event stream transition relevant to
-// consumers that can repair an incomplete derived index.
+// consumers that can repair an incomplete derived index. The pool emits every
+// transition from the worker that processes the endpoint's messages, so
+// transitions are ordered with the endpoint's events. A retired subscriber's
+// queued reset emits StreamEventCleared after its last accepted message.
 type StreamEvent string
 
 const (
-	StreamEventAttached        StreamEvent = "attached"
-	StreamEventDetached        StreamEvent = "detached"
 	StreamEventMissingParent   StreamEvent = "missing_parent"
 	StreamEventReportSupported StreamEvent = "report_supported"
 	StreamEventStored          StreamEvent = "stored"

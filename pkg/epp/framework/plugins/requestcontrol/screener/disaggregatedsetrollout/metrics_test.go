@@ -32,7 +32,7 @@ import (
 func resetMetrics(t *testing.T) {
 	t.Helper()
 	registerMetrics()
-	strictHeaderNoMatchTotal.Reset()
+	strictRevisionNoMatchTotal.Reset()
 	revisionGatingShare.Reset()
 }
 
@@ -41,12 +41,12 @@ func TestMetricStrictHeaderNoMatch(t *testing.T) {
 	config := validConfig()
 	config.RevisionGating = &RevisionGating{Mode: GatingModeDisabled}
 	screener := newTestScreener(config)
-	screener.screenStrictSelectors(context.Background(),
-		&fwksched.InferenceRequest{Headers: map[string]string{"x-disagg-revision": "v99"}},
+	screener.Screen(context.Background(),
+		&fwksched.InferenceRequest{Headers: map[string]string{"x-llm-d-disagg-revision": "v99"}},
 		[]fwksched.Endpoint{endpoint("p1", revLabels("v1"))},
 	)
 
-	got := testutil.ToFloat64(strictHeaderNoMatchTotal.WithLabelValues(PluginType, "test-screener", "revision"))
+	got := testutil.ToFloat64(strictRevisionNoMatchTotal.WithLabelValues(PluginType, "test-screener"))
 	if got != 1 {
 		t.Fatalf("strict no-match: want 1, got %v", got)
 	}

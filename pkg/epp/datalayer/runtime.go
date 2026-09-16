@@ -57,6 +57,10 @@ type Runtime struct {
 
 	crossReplicaPub *crossReplicaPublisher
 
+	notificationSyncMu sync.RWMutex
+	// notificationSyncs remains nil until Start has registered every source.
+	notificationSyncs []*notificationInitialSync
+
 	pendingMu            sync.Mutex
 	pendingRegistrations []fwkdl.PendingRegistration // code-registered (source-type, extractor) pairs, resolved by Configure()
 
@@ -387,9 +391,14 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 // Start is called to enable the Runtime to start processing data collection. It wires
 // Kubernetes notifications into the manager and starts cross-replica syncing.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
+	r.notificationSyncMu.Lock()
+	r.notificationSyncs = nil
+	r.notificationSyncMu.Unlock()
+
 	r.StartCrossReplicaSync(ctx)
 
-	return r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
+	notificationSyncs := make([]*notificationInitialSync, 0, r.notification.Count())
+	err := r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
 		var extractors []fwkdl.NotificationExtractor
 		if rawExts, ok := r.extractors.Get(srcName); ok {
 			extractors = make([]fwkdl.NotificationExtractor, len(rawExts))
@@ -397,11 +406,42 @@ func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 				extractors[i] = e.(fwkdl.NotificationExtractor)
 			}
 		}
-		if err := BindNotificationSource(src, extractors, mgr); err != nil {
+		initialSync, err := bindNotificationSource(src, extractors, mgr)
+		if err != nil {
 			return fmt.Errorf("failed to bind notification source %s: %w", src.TypedName(), err)
 		}
+		notificationSyncs = append(notificationSyncs, initialSync)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	r.notificationSyncMu.Lock()
+	r.notificationSyncs = notificationSyncs
+	r.notificationSyncMu.Unlock()
+	return nil
+}
+
+// CheckReady reports readiness after Start has registered every notification
+// source and each source has processed its initial Kubernetes events.
+func (r *Runtime) CheckReady() error {
+	r.notificationSyncMu.RLock()
+	defer r.notificationSyncMu.RUnlock()
+
+	if r.notificationSyncs == nil {
+		return errors.New("notification sources have not been initialized")
+	}
+	for _, initialSync := range r.notificationSyncs {
+		if !initialSync.hasSynced() {
+			return fmt.Errorf("notification source %s has not processed its initial events", initialSync.tracker.Name())
+		}
+	}
+	return nil
+}
+
+func (*Runtime) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "datalayer", Name: "runtime"}
 }
 
 // StartCrossReplicaSync starts the shared cross-replica publishing loop.
@@ -598,3 +638,4 @@ func findUnique(sourceType string, hits ...sourceHit) (sourceHit, error) {
 
 var _ EndpointFactory = (*Runtime)(nil)
 var _ fwkdl.Registrar = (*Runtime)(nil)
+var _ fwkplugin.ReadinessChecker = (*Runtime)(nil)

@@ -97,6 +97,8 @@ type endpointRepairState struct {
 
 // fullReportRepair retains missing block identities until a store, removal,
 // or cache reset resolves them. Report requests share an endpoint cooldown.
+// A cache reset, including the reset queued when a subscriber is removed,
+// deletes the endpoint's state.
 type fullReportRepair struct {
 	mu             sync.Mutex
 	endpoints      map[string]endpointRepairState
@@ -127,12 +129,12 @@ func (r *fullReportRepair) observe(endpoint string, event kvevents.StreamEvent, 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if event == kvevents.StreamEventDetached {
+	if event == kvevents.StreamEventCleared {
 		delete(r.endpoints, endpoint)
 		return
 	}
 	state, exists := r.endpoints[endpoint]
-	if !exists && event != kvevents.StreamEventAttached {
+	if !exists && event != kvevents.StreamEventReportSupported && event != kvevents.StreamEventMissingParent {
 		return
 	}
 	switch event {
@@ -149,9 +151,6 @@ func (r *fullReportRepair) observe(endpoint string, event kvevents.StreamEvent, 
 		for _, block := range blocks {
 			delete(state.missing, block)
 		}
-	case kvevents.StreamEventCleared:
-		state.missing = nil
-		state.reportSupported = false
 	}
 	r.endpoints[endpoint] = state
 }

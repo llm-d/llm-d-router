@@ -3,6 +3,8 @@ name: Check Typos
 on:
   pull_request:
   push:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -20,5 +22,5 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check typos
-        uses: crate-ci/typos@v1.50.0
+        uses: crate-ci/typos@v1.50.1
 

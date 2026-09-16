@@ -86,6 +86,10 @@ type TopologyExtractor struct {
 	zoneLabel     string
 	regionLabel   string
 	dk            fwkplugin.DataKey
+	// slot pins the Topology value type at construction so a future change
+	// to the declared type surfaces at the assignment boundary, not in
+	// downstream readers.
+	slot *fwkdl.Slot[*attrtopology.Topology]
 
 	// mu guards endpoints and hostnames.
 	mu sync.Mutex
@@ -129,6 +133,7 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		zoneLabel:     p.Zone,
 		regionLabel:   p.Region,
 		dk:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name),
+		slot:          fwkdl.NewSlot[*attrtopology.Topology](attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name)),
 		endpoints:     make(map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint),
 		hostnames:     make(map[types.NamespacedName]string),
 	}, nil
@@ -226,7 +231,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" && rack == "" && zone == "" && region == "" {
 		return nil
 	}
-	event.Endpoint.GetAttributes().Put(h.ext.dk, &attrtopology.Topology{
+	h.ext.slot.Put(event.Endpoint.GetAttributes(), &attrtopology.Topology{
 		Hostname: hn,
 		Rack:     rack,
 		Zone:     zone,
@@ -303,7 +308,7 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 				topo.Region = existing.Region
 			}
 		}
-		ep.GetAttributes().Put(h.ext.dk, topo)
+		h.ext.slot.Put(ep.GetAttributes(), topo)
 	}
 	return nil
 }

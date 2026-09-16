@@ -43,21 +43,6 @@ type subscriberEntry struct {
 	done chan struct{}
 }
 
-// eventStream serializes detachment with work already dequeued by the pool.
-type eventStream struct {
-	mu       sync.RWMutex
-	detached bool
-}
-
-func (sm *SubscriberManager) detach(podIdentifier string, entry *subscriberEntry) {
-	stream := entry.subscriber.stream
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	stream.detached = true
-	entry.cancel()
-	sm.pool.notifyStreamEvent(streamIdentity(podIdentifier, entry.sourceEndpoint), StreamEventDetached)
-}
-
 // NewSubscriberManager creates a new subscriber manager.
 func NewSubscriberManager(pool *Pool) *SubscriberManager {
 	return &SubscriberManager{
@@ -97,8 +82,13 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"newSourceEndpoint", sourceEndpoint,
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
-		sm.detach(podIdentifier, entry)
+		sm.retireSubscriber(entry)
 		delete(sm.subscribers, podIdentifier)
+		if err := ctx.Err(); err != nil {
+			metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
+			cleanupSubscriberMetrics(podIdentifier, entry.done)
+			return err
+		}
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
 	}
@@ -107,13 +97,10 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	debugLogger.Info("Creating new subscriber", "podIdentifier", podIdentifier, "endpoint", endpoint)
 	subscriber := newZMQSubscriber(
 		sm.pool, podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter, remoteSocket)
-	subscriber.stream = &eventStream{}
 
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	// Attach first so the initial message sees an eligible endpoint.
-	sm.pool.notifyStreamEvent(streamIdentity(podIdentifier, sourceEndpoint), StreamEventAttached)
 	go func() {
 		defer close(done)
 		subscriber.Start(subCtx)
@@ -134,8 +121,8 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	return nil
 }
 
-// RemoveSubscriber removes a subscriber for the given pod identifier.
-func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) {
+// RemoveSubscriber removes a subscriber for the given pod identifier and reports whether it existed.
+func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) bool {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	sm.mu.Lock()
@@ -144,14 +131,32 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	entry, exists := sm.subscribers[podIdentifier]
 	if !exists {
 		debugLogger.Info("Subscriber does not exist, nothing to remove", "podIdentifier", podIdentifier)
-		return
+		return false
 	}
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
-	sm.detach(podIdentifier, entry)
+	sm.retireSubscriber(entry)
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
+	return true
+}
+
+// retireSubscriber stops a subscriber without waiting for its socket goroutine.
+// A source reset is only safe when no other subscriber still represents the
+// same serving endpoint.
+func (sm *SubscriberManager) retireSubscriber(entry *subscriberEntry) {
+	resetSource := entry.sourceEndpoint != ""
+	if resetSource {
+		for _, other := range sm.subscribers {
+			if other != entry && other.sourceEndpoint == entry.sourceEndpoint {
+				resetSource = false
+				break
+			}
+		}
+	}
+	entry.cancel()
+	entry.subscriber.retire(resetSource)
 }
 
 // cleanupSubscriberMetrics drops the per-pod series for a removed subscriber
@@ -164,30 +169,28 @@ func cleanupSubscriberMetrics(podIdentifier string, done <-chan struct{}) {
 	}()
 }
 
-// Shutdown shuts down all subscribers.
+// Shutdown shuts down all subscribers and waits for their goroutines to exit.
 func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	debugLogger.Info("Shutting down subscriber manager")
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	dones := make([]chan struct{}, 0, len(sm.subscribers))
 	for podIdentifier, entry := range sm.subscribers {
 		debugLogger.Info("Shutting down subscriber", "podIdentifier", podIdentifier)
-		sm.detach(podIdentifier, entry)
+		entry.cancel()
 		cleanupSubscriberMetrics(podIdentifier, entry.done)
+		dones = append(dones, entry.done)
 	}
 
 	sm.subscribers = make(map[string]*subscriberEntry)
 	metrics.SubscriberActive.Set(0)
-	debugLogger.Info("All subscribers shut down")
-}
+	sm.mu.Unlock()
 
-func streamIdentity(podIdentifier, sourceEndpoint string) string {
-	if sourceEndpoint != "" {
-		return sourceEndpoint
+	for _, done := range dones {
+		<-done
 	}
-	return podIdentifier
+	debugLogger.Info("All subscribers shut down")
 }
 
 // GetActiveSubscribers returns the list of active pod identifiers and their endpoints.

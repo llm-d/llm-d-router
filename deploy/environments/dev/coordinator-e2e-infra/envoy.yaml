@@ -1,11 +1,9 @@
 # Hand-rolled Envoy manifest for the coordinator e-p-d-pool e2e test.
 #
-# Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes any
-# request carrying an EPP-Profile header (encode | prefill | decode) to the
+# Routes requests carrying an EPP-Profile header (encode | prefill | decode) to the
 # single EPP's ext_proc cluster; the EPP itself picks the scheduling profile
 # named by that header value (see header-profile-handler). The chosen EPP picks
-# an endpoint and Envoy forwards the request to it via the ORIGINAL_DST cluster
-# (just like the single-pool e2e Envoy).
+# an endpoint and Envoy forwards the request to it via the ORIGINAL_DST cluster.
 #
 # A request without an EPP-Profile header is the external client request: it
 # matches the default route and is forwarded to the coordinator, the pipeline

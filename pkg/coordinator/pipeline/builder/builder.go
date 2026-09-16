@@ -26,12 +26,21 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
 
 // validatePipeline rejects configurations that cannot work before any step runs.
-// The tokens-in format (use_openai_format=false) sends token IDs that only the
-// render step produces, so it requires a render step in the pipeline.
+// The async-broker step must intercept requests before any processing step
+// touches them (queued bodies are stored verbatim, and passthrough stamping
+// must precede routing), so it is only valid in first position. The tokens-in
+// format (use_openai_format=false) sends token IDs that only the render step
+// produces, so it requires a render step in the pipeline.
 func validatePipeline(p config.PipelineConfig) error {
+	for i, s := range p.Steps {
+		if s.Type == asyncbroker.StepName && i > 0 {
+			return fmt.Errorf("the %q step must be the first pipeline step, found it at position %d", asyncbroker.StepName, i+1)
+		}
+	}
 	if p.UseOpenAIFormat {
 		return nil
 	}
@@ -43,29 +52,29 @@ func validatePipeline(p config.PipelineConfig) error {
 	return fmt.Errorf("pipeline.use_openai_format=false requires a %q step (the tokens-in format sends token IDs that render produces)", steps.RenderStepName)
 }
 
-func mergeConnectorDefaults(params map[string]any, kvConnector, ecConnector string) map[string]any {
+func mergePipelineDefaults(params map[string]any, cfg config.PipelineConfig) map[string]any {
 	out := make(map[string]any, len(params))
 	for k, v := range params {
 		out[k] = v
 	}
-	if _, ok := out[steps.ParamKVConnector]; !ok && kvConnector != "" {
-		out[steps.ParamKVConnector] = kvConnector
+	if _, ok := out[steps.ParamKVConnector]; !ok && cfg.KVConnector != "" {
+		out[steps.ParamKVConnector] = cfg.KVConnector
 	}
-	if _, ok := out[steps.ParamECConnector]; !ok && ecConnector != "" {
-		out[steps.ParamECConnector] = ecConnector
+	if _, ok := out[steps.ParamECConnector]; !ok && cfg.ECConnector != "" {
+		out[steps.ParamECConnector] = cfg.ECConnector
 	}
 	return out
 }
 
-// Build validates cfg.Pipeline and constructs its steps in order.
-func Build(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Step, error) {
+// Build validates cfg.Pipeline and constructs its pipeline.
+func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, error) {
 	if err := validatePipeline(cfg.Pipeline); err != nil {
 		return nil, err
 	}
 
 	var pipelineSteps []pipeline.Step
 	for _, stepCfg := range cfg.Pipeline.Steps {
-		params := mergeConnectorDefaults(stepCfg.Params, cfg.Pipeline.KVConnector, cfg.Pipeline.ECConnector)
+		params := mergePipelineDefaults(stepCfg.Params, cfg.Pipeline)
 		if _, ok := params["use_openai_format"]; !ok {
 			params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
 		}
@@ -76,5 +85,5 @@ func Build(cfg *config.Config, gwClient *gateway.Client) ([]pipeline.Step, error
 
 		pipelineSteps = append(pipelineSteps, step)
 	}
-	return pipelineSteps, nil
+	return pipeline.NewWithForwardResponseHeaders(pipelineSteps, cfg.Pipeline.ForwardResponseHeaders)
 }

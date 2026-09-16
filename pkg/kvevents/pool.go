@@ -22,7 +22,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -30,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
@@ -37,7 +37,7 @@ import (
 
 const (
 	defaultEventSourceDeviceTier = "gpu"
-	defaultPodSelector           = "llm-d.ai/inference-serving=true"
+	defaultPodSelector           = ""
 )
 
 // normalizeDeviceTier lowercases an event's device tier and defaults an empty
@@ -116,6 +116,7 @@ type Config struct {
 // PodDiscoveryConfig holds configuration for the Kubernetes pod reconciler.
 type PodDiscoveryConfig struct {
 	// PodLabelSelector is a label selector string for filtering which pods to watch.
+	// Empty matches every pod.
 	// Example: "app=vllm" or "app=vllm,tier=gpu"
 	PodLabelSelector string `json:"podLabelSelector"`
 	// PodNamespace limits the reconciler to watch pods in a specific namespace.
@@ -196,9 +197,12 @@ type Pool struct {
 // Registration is idempotent (guarded by a sync.Once).
 func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProcessor,
 	adapter EngineAdapter,
-) *Pool {
+) (*Pool, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
+	}
+	if cfg.Concurrency <= 0 {
+		return nil, fmt.Errorf("kvEventsConfig.concurrency must be positive, got %d", cfg.Concurrency)
 	}
 
 	p := &Pool{
@@ -218,7 +222,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 
 	metrics.Register()
 
-	return p
+	return p, nil
 }
 
 // SetStreamObserver installs the observer for endpoint stream state. It is
@@ -354,6 +358,11 @@ func (p *Pool) AddTask(task *RawMessage) {
 	p.addQueueDepth(1)
 }
 
+// resetForSource queues a pod reset on the same shard as its event stream.
+func (p *Pool) resetForSource(topic, sourceEndpoint string) {
+	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
+}
+
 // worker is the main processing loop for a single worker goroutine.
 // It processes messages from its dedicated queue using the workqueue pattern.
 func (p *Pool) worker(ctx context.Context, workerIndex int) {
@@ -385,13 +394,6 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 
 // processRawMessage decodes the raw message payload using the adapter and processes the resulting event batch.
 func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
-	if msg.stream != nil {
-		msg.stream.mu.RLock()
-		defer msg.stream.mu.RUnlock()
-		if msg.stream.detached {
-			return
-		}
-	}
 	logger := log.FromContext(ctx)
 	if msg.reset {
 		podID := msg.SourceEndpoint
@@ -418,8 +420,8 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(
-			attribute.String("llm_d.kv_cache.events.topic", msg.Topic),
-			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(msg.Payload)),
+			semconv.LLMDKVCacheEventsTopic(msg.Topic),
+			semconv.LLMDKVCacheEventsPayloadSizeBytes(len(msg.Payload)),
 		)
 	}
 
@@ -437,8 +439,8 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	}
 	if tracingActive {
 		span.SetAttributes(
-			attribute.String("llm_d.kv_cache.events.pod_id", podID),
-			attribute.Int("llm_d.kv_cache.events.event_count", len(batch.Events)),
+			semconv.LLMDKVCacheEventsPodID(podID),
+			semconv.LLMDKVCacheEventsEventCount(len(batch.Events)),
 		)
 	}
 
@@ -463,7 +465,7 @@ func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, Eve
 	// pod after the SourceEndpoint override. Repeating the pre-override pod
 	// under the same key would give one attribute two meanings in one trace.
 	if span.IsRecording() {
-		span.SetAttributes(attribute.String("gen_ai.request.model", modelName))
+		span.SetAttributes(semconv.GenAIRequestModel(modelName))
 	}
 
 	return podID, modelName, batch, nil
@@ -474,7 +476,6 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
-		return
 	}
 	p.dedup.clear(podIdentifier)
 	p.notifyStreamEvent(podIdentifier, StreamEventCleared)
