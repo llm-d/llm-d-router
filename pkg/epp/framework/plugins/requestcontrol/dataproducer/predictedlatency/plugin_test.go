@@ -47,6 +47,8 @@ type mockPredictor struct {
 	// capturedBulkStrictRequests records the requests passed to the most recent
 	// PredictBulkStrict call, so tests can assert what was sent to the predictor.
 	capturedBulkStrictRequests []latencypredictor.PredictionRequest
+	// capturedTrainingEntries records entries passed to AddTrainingDataBulk.
+	capturedTrainingEntries []latencypredictor.TrainingEntry
 }
 
 func (m *mockPredictor) Predict(ctx context.Context, request latencypredictor.PredictionRequest) (*latencypredictor.PredictionResponse, error) {
@@ -94,6 +96,7 @@ func (m *mockPredictor) PredictBulkStrict(ctx context.Context, requests []latenc
 }
 
 func (m *mockPredictor) AddTrainingDataBulk(data []latencypredictor.TrainingEntry) error {
+	m.capturedTrainingEntries = append(m.capturedTrainingEntries, data...)
 	return nil
 }
 
