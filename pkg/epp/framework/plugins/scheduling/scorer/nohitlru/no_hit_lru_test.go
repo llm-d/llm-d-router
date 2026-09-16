@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -70,6 +71,10 @@ func (h *fakeHandle) CrossReplicaSyncer() plugin.Plugin {
 
 func (h *fakeHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
 	h.crossReplicaSyncer = syncer
+}
+
+func (h *fakeHandle) RefreshMetricsInterval() time.Duration {
+	return 0
 }
 
 type stubPlugin struct {

@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +53,10 @@ func (h *testHandle) CrossReplicaSyncer() plugin.Plugin {
 
 func (h *testHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
 	h.crossReplicaSyncer = syncer
+}
+
+func (h *testHandle) RefreshMetricsInterval() time.Duration {
+	return 0
 }
 
 type testHandlePlugins struct {
