@@ -32,8 +32,9 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - Self-check on the way out: if the change grew larger than expected or the fix feels hacky, rewrite the clean version before opening the PR.
 - Verify the code passes `make presubmit` locally before submitting a PR.
 - Always use the project's `.github/PULL_REQUEST_TEMPLATE.md`.
-  - Document user (not developer) facing changes in the ```release-note``` block. The  `release-notes.d/unreleased/*`
-    file is automatically generated from the block's content - do not create the file directly. 
+  - Document user (not developer) facing changes in the ```release-note``` block. A required check
+    validates it on the PR; the note is read from the PR body directly when release notes are
+    assembled at tag time.
   - If you include a test plan section, mark passing tests with [x] so it is clear which ran and passed.
     List only new tests - indicate functionality verified, not the test names.
 
@@ -41,6 +42,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 - Standard Go. `make format` and `make lint` are authoritative.
 - Comments are terse and only present when the WHY is non-obvious. Never paraphrase the code.
+- Avoid human body-part terms in docs and comments. Use stage/step/request/pod/worker. CPU architecture terms (ARM, arm64, armv7*, armhf) are OK.
 - Docs and comments describe the current state on its own terms. No "previously", "now", "recently", "renamed from", "added to fix", "this PR", "see above", or other temporal, deictic, or conversational framing. A reader with no context for the change must still understand the text.
 - State each fact once, in its canonical location. Do not duplicate across struct docs, prose, tables, inline comments, and examples.
 - Do not use Unicode symbols or special characters in general, unless explicitly requested.

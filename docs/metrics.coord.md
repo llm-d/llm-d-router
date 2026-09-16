@@ -28,6 +28,11 @@ process on the metrics port (default 9090, configurable with `--metrics-port`), 
 carrying the inference paths and `/healthz` and `/readyz`. A non-positive port disables the
 endpoint.
 
+The endpoint serves HTTP when no certificate directory is set. Set `--metrics-cert-dir` or
+`server.metrics_cert_dir` to a directory containing `tls.crt` and `tls.key` to serve HTTPS.
+If a certificate directory is set, missing or invalid files stop the coordinator. The metrics listener does not fall back to HTTP.
+Valid certificate changes take effect without restarting the coordinator.
+
 The endpoint serves the shared controller-runtime registry, so controller-runtime's process
 collectors appear alongside the coordinator metrics. It is unauthenticated. Authenticating it costs
 RBAC for TokenReview and SubjectAccessReview on the coordinator's ServiceAccount.
@@ -142,7 +147,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 | `llm_d_coordinator_execution_path_total` | `llm_d_epp_disagg_decision_total` | Coordinator observes the phases that actually ran on the client request; EPP records the routing decision that was made and adds plugin labels. |
 | `llm_d_coordinator_step_*`, `llm_d_coordinator_upstream_request_*`, `llm_d_coordinator_conditional_decode_probes_total` | None | Unique to coordinator. |
 
-**EPP-only metrics:** Scheduling, flow control, and pool aggregates have no coordinator counterpart. EPP's token counts and TTFT do, but they are per leg: the same prompt reaches EPP on more than one leg, and decode-leg TTFT starts after render, encode, and prefill have finished, so neither describes a client request. Only the coordinator sees a client request as one request. See [Deliberate omissions](#deliberate-omissions) for what it could report and why it does not today.
+**EPP-only metrics:** Scheduling, flow control, and pool aggregates have no coordinator counterpart. EPP's token counts and TTFT do, but they are per request: the same prompt reaches EPP on more than one request, and decode-request TTFT starts after render, encode, and prefill have finished, so neither describes a client request. Only the coordinator sees a client request as one request. See [Deliberate omissions](#deliberate-omissions) for what it could report and why it does not today.
 
 ## Deliberate omissions
 
@@ -154,7 +159,7 @@ The coordinator emits no output or cached token-count metrics. Those values live
 
 The coordinator emits no TTFT metric. Identifying the first token requires parsing the streamed
 response, which the decode step does not do: it proxies bytes straight to the client. EPP measures
-TTFT, but only per leg, since each phase reaches it as a separate request, so its decode-leg
+TTFT, but only per request, since each phase reaches it as a separate request, so its decode-step
 `request_ttft_seconds` starts after render, encode, and prefill have already finished. Neither
 component reports the client's full wait for output.
 

@@ -25,10 +25,10 @@ import (
 
 // pickDPRank returns a deterministic DP rank for a request as
 // blake2s(requestID) mod dpSize. With dpSize > 1, vLLM's API servers share a
-// port via SO_REUSEPORT and the kernel may route a disagg pair's two legs to
-// different DP ranks; pinning both legs to the same rank keeps the MoRI-IO
-// handshake from addressing a peer that is not listening. dpSize <= 1 returns
-// 0 so single-DP deployments are unaffected.
+// port via SO_REUSEPORT and the kernel may route a disagg pair's prefill and
+// decode requests to different DP ranks; pinning both requests to the same rank
+// keeps the MoRI-IO handshake from addressing a peer that is not listening.
+// dpSize <= 1 returns 0 so single-DP deployments are unaffected.
 func pickDPRank(requestID string, dpSize int) int {
 	if dpSize <= 1 {
 		return 0
@@ -43,8 +43,8 @@ func pickDPRank(requestID string, dpSize int) int {
 	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(dpSize))
 }
 
-// resolveDecodeDPRank picks the DP rank for the decode leg in serial WRITE
-// dispatch. It prefers the rank the prefill leg returned in its
+// resolveDecodeDPRank picks the DP rank for the decode request in serial WRITE
+// dispatch. It prefers the rank the prefill request returned in its
 // kv_transfer_params (remote_dp_rank), but only when that value is a valid
 // integer in [0, dpSize); otherwise it falls back to the deterministic hash of
 // the request id. The returned rank is therefore always in range, so the caller

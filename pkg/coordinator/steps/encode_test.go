@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -251,15 +252,12 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
-		// Extract hash from tokens.features
-		tokens, _ := receivedBody["tokens"].(map[string]any)
-		features, _ := tokens["features"].(map[string]any)
-		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
-		hash, _ := imageHashes[0].(string)
+		// The chat/completions sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
-				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			},
 		})
 	}))
@@ -275,7 +273,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -321,25 +319,9 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
 	}
 
-	// Verify tokens nested field
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 4 { // BOS + 3 placeholders
-		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data in chat format")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions format should not have a tokens field")
 	}
 
 	// Verify no top-level token_ids or features
@@ -353,7 +335,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 
 // TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens verifies the
 // encode chat sub-request carries max_completion_tokens=1 unconditionally
-// (via capSingleTokenOutput/reqcommon.PrimeSingleTokenRequest), even though the
+// (via reqcommon.CapSingleToken), even though the
 // sub-request is built fresh from the request context and never copies the
 // client's own max_completion_tokens value.
 func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {
@@ -378,7 +360,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-max-completion-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -450,37 +432,44 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 // multimodal entries are present: the prefill worker runs the vision encoder
 // inline, so the encode fan-out and EC handoff are skipped.
 func TestEncodeStep_SkipsForGenerate(t *testing.T) {
-	gatewayCallCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gatewayCallCount++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	for name, path := range map[string]string{
+		"exact path":    reqcommon.PathGenerate,
+		"prefixed path": "/prefix" + reqcommon.PathGenerate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gatewayCallCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gatewayCallCount++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
 
-	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
-	if err != nil {
-		t.Fatal(err)
-	}
+			gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+			step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	reqCtx := &pipeline.RequestContext{
-		RequestID:    "req-generate",
-		Model:        "test-model",
-		OriginalPath: gateway.DefaultGeneratePath,
-		TokenIDs:     []int{1, 32000, 32000, 2},
-		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
-		},
-	}
+			reqCtx := &pipeline.RequestContext{
+				RequestID:    "req-generate",
+				Model:        "test-model",
+				OriginalPath: path,
+				TokenIDs:     []int{1, 32000, 32000, 2},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+				},
+			}
 
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if gatewayCallCount != 0 {
-		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
-	}
-	if reqCtx.ECTransferParams != nil {
-		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gatewayCallCount != 0 {
+				t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
+			}
+			if reqCtx.ECTransferParams != nil {
+				t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+			}
+		})
 	}
 }
 
@@ -581,9 +570,9 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 }
 
 // TestEncodeStep_GenerateFormat_CapsSingleToken verifies the generate-format
-// encoder sub-request caps output to a single token: sampling_params carries
-// max_tokens=1 and strips min_tokens (it defaults to 0, keeping min_tokens <=
-// max_tokens).
+// encoder sub-request carries sampling_params.max_tokens=1. The sub-request is
+// built from RequestContext, so the min_tokens check guards against the step
+// starting to forward client sampling_params.
 func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	var samplingParams map[string]any
 
@@ -618,5 +607,25 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	}
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
+	}
+}
+
+func TestEncodeStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test",
+	}
+
+	body, err := step.(*EncodeStep).buildEncodeBody(reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
+	if err == nil {
+		t.Fatalf("expected error for unsupported format, got body %v", body)
+	}
+	if want := "unsupported request format APIType(99)"; err.Error() != want {
+		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
 }

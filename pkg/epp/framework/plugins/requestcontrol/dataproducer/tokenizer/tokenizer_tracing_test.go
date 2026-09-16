@@ -29,6 +29,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -90,10 +91,10 @@ func TestProduce_EmitsTokenizeSpan(t *testing.T) {
 	require.NoError(t, p.Produce(context.Background(), chatRequest(), nil))
 
 	attrs := spanAttrs(tokenizeSpan(t, recorder))
-	assert.Equal(t, backendVLLM, attrs["llm_d.epp.token_producer.backend"].AsString())
-	assert.Equal(t, int64(3), attrs["llm_d.epp.token_producer.token_count"].AsInt64())
-	assert.Equal(t, "model-a", attrs["gen_ai.request.model"].AsString())
-	assert.Equal(t, "req-1", attrs["gen_ai.request.id"].AsString())
+	assert.Equal(t, backendVLLM, attrs[semconv.LLMDEPPTokenProducerBackendKey].AsString())
+	assert.Equal(t, int64(3), attrs[semconv.LLMDEPPTokenProducerTokenCountKey].AsInt64())
+	assert.Equal(t, "model-a", attrs[semconv.GenAIRequestModelKey].AsString())
+	assert.Equal(t, "req-1", attrs[semconv.GenAIRequestIDKey].AsString())
 	assert.Equal(t, "none", attrs["mm.modality"].AsString())
 	assert.Equal(t, int64(0), attrs["mm.hash_count"].AsInt64())
 }
@@ -175,7 +176,7 @@ func TestProduce_TokenizeSpanRecordsSkippedNoTokens(t *testing.T) {
 	require.NoError(t, p.Produce(context.Background(), chatRequest(), nil))
 
 	attrs := spanAttrs(tokenizeSpan(t, recorder))
-	assert.Equal(t, resultSkippedNoTokens, attrs["llm_d.epp.token_producer.result"].AsString())
-	_, hasCount := attrs["llm_d.epp.token_producer.token_count"]
+	assert.Equal(t, resultSkippedNoTokens, attrs[semconv.LLMDEPPTokenProducerResultKey].AsString())
+	_, hasCount := attrs[semconv.LLMDEPPTokenProducerTokenCountKey]
 	assert.False(t, hasCount, "no token count on the skipped path")
 }

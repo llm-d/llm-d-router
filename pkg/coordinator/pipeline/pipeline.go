@@ -113,7 +113,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		}
 		for _, t := range timings {
 			if t.name != "" && t.duration > 0 {
-				stats = append(stats, t.duration.String())
+				stats = append(stats, t.name, t.duration.String())
 			}
 		}
 		logger.V(logutil.DEFAULT).Info("pipeline step timings", stats...)

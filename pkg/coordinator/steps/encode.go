@@ -95,7 +95,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
 	// avoids shipping the oversized preprocessed pixel tensor a second time
 	// (see https://github.com/vllm-project/vllm/issues/46722).
-	if reqCtx.OriginalPath == gateway.DefaultGeneratePath {
+	if reqcommon.DetectAPIType(reqCtx.OriginalPath) == reqcommon.APITypeGenerate {
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
 		return nil
 	}
@@ -107,15 +107,18 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
-	if format == gateway.FormatChatCompletions {
+	if format == reqcommon.APITypeChatCompletions {
 		imageParts = collectImageParts(reqCtx.Body)
 	}
 
 	for i, entry := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
-
-			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
+			body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
+			if err != nil {
+				err = fmt.Errorf("encode[%d]: %w", i, err)
+				logger.Error(err, "encode fanout build body", "index", i)
+				return err
+			}
 
 			bodyBytes, err := json.Marshal(body)
 			if err != nil {
@@ -124,7 +127,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				return err
 			}
 
-			path := gateway.PathForFormat(format)
+			path := format.Path()
 			logger.V(logutil.DEFAULT).Info("sending sub-request", "index", i, "path", path)
 
 			headers := reqCtx.ForwardedHeaders()
@@ -198,9 +201,9 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format gateway.RequestFormat, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
-	case gateway.FormatChatCompletions:
+	case reqcommon.APITypeChatCompletions:
 		imageContent := buildSingleImageContent(imageParts, entry.Index)
 		body := map[string]any{
 			"model": reqCtx.Model,
@@ -210,28 +213,29 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"content": []any{imageContent},
 				},
 			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
-			},
 		}
-		capSingleTokenOutput(body, format)
-		return body
-	default:
+		reqcommon.CapSingleToken(body, format)
+		return body, nil
+	case reqcommon.APITypeGenerate:
 		body := map[string]any{
 			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
+			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
 				"kwargs_data":     mmKwargsField([]string{entry.KwargsData}),
 			},
 		}
-		capSingleTokenOutput(body, format)
-		return body
+		reqcommon.CapSingleToken(body, format)
+		return body, nil
+	default:
+		// resolveFormat can also return APITypeCompletions, but a completions
+		// request never carries images: render's executeCompletions never
+		// populates MultimodalEntries, so this fan-out never runs for one. That
+		// leaves APITypeCompletions and any future format value as cases that
+		// should not reach here; treat them as a programming error instead of
+		// silently sending a generate-shaped body to the wrong endpoint.
+		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
 }
 

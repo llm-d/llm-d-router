@@ -48,19 +48,29 @@ func TestCoreLegacyMetricFamiliesAreNotRegistered(t *testing.T) {
 	require.NoError(t, err)
 
 	legacy := map[string]struct{}{
-		"inference_objective_request_total":            {},
-		"inference_objective_request_error_total":      {},
-		"inference_objective_request_duration_seconds": {},
-		"inference_objective_request_sizes":            {},
-		"inference_objective_response_sizes":           {},
-		"inference_objective_input_tokens":             {},
-		"inference_objective_output_tokens":            {},
-		"inference_objective_prompt_cached_tokens":     {},
-		"inference_objective_running_requests":         {},
-		"inference_pool_average_kv_cache_utilization":  {},
-		"inference_pool_average_queue_size":            {},
-		"inference_pool_average_running_requests":      {},
-		"inference_pool_ready_pods":                    {},
+		"inference_objective_request_total":                                 {},
+		"inference_objective_request_error_total":                           {},
+		"inference_objective_request_duration_seconds":                      {},
+		"inference_objective_request_sizes":                                 {},
+		"inference_objective_response_sizes":                                {},
+		"inference_objective_input_tokens":                                  {},
+		"inference_objective_output_tokens":                                 {},
+		"inference_objective_prompt_cached_tokens":                          {},
+		"inference_objective_running_requests":                              {},
+		"inference_pool_average_kv_cache_utilization":                       {},
+		"inference_pool_average_queue_size":                                 {},
+		"inference_pool_average_running_requests":                           {},
+		"inference_pool_ready_pods":                                         {},
+		"inference_extension_scheduler_e2e_duration_seconds":                {},
+		"inference_extension_plugin_duration_seconds":                       {},
+		"inference_extension_info":                                          {},
+		"inference_extension_model_rewrite_decisions_total":                 {},
+		"inference_extension_flow_control_request_queue_duration_seconds":   {},
+		"inference_extension_flow_control_dispatch_cycle_duration_seconds":  {},
+		"inference_extension_flow_control_request_enqueue_duration_seconds": {},
+		"inference_extension_flow_control_pool_saturation":                  {},
+		"llm_d_inference_scheduler_datalayer_poll_errors_total":             {},
+		"llm_d_inference_scheduler_datalayer_extract_errors_total":          {},
 	}
 	for _, family := range families {
 		_, found := legacy[family.GetName()]
@@ -703,16 +713,6 @@ func TestPluginProcessingLatencies(t *testing.T) {
 				RecordPluginProcessingLatency(latency.extensionPoint, latency.pluginType, latency.pluginName, latency.duration)
 			}
 
-			// Verify deprecated metric
-			wantPluginLatencies, err := os.Open("testdata/plugin_processing_latencies_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantPluginLatencies.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantPluginLatencies, "inference_extension_plugin_duration_seconds"); err != nil {
-				t.Error(err)
-			}
-
 			// Verify llm_d_epp metric
 			wantPluginLatenciesNew, err := os.Open("testdata/llm_d_plugin_processing_latencies_metric")
 			if err != nil {
@@ -751,16 +751,6 @@ func TestSchedulerE2ELatency(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, duration := range scenario.durations {
 				RecordSchedulerE2ELatency(duration)
-			}
-
-			// Verify deprecated metric
-			wantE2ELatency, err := os.Open("testdata/scheduler_e2e_duration_seconds_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantE2ELatency.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantE2ELatency, "inference_extension_scheduler_e2e_duration_seconds"); err != nil {
-				t.Error(err)
 			}
 
 			// Verify llm_d_epp metric
@@ -859,16 +849,6 @@ func TestFlowControlDispatchCycleLengthMetric(t *testing.T) {
 				RecordFlowControlDispatchCycleDuration(duration)
 			}
 
-			// Verify deprecated metric
-			wantDispatchCycleLatency, err := os.Open("testdata/flow_control_dispatch_cycle_duration_seconds_metric")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer wantDispatchCycleLatency.Close()
-			if err := testutil.GatherAndCompare(metrics.Registry, wantDispatchCycleLatency, "inference_extension_flow_control_dispatch_cycle_duration_seconds"); err != nil {
-				t.Error(err)
-			}
-
 			// Verify llm_d_epp metric
 			wantDispatchCycleLatencyNew, err := os.Open("testdata/llm_d_flow_control_dispatch_cycle_duration_seconds_metric")
 			if err != nil {
@@ -931,18 +911,6 @@ func TestFlowControlEnqueueDurationMetric(t *testing.T) {
 				)
 			}
 
-			// Verify deprecated metric
-			func() {
-				wantEnqueueLatency, err := os.Open("testdata/flow_control_enqueue_duration_seconds_metric")
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer wantEnqueueLatency.Close()
-				if err := testutil.GatherAndCompare(metrics.Registry, wantEnqueueLatency, "inference_extension_flow_control_request_enqueue_duration_seconds"); err != nil {
-					t.Error(err)
-				}
-			}()
-
 			// Verify llm_d_epp metric
 			func() {
 				wantEnqueueLatencyNew, err := os.Open("testdata/llm_d_flow_control_enqueue_duration_seconds_metric")
@@ -959,26 +927,14 @@ func TestFlowControlEnqueueDurationMetric(t *testing.T) {
 }
 
 func TestSchedulerAttemptsTotal(t *testing.T) {
-	compareMetrics := func(t *testing.T, goldenFile string) {
+	compareMetrics := func(t *testing.T, family, goldenFile string) {
 		t.Helper()
 		wantMetrics, err := os.Open(goldenFile)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer wantMetrics.Close()
-		if err := testutil.GatherAndCompare(metrics.Registry, wantMetrics, "inference_extension_scheduler_attempts_total"); err != nil {
-			t.Errorf("metric comparison failed: %v", err)
-		}
-	}
-
-	compareMetricsNew := func(t *testing.T, goldenFile string) {
-		t.Helper()
-		wantMetrics, err := os.Open(goldenFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer wantMetrics.Close()
-		if err := promtestutil.GatherAndCompare(metrics.Registry, wantMetrics, "llm_d_epp_scheduler_attempts_total"); err != nil {
+		if err := promtestutil.GatherAndCompare(metrics.Registry, wantMetrics, family); err != nil {
 			t.Errorf("metric comparison failed: %v", err)
 		}
 	}
@@ -1004,8 +960,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		}
 		RecordSchedulerAttempt(nil, "modelA", result)
 		RecordSchedulerAttempt(nil, "modelA", result)
-		compareMetrics(t, "testdata/scheduler_attempts_with_result_metrics")
-		compareMetricsNew(t, "testdata/llm_d_scheduler_attempts_with_result_metrics")
+		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_with_result_metrics")
 	})
 
 	t.Run("success with multiple endpoints uses first", func(t *testing.T) {
@@ -1037,8 +992,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		}
 		RecordSchedulerAttempt(nil, "modelA", result)
 		RecordSchedulerAttempt(nil, "modelB", result)
-		compareMetrics(t, "testdata/scheduler_attempts_multiple_endpoints_metrics")
-		compareMetricsNew(t, "testdata/llm_d_scheduler_attempts_multiple_endpoints_metrics")
+		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_multiple_endpoints_metrics")
 	})
 
 	t.Run("success with different models and endpoints", func(t *testing.T) {
@@ -1080,8 +1034,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		RecordSchedulerAttempt(nil, "modelA", resultA)
 		RecordSchedulerAttempt(nil, "modelA", resultA)
 		RecordSchedulerAttempt(nil, "modelB", resultB)
-		compareMetrics(t, "testdata/scheduler_attempts_different_models_metrics")
-		compareMetricsNew(t, "testdata/llm_d_scheduler_attempts_different_models_metrics")
+		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_different_models_metrics")
 	})
 
 	t.Run("mixed success and failure attempts", func(t *testing.T) {
@@ -1092,8 +1045,7 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 		for range 5 {
 			RecordSchedulerAttempt(errors.New("simulated scheduling failure"), "modelA", nil)
 		}
-		compareMetrics(t, "testdata/scheduler_attempts_total_metrics")
-		compareMetricsNew(t, "testdata/llm_d_scheduler_attempts_total_metrics")
+		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_total_metrics")
 	})
 }
 
@@ -1193,17 +1145,11 @@ func TestFlowControlQueueDurationMetric(t *testing.T) {
 				tc.labels["target_model_name"],
 			}
 
-			// Deprecated metric
-			hist, err := getHistogramVecLabelValues(t, flowControlRequestQueueDuration, labels...)
-			require.NoError(t, err, "Failed to get histogram for labels %v", tc.labels)
-			require.Equal(t, tc.expectCount, hist.GetSampleCount(), "Sample count mismatch for labels %v", tc.labels)
-			require.InDelta(t, tc.expectSum, hist.GetSampleSum(), 0.00001, "Sample sum mismatch for labels %v", tc.labels)
-
 			// llm_d_epp metric
-			histNew, err := getHistogramVecLabelValues(t, llmdFlowControlRequestQueueDuration, labels...)
+			hist, err := getHistogramVecLabelValues(t, llmdFlowControlRequestQueueDuration, labels...)
 			require.NoError(t, err, "Failed to get llm_d_epp histogram for labels %v", tc.labels)
-			require.Equal(t, tc.expectCount, histNew.GetSampleCount(), "llm_d_epp sample count mismatch for labels %v", tc.labels)
-			require.InDelta(t, tc.expectSum, histNew.GetSampleSum(), 0.00001, "llm_d_epp sample sum mismatch for labels %v", tc.labels)
+			require.Equal(t, tc.expectCount, hist.GetSampleCount(), "llm_d_epp sample count mismatch for labels %v", tc.labels)
+			require.InDelta(t, tc.expectSum, hist.GetSampleSum(), 0.00001, "llm_d_epp sample sum mismatch for labels %v", tc.labels)
 		})
 	}
 }
@@ -1219,22 +1165,14 @@ func TestFlowControlQueueSizeMetric(t *testing.T) {
 
 	// Basic Inc/Dec
 	IncFlowControlQueueSize("user-a", "100", pool, model, target)
-	val, err := testutil.GetGaugeMetricValue(flowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 1.0, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 1.0, valNew)
-
 	DecFlowControlQueueSize("user-a", "100", pool, model, target)
-	val, err = testutil.GetGaugeMetricValue(flowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 0.0, val)
-
-	valNew, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueSize.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 0.0, valNew)
 }
 
 func TestFlowControlQueueBytesMetric(t *testing.T) {
@@ -1247,22 +1185,14 @@ func TestFlowControlQueueBytesMetric(t *testing.T) {
 	)
 
 	AddFlowControlQueueBytes("user-a", "100", pool, model, target, 32)
-	val, err := testutil.GetGaugeMetricValue(flowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 32.0, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 32.0, valNew)
-
 	SubFlowControlQueueBytes("user-a", "100", pool, model, target, 32)
-	val, err = testutil.GetGaugeMetricValue(flowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
 	require.NoError(t, err)
 	require.Equal(t, 0.0, val)
-
-	valNew, err = testutil.GetGaugeMetricValue(llmdFlowControlQueueBytes.WithLabelValues("user-a", "100", pool, model, target))
-	require.NoError(t, err)
-	require.Equal(t, 0.0, valNew)
 }
 
 func TestFlowControlPoolSaturationMetric(t *testing.T) {
@@ -1271,21 +1201,17 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	const pool = "test-pool"
 
 	RecordFlowControlPoolSaturation(pool, "effective", 0.5)
-	val, err := testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "effective"))
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "effective"))
 	require.NoError(t, err)
 	require.Equal(t, 0.5, val)
 
-	valNew, err := testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "effective"))
-	require.NoError(t, err)
-	require.Equal(t, 0.5, valNew)
-
 	RecordFlowControlPoolSaturation(pool, "prefill", 0.3)
-	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "prefill"))
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "prefill"))
 	require.NoError(t, err)
 	require.Equal(t, 0.3, val)
 
 	RecordFlowControlPoolSaturation(pool, "decode", 0.7)
-	val, err = testutil.GetGaugeMetricValue(flowControlPoolSaturation.WithLabelValues(pool, "decode"))
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "decode"))
 	require.NoError(t, err)
 	require.Equal(t, 0.7, val)
 }
@@ -1418,13 +1344,9 @@ func TestInferenceModelRewriteDecisionsTotalMetric(t *testing.T) {
 
 	RecordInferenceModelRewriteDecision("rewrite-rule-1", "model-a", "model-b")
 
-	val, err := testutil.GetCounterMetricValue(inferenceModelRewriteDecisionsTotal.WithLabelValues("rewrite-rule-1", "model-a", "model-b"))
+	val, err := testutil.GetCounterMetricValue(llmdInferenceModelRewriteDecisionsTotal.WithLabelValues("rewrite-rule-1", "model-a", "model-b"))
 	require.NoError(t, err)
 	require.Equal(t, 1.0, val)
-
-	valNew, err := testutil.GetCounterMetricValue(llmdInferenceModelRewriteDecisionsTotal.WithLabelValues("rewrite-rule-1", "model-a", "model-b"))
-	require.NoError(t, err)
-	require.Equal(t, 1.0, valNew)
 }
 
 func TestFlowControlEvictionMetrics(t *testing.T) {

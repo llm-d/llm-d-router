@@ -184,6 +184,7 @@ func ratio(inflight, capacity int64) float64 {
 //
 // It applies a relaxed limit (Capacity * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 // In "hybrid" mode an endpoint is dropped when either its request load or its token load reaches the limit.
+// If all endpoints are filtered out, the filter fails open and returns all endpoints.
 func (d *detector) Filter(
 	_ context.Context,
 	_ *fwksched.InferenceRequest,
@@ -203,6 +204,13 @@ func (d *detector) Filter(
 
 		if d.admits(load, reqLimit, tokLimit) {
 			filtered = append(filtered, e)
+		}
+	}
+	if len(filtered) == 0 {
+		for _, e := range endpoints {
+			if e != nil {
+				filtered = append(filtered, e)
+			}
 		}
 	}
 	return filtered

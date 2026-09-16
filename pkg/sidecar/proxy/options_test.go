@@ -1019,7 +1019,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 }
 
 // TestCompleteWideEPValidation drives the Wide-EP validation through
-// Options.Complete() to confirm BOTH host-list legs are checked and a valid
+// Options.Complete() to confirm BOTH host lists are checked and a valid
 // 2P2D config passes end-to-end.
 func TestCompleteWideEPValidation(t *testing.T) {
 	// Skip when MoRI-IO feature is dormant since all test cases set MoRI-IO
@@ -1036,7 +1036,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 		wantErr     string
 	}{
 		{
-			name:        "valid 2P2D DP16 both legs",
+			name:        "valid 2P2D DP16 both lists",
 			remoteHosts: []string{testLocalHostname, testLocalHostname},
 			decodeHosts: []string{testLocalHostname, testLocalHostname},
 			dpSize:      16,
@@ -1052,7 +1052,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 			wantErr:     "",
 		},
 		{
-			name:        "remote-hosts leg invalid",
+			name:        "remote-hosts list invalid",
 			remoteHosts: []string{testPrefillHostIP1, testPrefillHostIP2},
 			decodeHosts: nil,
 			dpSize:      16,
@@ -1060,7 +1060,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 			wantErr:     "--moriio-remote-hosts",
 		},
 		{
-			name:        "decode-hosts leg invalid",
+			name:        "decode-hosts list invalid",
 			remoteHosts: nil,
 			decodeHosts: []string{testDecodeHostIP, testDecodeHostIP2, testDecodeHostIP3},
 			dpSize:      16,
@@ -1203,6 +1203,28 @@ func TestModelServerPortFlagBeatsYAML(t *testing.T) {
 	require.NoError(t, opts.Complete())
 	require.NoError(t, opts.Validate())
 	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
+}
+
+func TestMetricsCertDirYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-dir: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/metrics-certs", opts.MetricsCertDir)
+}
+
+// A CLI flag overrides the metrics-cert-dir YAML key.
+func TestMetricsCertDirFlagBeatsYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-dir: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	setFlag(t, testPFlagSet, metricsCertDir, "/etc/cli-flag-certs")
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/cli-flag-certs", opts.MetricsCertDir)
 }
 
 func TestCompleteTLSConfiguration(t *testing.T) {

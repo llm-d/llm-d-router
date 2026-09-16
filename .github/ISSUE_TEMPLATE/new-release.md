@@ -112,7 +112,7 @@ This document defines the process for releasing llm-d-router.
     1. Choose the tag that you created for the release.
     1. Use the tag as the release title, e.g. `v0.1.0`.
     1. Click "Generate release notes" to auto-populate the list of PRs and contributors.
-    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT). Provide the newly compiled release notes block from `RELEASE-NOTES.md` (or the unreleased fragments in `release-notes.d/unreleased/`) with the following prompt:
+    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT). Provide the newly compiled release notes block from `RELEASE-NOTES.md` with the following prompt:
 
        ```text
        Please summarize these release notes into three clear sections:

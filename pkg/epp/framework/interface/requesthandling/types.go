@@ -46,7 +46,8 @@ const (
 type RequestPayload interface {
 	isRequestPayload()
 	IsParsed() bool
-	// AsMap returns the parsed JSON map
+	// AsMap returns the JSON envelope. Content may be opaque json.RawMessage;
+	// use the protocol projections to inspect it.
 	AsMap() (PayloadMap, bool)
 }
 
@@ -116,6 +117,12 @@ type InferenceRequestBody struct {
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
 	Payload RequestPayload `json:"-"`
+	// RawBody retains the parser's JSON input for rendering: handlers.Request.RawBody
+	// for HTTP, or embedded HttpBody.Data for Vertex AI. Repackaging updates the
+	// handler body while this snapshot remains unchanged.
+	RawBody []byte `json:"-"`
+	// RenderRequest bypasses token production while retaining model routing.
+	RenderRequest bool `json:"-"`
 	// TokenizedRequest contains parser-derived tokenization results when available.
 	// It is nil when the request was not already tokenized.
 	TokenizedRequest *TokenizedRequest `json:"-"`
@@ -141,6 +148,14 @@ type InferenceRequestBody struct {
 	// true themselves; it is not inferred or enforced -- see MutatePayloadMap for the one
 	// in-place-edit case the codebase needs today.
 	Mutated bool
+}
+
+// WirePayload is the body used for both rendering and forwarding.
+func (b *InferenceRequestBody) WirePayload() RequestPayload {
+	if !b.Mutated && b.RawBody != nil {
+		return RawPayload(b.RawBody)
+	}
+	return b.Payload
 }
 
 // MutatePayloadMap edits Payload in place via fn when Payload is a PayloadMap, and marks the
