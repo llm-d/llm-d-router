@@ -70,6 +70,7 @@ func TestValidation(t *testing.T) {
 		{name: "missing producer", mutate: func(p *parameters) { p.Producer = nil }, wantErr: "producer"},
 		{name: "missing weights", mutate: func(p *parameters) { p.Weights = nil }, wantErr: "weights"},
 		{name: "zero weight", mutate: func(p *parameters) { p.Weights = map[string]float64{"H100": 0} }, wantErr: "positive"},
+		{name: "negative weight", mutate: func(p *parameters) { p.Weights = map[string]float64{"H100": -1} }, wantErr: "positive"},
 		{name: "non-finite weight", mutate: func(p *parameters) { p.Weights = map[string]float64{"H100": math.NaN()} }, wantErr: "finite"},
 		{name: "normalization underflow", mutate: func(p *parameters) {
 			p.Weights = map[string]float64{"largest": math.MaxFloat64, "smallest": math.SmallestNonzeroFloat64}
@@ -84,6 +85,33 @@ func TestValidation(t *testing.T) {
 			assert.Nil(t, scorer)
 		})
 	}
+}
+
+func TestEmptyProducerNamespace(t *testing.T) {
+	params := scorerParams()
+	params.Producer = pointer("")
+	scorer, err := NewEndpointAttributeWeightScorer("gpu-weight", params)
+	require.NoError(t, err)
+
+	emptyProducerKey := fwkplugin.NewDataKey(testAttributeKey, "")
+	assert.IsType(t, attrstring.Value(""), scorer.Consumes().Optional[emptyProducerKey])
+
+	emptyProducer := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "empty-producer"}},
+		nil,
+		fwkdl.NewAttributes(),
+	)
+	emptyProducer.Put(emptyProducerKey, attrstring.Value("H100"))
+	namedProducer := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "named-producer"}},
+		nil,
+		fwkdl.NewAttributes(),
+	)
+	namedProducer.Put(fwkplugin.NewDataKey(testAttributeKey, testProducer), attrstring.Value("H100"))
+
+	scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{emptyProducer, namedProducer})
+	assert.Equal(t, 1.0, scores[emptyProducer])
+	assert.Equal(t, 0.25, scores[namedProducer])
 }
 
 func TestConsumesCategoryAndScore(t *testing.T) {

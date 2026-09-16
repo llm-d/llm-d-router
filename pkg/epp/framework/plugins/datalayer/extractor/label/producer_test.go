@@ -115,7 +115,7 @@ func TestFactoryRejectsMultipleInstances(t *testing.T) {
 	}`)), handle)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multiple label-producer instances")
+	assert.Contains(t, err.Error(), `multiple "label-producer" instances`)
 	assert.Contains(t, err.Error(), existing.TypedName().String())
 	assert.Nil(t, producer)
 }

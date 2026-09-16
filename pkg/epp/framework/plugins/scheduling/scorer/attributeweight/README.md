@@ -10,7 +10,7 @@ weights. Enable the plugins with `--allow-experimental-plugins=true`.
 | Parameter | Required | Description |
 | --- | --- | --- |
 | `attributeKey` | yes | String endpoint attribute to read. |
-| `producer` | yes | Producer instance name; `""` selects the empty namespace. |
+| `producer` | yes | Producer instance name. Required because this scorer has no default producer; `""` selects the empty producer namespace. |
 | `weights` | yes | Non-empty map of attribute values to finite, positive weights. |
 
 Scores are `weight / max(weights)`. Missing or unknown values receive the lowest

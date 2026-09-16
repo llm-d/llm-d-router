@@ -59,7 +59,7 @@ func Factory(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkpl
 	if handle != nil {
 		for _, existing := range handle.GetAllPlugins() {
 			if existing.TypedName().Type == LabelProducerType {
-				return nil, fmt.Errorf("multiple %s instances configured (%s, %s); only one instance is supported",
+				return nil, fmt.Errorf("multiple %q instances configured (%s, %s); only one instance is supported",
 					LabelProducerType, existing.TypedName(), producer.TypedName())
 			}
 		}

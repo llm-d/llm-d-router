@@ -36,9 +36,12 @@ var (
 )
 
 type parameters struct {
-	AttributeKey string             `json:"attributeKey"`
-	Producer     *string            `json:"producer"`
-	Weights      map[string]float64 `json:"weights"`
+	AttributeKey string `json:"attributeKey"`
+	// Producer names the plugin publishing the attribute. A pointer distinguishes
+	// an omitted producer, which is invalid, from an explicit empty string, which
+	// selects the empty producer namespace.
+	Producer *string            `json:"producer"`
+	Weights  map[string]float64 `json:"weights"`
 }
 
 func Factory(name string, decoder *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -86,9 +89,11 @@ func NewEndpointAttributeWeightScorer(name string, params parameters) (*Endpoint
 		fallbackScore = min(fallbackScore, score)
 	}
 
+	// String attributes have no default producer, so resolve the required value directly.
+	dataKey := fwkplugin.NewDataKey(params.AttributeKey, *params.Producer)
 	return &EndpointAttributeWeightScorer{
 		typedName:     fwkplugin.TypedName{Type: EndpointAttributeWeightScorerType, Name: name},
-		dataKey:       fwkplugin.NewDataKey(params.AttributeKey, *params.Producer),
+		dataKey:       dataKey,
 		scores:        scores,
 		fallbackScore: fallbackScore,
 	}, nil
