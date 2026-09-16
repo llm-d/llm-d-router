@@ -111,21 +111,44 @@ Configure `p2p-cache-source` as shown in the
 [producer configuration](../../../requestcontrol/dataproducer/p2psource/README.md#configuration).
 Its `prefillProfileName` must match both the profile selected by
 `disagg-profile-handler` and the profile that references the work classifier.
-The profile's candidate filters and picker are omitted here.
+The profile's picker is omitted here. Threshold parameters for the gate are
+described in the
+[prefix-cache-affinity-filter README](../../filter/prefixcacheaffinity/README.md).
 
 ```yaml
 plugins:
+  - type: prefix-cache-affinity-filter
+    name: cache-load-gate
+    parameters:
+      prefixMatchInfoProducerName: precise-cache
+      inFlightLoadProducerName: inflight-load
   - type: context-length-aware
     name: prefill-work-router
     parameters:
       label: llm-d.ai/prefill-work-range
-      enableFiltering: true
+      enableFiltering: false
       reusableTokensProducerName: p2p-cache-source
 schedulingProfiles:
   - name: prefill
     plugins:
+      - pluginRef: cache-load-gate
       - pluginRef: prefill-work-router
 ```
+
+Score mode (`enableFiltering: false`) is what makes this composition work.
+`prefix-cache-affinity-filter` keeps a follow-up on the pod already holding its
+prefix while that pod's predicted delay stays under the configured penalty, and
+releases the request to the work classifier once the delay exceeds it. Scoring
+then ranks the short-work class first without removing the holder, so the
+scheduler can still choose it.
+
+Filter mode cannot sit behind a sticky filter. A cached follow-up has a small
+routing length, so the work-range filter drops a P-long holder whose range
+starts above it; when the affinity filter has already narrowed the candidates to
+that holder, the prefill profile returns no endpoints and
+`disagg-profile-handler` schedules decode only. Filter mode without the affinity
+filter has the opposite cost: every cached follow-up migrates, including when
+the holder is idle and the transfer buys nothing.
 
 The producer and serving pods must satisfy the
 [deployment requirements](../../../requestcontrol/dataproducer/p2psource/README.md#deployment-requirements).
