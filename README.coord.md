@@ -50,8 +50,6 @@ Configuration is a YAML file passed via the `--config` flag. See `config/coordin
 | GET | `/healthz` | Health check |
 | GET | `/readyz` | Readiness check |
 
-All paths are served over HTTPS unless `--secure-coordinator=false` is set.
-
 Both completion endpoints support `"stream": true` for Server-Sent Events streaming.
 
 ## Docker
