@@ -18,8 +18,8 @@
 log_level: 2
 
 # -------------------------------------------------------------------------------
-# server: listener for incoming OpenAI-compatible requests. Serves TLS unless set
-# secure_coordinator: false.
+# server: listener for incoming OpenAI-compatible requests. Serves TLS unless
+# secure_coordinator is false.
 # -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
@@ -51,7 +51,7 @@ server:
   # cert_path: ""
 
   # tls_min_version is the minimum TLS version the inference listener accepts,
-  # for example VersionTLS12 or VersionTLS13. Empty uses the crypto/tls default.
+  # for example VersionTLS12 or VersionTLS13. Empty uses VersionTLS12.
   # The --tls-min-version CLI flag overrides this field.
   # env: COORDINATOR_SERVER_TLS_MIN_VERSION
   # tls_min_version: ""

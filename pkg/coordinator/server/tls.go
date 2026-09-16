@@ -29,17 +29,17 @@ import (
 )
 
 // tlsProfile holds the parsed form of the TLS version and cipher suite
-// configuration. Zero values leave the crypto/tls defaults in place.
+// configuration.
 type tlsProfile struct {
 	minVersion   uint16
 	cipherSuites []uint16
 }
 
-// parseTLSProfile resolves TLS version and cipher suite names to their
-// crypto/tls values. An empty version or empty suite list is not an error: it
-// selects the crypto/tls default rather than a pinned value.
+// parseTLSProfile resolves TLS version and cipher suite names to their crypto/tls values.
+// An empty version uses TLS 1.2.
+// An empty suite list uses the crypto/tls default.
 func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, error) {
-	var profile tlsProfile
+	profile := tlsProfile{minVersion: tls.VersionTLS12}
 	if minVersion != "" {
 		version, err := flag.TLSVersion(minVersion)
 		if err != nil {

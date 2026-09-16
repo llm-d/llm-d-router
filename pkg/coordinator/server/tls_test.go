@@ -167,7 +167,7 @@ func TestServe_TLSMinVersionRejectsOlderClient(t *testing.T) {
 		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test
 		MaxVersion:         tls.VersionTLS12,
 	})
-	require.Error(t, err, "TLS 1.2 client must be rejected when the floor is TLS 1.3")
+	require.Error(t, err, "TLS 1.2 client must be rejected when the minimum is TLS 1.3")
 }
 
 func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
@@ -192,9 +192,20 @@ func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
 	}
 }
 
-func TestParseTLSProfile_EmptyKeepsCryptoDefaults(t *testing.T) {
+func TestParseTLSProfile_EmptyUsesTLS12(t *testing.T) {
 	profile, err := parseTLSProfile("", nil)
 	require.NoError(t, err)
-	require.Zero(t, profile.minVersion, "empty tls_min_version must leave the crypto/tls default")
+	require.Equal(t, uint16(tls.VersionTLS12), profile.minVersion, "empty tls_min_version must use TLS 1.2")
 	require.Empty(t, profile.cipherSuites, "empty tls_cipher_suites must leave the crypto/tls default")
+}
+
+func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {
+	addr := serve(t, config.ServerConfig{SecureCoordinator: true})
+
+	_, err := tls.Dial("tcp", addr, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test
+		MaxVersion:         tls.VersionTLS11,
+		MinVersion:         tls.VersionTLS10,
+	})
+	require.Error(t, err, "TLS 1.1 client must be rejected when the minimum is TLS 1.2")
 }

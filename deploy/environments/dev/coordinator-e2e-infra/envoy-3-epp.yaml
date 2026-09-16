@@ -255,7 +255,7 @@ data:
           original_dst_lb_config:
             use_http_header: true
             http_header_name: x-gateway-destination-endpoint
-        # Coordinator backend — plain HTTP, resolved by Service DNS name. Serves
+        # Coordinator backend — TLS, resolved by Service DNS name. Serves
         # the default (no EPP-Profile) route as the pipeline entry point.
         - name: coordinator
           type: STRICT_DNS
