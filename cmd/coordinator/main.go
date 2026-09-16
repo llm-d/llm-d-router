@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -136,7 +137,7 @@ func main() {
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = run(ctx, srv, cfg.Server)
+	err = run(ctx, srv, cfg.Server, nil)
 	stop()
 	if err != nil {
 		log.Error(err, "server error")
@@ -149,13 +150,21 @@ func main() {
 // or either server exits. On any exit condition both servers are drained
 // before run returns: the coordinator server bounded by cfg.ShutdownTimeout,
 // the metrics server by metricsShutdownTimeout. A non-positive MetricsPort
-// disables the metrics endpoint entirely.
-func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error {
+// disables the metrics endpoint entirely. lis, when non-nil, is an already
+// bound listener the coordinator server serves on instead of binding
+// cfg.ListenAddr itself; production passes nil.
+func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig, lis net.Listener) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		errCh := make(chan error, 1)
-		go func() { errCh <- srv.ListenAndServe() }()
+		go func() {
+			if lis != nil {
+				errCh <- srv.Serve(lis)
+			} else {
+				errCh <- srv.ListenAndServe()
+			}
+		}()
 		select {
 		case err := <-errCh:
 			// ListenAndServe returned before shutdown was requested; always a failure.
@@ -175,21 +184,23 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error
 
 	if cfg.MetricsPort > 0 {
 		g.Go(func() error {
-			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertDir)
+			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertDir, nil)
 		})
 	}
 
 	return g.Wait()
 }
 
-// serveMetrics stands up a Prometheus /metrics server on port and blocks
-// until ctx is cancelled or the underlying ListenAndServe returns
-// unexpectedly. On ctx cancellation the server is drained via Shutdown
-// bounded by metricsShutdownTimeout. Uses the shared controller-runtime
-// registry so every package that registers against it (this coordinator's
-// metrics, controller-runtime's process collectors) is exposed on the same
-// endpoint. A non-empty certDir enables TLS with tls.crt and tls.key.
-func serveMetrics(ctx context.Context, port int, certDir string) error {
+// serveMetrics stands up a Prometheus /metrics server and blocks until ctx is
+// cancelled or the underlying listen/serve returns unexpectedly. On ctx
+// cancellation the server is drained via Shutdown bounded by
+// metricsShutdownTimeout. Uses the shared controller-runtime registry so
+// every package that registers against it (this coordinator's metrics,
+// controller-runtime's process collectors) is exposed on the same endpoint. A
+// non-empty certDir enables TLS with tls.crt and tls.key. lis, when non-nil,
+// is an already bound listener the server serves on instead of binding port
+// itself; production passes nil.
+func serveMetrics(ctx context.Context, port int, certDir string, lis net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	srv := &http.Server{
@@ -207,7 +218,7 @@ func serveMetrics(ctx context.Context, port int, certDir string) error {
 	}
 
 	// Shutdown fires when ctx cancels (normal path) or when the local
-	// cancel below is invoked after ListenAndServe returns (bind failure).
+	// cancel below is invoked after listen/serve returns (bind failure).
 	shutdownCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -221,9 +232,14 @@ func serveMetrics(ctx context.Context, port int, certDir string) error {
 	}()
 
 	var err error
-	if serveTLS {
+	switch {
+	case lis != nil && serveTLS:
+		err = srv.ServeTLS(lis, "", "")
+	case lis != nil:
+		err = srv.Serve(lis)
+	case serveTLS:
 		err = srv.ListenAndServeTLS("", "")
-	} else {
+	default:
 		err = srv.ListenAndServe()
 	}
 	cancel()

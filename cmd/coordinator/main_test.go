@@ -82,13 +82,14 @@ func writeMetricsCertificate(t *testing.T, dir string) {
 }
 
 func TestServeMetricsHTTP(t *testing.T) {
-	port, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
+	port := lis.Addr().(*net.TCPAddr).Port
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveMetrics(ctx, port, "") }()
+	go func() { errCh <- serveMetrics(ctx, port, "", lis) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	require.Eventually(t, func() bool {
@@ -107,13 +108,14 @@ func TestServeMetricsHTTP(t *testing.T) {
 func TestServeMetricsHTTPS(t *testing.T) {
 	certDir := t.TempDir()
 	writeMetricsCertificate(t, certDir)
-	port, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
+	port := lis.Addr().(*net.TCPAddr).Port
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveMetrics(ctx, port, certDir) }()
+	go func() { errCh <- serveMetrics(ctx, port, certDir, lis) }()
 
 	client := &http.Client{
 		Timeout:   2 * time.Second,
@@ -152,10 +154,12 @@ func TestServeMetricsInvalidTLSFiles(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.crt"), []byte("invalid"), 0o600))
 				require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.key"), []byte("invalid"), 0o600))
 			}
+			// TLS cert/key loading fails before any bind is attempted, so a bare
+			// port number carries no bind race here.
 			port, err := fwknet.GetFreePort()
 			require.NoError(t, err)
 
-			err = serveMetrics(context.Background(), port, certDir)
+			err = serveMetrics(context.Background(), port, certDir, nil)
 			require.ErrorIs(t, err, errMetricsTLS)
 		})
 	}
@@ -165,9 +169,9 @@ func TestServeMetricsInvalidTLSFiles(t *testing.T) {
 // exit path is context cancellation. run must return nil once the
 // coordinator server drains.
 func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
-	port, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	listenAddr := "127.0.0.1:" + strconv.Itoa(port)
+	listenAddr := lis.Addr().String()
 
 	cfg := config.ServerConfig{
 		ListenAddr:      listenAddr,
@@ -182,7 +186,7 @@ func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg) }()
+	go func() { done <- run(ctx, srv, cfg, lis) }()
 
 	waitForDial(t, listenAddr, 2*time.Second)
 	cancel()
@@ -207,9 +211,9 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	t.Cleanup(func() { _ = blocker.Close() })
 	blockedPort := blocker.Addr().(*net.TCPAddr).Port
 
-	inferencePort, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	listenAddr := "127.0.0.1:" + strconv.Itoa(inferencePort)
+	listenAddr := lis.Addr().String()
 
 	cfg := config.ServerConfig{
 		ListenAddr:      listenAddr,
@@ -224,7 +228,7 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg) }()
+	go func() { done <- run(ctx, srv, cfg, lis) }()
 
 	select {
 	case err := <-done:
@@ -242,11 +246,13 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 }
 
 func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
+	// The metrics server fails loading its TLS cert/key before ever binding
+	// metricsPort, so a bare port number carries no bind race for it.
 	metricsPort, err := fwknet.GetFreePort()
 	require.NoError(t, err)
-	inferencePort, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	listenAddr := "127.0.0.1:" + strconv.Itoa(inferencePort)
+	listenAddr := lis.Addr().String()
 
 	cfg := config.ServerConfig{
 		ListenAddr:      listenAddr,
@@ -261,7 +267,7 @@ func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg) }()
+	go func() { done <- run(ctx, srv, cfg, lis) }()
 
 	select {
 	case err := <-done:

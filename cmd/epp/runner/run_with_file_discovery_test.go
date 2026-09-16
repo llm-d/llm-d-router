@@ -34,11 +34,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
+
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
+
+const testPoolName = "test-pool"
 
 // TestRunWithFileDiscovery_Smoke is a wiring test for the file-discovery path.
 // It does not exercise ext_proc routing; that lives in the integration test.
@@ -94,24 +98,36 @@ dataLayer:
         - pluginRef: metrics-extractor
 `, endpointsPath)
 
-	grpcPort := freeTCPPort(t)
-	healthPort := freeTCPPort(t)
-	metricsPort := freeTCPPort(t)
+	// Reserve live listeners for the ports this test dials (grpc, health)
+	// instead of picking a port number and closing the listener: the runner
+	// binds these listeners directly, so no window exists in which another
+	// process can take the port between selection and bind. Metrics is never
+	// dialed here, so it can bind an OS-assigned port with no test-side
+	// bookkeeping.
+	grpcListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	grpcPort := grpcListener.Addr().(*net.TCPAddr).Port
+
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	healthPort := healthListener.Addr().(*net.TCPAddr).Port
 
 	opts := runserver.NewOptions()
 	opts.GRPCPort = grpcPort
 	opts.GRPCHealthPort = healthPort
-	opts.MetricsPort = metricsPort
+	opts.MetricsPort = 0
 	opts.SecureServing = false
 	opts.HealthChecking = true
 	opts.EnablePprof = false
-	opts.PoolName = "test-pool"
+	opts.PoolName = testPoolName
 	opts.PoolNamespace = "test-ns"
 	opts.ConfigText = configText
 	opts.GRPCMaxRecvMsgSize = 6 * 1024 * 1024
 	opts.GRPCMaxSendMsgSize = 6 * 1024 * 1024
 
 	r := NewRunner()
+	r.grpcListener = grpcListener
+	r.healthListener = healthListener
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -213,13 +229,119 @@ dataLayer:
 	}
 }
 
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+// TestRunWithFileDiscovery_ListenerTakesPrecedenceOverPort is a regression test
+// for the port bind race in
+// https://github.com/llm-d/llm-d-router/issues/2858: picking a free port,
+// closing the listener, and later binding that bare port number leaves a
+// window in which another process can take it, producing "address already in
+// use". Reserving a live listener and handing it to the server removes the
+// window because the port is never released between selection and use.
+//
+// This test proves the runner actually takes that path: opts.GRPCPort and
+// opts.GRPCHealthPort are set to a port a decoy listener already holds, so
+// binding by number would fail immediately. runWithFileDiscovery must ignore
+// those numbers and serve on r.grpcListener / r.healthListener instead.
+func TestRunWithFileDiscovery_ListenerTakesPrecedenceOverPort(t *testing.T) {
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+  - name: metrics-source
+    type: metrics-data-source
+  - name: metrics-extractor
+    type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    pluginRef: file-discovery
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+`, endpointsPath)
+
+	grpcListener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close())
-	return port
+	defer grpcListener.Close()
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	defer healthListener.Close()
+
+	// decoyListener occupies a port that opts.GRPCPort/opts.GRPCHealthPort will
+	// name. If runWithFileDiscovery bound by number instead of using the
+	// injected listeners, net.Listen on that port would fail here.
+	decoyListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	defer decoyListener.Close()
+	decoyPort := decoyListener.Addr().(*net.TCPAddr).Port
+
+	opts := runserver.NewOptions()
+	opts.GRPCPort = decoyPort
+	opts.GRPCHealthPort = decoyPort
+	opts.MetricsPort = 0
+	opts.SecureServing = false
+	opts.HealthChecking = true
+	opts.PoolName = testPoolName
+	opts.PoolNamespace = "test-ns"
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	r.grpcListener = grpcListener
+	r.healthListener = healthListener
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+
+	healthAddr := healthListener.Addr().String()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case err := <-runErr:
+			t.Fatalf("runWithFileDiscovery exited before health came up: %v", err)
+		case <-deadline:
+			t.Fatal("timeout waiting for health gRPC to reach SERVING")
+		default:
+		}
+		if checkHealthServing(healthAddr) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	extProcConn, err := net.DialTimeout("tcp", grpcListener.Addr().String(), time.Second)
+	require.NoError(t, err, "ext_proc should be serving on the injected listener, not the decoy port")
+	_ = extProcConn.Close()
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("runWithFileDiscovery returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runWithFileDiscovery did not return after context cancel")
+	}
 }
 
 func checkHealthServing(addr string) bool {
