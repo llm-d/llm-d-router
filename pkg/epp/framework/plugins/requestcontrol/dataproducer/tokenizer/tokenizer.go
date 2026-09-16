@@ -99,14 +99,24 @@ type estimateConfig struct {
 	Audio *audioEstimateConfig `json:"audio,omitempty"`
 }
 
-// audioEstimateConfig tunes how an audio's placeholder-token count is estimated.
+// audioEstimateConfig tunes how an audio's placeholder-token count is estimated:
+// min(durationSeconds*tokensPerSecond + overheadTokens, maxAudioTokens). Clip
+// duration is resolved per clip rather than configured: the
+// x-llm-d-audio-duration-seconds header wins, then the payload itself, then
+// defaultDuration.
 type audioEstimateConfig struct {
 	// Mode selects "dynamic" (tokens-per-second * duration) or "static" (a constant count).
 	Mode string `json:"mode,omitempty"`
+	// DefaultDuration is the clip length in seconds used when neither the header
+	// nor the payload provides one, as for a clip referenced by URL.
+	DefaultDuration float64 `json:"defaultDuration,omitempty"`
 	// Static configures the static (constant per-audio) mode.
 	Static *staticAudioConfig `json:"static,omitempty"`
 	// Dynamic configures the dynamic (tokens-per-second) mode.
 	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
+	// MaxAudioTokens caps the total placeholder count, mirroring maxVideoTokens.
+	// Zero means uncapped.
+	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
 }
 
 // staticAudioConfig is the static-mode parameter.
@@ -117,11 +127,16 @@ type staticAudioConfig struct {
 
 // dynamicAudioConfig is the dynamic-mode parameter.
 type dynamicAudioConfig struct {
-	// TokensPerSecond is the placeholder tokens per second of audio.
-	TokensPerSecond int `json:"tokensPerSecond,omitempty"`
+	// TokensPerSecond is the placeholder tokens per second of audio. It is
+	// fractional because audio towers do not land on whole rates: Qwen3-Omni is
+	// 12.5 tokens/s.
+	TokensPerSecond float64 `json:"tokensPerSecond,omitempty"`
 	// OverheadTokens is the fixed prompt template + text token overhead added
 	// to every audio estimate.
 	OverheadTokens int `json:"overheadTokens,omitempty"`
+	// BytesPerSecond converts a payload length to seconds when the clip is not
+	// PCM WAV, whose own header carries an exact byte rate.
+	BytesPerSecond int `json:"bytesPerSecond,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.

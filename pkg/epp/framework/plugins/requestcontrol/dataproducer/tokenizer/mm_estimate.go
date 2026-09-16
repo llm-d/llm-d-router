@@ -18,7 +18,10 @@ package tokenizer
 
 import (
 	"encoding/base64"
+	"encoding/binary"
+	"errors"
 	"image"
+	"io"
 	"strings"
 
 	// Registers decoders so image.DecodeConfig can read dimensions.
@@ -357,18 +360,37 @@ const (
 	audioModeDynamic = "dynamic"
 	audioModeStatic  = "static"
 
-	defaultAudioDuration        = 10 // seconds
-	defaultAudioTokensPerSecond = 13 // codec frames per second (Qwen3-Omni RVQ codec)
+	defaultAudioDuration = 10 // seconds
+	// defaultAudioTokensPerSecond is the Qwen3-Omni RVQ codec frame rate. Per-model
+	// rates belong in configuration; this is only the no-config fallback.
+	defaultAudioTokensPerSecond = 12.5
 	defaultAudioOverheadTokens  = 14 // prompt template + text tokens
+	// defaultAudioBytesPerSecond converts a payload length into seconds for clips
+	// that are not PCM WAV, modeling ~128kbps compressed audio.
+	defaultAudioBytesPerSecond = 16000
+	// wavHeaderBytes bounds how much of a payload is decoded while looking for the
+	// WAV format and data chunk headers. Real headers are far smaller; a payload
+	// whose data chunk starts past this is treated as unreadable.
+	wavHeaderBytes = 1024
+	// WAV chunk ids read while resolving a clip's duration.
+	wavFmtChunkID  = "fmt "
+	wavDataChunkID = "data"
 )
 
-// audioEstimator estimates an audio's placeholder-token count from configured or
-// default parameters. The zero value is valid and uses all built-in defaults.
+// audioEstimator estimates an audio clip's placeholder-token count as
+// min(duration*tokensPerSecond + overheadTokens, maxAudioTokens). Audio towers
+// convert a clip to encoder frames at a fixed rate and pool them into tokens, so
+// the count tracks duration rather than payload size. Duration is resolved per
+// clip: a header value wins, then the payload itself, then configuration, then
+// the built-in default. The zero value is valid and uses all built-in defaults.
 type audioEstimator struct {
 	mode           string
 	staticToken    int
-	tokensPerSec   int
+	tokensPerSec   float64
 	overheadTokens int
+	bytesPerSec    int
+	defDuration    float64
+	maxTokens      int
 }
 
 // newAudioEstimator resolves an estimateConfig into an audioEstimator, leaving
@@ -378,20 +400,26 @@ func newAudioEstimator(cfg *estimateConfig) audioEstimator {
 		return audioEstimator{}
 	}
 	aud := cfg.Audio
-	est := audioEstimator{mode: aud.Mode}
+	est := audioEstimator{
+		mode:        aud.Mode,
+		defDuration: aud.DefaultDuration,
+		maxTokens:   aud.MaxAudioTokens,
+	}
 	if aud.Static != nil {
 		est.staticToken = aud.Static.NumTokens
 	}
 	if aud.Dynamic != nil {
 		est.tokensPerSec = aud.Dynamic.TokensPerSecond
 		est.overheadTokens = aud.Dynamic.OverheadTokens
+		est.bytesPerSec = aud.Dynamic.BytesPerSecond
 	}
 	return est
 }
 
-// placeholderCount estimates placeholder tokens for audio content.
-// Requires a duration header; falls back to defaultAudioDuration otherwise.
-func (e audioEstimator) placeholderCount(_ bool, meta audioMetadata) int {
+// placeholderCount estimates placeholder tokens for audio content. data is the
+// inline base64 payload of an input_audio block and is empty for a clip carried
+// by URL. Always >= 1 so every clip carries weight.
+func (e audioEstimator) placeholderCount(data string, meta audioMetadata) int {
 	if e.mode == audioModeStatic {
 		if e.staticToken > 0 {
 			return e.staticToken
@@ -409,14 +437,115 @@ func (e audioEstimator) placeholderCount(_ bool, meta audioMetadata) int {
 		overhead = defaultAudioOverheadTokens
 	}
 
-	duration := meta.duration
-	if duration <= 0 {
-		duration = float64(defaultAudioDuration)
+	tokens := overhead + int(tokensPerSec*e.durationSeconds(data, meta))
+	if e.maxTokens > 0 && tokens > e.maxTokens {
+		tokens = e.maxTokens
 	}
-
-	tokens := overhead + int(float64(tokensPerSec)*duration)
 	if tokens < 1 {
 		tokens = 1
 	}
 	return tokens
+}
+
+// durationSeconds resolves a clip's length in seconds. A header value wins, then
+// the payload, which is exact for PCM WAV and payloadBytes/bytesPerSecond for
+// everything else, then configuration, then the built-in default. A clip carried
+// by reference has no payload and so falls through to configuration.
+func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64 {
+	if meta.duration > 0 {
+		return meta.duration
+	}
+	if data != "" {
+		if seconds, ok := wavDurationFromBase64(data); ok {
+			return seconds
+		}
+		rate := e.bytesPerSec
+		if rate <= 0 {
+			rate = defaultAudioBytesPerSecond
+		}
+		if n := base64DecodedLen(audioBase64Payload(data)); n > 0 {
+			return float64(n) / float64(rate)
+		}
+	}
+	if e.defDuration > 0 {
+		return e.defDuration
+	}
+	return defaultAudioDuration
+}
+
+// wavDurationFromBase64 returns the length of a base64 PCM WAV payload, its data
+// chunk divided by the byte rate its own header declares. ok is false when the
+// payload is not a readable WAV, leaving the caller on the byte-rate estimate.
+func wavDurationFromBase64(data string) (seconds float64, ok bool) {
+	payload := audioBase64Payload(data)
+	// Only the headers are needed, so decoding is streamed and bounded.
+	head := make([]byte, wavHeaderBytes)
+	n, err := io.ReadFull(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return 0, false
+	}
+	head = head[:n]
+	if len(head) < 12 || string(head[0:4]) != "RIFF" || string(head[8:12]) != "WAVE" {
+		return 0, false
+	}
+	// Walk the chunk list: a 4-byte id, a 4-byte little-endian size, then a
+	// payload padded to an even length. fmt carries the byte rate and always
+	// precedes data.
+	var byteRate uint32
+	for pos := 12; pos+8 <= len(head); {
+		id := string(head[pos : pos+4])
+		size := int64(binary.LittleEndian.Uint32(head[pos+4 : pos+8]))
+		body := int64(pos) + 8
+		switch id {
+		case wavFmtChunkID:
+			if body+12 <= int64(len(head)) {
+				byteRate = binary.LittleEndian.Uint32(head[body+8 : body+12])
+			}
+		case wavDataChunkID:
+			if byteRate == 0 {
+				return 0, false
+			}
+			// A streamed WAV can declare a placeholder size, so what the payload
+			// actually carries bounds the data chunk.
+			available := int64(base64DecodedLen(payload)) - body
+			if size <= 0 || size > available {
+				size = available
+			}
+			if size <= 0 {
+				return 0, false
+			}
+			return float64(size) / float64(byteRate), true
+		}
+		next := body + size
+		if size%2 == 1 {
+			next++
+		}
+		if next <= int64(pos) || next > int64(len(head)) {
+			return 0, false
+		}
+		pos = int(next)
+	}
+	return 0, false
+}
+
+// audioBase64Payload strips a "data:...;base64," prefix when present, so a bare
+// input_audio payload and a data URL resolve to the same bytes.
+func audioBase64Payload(data string) string {
+	if !strings.HasPrefix(data, "data:") {
+		return data
+	}
+	if idx := strings.Index(data, "base64,"); idx > 0 {
+		return data[idx+len("base64,"):]
+	}
+	return data
+}
+
+// base64DecodedLen returns the decoded byte length of a standard base64 payload
+// without decoding it.
+func base64DecodedLen(rawB64 string) int {
+	n := len(rawB64)
+	for n > 0 && rawB64[n-1] == '=' {
+		n--
+	}
+	return n * 3 / 4
 }
