@@ -71,6 +71,7 @@ var (
 func newOpenAIParserWithPriorityPropagation(t *testing.T) *openai.OpenAIParser {
 	t.Helper()
 	return openai.NewOpenAIParser()
+}
 
 func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 	for _, tt := range []struct {
