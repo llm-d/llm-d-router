@@ -82,6 +82,41 @@ type RawMessage struct {
 	SpanContext *trace.SpanContext
 }
 
+// StreamEvent describes an endpoint KV-event stream transition relevant to
+// consumers that can repair an incomplete derived index. The pool emits every
+// transition from the worker that processes the endpoint's messages, so
+// transitions are ordered with the endpoint's events.
+type StreamEvent string
+
+const (
+	// StreamEventMissingParent carries stored blocks dropped because their
+	// parent block is not indexed.
+	StreamEventMissingParent StreamEvent = "missing_parent"
+	// StreamEventReportSupported marks a store that carried a BlockOrigin, so
+	// the engine's reports are distinguishable from new stores.
+	StreamEventReportSupported StreamEvent = "report_supported"
+	// StreamEventStored carries blocks added to the index.
+	StreamEventStored StreamEvent = "stored"
+	// StreamEventRemoved carries blocks the engine removed.
+	StreamEventRemoved StreamEvent = "removed"
+	// StreamEventCleared marks a reset of the endpoint's index state: an
+	// AllBlocksCleared event or a reset queued by the endpoint's subscriber,
+	// including the one queued after a retired subscriber's last message.
+	StreamEventCleared StreamEvent = "cleared"
+)
+
+// StreamObserver receives stream transitions keyed by the serving endpoint
+// address used by the scheduler (address:port).
+type StreamObserver func(sourceEndpoint string, event StreamEvent, blocks ...StreamBlock)
+
+// StreamBlock identifies a block within an endpoint's index eviction scope.
+type StreamBlock struct {
+	Hash       uint64
+	DeviceTier string
+	// GroupIdx is -1 for events without a cache group.
+	GroupIdx int
+}
+
 // EngineAdapter defines the interface for engine-specific message parsers.
 // Each inference engine has its own adapter implementation that handles
 // parsing raw transport messages into domain events.
@@ -96,8 +131,23 @@ type EngineAdapter interface {
 	ShardingKey(msg *RawMessage) string
 }
 
+// BlockOrigin distinguishes blocks an engine newly cached from cached blocks
+// it re-announces in a full cache report. Engine adapters translate their wire
+// values to these.
+type BlockOrigin uint8
+
+const (
+	// BlockOriginUnspecified marks stores from engines that do not tag origin.
+	BlockOriginUnspecified BlockOrigin = iota
+	// BlockOriginNew marks a block the engine newly cached.
+	BlockOriginNew
+	// BlockOriginReused marks an already-cached block re-announced by a report.
+	BlockOriginReused
+)
+
 // BlockStoredEvent represents blocks being added to the cache.
 type BlockStoredEvent struct {
+	Origin      BlockOrigin
 	BlockHashes []uint64
 	Tokens      []uint32
 	ParentHash  uint64

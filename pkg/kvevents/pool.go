@@ -184,6 +184,7 @@ type Pool struct {
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
 	queueDepth atomic.Int64
+	observer   StreamObserver
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -221,6 +222,29 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	metrics.Register()
 
 	return p, nil
+}
+
+// SetStreamObserver installs the observer for endpoint stream transitions. It
+// must be called before Start.
+func (p *Pool) SetStreamObserver(observer StreamObserver) {
+	p.observer = observer
+}
+
+func (p *Pool) notifyStreamEvent(sourceEndpoint string, event StreamEvent) {
+	if p.observer != nil && sourceEndpoint != "" {
+		p.observer(sourceEndpoint, event)
+	}
+}
+
+func (p *Pool) notifyBlockEvent(scope blockScope, event StreamEvent, hashes []uint64) {
+	if p.observer == nil || len(hashes) == 0 {
+		return
+	}
+	blocks := make([]StreamBlock, len(hashes))
+	for i, hash := range hashes {
+		blocks[i] = StreamBlock{Hash: hash, DeviceTier: scope.deviceTier, GroupIdx: scope.groupIdx}
+	}
+	p.observer(scope.podIdentifier, event, blocks...)
 }
 
 // Span start options are built once. Passing them variadically at each call
@@ -435,6 +459,16 @@ func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, Eve
 	return podID, modelName, batch, nil
 }
 
+// trackStored counts a newly cached block as a physical reference. A reused
+// block report restores only a reference the filter does not track.
+func (p *Pool) trackStored(scope blockScope, ev *BlockStoredEvent) {
+	if ev.Origin == BlockOriginReused {
+		p.dedup.trackReport(scope, ev.BlockHashes)
+		return
+	}
+	p.dedup.trackStore(scope, ev.BlockHashes)
+}
+
 func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
@@ -442,6 +476,7 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
 			"podIdentifier", podIdentifier)
 	}
 	p.dedup.clear(podIdentifier)
+	p.notifyStreamEvent(podIdentifier, StreamEventCleared)
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -549,6 +584,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			if ev.Origin != BlockOriginUnspecified {
+				p.notifyStreamEvent(podIdentifier, StreamEventReportSupported)
+			}
 
 			// Scope for reference-counting this store against duplicate removes.
 			// Mirrors the index eviction identity (pod, tier, group); DP rank is
@@ -616,6 +654,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"numTokens", len(ev.Tokens),
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)
+					// The child is dropped, so the endpoint needs a repair report.
+					p.notifyBlockEvent(storeScope, StreamEventMissingParent, ev.BlockHashes)
 					continue
 				}
 				parentRequestKey = key
@@ -682,7 +722,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			if len(requestKeys) == 0 {
 				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
-					p.dedup.trackStore(storeScope, ev.BlockHashes)
+					p.trackStored(storeScope, ev)
 				}
 				continue
 			}
@@ -694,7 +734,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
 			}
-			p.dedup.trackStore(storeScope, ev.BlockHashes)
+			p.trackStored(storeScope, ev)
+			p.notifyBlockEvent(storeScope, StreamEventStored, ev.BlockHashes)
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
@@ -759,6 +800,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					continue
 				}
 			}
+			p.notifyBlockEvent(removeScope, StreamEventRemoved, hashesToEvict)
 
 		case *AllBlocksClearedEvent:
 			debugLogger.Info("All blocks cleared event received",

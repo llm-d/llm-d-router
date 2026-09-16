@@ -2,6 +2,7 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -43,6 +44,41 @@ type recordingIndex struct {
 	kvblock.Index
 	getRequestKeyCalls int
 	evictCalls         int
+}
+
+func TestPoolFullReportDoesNotRetainEvictedBlock(t *testing.T) {
+	for _, stores := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("stores=%d", stores), func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(t.Context())
+			pool, idx, tp := newTestPool(t, 16)
+			const pod = "10.0.0.1:8000"
+			store := &BlockStoredEvent{BlockHashes: []uint64{42}, Tokens: makeTokens(16), DeviceTier: "GPU", Origin: BlockOriginNew}
+			for range stores {
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{store}}, pod, "model")
+			}
+			report := *store
+			report.Origin = BlockOriginReused
+			for range 3 {
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&report}}, pod, "model")
+			}
+			keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, makeTokens(16), "model", nil)
+			require.NoError(t, err)
+			found, err := idx.Lookup(ctx, keys, nil)
+			require.NoError(t, err)
+			require.NotEmpty(t, found[keys[0]], "a report must restore residency even without a prior store")
+			remove := &BlockRemovedEvent{BlockHashes: []uint64{42}, DeviceTier: "GPU"}
+			for i := range max(stores, 1) {
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{remove}}, pod, "model")
+				found, err = idx.Lookup(ctx, keys, nil)
+				require.NoError(t, err)
+				if i+1 < stores {
+					assert.NotEmpty(t, found[keys[0]], "reports must preserve physical reference counts")
+				} else {
+					assert.Empty(t, found[keys[0]], "the final physical removal must evict the reported block")
+				}
+			}
+		})
+	}
 }
 
 func (i *recordingIndex) GetRequestKey(ctx context.Context, engineKey kvblock.BlockHash) (kvblock.BlockHash, error) {
@@ -1155,6 +1191,38 @@ func TestAllBlocksCleared_Dispatch(t *testing.T) {
 		require.Len(t, result[ck], 1, "only the surviving pod should remain on key %s", ck)
 		assert.Equal(t, "pod-kept", result[ck][0].PodIdentifier)
 	}
+}
+
+func TestPool_ReportsRepairIntegritySignals(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	var got []StreamEvent
+	var gotBlocks [][]StreamBlock
+	pool.SetStreamObserver(func(endpoint string, event StreamEvent, blocks ...StreamBlock) {
+		assert.Equal(t, "10.0.0.9:8000", endpoint)
+		got = append(got, event)
+		gotBlocks = append(gotBlocks, blocks)
+	})
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{2}, Tokens: makeTokens(16), ParentHash: 1},
+	}}, "10.0.0.9:8000", "test-model")
+
+	assert.Equal(t, []StreamEvent{StreamEventMissingParent}, got)
+	assert.Equal(t, []StreamBlock{{Hash: 2, DeviceTier: "gpu", GroupIdx: noGroupIdx}}, gotBlocks[0])
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{2}, Tokens: makeTokens(16), Origin: BlockOriginReused},
+		&BlockRemovedEvent{BlockHashes: []uint64{2}},
+		&AllBlocksClearedEvent{},
+	}}, "10.0.0.9:8000", "test-model")
+	assert.Equal(t, []StreamEvent{StreamEventMissingParent, StreamEventReportSupported,
+		StreamEventStored, StreamEventRemoved, StreamEventCleared}, got)
+	assert.Equal(t, gotBlocks[0], gotBlocks[2])
+	assert.Equal(t, gotBlocks[0], gotBlocks[3])
+
+	// A retired subscriber's queued reset ends the endpoint's stream state.
+	pool.processRawMessage(ctx, &RawMessage{SourceEndpoint: "10.0.0.9:8000", reset: true})
+	assert.Equal(t, StreamEventCleared, got[len(got)-1])
 }
 
 // TestPool_AllBlocksClearedResetsDedup verifies the filter is reset on

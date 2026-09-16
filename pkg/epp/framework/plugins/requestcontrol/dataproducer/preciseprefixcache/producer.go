@@ -61,6 +61,9 @@ type PluginConfig struct {
 	// eviction. Go duration string; defaults to defaultSpeculativeTTL when
 	// empty.
 	SpeculativeTTL string `json:"speculativeTTL"`
+	// FullReportRepair enables bounded per-request cache reports that repair an
+	// event-derived index after attachment or an integrity fault.
+	FullReportRepair *FullReportRepairConfig `json:"fullReportRepair,omitempty"`
 }
 
 var (
@@ -104,6 +107,7 @@ type Producer struct {
 	speculativeCache   *ttlcache.Cache[string, *speculativeEntries]
 	speculativeTTL     time.Duration
 	speculativeEnabled bool
+	fullReportRepair   *fullReportRepair
 
 	blockSizeTokens int
 
@@ -165,6 +169,20 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		podSelector = sel
 	}
 
+	// Validate the opt-in repair mode before starting background components.
+	var repair *fullReportRepair
+	if config.FullReportRepair != nil {
+		request, err := fullReportRequestFor(config.KVEventsConfig)
+		if err != nil {
+			return nil, err
+		}
+		repairConfig, cooldown, err := normalizeFullReportRepairConfig(*config.FullReportRepair)
+		if err != nil {
+			return nil, fmt.Errorf("invalid fullReportRepair: %w", err)
+		}
+		repair = newFullReportRepair(repairConfig, cooldown, request)
+	}
+
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token processor: %w", err)
@@ -183,6 +201,9 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
+	}
+	if repair != nil {
+		pool.SetStreamObserver(repair.observe)
 	}
 	pool.Start(ctx)
 
@@ -210,6 +231,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
+		fullReportRepair:   repair,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}, nil
@@ -363,6 +385,10 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
+	var repairMatches map[string]repairMatch
+	if p.fullReportRepair != nil {
+		repairMatches = make(map[string]repairMatch, len(endpoints))
+	}
 	results := make([]endpointResult, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if err := ctx.Err(); err != nil {
@@ -372,7 +398,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if md == nil {
 			continue
 		}
-		match := matches[fmt.Sprintf("%s:%s", md.Address, md.Port)]
+		addr := endpointAddress(md)
+		match := matches[addr]
 		if match.BlocksByTier == nil {
 			match.BlocksByTier = map[string]int{} // no match: consumers still read a map
 		}
@@ -386,15 +413,18 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, match.MatchedBlocks)})
 		}
+		if repairMatches != nil {
+			repairMatches[addr] = repairMatch{total: totalBlocks, confirmed: match.ConfirmedBlocks}
+		}
 		results = append(results, endpointResult{endpoint: ep, info: info})
 	}
 	if err := p.publishEndpointResults(ctx, results); err != nil {
 		return err
 	}
 
-	if p.speculativeEnabled {
+	if p.speculativeEnabled || p.fullReportRepair != nil {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
-			&blockKeysState{perPromptKeys: perPromptKeys})
+			&blockKeysState{perPromptKeys: perPromptKeys, repairMatches: repairMatches})
 	}
 
 	span.SetAttributes(
@@ -416,6 +446,7 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 	}
 	a.WeightedScore += b.WeightedScore
 	a.MatchedBlocks += b.MatchedBlocks
+	a.ConfirmedBlocks += b.ConfirmedBlocks
 	for tier, count := range b.BlocksByTier {
 		a.BlocksByTier[tier] += count
 	}
