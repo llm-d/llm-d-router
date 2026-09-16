@@ -171,6 +171,28 @@ apply to every video in the request.
 | `estimate.video.defaultDuration`      | `10`      | Video length in seconds for frame counting; fallback for the `x-llm-d-video-duration-seconds` header.                                                       |
 | `estimate.video.maxVideoTokens`       | –         | Overall placeholder cap for a video (0 = uncapped).                                                                                                         |
 
+Audio estimation is `min(duration × tokensPerSecond + fixedOverheadTokens,
+maxAudioTokens)`. Audio towers turn a clip into encoder frames at a fixed rate and
+pool them into tokens, so the count follows the clip's length rather than its
+payload size. Duration is resolved per clip: the `x-llm-d-audio-duration-seconds`
+header wins, then the payload itself — exact for PCM WAV, whose header declares a
+byte rate, and payload bytes ÷ `bytesPerSecond` for anything else — then
+`defaultDuration`, which is what a clip carried by reference falls back to.
+
+| Request header                  | Format          | Description                                     |
+| ------------------------------- | --------------- | ----------------------------------------------- |
+| `x-llm-d-audio-duration-seconds`| float seconds   | Clip length; overrides the payload and `defaultDuration`. |
+
+| Parameter                                  | Default   | Description                                                                  |
+| ------------------------------------------ | --------- | ---------------------------------------------------------------------------- |
+| `estimate.audio.mode`                      | `dynamic` | `dynamic` (duration×tokensPerSecond) or `static` (a constant per-clip count). |
+| `estimate.audio.dynamic.tokensPerSecond`   | `25`      | The audio tower's placeholder tokens per second of audio.                     |
+| `estimate.audio.dynamic.fixedOverheadTokens`| –        | Constant added to every clip, modeling per-clip markers.                      |
+| `estimate.audio.dynamic.bytesPerSecond`    | `16000`   | Byte rate used to read a duration out of a non-WAV payload (~128kbps).        |
+| `estimate.audio.static.staticToken`        | –         | Static-mode per-clip placeholder count.                                       |
+| `estimate.audio.defaultDuration`           | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
+| `estimate.audio.maxAudioTokens`            | –         | Overall placeholder cap for a clip (0 = uncapped).                            |
+
 ## Failure mode
 
 Per-request errors are returned to the Director, which logs and continues;

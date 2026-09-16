@@ -88,13 +88,15 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. Multimodal image and video
-// estimation are the only tunables; an empty config uses built-in defaults.
+// estimateConfig configures the estimation backend. Multimodal image, video, and
+// audio estimation are the only tunables; an empty config uses built-in defaults.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
 	// Video tunes multimodal video placeholder-token estimation.
 	Video *videoEstimateConfig `json:"video,omitempty"`
+	// Audio tunes multimodal audio placeholder-token estimation.
+	Audio *audioEstimateConfig `json:"audio,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -206,6 +208,46 @@ type framesStridedMode struct {
 	FrameStride int `json:"frameStride,omitempty"`
 }
 
+// audioEstimateConfig tunes how an audio clip's placeholder-token count is
+// estimated: min(durationSeconds*tokensPerSecond + fixedOverheadTokens,
+// maxAudioTokens). Empty fields fall back to built-in defaults. Clip duration is
+// resolved per clip rather than configured: the x-llm-d-audio-duration-seconds
+// header wins, then the payload itself, then defaultDuration.
+type audioEstimateConfig struct {
+	// Mode selects "dynamic" (duration*tokensPerSecond) or "static" (a constant
+	// per-clip count).
+	Mode string `json:"mode,omitempty"`
+	// DefaultDuration is the clip length in seconds used when neither the header
+	// nor the payload provides one, as for a clip referenced by URL.
+	DefaultDuration float64 `json:"defaultDuration,omitempty"`
+	// Static configures the static (constant per-clip) mode.
+	Static *staticAudioConfig `json:"static,omitempty"`
+	// Dynamic configures the dynamic (duration-based) mode.
+	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
+	// MaxAudioTokens caps the total placeholder count. Zero means uncapped.
+	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
+}
+
+// staticAudioConfig is the static-mode parameter.
+type staticAudioConfig struct {
+	// StaticToken is the per-clip placeholder count.
+	StaticToken int `json:"staticToken,omitempty"`
+}
+
+// dynamicAudioConfig holds the dynamic-mode parameters, which are the per-model
+// knobs: an audio tower's frame-to-token rate, its per-clip fixed overhead, and
+// the byte rate used to read a duration out of a compressed payload.
+type dynamicAudioConfig struct {
+	// TokensPerSecond is the audio tower's placeholder tokens per second of audio.
+	TokensPerSecond float64 `json:"tokensPerSecond,omitempty"`
+	// FixedOverheadTokens is a constant added to every clip, modeling the
+	// per-clip markers a processor wraps audio in.
+	FixedOverheadTokens int `json:"fixedOverheadTokens,omitempty"`
+	// BytesPerSecond converts a payload length to seconds when the clip is not
+	// PCM WAV, whose own header carries an exact byte rate.
+	BytesPerSecond int `json:"bytesPerSecond,omitempty"`
+}
+
 // PluginFactory is the factory function for the tokenizer plugin.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	config := tokenizerPluginConfig{}
@@ -281,7 +323,11 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
+		backend = estimateBackend{
+			img: newImageEstimator(config.Estimate),
+			vid: newVideoEstimator(config.Estimate),
+			aud: newAudioEstimator(config.Estimate),
+		}
 		backendName = backendEstimate
 	}
 
