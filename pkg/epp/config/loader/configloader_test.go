@@ -80,11 +80,11 @@ func (testCrossReplicaSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "test-syncer", Name: "test-syncer"}
 }
 
-func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any) error {
+func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
 	return nil
 }
 
-func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string, func([]any) any) (any, bool, error) {
+func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
 	return nil, false, nil
 }
 
@@ -126,6 +126,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 		want         *configapi.EndpointPickerConfig
 		wantFeatures map[string]bool
 		wantErr      bool
+		wantErrMsg   string
 		deprecated   bool
 	}{
 		{
@@ -330,71 +331,16 @@ func TestLoadRawConfiguration(t *testing.T) {
 			deprecated: true,
 		},
 		{
-			name:       "Success - Deprecated Top-level SaturationDetector",
-			configText: successDeprecatedTopLevelSaturationDetectorText,
-			want: &configapi.EndpointPickerConfig{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointPickerConfig",
-					APIVersion: configapi.GroupVersion.String(),
-				},
-				Plugins: []configapi.PluginSpec{
-					{Name: "maxScore", Type: "max-score-picker"},
-				},
-				SchedulingProfiles: []configapi.SchedulingProfile{
-					{
-						Name: "default",
-						Plugins: []configapi.SchedulingPlugin{
-							{PluginRef: "maxScore"},
-						},
-					},
-				},
-				FeatureGates: configapi.FeatureGates{
-					flowcontrol.FeatureGate,
-				},
-				FlowControl: &configapi.FlowControlConfig{
-					SaturationDetector: &configapi.SaturationDetectorConfig{
-						PluginRef: "utilization-detector",
-					},
-				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
-				},
-			},
-			wantErr:    false,
-			deprecated: true,
+			name:       "Error - Removed Top-level SaturationDetector",
+			configText: errorRemovedTopLevelSaturationDetectorText,
+			wantErr:    true,
+			wantErrMsg: `unknown field "saturationDetector"`,
 		},
 		{
-			name:       "Success - Deprecated Top-level Parser",
-			configText: successDeprecatedTopLevelParserText,
-			want: &configapi.EndpointPickerConfig{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointPickerConfig",
-					APIVersion: configapi.GroupVersion.String(),
-				},
-				Plugins: []configapi.PluginSpec{
-					{Name: "maxScore", Type: "max-score-picker"},
-					{Name: "openai-parser", Type: "openai-parser"},
-				},
-				SchedulingProfiles: []configapi.SchedulingProfile{
-					{
-						Name: "default",
-						Plugins: []configapi.SchedulingPlugin{
-							{PluginRef: "maxScore"},
-						},
-					},
-				},
-				FeatureGates: configapi.FeatureGates{},
-				RequestHandler: &configapi.RequestHandlerConfig{
-					Parsers: []configapi.ParserConfig{
-						{PluginRef: "openai-parser"},
-					},
-				},
-				Parser: &configapi.ParserConfig{
-					PluginRef: "openai-parser",
-				},
-			},
-			wantErr:    false,
-			deprecated: true,
+			name:       "Error - Removed Top-level Parser",
+			configText: errorRemovedTopLevelParserText,
+			wantErr:    true,
+			wantErrMsg: `unknown field "parser"`,
 		},
 		{
 			name:       "Error - Invalid YAML",
@@ -426,6 +372,9 @@ func TestLoadRawConfiguration(t *testing.T) {
 
 			if tc.wantErr {
 				require.Error(t, err, "Expected LoadRawConfig to fail")
+				if tc.wantErrMsg != "" {
+					require.ErrorContains(t, err, tc.wantErrMsg)
+				}
 				return
 			}
 			require.NoError(t, err, "Expected LoadRawConfig to succeed")
@@ -745,6 +694,11 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.NotNil(t, cfg.FlowControlConfig, "FlowControl config should be loaded")
 				require.Contains(t, cfg.FlowControlConfig.Registry.PriorityBands, 100, "Should contain priority band 100")
 				band := cfg.FlowControlConfig.Registry.PriorityBands[100]
+				require.NotNil(t, band.DefaultRequestTTL)
+				require.Equal(t, 5*time.Minute, *band.DefaultRequestTTL)
+				unboundedBand := cfg.FlowControlConfig.Registry.PriorityBands[-1]
+				require.NotNil(t, unboundedBand.DefaultRequestTTL)
+				require.Zero(t, *unboundedBand.DefaultRequestTTL)
 
 				// Verify custom policies.
 				require.Equal(t, "customFCFS", band.OrderingPolicy.TypedName().Name,
@@ -811,16 +765,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Equal(t, "secondParser", parsers[1].TypedName().Name, "Second parser should be secondParser")
 			},
 		},
-
-		{
-			name:       "Success - Deprecated Top-level SaturationDetector",
-			configText: successDeprecatedTopLevelSaturationDetectorText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be loaded")
-				require.Equal(t, "utilization-detector", cfg.SaturationDetector.TypedName().Name)
-			},
-		},
 		{
 			name:       "Success - Explicit parsers keep their own fallback",
 			configText: successExplicitPassthroughConfigText,
@@ -833,17 +777,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Equal(t, "myFallback", parsers[1].TypedName().Name,
 					"The operator's own fallback is kept, under its own name")
 				require.Equal(t, passthrough.PassthroughParserType, parsers[1].TypedName().Type)
-			},
-		},
-		{
-			name:       "Success - Deprecated Top-level Parser",
-			configText: successDeprecatedTopLevelParserText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserRegistry, "ParserRegistry should be loaded")
-				parsers := cfg.ParserRegistry.Parsers()
-				require.Len(t, parsers, 1, "Should have one parser")
-				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
 			},
 		},
 		// --- Instantiation Errors ---
@@ -1116,6 +1049,34 @@ func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	require.Empty(t, cfg.Sources)
+}
+
+func TestBuildDataLayerConfigCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	timeout := 3 * time.Second
+	cfg, err := buildDataLayerConfig(
+		&configapi.DataLayerConfig{
+			CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+		},
+		handle,
+	)
+	require.NoError(t, err)
+	require.Equal(t, timeout, cfg.PublishTimeout)
+}
+
+func TestBuildDataLayerConfigRejectsNonPositiveCrossReplicaPublishTimeout(t *testing.T) {
+	t.Parallel()
+	handle := testutils.NewTestHandle(context.Background())
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		_, err := buildDataLayerConfig(
+			&configapi.DataLayerConfig{
+				CrossReplicaPublishTimeout: &metav1.Duration{Duration: timeout},
+			},
+			handle,
+		)
+		require.ErrorContains(t, err, "crossReplicaPublishTimeout must be positive")
+	}
 }
 
 // --- Helpers & Mocks ---

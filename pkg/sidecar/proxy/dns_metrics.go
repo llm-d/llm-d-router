@@ -18,9 +18,11 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +31,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/llm-d/llm-d-router/pkg/common"
 )
 
 // envMoRIIOMetricsAddr is a backward-compatible fallback for enabling the
@@ -103,7 +107,11 @@ func (s *Server) metricsAddr() string {
 // metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR),
 // registering the goroutine on grp so it shares the server lifecycle and shuts
 // down with ctx. When neither is set (the default) it is a no-op and the
-// counters simply go unscraped.
+// counters simply go unscraped. A metrics server failure propagates to grp and
+// stops the sidecar: the failures reachable here (an unusable
+// --metrics-cert-dir, an address already in use) are startup misconfigurations,
+// so failing immediately surfaces them during rollout instead of leaving the
+// sidecar serving traffic with no /metrics endpoint.
 func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 	addr := s.metricsAddr()
 	if addr == "" {
@@ -117,7 +125,12 @@ func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 // serveMetrics serves the shared controller-runtime metrics registry at
 // /metrics on addr until ctx is cancelled, then shuts the server down
 // gracefully. Registration of the moriio_dns_* counters is ensured here so they
-// are present even if no resolver has been constructed yet.
+// are present even if no resolver has been constructed yet. The metrics server
+// uses HTTP by default. When --metrics-cert-dir is set, or metrics-cert-dir
+// is set in the sidecar YAML, it serves /metrics over HTTPS using tls.crt and
+// tls.key from that directory, with no fallback to HTTP. Startup and serving
+// errors are returned to maybeStartMetrics. The shutdown goroutine logs
+// shutdown errors.
 func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 	registerDNSMetrics()
 
@@ -129,6 +142,15 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	serveTLS := s.config.MetricsCertDir != ""
+	if serveTLS {
+		tlsConfig, err := s.metricsTLSConfig(ctx)
+		if err != nil {
+			return err
+		}
+		server.TLSConfig = tlsConfig
+	}
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -138,10 +160,39 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		}
 	}()
 
-	s.logger.Info("starting MoRI-IO metrics server", "addr", addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		s.logger.Error(err, "metrics server failed")
+	s.logger.Info("starting MoRI-IO metrics server", "addr", addr, "tls", serveTLS)
+	var err error
+	if serveTLS {
+		err = server.ListenAndServeTLS("", "")
+	} else {
+		err = server.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// metricsTLSConfig loads tls.crt and tls.key from Config.MetricsCertDir for
+// the HTTPS metrics server. Changes to either file take effect without
+// restarting the sidecar.
+func (s *Server) metricsTLSConfig(ctx context.Context) (*tls.Config, error) {
+	certFile := filepath.Join(s.config.MetricsCertDir, "tls.crt")
+	keyFile := filepath.Join(s.config.MetricsCertDir, "tls.key")
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load metrics TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+	}
+
+	reloader, err := common.NewCertReloader(ctx, s.config.MetricsCertDir, &cert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start metrics cert reloader: %w", err)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return reloader.Get(), nil
+		},
+	}, nil
 }

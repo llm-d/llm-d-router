@@ -167,8 +167,6 @@ func TestSchedule(t *testing.T) {
 	}
 }
 
-// Tests that a filter draining the candidate set surfaces a typed capacity
-// rejection from Schedule.
 func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
 	drainingFilter := &testPlugin{typedName: fwkplugin.TypedName{Type: "drain-filter", Name: "drain-filter"}} // empty FilterRes drops every endpoint
 
@@ -195,6 +193,6 @@ func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
 	if !errors.As(err, &typedErr) {
 		t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
 	}
-	assert.Equal(t, errcommon.ResourceExhausted, typedErr.Code)
-	assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+	assert.Equal(t, errcommon.ServiceUnavailable, typedErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }

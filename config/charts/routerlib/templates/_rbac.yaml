@@ -1,5 +1,5 @@
 {{- define "llm-d-router.rbac" -}}
-{{- if .Values.router.monitoring.prometheus.enabled }}
+{{- if and .Values.router.monitoring.prometheus.enabled .Values.router.monitoring.prometheus.auth.enabled }}
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1

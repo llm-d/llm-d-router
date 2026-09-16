@@ -128,7 +128,7 @@ const (
 	// servers. Consider the llama3 8B model on a H100 80GB GPUs. The size of the model weight is
 	// about 16GB. The remaining HBM used for caching prefixes is 64GB. Each
 	// token is about 128KB in size, so we can cache 500K tokens. Using the default block size of 16
-	// in vLLM, we will have 250K / 16 = 31.25K blocks.
+	// in vLLM, we will have 500K / 16 = 31.25K blocks.
 	defaultLRUCapacityPerServer = 31250
 )
 

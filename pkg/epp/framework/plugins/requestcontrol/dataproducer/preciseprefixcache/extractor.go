@@ -19,7 +19,10 @@ package preciseprefixcache
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -28,10 +31,9 @@ import (
 
 var _ fwkdl.EndpointExtractor = &Producer{}
 
-// Extract processes endpoint lifecycle events emitted by the
-// endpoint-notification-source: add/update installs a per-pod ZMQ KV-events
-// subscriber, delete tears one down. No-op unless per-pod discovery is
-// enabled.
+// Extract subscribes matching endpoints to per-pod KV events when discovery is
+// enabled. Deleted endpoints and endpoints that stop matching lose their
+// subscriber and cached index entries.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
@@ -44,14 +46,16 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointKey := meta.ID.String()
 
-	switch event.Type {
-	case fwkdl.EventAddOrUpdate:
-		if err := p.ensureSubscriber(ctx, meta); err != nil {
-			return err
+	matchesSelector := p.podSelector == nil || p.podSelector.Matches(labels.Set(meta.Labels))
+	switch {
+	case event.Type == fwkdl.EventAddOrUpdate && matchesSelector:
+		return p.ensureSubscriber(ctx, meta)
+	case event.Type == fwkdl.EventAddOrUpdate || event.Type == fwkdl.EventDelete:
+		removed := p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
+		// Deleted endpoints can have speculative entries without a subscriber.
+		if !removed && event.Type == fwkdl.EventAddOrUpdate {
+			return nil
 		}
-		logger.V(logging.DEBUG).Info("Adding subscriber", "endpoint", endpointKey)
-	case fwkdl.EventDelete:
-		p.subscribersManager.RemoveSubscriber(ctx, endpointKey)
 		if meta.Address != "" {
 			if err := p.kvCacheIndexer.KVBlockIndex().Clear(ctx, fmt.Sprintf("%s:%s", meta.Address, meta.Port)); err != nil {
 				logger.Error(err, "Failed to clear index entries for removed endpoint",
@@ -72,10 +76,10 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	}
 	endpointKey := meta.ID.String()
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
-	zmqEndpoint := fmt.Sprintf("tcp://%s:%d", meta.Address, port)
+	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
 	replayEndpoint := ""
 	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = fmt.Sprintf("tcp://%s:%d", meta.Address, replayPort+meta.GetRankIndex())
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
 	}
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 

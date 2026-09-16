@@ -62,20 +62,6 @@ type EndpointPickerConfig struct {
 	// +optional
 	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
-
-	// +optional
-	// SaturationDetector specifies which saturation detector plugin to use.
-	//
-	// Deprecated: use flowControl.saturationDetector instead. If both are set, the new field is used.
-	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
-	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
-
-	// +optional
-	// Parser specifies the parsing logic used by the EPP to process protocol messages.
-	//
-	// Deprecated: use requestHandler.parser instead. If both are set, the new field is used.
-	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
-	Parser *ParserConfig `json:"parser,omitempty"`
 }
 
 func (cfg EndpointPickerConfig) String() string {
@@ -97,12 +83,6 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.RequestHandler != nil {
 		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
-	}
-	if cfg.SaturationDetector != nil {
-		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
-	}
-	if cfg.Parser != nil {
-		parts = append(parts, fmt.Sprintf("Parser: %v", cfg.Parser))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -246,17 +226,21 @@ type DataLayerConfig struct {
 	CrossReplicaSyncerPluginRef string `json:"crossReplicaSyncerPluginRef,omitempty"`
 	// +optional
 	// CrossReplicaSyncInterval is the cadence at which each replica publishes
-	// its local per-endpoint state to the cross-replica syncer. It is rounded
-	// to a multiple of the datalayer base tick. If omitted, a default is used.
+	// its local per-endpoint state to the cross-replica syncer. This cadence is
+	// independent of the datalayer polling interval. If omitted, a default is used.
 	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
+	// +optional
+	// CrossReplicaPublishTimeout bounds one endpoint publish, including all
+	// concurrent contributor writes. If omitted, a default is used.
+	CrossReplicaPublishTimeout *metav1.Duration `json:"crossReplicaPublishTimeout,omitempty"`
 }
 
 func (dlc *DataLayerConfig) String() string {
 	if dlc == nil {
 		return nilString
 	}
-	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v}",
-		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval)
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplicaSyncerPluginRef: %s, CrossReplicaSyncInterval: %v, CrossReplicaPublishTimeout: %v}",
+		dlc.Sources, dlc.Discovery, dlc.CrossReplicaSyncerPluginRef, dlc.CrossReplicaSyncInterval, dlc.CrossReplicaPublishTimeout)
 }
 
 // DiscoveryConfig groups endpoint and peer discovery plugin references.
@@ -575,6 +559,13 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
+	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
+	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
+	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
+	// eviction in this band while the pool has endpoints.
+	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
+
+	// +optional
 	// FairnessPolicyRef specifies the name of the policy that governs flow selection.
 	// If omitted, the system default ("global-strict-fairness-policy") is used.
 	FairnessPolicyRef string `json:"fairnessPolicyRef,omitempty"`
@@ -595,6 +586,10 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequests != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.DefaultRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", pbc.DefaultRequestTTL.Duration))
 	}
 
 	if pbc.FairnessPolicyRef != "" {

@@ -71,7 +71,7 @@ func (p *AnthropicParser) TypedName() fwkplugin.TypedName {
 
 func (p *AnthropicParser) Claims() fwkrh.Claims {
 	return fwkrh.Claims{
-		Paths:     []string{messagesAPI, countTokensAPI},
+		Paths:     []string{messagesAPI, countTokensAPI, messagesAPI + "/render"},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 }
@@ -87,9 +87,11 @@ func (p *AnthropicParser) WithName(name string) *AnthropicParser {
 
 func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	path := request.GetRequestPath(headers)
+	if request.MatchPathSuffix(path, messagesAPI+"/render") {
+		return parserutil.ParseRenderRequest(body)
+	}
 
-	// The count_tokens endpoint returns only a token count and gains nothing from
-	// structured parsing or response interception; forward the body unchanged.
+	// count_tokens delegates token counting to the server and passes its response through.
 	if strings.HasSuffix(path, "/"+countTokensAPI) {
 		return &fwkrh.ParseResult{
 			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
@@ -101,8 +103,8 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, fmt.Errorf("unsupported API endpoint: %s", path)
 	}
 
-	bodyMap := make(map[string]any)
-	if err := parserutil.Unmarshal(body, &bodyMap); err != nil {
+	bodyMap, err := parserutil.UnmarshalEnvelope(body, "system")
+	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
 	}
 
@@ -117,6 +119,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	result := &fwkrh.InferenceRequestBody{
 		Messages:        &messagesReq,
 		Payload:         fwkrh.PayloadMap(bodyMap),
+		RawBody:         body,
 		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
 	if model, ok := bodyMap["model"].(string); ok {

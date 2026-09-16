@@ -342,8 +342,9 @@ schedulingProfiles:
   plugins:
   - pluginRef: maxScore
 featureGates: ["flowControl=false"]
-saturationDetector:
-  pluginRef: utilization-detector
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
 `
 
 // successComplexFlowControlConfigText tests that Flow Control configuration with custom plugins is correctly loaded.
@@ -364,10 +365,14 @@ schedulingProfiles:
 featureGates:
 - flowControl
 flowControl:
+  defaultRequestTTL: 1m
   priorityBands:
   - priority: 100
+    defaultRequestTTL: 5m
     orderingPolicyRef: customFCFS
     fairnessPolicyRef: customFairness
+  - priority: -1
+    defaultRequestTTL: 0s
 `
 
 // successParserConfigText tests that configuration with parser plugin is correctly loaded.
@@ -952,9 +957,8 @@ dataLayer:
     pluginRef: my-disc
 `
 
-// successDeprecatedTopLevelSaturationDetectorText tests that top-level saturationDetector is correctly loaded,
-// copied to nested location, and handled.
-const successDeprecatedTopLevelSaturationDetectorText = `
+// errorRemovedTopLevelSaturationDetectorText tests that the removed top-level saturationDetector field is rejected.
+const errorRemovedTopLevelSaturationDetectorText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -970,9 +974,8 @@ saturationDetector:
   pluginRef: utilization-detector
 `
 
-// successDeprecatedTopLevelParserText tests that top-level parser is correctly loaded,
-// copied to nested location, and handled.
-const successDeprecatedTopLevelParserText = `
+// errorRemovedTopLevelParserText tests that the removed top-level parser field is rejected.
+const errorRemovedTopLevelParserText = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:

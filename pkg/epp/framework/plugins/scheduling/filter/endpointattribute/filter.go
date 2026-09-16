@@ -81,7 +81,10 @@ type parameters struct {
 }
 
 // compile-time type assertion
-var _ scheduling.Filter = &EndpointAttributeFilter{}
+var (
+	_ scheduling.Filter     = &EndpointAttributeFilter{}
+	_ plugin.ConsumerPlugin = &EndpointAttributeFilter{}
+)
 
 // EndpointAttributeFilterFactory defines the factory function for EndpointAttributeFilter.
 func EndpointAttributeFilterFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {

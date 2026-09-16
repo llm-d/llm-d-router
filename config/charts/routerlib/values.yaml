@@ -3,8 +3,27 @@ extraServicePorts: []
 # Kubernetes cluster DNS domain, used to build in-cluster Service FQDNs.
 clusterDomain: cluster.local
 
+# Secrets holding credentials for pulling images from private registries
+imagePullSecrets: []
+
 epp:
   replicas: 1
+
+  # Overrides the EPP Deployment's spec.strategy. Unset means `type: Recreate`,
+  # which is the recommended default for the stateful single-active-replica pattern.
+  #
+  # With replicas > 1 the chart enables leader election, and standby replicas stay
+  # NotReady by design, so a `Recreate` Deployment never reports Available=True and
+  # `helm --wait` blocks until it times out. Setting a RollingUpdate strategy whose
+  # maxUnavailable covers the standbys lets Helm consider the release ready while
+  # keeping standbys out of the Service (they are still NotReady, so they are not
+  # Endpoints). See "Multi-replica EPP and Helm --wait" in the chart README.
+  #
+  # deploymentStrategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 1
+  #     maxSurge: 0
   image:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker
@@ -37,6 +56,10 @@ epp:
   env: []
   
   pluginsConfigFile: "default-plugins.yaml"
+  # Structured EPP configuration rendered into pluginsConfigFile. Maps merge
+  # across values files; lists are replaced according to Helm's merge rules.
+  pluginsConfig: {}
+  # Additional raw ConfigMap entries keyed by file name.
   pluginsCustomConfig: {}
   
   # Define additional container ports
@@ -76,12 +99,16 @@ epp:
 proxy:
   enabled: false    
 
-# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` and exposes
-# `/render` over loopback HTTP to EPP. modelName is passed as the first
+# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
+# `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
+# `/v1/chat/completions/render` over loopback HTTP to EPP. modelName is passed as the first
 # positional arg to the render command (required when enabled). EPP is wired to
 # the sidecar via `router.epp.pluginsCustomConfig`.
+# When flavor is "rust", router.tokenizer.image must be set to an image containing the vllm-rs binary.
 tokenizer:
   enabled: false
+  # Backend renderer flavor: "python" (default, runs vllm launch render) or "rust" (runs vllm-rs render; requires an image that includes vllm-rs).
+  flavor: "python"
   modelName: ""
   image:
     registry: docker.io

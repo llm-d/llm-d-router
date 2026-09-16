@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -33,11 +34,18 @@ func TestFactory(t *testing.T) {
 	tests := []struct {
 		name       string
 		parameters string
+		wantStamp  bool
 		wantErr    string
 	}{
 		{
-			name:       "valid",
+			name:       "response stamping defaults on",
 			parameters: `{"headerName":"X-Disagg-Slice","labelKey":"disaggregatedset.x-k8s.io/slice"}`,
+			wantStamp:  true,
+		},
+		{
+			name:       "response stamping can be disabled",
+			parameters: `{"headerName":"X-Disagg-Slice","labelKey":"disaggregatedset.x-k8s.io/slice","stampResponseHeader":false}`,
+			wantStamp:  false,
 		},
 		{
 			name:       "missing parameters",
@@ -72,8 +80,42 @@ func TestFactory(t *testing.T) {
 			assert.Equal(t, PluginType, scorer.TypedName().Type)
 			assert.Equal(t, "slice-affinity", scorer.TypedName().Name)
 			assert.Equal(t, "x-disagg-slice", scorer.headerName)
+			assert.Equal(t, test.wantStamp, scorer.stampResponseHeader)
 		})
 	}
+}
+
+func TestResponseHeader(t *testing.T) {
+	metadata := &fwkdl.EndpointMetadata{Labels: map[string]string{"slice": "slice-a"}}
+
+	t.Run("stamps selected label when enabled", func(t *testing.T) {
+		scorer := &Scorer{headerName: "x-slice", labelKey: "slice", stampResponseHeader: true}
+		response := &fwkrc.Response{Headers: map[string]string{}}
+		scorer.ResponseHeader(context.Background(), nil, response, metadata)
+		assert.Equal(t, "slice-a", response.Headers["x-slice"])
+	})
+
+	t.Run("stamps actual selection even when the request preferred another label", func(t *testing.T) {
+		scorer := &Scorer{headerName: "x-slice", labelKey: "slice", stampResponseHeader: true}
+		request := &fwksched.InferenceRequest{Headers: map[string]string{"x-slice": "slice-b"}}
+		response := &fwkrc.Response{Headers: map[string]string{}}
+		scorer.ResponseHeader(context.Background(), request, response, metadata)
+		assert.Equal(t, "slice-a", response.Headers["x-slice"])
+	})
+
+	t.Run("does not stamp when disabled", func(t *testing.T) {
+		scorer := &Scorer{headerName: "x-slice", labelKey: "slice"}
+		response := &fwkrc.Response{Headers: map[string]string{}}
+		scorer.ResponseHeader(context.Background(), nil, response, metadata)
+		assert.Empty(t, response.Headers)
+	})
+
+	t.Run("ignores an endpoint without the label", func(t *testing.T) {
+		scorer := &Scorer{headerName: "x-slice", labelKey: "slice", stampResponseHeader: true}
+		response := &fwkrc.Response{Headers: map[string]string{}}
+		scorer.ResponseHeader(context.Background(), nil, response, &fwkdl.EndpointMetadata{})
+		assert.Empty(t, response.Headers)
+	})
 }
 
 func TestScore(t *testing.T) {

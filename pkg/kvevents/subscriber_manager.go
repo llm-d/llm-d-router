@@ -83,7 +83,16 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
 		entry.cancel()
+		select {
+		case <-entry.done:
+		case <-ctx.Done():
+		}
 		delete(sm.subscribers, podIdentifier)
+		if err := ctx.Err(); err != nil {
+			metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
+			cleanupSubscriberMetrics(podIdentifier, entry.done)
+			return err
+		}
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
 	}
@@ -116,8 +125,8 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	return nil
 }
 
-// RemoveSubscriber removes a subscriber for the given pod identifier.
-func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) {
+// RemoveSubscriber removes a subscriber for the given pod identifier and reports whether it existed.
+func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) bool {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	sm.mu.Lock()
@@ -126,7 +135,7 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	entry, exists := sm.subscribers[podIdentifier]
 	if !exists {
 		debugLogger.Info("Subscriber does not exist, nothing to remove", "podIdentifier", podIdentifier)
-		return
+		return false
 	}
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
@@ -134,6 +143,7 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
+	return true
 }
 
 // cleanupSubscriberMetrics drops the per-pod series for a removed subscriber
@@ -146,22 +156,32 @@ func cleanupSubscriberMetrics(podIdentifier string, done <-chan struct{}) {
 	}()
 }
 
-// Shutdown shuts down all subscribers.
+// Shutdown shuts down all subscribers and waits for their goroutines to exit.
 func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	debugLogger.Info("Shutting down subscriber manager")
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	dones := make([]chan struct{}, 0, len(sm.subscribers))
 	for podIdentifier, entry := range sm.subscribers {
 		debugLogger.Info("Shutting down subscriber", "podIdentifier", podIdentifier)
 		entry.cancel()
 		cleanupSubscriberMetrics(podIdentifier, entry.done)
+		dones = append(dones, entry.done)
 	}
 
 	sm.subscribers = make(map[string]*subscriberEntry)
 	metrics.SubscriberActive.Set(0)
+	sm.mu.Unlock()
+
+	for _, done := range dones {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			debugLogger.Info("Shutdown context canceled while waiting for subscribers to exit")
+			return
+		}
+	}
 	debugLogger.Info("All subscribers shut down")
 }
 

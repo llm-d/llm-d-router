@@ -18,22 +18,9 @@ package collectors
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	compbasemetrics "k8s.io/component-base/metrics"
 
-	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
-)
-
-var (
-	descInferencePoolPerPodQueueSize = prometheus.NewDesc(
-		"inference_pool_per_pod_queue_size",
-		metricsutil.HelpMsgWithStability("The total number of requests pending in the model server queue for each underlying pod.", compbasemetrics.ALPHA),
-		[]string{
-			"name",
-			"model_server_pod",
-		}, nil,
-	)
 )
 
 type inferencePoolMetricsCollector struct {
@@ -53,7 +40,6 @@ func NewInferencePoolMetricsCollector(ds datastore.Datastore) prometheus.Collect
 
 // DescribeWithStability implements the prometheus.Collector interface.
 func (c *inferencePoolMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- descInferencePoolPerPodQueueSize
 	ch <- eppmetrics.DescInferencePoolPerEndpointQueueSize
 }
 
@@ -70,13 +56,6 @@ func (c *inferencePoolMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	for _, pod := range podMetrics {
-		ch <- prometheus.MustNewConstMetric(
-			descInferencePoolPerPodQueueSize,
-			prometheus.GaugeValue,
-			float64(pod.GetMetrics().WaitingQueueSize),
-			pool.Name,
-			pod.GetMetadata().ID.Name,
-		)
 		ch <- prometheus.MustNewConstMetric(
 			eppmetrics.DescInferencePoolPerEndpointQueueSize,
 			prometheus.GaugeValue,

@@ -38,10 +38,19 @@ type ReadinessChecker interface {
 // DataDependencies holds the data keys a plugin consumes, split by whether they
 // are required (framework errors if no producer exists) or optional (framework
 // logs a warning but continues if no producer exists).
+//
+// The declared dependencies give every requestcontrol extension point a
+// deterministic order: a plugin runs after the plugins producing the keys it
+// consumes. Producer-before-consumer is the intended semantic on RequestHeader,
+// Screen, Admit, Produce and PreRequest. ResponseHeader and ResponseBody are
+// ordered the same way for determinism, but the correct direction there is
+// unsettled - a producer may release consumed state in a response hook - so
+// response-hook plugins must not rely on it.
 type DataDependencies struct {
 	// Required keys — the framework will error at init time if no producer exists for any of these.
 	Required map[DataKey]any
 	// Optional keys — the framework logs a warning at init time but does NOT error if no producer exists.
+	// Configured producers run before their optional consumers.
 	// The plugin must handle the case where this data is absent at runtime.
 	Optional map[DataKey]any
 }

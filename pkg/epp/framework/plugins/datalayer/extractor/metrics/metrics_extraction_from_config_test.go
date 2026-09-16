@@ -51,7 +51,7 @@ import (
 
 // pipeline pairs a typed HTTPDataSource with its extractor. Tests assert
 // against the dispatcher contract via Poll (which fans extract errors out
-// through DataLayerExtractErrorsTotal, not the return value), and against
+// through LlmdDataLayerExtractErrorsTotal, not the return value), and against
 // the extractor's error logic by reaching into source/ext directly.
 type pipeline struct {
 	source *sourcehttp.HTTPDataSource[sourcemetrics.PrometheusMetricMap]
@@ -60,7 +60,7 @@ type pipeline struct {
 
 // Poll dispatches the source: fetches data and runs every bound extractor.
 // Per the PollingDispatcher contract, per-extractor failures are recorded via
-// DataLayerExtractErrorsTotal and do NOT surface as a returned error here.
+// LlmdDataLayerExtractErrorsTotal and do NOT surface as a returned error here.
 func (p *pipeline) Poll(ctx context.Context, ep fwkdl.Endpoint) error {
 	return p.source.Dispatch(ctx, ep)
 }
@@ -166,6 +166,55 @@ func TestMetricsExtractionDefaultConfig(t *testing.T) {
 	assert.Equal(t, 512, m.CacheNumBlocks, "CacheNumBlocks")
 }
 
+// TestMetricsExtractionCPUBackendVLLM verifies the RHAI-195 contract for a
+// CPU-backed vLLM endpoint. CPU vLLM exposes the same scheduling metric names
+// as GPU vLLM and currently retains the num_gpu_blocks label on
+// vllm:cache_config_info even though those blocks are CPU-resident.
+//
+// The LoRA family is intentionally absent: a CPU deployment without LoRA
+// adapters must still be scrapeable and usable by the EPP.
+func TestMetricsExtractionCPUBackendVLLM(t *testing.T) {
+	srv := createMockServer([]MetricMock{
+		{Name: WaitingMetric, Value: 6},
+		{Name: RunningMetric, Value: 2},
+		{Name: KVCacheMetric, Value: 0.42},
+		{
+			Name:  CacheConfigMetric,
+			Value: 1,
+			Labels: map[string]string{
+				CacheConfigBlockSizeInfoMetricName: "16",
+				CacheConfigNumGPUBlocksMetricName:  "2048",
+			},
+		},
+	})
+	defer srv.Close()
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+		// The extractor must not make a GPU-specific decision based on this
+		// label; CPU and GPU vLLM use the same default metric mapping.
+		"accelerator": "cpu",
+	})
+
+	data, err := p.source.Poll(context.Background(), ep)
+	require.NoError(t, err)
+	require.NoError(t, p.ext.Extract(context.Background(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+		Payload:  data,
+		Endpoint: ep,
+	}))
+
+	m := ep.GetMetrics()
+	assert.Equal(t, 6, m.WaitingQueueSize, "WaitingQueueSize")
+	assert.Equal(t, 2, m.RunningRequestsSize, "RunningRequestsSize")
+	assert.InDelta(t, 0.42, m.KVCacheUsagePercent, 0.001, "KVCacheUsagePercent")
+	assert.Equal(t, 16, m.CacheBlockSize, "CacheBlockSize")
+	assert.Equal(t, 2048, m.CacheNumBlocks, "CPU KV cache block count")
+	assert.Empty(t, m.ActiveModels, "CPU vLLM without LoRA must have no active adapters")
+}
+
 // TestMetricsExtractionLoRADisabledViaConfig verifies the "disable a specific metric"
 // pattern: with loraSpec: "", the extractor skips LoRA entirely — no extraction attempt,
 // no error for the missing/present family, and ActiveModels stays at its zero value.
@@ -257,7 +306,7 @@ func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 
 			// Drive Poll + Extract directly so the extractor's error surfaces.
 			// The dispatcher contract intentionally swallows extractor errors
-			// into DataLayerExtractErrorsTotal; this test asserts on the error
+			// into LlmdDataLayerExtractErrorsTotal; this test asserts on the error
 			// itself.
 			data, err := p.source.Poll(ctx, ep)
 			require.NoError(t, err, "fetch should succeed; we are testing the extractor's error path")
@@ -275,7 +324,7 @@ func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 // vllm:lora_requests_info family, Extract returns no error and still populates
 // the other (required) metrics. Before the fix the extractor would return an
 // "lora_requests_info not found" error and the EPP would increment
-// DataLayerExtractErrorsTotal on every poll of any vanilla deployment.
+// LlmdDataLayerExtractErrorsTotal on every poll of any vanilla deployment.
 func TestMetricsExtractionLoRAFamilyAbsentNoError(t *testing.T) {
 	srv := createMockServer([]MetricMock{
 		{Name: WaitingMetric, Value: 4},
@@ -569,7 +618,7 @@ func TestMetricsExtractionSGLangDefaultConfig(t *testing.T) {
 	})
 
 	// Drive Poll + Extract directly: the dispatcher swallows extractor errors
-	// into DataLayerExtractErrorsTotal, and a spurious per-scrape error is
+	// into LlmdDataLayerExtractErrorsTotal, and a spurious per-scrape error is
 	// part of what this test guards against.
 	data, err := p.source.Poll(ctx, ep)
 	require.NoError(t, err)

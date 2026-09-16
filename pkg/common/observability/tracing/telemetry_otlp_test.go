@@ -27,12 +27,15 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -41,6 +44,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // collector records the spans and request metadata an exporter delivers.
@@ -108,6 +113,15 @@ func serveCollector(t *testing.T, creds credentials.TransportCredentials, lis ne
 func selfSignedCert(t *testing.T) (credentials.TransportCredentials, string) {
 	t.Helper()
 
+	pair, path := selfSignedKeyPair(t)
+	return credentials.NewServerTLSFromCert(pair), path
+}
+
+// selfSignedKeyPair returns the certificate itself, for servers that are not gRPC,
+// alongside the path of the PEM a client trusts it by.
+func selfSignedKeyPair(t *testing.T) (*tls.Certificate, string) {
+	t.Helper()
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -147,7 +161,7 @@ func selfSignedCert(t *testing.T) (credentials.TransportCredentials, string) {
 		t.Fatalf("write certificate: %v", err)
 	}
 
-	return credentials.NewServerTLSFromCert(&pair), path
+	return &pair, path
 }
 
 // exportOneSpan builds an exporter from the environment and sends a single span,
@@ -159,7 +173,7 @@ func exportOneSpan(ctx context.Context, t *testing.T) error {
 	if err != nil {
 		t.Fatalf("traceExporterType() error = %v", err)
 	}
-	exporter, err := newTraceExporter(ctx, exporterType)
+	exporter, err := newTraceExporter(ctx, &errorHandler{logger: testr.New(t)}, exporterType)
 	if err != nil {
 		t.Fatalf("newTraceExporter() error = %v", err)
 	}
@@ -349,4 +363,310 @@ func TestInitTracingDefaultsToOTLPCollector(t *testing.T) {
 	if spans, _ := c.received(); spans != 1 {
 		t.Errorf("collector received %d spans, want 1 exported by the default exporter", spans)
 	}
+}
+
+// httpCollector records what an OTLP/HTTP exporter delivers to /v1/traces.
+type httpCollector struct {
+	mu       sync.Mutex
+	requests int
+	header   http.Header
+}
+
+func (c *httpCollector) record(r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.requests++
+	c.header = r.Header.Clone()
+}
+
+func (c *httpCollector) received() (int, http.Header) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.requests, c.header
+}
+
+// serveHTTPCollector answers OTLP/HTTP export requests on lis. An empty protobuf
+// response body is a valid ExportTraceServiceResponse, so the exporter treats the
+// export as successful.
+func serveHTTPCollector(t *testing.T, tlsCert *tls.Certificate, lis net.Listener) *httpCollector {
+	t.Helper()
+
+	c := &httpCollector{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/traces", func(w http.ResponseWriter, r *http.Request) {
+		c.record(r)
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	if tlsCert != nil {
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{*tlsCert}, MinVersion: tls.VersionTLS12}
+		go func() { _ = srv.ServeTLS(lis, "", "") }()
+	} else {
+		go func() { _ = srv.Serve(lis) }()
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	return c
+}
+
+// startHTTPCollector serves OTLP/HTTP on an arbitrary loopback port.
+func startHTTPCollector(t *testing.T, tlsCert *tls.Certificate) (*httpCollector, string) {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	return serveHTTPCollector(t, tlsCert, lis), lis.Addr().String()
+}
+
+func TestOTLPProtocol(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset defaults to grpc", want: protocolGRPC},
+		{
+			name: "grpc",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"},
+			want: protocolGRPC,
+		},
+		{
+			name: "http/protobuf",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"},
+			want: protocolHTTP,
+		},
+		{
+			name: "the per-signal variable wins over the generic one",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "grpc",
+				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+			},
+			want: protocolHTTP,
+		},
+		{
+			name: "the generic variable applies when the per-signal one is unset",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"},
+			want: protocolHTTP,
+		},
+		{
+			name:    "http/json is reported as unsupported",
+			env:     map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "http/json"},
+			want:    protocolGRPC,
+			wantErr: true,
+		},
+		{
+			name: "a supported value matches case-insensitively",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "HTTP/PROTOBUF"},
+			want: protocolHTTP,
+		},
+		{
+			name: "grpc matches case-insensitively",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "GRPC"},
+			want: protocolGRPC,
+		},
+		{
+			name:    "an unrecognised protocol is reported",
+			env:     map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "thrift"},
+			want:    protocolGRPC,
+			wantErr: true,
+		},
+		{
+			name: "an empty value counts as unset",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": ""},
+			want: protocolGRPC,
+		},
+		{
+			name: "a blank value counts as unset",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "   "},
+			want: protocolGRPC,
+		},
+		{
+			name: "surrounding whitespace does not reject a supported value",
+			env:  map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "  http/protobuf  "},
+			want: protocolHTTP,
+		},
+		{
+			name: "an empty per-signal value falls through to the generic one",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
+				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "",
+			},
+			want: protocolHTTP,
+		},
+		{
+			name: "a rejected per-signal value is ignored so the generic one applies",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
+				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "thrift",
+			},
+			want:    protocolHTTP,
+			wantErr: true,
+		},
+		{
+			name: "gRPC applies when no variable names a supported protocol",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/json",
+				"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "thrift",
+			},
+			want:    protocolGRPC,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t, otlpProtocolEnv...)
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+
+			got, err := otlpProtocol()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("otlpProtocol() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("otlpProtocol() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// http/protobuf must actually export over HTTP, not silently keep using gRPC.
+func TestOTLPHTTPExporterReachesCollector(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, otlpProtocolEnv...)
+
+	c, addr := startHTTPCollector(t, nil)
+
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := exportOneSpan(ctx, t); err != nil {
+		t.Fatalf("ExportSpans() over OTLP/HTTP error = %v", err)
+	}
+
+	if requests, _ := c.received(); requests != 1 {
+		t.Errorf("collector received %d requests, want 1", requests)
+	}
+}
+
+// The loopback fallback has to follow the protocol: the HTTP transport is served on
+// a different port than gRPC, so sharing one default would reach nothing.
+func TestOTLPHTTPExporterDefaultsToPlaintextLoopback(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, otlpProtocolEnv...)
+
+	lis, err := net.Listen("tcp", localHTTPEndpoint)
+	if err != nil {
+		t.Skipf("cannot bind the default OTLP/HTTP port: %v", err)
+	}
+	c := serveHTTPCollector(t, nil, lis)
+
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := exportOneSpan(ctx, t); err != nil {
+		t.Fatalf("ExportSpans() to the loopback default error = %v", err)
+	}
+
+	if requests, _ := c.received(); requests != 1 {
+		t.Errorf("collector received %d requests, want 1", requests)
+	}
+}
+
+// The authentication behaviour established for gRPC must hold on the HTTP path.
+func TestOTLPHTTPExporterSendsHeadersFromEnvironment(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, otlpProtocolEnv...)
+
+	c, addr := startHTTPCollector(t, nil)
+
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+addr)
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer token123")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := exportOneSpan(ctx, t); err != nil {
+		t.Fatalf("ExportSpans() error = %v", err)
+	}
+
+	_, header := c.received()
+	if got := header.Get("Authorization"); got != "Bearer token123" {
+		t.Errorf("Authorization header = %q, want %q", got, "Bearer token123")
+	}
+}
+
+// An https endpoint must reach a TLS collector on the HTTP path, the same way it does
+// over gRPC.
+func TestOTLPHTTPExporterUsesTLSFromEnvironment(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, otlpProtocolEnv...)
+
+	cert, certPath := selfSignedKeyPair(t)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	c := serveHTTPCollector(t, cert, lis)
+
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://"+lis.Addr().String())
+	t.Setenv("OTEL_EXPORTER_OTLP_CERTIFICATE", certPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := exportOneSpan(ctx, t); err != nil {
+		t.Fatalf("ExportSpans() over TLS error = %v", err)
+	}
+
+	if requests, _ := c.received(); requests != 1 {
+		t.Errorf("collector received %d requests, want 1", requests)
+	}
+}
+
+// A rejected protocol reaches the operator only through the error handler: the exporter
+// is still built, so nothing downstream reports the value that was ignored.
+func TestUnsupportedProtocolReachesErrorHandler(t *testing.T) {
+	clearEnv(t, otlpTransportEnv...)
+	clearEnv(t, otlpProtocolEnv...)
+
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "thrift")
+
+	var handled []string
+	h := &errorHandler{logger: funcr.New(func(_, args string) {
+		handled = append(handled, args)
+	}, funcr.Options{Verbosity: logging.DEBUG})}
+
+	exporter, err := newTraceExporter(context.Background(), h, exporterTypeOTLP)
+	if err != nil {
+		t.Fatalf("newTraceExporter() error = %v", err)
+	}
+	t.Cleanup(func() { _ = exporter.Shutdown(context.Background()) })
+
+	for _, line := range handled {
+		if strings.Contains(line, "thrift") {
+			return
+		}
+	}
+	t.Errorf("error handler received %q, want a report naming the rejected protocol", handled)
 }

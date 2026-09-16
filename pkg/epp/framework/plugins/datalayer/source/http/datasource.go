@@ -247,7 +247,7 @@ func (s *HTTPDataSource[T]) Poll(ctx context.Context, ep fwkdl.Endpoint) (T, err
 //
 // Return contract: a non-nil return indicates a poll-level failure (the
 // dispatcher could not produce data). Per-extractor failures are recorded
-// in DataLayerExtractErrorsTotal and do NOT surface as a returned error.
+// in LlmdDataLayerExtractErrorsTotal and do NOT surface as a returned error.
 // This keeps the collector's poll/extract counters cleanly separated.
 func (s *HTTPDataSource[T]) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	pollCtx, cancelPoll := context.WithTimeout(ctx, defaultStepTimeout)
@@ -271,7 +271,7 @@ func (s *HTTPDataSource[T]) Dispatch(ctx context.Context, ep fwkdl.Endpoint) err
 	return nil
 }
 
-// runExtractor invokes ext under panic recovery; both failures and panics increment DataLayerExtractErrorsTotal.
+// runExtractor invokes ext under panic recovery; both failures and panics increment LlmdDataLayerExtractErrorsTotal.
 func (s *HTTPDataSource[T]) runExtractor(ctx context.Context, ext fwkdl.PollingExtractor[T], in fwkdl.PollInput[T]) {
 	logger := log.FromContext(ctx)
 	srcType := s.typedName.Type

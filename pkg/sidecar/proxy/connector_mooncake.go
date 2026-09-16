@@ -22,15 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -38,26 +36,15 @@ const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the oth
 
 const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id in header to prefill
 
-func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if err := errorJSONInvalid(fmt.Errorf("failed to read request body: %w", err), w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
-	var requestData map[string]any
-	if err := json.Unmarshal(body, &requestData); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	bootstrapAddr := fmt.Sprintf("http://%s:%d", extractHost(prefillPodHostPort), s.config.MooncakeBootstrapPort)
+	bootstrapAddr := "http://" + net.JoinHostPort(extractHost(prefillPodHostPort), strconv.Itoa(s.config.MooncakeBootstrapPort))
 
 	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
 	if err != nil {
@@ -81,17 +68,14 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		"engine_id", engineID)
 
 	// Build prefill request body
-	prefillData := make(map[string]any)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
+	prefillData := maps.Clone(requestData)
 	prefillData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill: false,
 		requestFieldDoRemoteDecode:  true,
 		requestFieldTransferID:      transferID,
 	}
 	// update fields from original body; return asap.
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
+	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
@@ -104,14 +88,11 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", "body", string(prefillBody))
+		trace.Info("Prefill request", logging.HTTPBodyKey, string(prefillBody))
 	}
 
 	// Build decode request body
-	decodeData := make(map[string]any)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
+	decodeData := maps.Clone(requestData)
 	decodeData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldDoRemotePrefill:     true,
 		requestFieldDoRemoteDecode:      false,
@@ -129,10 +110,14 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	}
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Decode request", "body", string(decodeBody))
+		trace.Info("Decode request", logging.HTTPBodyKey, string(decodeBody))
 	}
 
-	s.handleMooncakeConcurrentRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, dpRank)
+	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, KVConnectorMooncake, func(prefillReq, _ *http.Request) {
+		// Route prefill to the same DP rank whose engine_id was given to decode, so the
+		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
+		prefillReq.Header.Set(mooncakeDataParallelRankHeader, dpRank)
+	})
 }
 
 // getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.
@@ -182,102 +167,4 @@ func (s *Server) getMooncakeEngineMap(ctx context.Context, prefillHostPort, boot
 	// add the full map into LRU
 	s.mooncakeEngineIDs.Add(prefillHostPort, engineMap)
 	return engineMap, nil
-}
-
-func (s *Server) handleMooncakeConcurrentRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost, dpRank string) {
-	tracer := tracing.Tracer(tracerScope)
-	ctx := r.Context()
-
-	// WithoutCancel for prefill so it isn't aborted when the decode response finishes first
-	prefillReq := cloneRequestWithBody(context.WithoutCancel(ctx), r, prefillBody)
-	decodeReq := cloneRequestWithBody(ctx, r, decodeBody)
-
-	// Route prefill to the same DP rank whose engine_id was given to decode, so the
-	// KV it produces lands on the engine decode pulls from. No-op for a single rank.
-	prefillReq.Header.Set(mooncakeDataParallelRankHeader, dpRank)
-
-	// Prefill runs in a goroutine: only populates KV cache, response is discarded.
-	// Decode runs on the main thread: writes the actual response back to the client via w.
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorMooncake),
-		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
-	)
-	prefillStart := time.Now()
-
-	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
-	if err != nil {
-		prefillSpan.SetStatus(codes.Error, "failed to create prefill handler")
-		prefillSpan.End()
-		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	go func() {
-		defer prefillSpan.End()
-		defer func() {
-			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
-				s.logger.Error(fmt.Errorf("panic: %v", rec), "panic in prefill request")
-			}
-		}()
-		// buffered writer captures response for status check only, not sent to client
-		pw := &bufferedResponseWriter{}
-		prefillHandler.ServeHTTP(pw, prefillReq)
-		prefillDuration := time.Since(prefillStart)
-		prefillSpan.SetAttributes(
-			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
-		)
-		if isHTTPError(pw.statusCode) {
-			prefillSpan.SetStatus(codes.Error, "prefill request failed")
-		}
-		s.logger.V(logging.TRACE).Info("mooncake prefill request completed", "status", pw.statusCode)
-	}()
-
-	// Decode Stage
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	defer decodeSpan.End()
-
-	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorMooncake),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
-	)
-	decodeStart := time.Now()
-
-	decodeReq = decodeReq.WithContext(ctx)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
-
-	decodeDuration := time.Since(decodeStart)
-	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
-	)
-
-	// Calculate end-to-end P/D timing metrics for concurrent P/D.
-	// True TTFT captures time from gateway request start to decode start.
-	// In Mooncake's concurrent mode, prefill duration is tracked in the async prefill span.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
-		var totalDuration time.Duration
-		var trueTTFT time.Duration
-		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
-			if requestStart, ok := requestStartValue.(time.Time); ok {
-				totalDuration = time.Since(requestStart)
-				trueTTFT = decodeStart.Sub(requestStart)
-			}
-		}
-
-		currentSpan.SetAttributes(
-			attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-			attribute.Bool("llm_d.pd_proxy.concurrent_pd", true),
-		)
-	}
 }
