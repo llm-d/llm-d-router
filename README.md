@@ -98,6 +98,8 @@ Contributions are welcome!
 [Meeting Notes]:https://docs.google.com/document/d/1Pf3x7ZM8nNpU56nt6CzePAOmFZ24NXDeXyaYb565Wq4
 [#sig-router]:https://llm-d.slack.com/?redir=%2Fmessages%2Fsig-router
 
+## Security
+See [SECURITY.md](SECURITY.md) for vulnerability reporting. Published container images carry a signed provenance attestation and an SBOM (software bill of materials). See [Verifying Published Artifacts](docs/verifying-releases.md) for how to check them.
 
 ## License
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_large)
