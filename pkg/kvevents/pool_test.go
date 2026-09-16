@@ -52,12 +52,12 @@ func TestPoolFullReportDoesNotRetainEvictedBlock(t *testing.T) {
 			ctx := logging.NewTestLoggerIntoContext(t.Context())
 			pool, idx, tp := newTestPool(t, 16)
 			const pod = "10.0.0.1:8000"
-			store := &BlockStoredEvent{BlockHashes: []uint64{42}, Tokens: makeTokens(16), DeviceTier: "GPU", Origin: "NEW"}
+			store := &BlockStoredEvent{BlockHashes: []uint64{42}, Tokens: makeTokens(16), DeviceTier: "GPU", Origin: BlockOriginNew}
 			for range stores {
 				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{store}}, pod, "model")
 			}
 			report := *store
-			report.Origin = "REUSED"
+			report.Origin = BlockOriginReused
 			for range 3 {
 				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&report}}, pod, "model")
 			}
@@ -1211,7 +1211,7 @@ func TestPool_ReportsRepairIntegritySignals(t *testing.T) {
 	assert.Equal(t, []StreamEvent{StreamEventMissingParent}, got)
 	assert.Equal(t, []StreamBlock{{Hash: 2, DeviceTier: "gpu", GroupIdx: noGroupIdx}}, gotBlocks[0])
 	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
-		&BlockStoredEvent{BlockHashes: []uint64{2}, Tokens: makeTokens(16), Origin: "REUSED"},
+		&BlockStoredEvent{BlockHashes: []uint64{2}, Tokens: makeTokens(16), Origin: BlockOriginReused},
 		&BlockRemovedEvent{BlockHashes: []uint64{2}},
 		&AllBlocksClearedEvent{},
 	}}, "10.0.0.9:8000", "test-model")

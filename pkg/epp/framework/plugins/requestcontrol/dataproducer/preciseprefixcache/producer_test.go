@@ -529,10 +529,7 @@ func TestProduce_RepairMatchExcludesSpeculativeOnlyBlocks(t *testing.T) {
 		},
 	}
 	p := newProducerWithIndexer(ctx, idx)
-	p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
-		FullReportThreshold: 0.80,
-		MinMissingBlocks:    32,
-	}, 0)
+	p.fullReportRepair = newTestRepair(0)
 	req := &scheduling.InferenceRequest{
 		RequestID:   "repair-counts",
 		TargetModel: "model",
@@ -564,11 +561,7 @@ func TestProduceThenPreRequest_RepairsSelectedPrefill(t *testing.T) {
 		},
 	}
 	p := newProducerWithIndexer(ctx, idx)
-	p.fullReportRepair = newFullReportRepair(FullReportRepairConfig{
-		FullReportThreshold: 0.80,
-		MinMissingBlocks:    32,
-	}, 0)
-	p.fullReportRepair.observe(prefill, kvevents.StreamEventReportSupported)
+	p.fullReportRepair = newTestRepair(0, prefill)
 	payload := fwkrh.PayloadMap{"model": "model"}
 	req := &scheduling.InferenceRequest{
 		RequestID:   "produce-prerequest-repair",

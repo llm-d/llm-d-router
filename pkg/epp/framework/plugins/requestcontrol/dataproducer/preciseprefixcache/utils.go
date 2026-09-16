@@ -17,12 +17,17 @@ limitations under the License.
 package preciseprefixcache
 
 import (
-	"fmt"
-
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
+
+// endpointAddress is the "address:port" identity that KV-block index entries
+// and KV-event subscribers use for an endpoint.
+func endpointAddress(m *fwkdl.EndpointMetadata) string {
+	return m.Address + ":" + m.Port
+}
 
 // extractEndpointSet builds the "address:port" identifier set used to filter
 // kvblock.Index lookups to candidate endpoints. Endpoints without metadata
@@ -31,7 +36,7 @@ func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
 	endpointSet := sets.New[string]()
 	for _, ep := range endpoints {
 		if m := ep.GetMetadata(); m != nil {
-			endpointSet.Insert(fmt.Sprintf("%s:%s", m.Address, m.Port))
+			endpointSet.Insert(endpointAddress(m))
 		}
 	}
 	return endpointSet

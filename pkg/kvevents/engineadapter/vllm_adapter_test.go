@@ -658,17 +658,28 @@ func TestVLLMParseMessage_MapEncodedBlockStored(t *testing.T) {
 }
 
 func TestVLLMBlockStoredOrigin(t *testing.T) {
-	for _, origin := range []string{"NEW", "REUSED", "", "future-origin"} {
-		t.Run(origin, func(t *testing.T) {
+	for wireOrigin, want := range map[string]kvevents.BlockOrigin{
+		"NEW":           kvevents.BlockOriginNew,
+		"REUSED":        kvevents.BlockOriginReused,
+		"":              kvevents.BlockOriginUnspecified,
+		"future-origin": kvevents.BlockOriginUnspecified,
+	} {
+		t.Run(wireOrigin, func(t *testing.T) {
 			event := map[string]any{"type": "BlockStored", "block_hashes": []uint64{42},
-				"token_ids": []uint32{1}, "block_size": 1, "origin": origin}
+				"token_ids": []uint32{1}, "block_size": 1, "origin": wireOrigin}
 			wire, err := msgpack.Marshal(event)
 			require.NoError(t, err)
 			got, err := NewVLLMAdapter().decodeVLLMEvent(wire)
 			require.NoError(t, err)
-			assert.Equal(t, origin, got.(*kvevents.BlockStoredEvent).Origin)
+			assert.Equal(t, want, got.(*kvevents.BlockStoredEvent).Origin)
 		})
 	}
+
+	wire, err := msgpack.Marshal(map[string]any{"type": "BlockStored", "block_hashes": []uint64{42},
+		"token_ids": []uint32{1}, "block_size": 1, "origin": 1})
+	require.NoError(t, err)
+	_, err = NewVLLMAdapter().decodeVLLMEvent(wire)
+	assert.ErrorContains(t, err, "origin")
 }
 
 // TestVLLMParseMessage_MapEncodedBlockRemovedAndCleared covers the remaining

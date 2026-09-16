@@ -172,14 +172,15 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	// Validate the opt-in repair mode before starting background components.
 	var repair *fullReportRepair
 	if config.FullReportRepair != nil {
-		if err := validateFullReportRepairPrerequisites(config.KVEventsConfig); err != nil {
+		request, err := fullReportRequestFor(config.KVEventsConfig)
+		if err != nil {
 			return nil, err
 		}
 		repairConfig, cooldown, err := normalizeFullReportRepairConfig(*config.FullReportRepair)
 		if err != nil {
 			return nil, fmt.Errorf("invalid fullReportRepair: %w", err)
 		}
-		repair = newFullReportRepair(repairConfig, cooldown)
+		repair = newFullReportRepair(repairConfig, cooldown, request)
 	}
 
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)
@@ -397,7 +398,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if md == nil {
 			continue
 		}
-		match := matches[fmt.Sprintf("%s:%s", md.Address, md.Port)]
+		addr := endpointAddress(md)
+		match := matches[addr]
 		if match.BlocksByTier == nil {
 			match.BlocksByTier = map[string]int{} // no match: consumers still read a map
 		}
@@ -412,7 +414,6 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, match.MatchedBlocks)})
 		}
 		if repairMatches != nil {
-			addr := fmt.Sprintf("%s:%s", md.Address, md.Port)
 			repairMatches[addr] = repairMatch{total: totalBlocks, confirmed: match.ConfirmedBlocks}
 		}
 		results = append(results, endpointResult{endpoint: ep, info: info})

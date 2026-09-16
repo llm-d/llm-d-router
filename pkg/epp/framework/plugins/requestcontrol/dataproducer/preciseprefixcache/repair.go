@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/utils/clock"
 
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
@@ -73,71 +74,86 @@ func normalizeFullReportRepairConfig(config FullReportRepairConfig) (FullReportR
 	return config, cooldown, nil
 }
 
-func validateFullReportRepairPrerequisites(config *kvevents.Config) error {
+// fullReportRequest returns the payload mutation that asks the serving engine
+// for a full KV-cache report, or false when the request body cannot carry it.
+type fullReportRequest func(body *fwkrh.InferenceRequestBody) (func(fwkrh.PayloadMap), bool)
+
+// fullReportRequestFor validates the KV-events prerequisites of repair and
+// returns the report request of the configured engine.
+func fullReportRequestFor(config *kvevents.Config) (fullReportRequest, error) {
 	if config == nil || !config.DiscoverPods || config.PodDiscoveryConfig == nil {
-		return errors.New("fullReportRepair requires kvEventsConfig.discoverPods with podDiscoveryConfig")
+		return nil, errors.New("fullReportRepair requires kvEventsConfig.discoverPods with podDiscoveryConfig")
 	}
 	if config.ZMQEndpoint != "" {
-		return errors.New("fullReportRepair does not support kvEventsConfig.zmqEndpoint global-socket mode")
-	}
-	if config.EngineType != "" && config.EngineType != engineadapter.EngineTypeVLLM {
-		return fmt.Errorf("fullReportRepair requires kvEventsConfig.engineType %q", engineadapter.EngineTypeVLLM)
+		return nil, errors.New("fullReportRepair does not support kvEventsConfig.zmqEndpoint global-socket mode")
 	}
 	if config.PodDiscoveryConfig.EffectiveReplayPort() > 0 {
-		return errors.New("fullReportRepair does not support kvEventsConfig.podDiscoveryConfig.replaySocketPort")
+		return nil, errors.New("fullReportRepair does not support kvEventsConfig.podDiscoveryConfig.replaySocketPort")
 	}
-	return nil
+	switch config.EngineType {
+	case "", engineadapter.EngineTypeVLLM:
+		return vllmFullReport, nil
+	default:
+		return nil, fmt.Errorf("fullReportRepair requires kvEventsConfig.engineType %q, got %q",
+			engineadapter.EngineTypeVLLM, config.EngineType)
+	}
 }
 
+// endpointRepairState is one endpoint's report eligibility and open faults.
 type endpointRepairState struct {
-	missing         map[kvevents.StreamBlock]struct{}
+	// missing holds blocks dropped for a missing parent that no later store,
+	// removal, or cache reset has resolved.
+	missing map[kvevents.StreamBlock]struct{}
+	// reportSupported records that the endpoint's stream tags store origins.
 	reportSupported bool
 	lastRequest     time.Time
 }
 
-// fullReportRepair retains missing block identities until a store, removal,
-// or cache reset resolves them. Report requests share an endpoint cooldown.
-// A cache reset, including the reset queued when a subscriber is removed,
-// deletes the endpoint's state.
+// fullReportRepair decides when a request asks its endpoint for a full
+// KV-cache report. State is keyed by endpoint address and follows the pool's
+// stream transitions: an origin-tagged store makes an endpoint eligible, a
+// missing-parent drop arms a fault, and a cache reset, including the reset
+// queued when a subscriber is removed, deletes the endpoint's state.
 type fullReportRepair struct {
 	mu             sync.Mutex
-	endpoints      map[string]endpointRepairState
+	endpoints      map[string]*endpointRepairState
 	threshold      float64
 	minMissing     int
 	cooldown       time.Duration
 	prefillProfile string
+	request        fullReportRequest
 	clock          clock.PassiveClock
 }
 
-func newFullReportRepair(config FullReportRepairConfig, cooldown time.Duration) *fullReportRepair {
+func newFullReportRepair(config FullReportRepairConfig, cooldown time.Duration, request fullReportRequest) *fullReportRepair {
 	if config.PrefillProfile == "" {
 		config.PrefillProfile = experimentalPrefillProfile
 	}
 	return &fullReportRepair{
-		endpoints:      make(map[string]endpointRepairState),
+		endpoints:      make(map[string]*endpointRepairState),
 		threshold:      config.FullReportThreshold,
 		minMissing:     config.MinMissingBlocks,
 		cooldown:       cooldown,
 		prefillProfile: config.PrefillProfile,
+		request:        request,
 		clock:          clock.RealClock{},
 	}
 }
 
 func (r *fullReportRepair) observe(endpoint string, event kvevents.StreamEvent, blocks ...kvevents.StreamBlock) {
-	if r == nil || endpoint == "" {
-		return
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if event == kvevents.StreamEventCleared {
-		delete(r.endpoints, endpoint)
-		return
-	}
-	state, exists := r.endpoints[endpoint]
-	if !exists && event != kvevents.StreamEventReportSupported && event != kvevents.StreamEventMissingParent {
-		return
+	state := r.endpoints[endpoint]
+	if state == nil {
+		if event != kvevents.StreamEventReportSupported && event != kvevents.StreamEventMissingParent {
+			return
+		}
+		state = &endpointRepairState{}
+		r.endpoints[endpoint] = state
 	}
 	switch event {
+	case kvevents.StreamEventCleared:
+		delete(r.endpoints, endpoint)
 	case kvevents.StreamEventReportSupported:
 		state.reportSupported = true
 	case kvevents.StreamEventMissingParent:
@@ -152,31 +168,57 @@ func (r *fullReportRepair) observe(endpoint string, event kvevents.StreamEvent, 
 			delete(state.missing, block)
 		}
 	}
-	r.endpoints[endpoint] = state
 }
 
-func (r *fullReportRepair) shouldRequest(endpoint string, match repairMatch) (bool, string) {
-	if r == nil {
-		return false, ""
-	}
+// shouldRequest reports whether a request routed to endpoint should ask for a
+// full report, and why. It does not start the cooldown; reserve does.
+//
+// The endpoint's stream must tag store origins, because only tagged reports
+// restore residency without adding dedup references, and its cooldown must
+// have elapsed. The reason is then one of:
+//
+//   - "integrity" while a missing-parent fault is open. The request needs at
+//     least one complete block but no minimum gap, since the dropped blocks'
+//     prefix is unknown. A fault stays open until its blocks are stored,
+//     removed, or cleared, so reports repeat at the cooldown rate until one
+//     comes from a request that reuses the affected prefix.
+//   - "threshold" when the request's confirmed prefix on the endpoint covers
+//     less than threshold of its blocks and misses at least minMissing. The
+//     gap is either an uncached prompt or stores the index missed, such as
+//     those published before the subscriber attached. The engine re-announces
+//     only blocks the request reuses, so an uncached prompt yields a small
+//     report and an under-indexed one restores its prefix. The floor and ratio
+//     keep small gaps and mostly indexed prompts from spending the cooldown.
+func (r *fullReportRepair) shouldRequest(endpoint string, match repairMatch) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	state, eligible := r.endpoints[endpoint]
-	if !eligible || !state.reportSupported || match.total <= 0 {
-		return false, ""
+	state := r.endpoints[endpoint]
+	if state == nil || !state.reportSupported || match.total <= 0 || r.coolingDown(state) {
+		return "", false
 	}
-	if r.cooldown > 0 && !state.lastRequest.IsZero() && r.clock.Since(state.lastRequest) < r.cooldown {
-		return false, ""
+	if len(state.missing) > 0 {
+		return "integrity", true
 	}
-	reason := "integrity"
-	if len(state.missing) == 0 {
-		missing := match.total - match.confirmed
-		if missing < r.minMissing || float64(match.confirmed)/float64(match.total) >= r.threshold {
-			return false, ""
-		}
-		reason = "threshold"
+	missing := match.total - match.confirmed
+	if missing < r.minMissing || float64(match.confirmed)/float64(match.total) >= r.threshold {
+		return "", false
+	}
+	return "threshold", true
+}
+
+// reserve starts endpoint's cooldown and reports whether no concurrent request
+// started it first.
+func (r *fullReportRepair) reserve(endpoint string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.endpoints[endpoint]
+	if state == nil || r.coolingDown(state) {
+		return false
 	}
 	state.lastRequest = r.clock.Now()
-	r.endpoints[endpoint] = state
-	return true, reason
+	return true
+}
+
+func (r *fullReportRepair) coolingDown(state *endpointRepairState) bool {
+	return !state.lastRequest.IsZero() && r.clock.Since(state.lastRequest) < r.cooldown
 }

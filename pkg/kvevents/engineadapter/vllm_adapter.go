@@ -97,19 +97,15 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 	}
 
 	var fields []any
-	var origin string
+	origin := kvevents.BlockOriginUnspecified
 	switch ev := decoded.(type) {
 	case []any:
 		fields = ev
 	case map[string]any:
-		if raw := ev["origin"]; raw != nil {
-			var ok bool
-			origin, ok = raw.(string)
-			if !ok {
-				return nil, fmt.Errorf("event origin is not a string: %T", raw)
-			}
-		}
 		var err error
+		if origin, err = blockOrigin(ev["origin"]); err != nil {
+			return nil, err
+		}
 		if fields, err = mapEventToFields(ev); err != nil {
 			return nil, err
 		}
@@ -136,6 +132,24 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 		stored.Origin = origin
 	}
 	return event, err
+}
+
+// blockOrigin translates the BlockStored origin that vLLM publishes in
+// map-encoded events. Unknown values stay unspecified, so their stores count
+// as newly cached blocks.
+func blockOrigin(raw any) (kvevents.BlockOrigin, error) {
+	switch raw {
+	case nil:
+		return kvevents.BlockOriginUnspecified, nil
+	case "NEW":
+		return kvevents.BlockOriginNew, nil
+	case "REUSED":
+		return kvevents.BlockOriginReused, nil
+	}
+	if _, ok := raw.(string); !ok {
+		return kvevents.BlockOriginUnspecified, fmt.Errorf("event origin is not a string: %T", raw)
+	}
+	return kvevents.BlockOriginUnspecified, nil
 }
 
 // Field-name order of map-encoded events, mirroring the converters' positional

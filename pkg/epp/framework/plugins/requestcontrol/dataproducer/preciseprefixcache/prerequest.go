@@ -29,7 +29,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -51,12 +50,17 @@ type speculativeEntries struct {
 // blockKeysState carries the block keys computed in Produce to PreRequest
 // via PluginState, avoiding a second hash on the same request.
 // perPromptKeys holds one slice of block keys per prompt; single-prompt
-// requests use a length-1 outer slice.
+// requests use a length-1 outer slice. repairMatches is keyed by endpoint
+// address and populated only when full-report repair is enabled.
 type blockKeysState struct {
 	perPromptKeys [][]kvblock.BlockHash
 	repairMatches map[string]repairMatch
 }
 
+// repairMatch is the request's prefix coverage on one candidate endpoint, as
+// seen by Produce before any speculative entries for the request are added.
+// total counts the request's blocks across prompts. confirmed sums, per
+// prompt, the contiguous prefix the endpoint holds in non-speculative entries.
 type repairMatch struct {
 	total     int
 	confirmed int
@@ -123,9 +127,12 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	return cache, ttl, nil
 }
 
-// PreRequest may request a bounded full KV-cache report for an eligible,
-// materially under-indexed selected endpoint, then seeds speculative entries
-// when speculative indexing is enabled.
+// PreRequest asks the selected endpoint for a full KV-cache report when
+// fullReportRepair.shouldRequest reports one is due. It then seeds speculative
+// KV-block index entries for the endpoint(s) selected by the scheduler, so the
+// next same-prefix request hits without waiting for confirmed KV-events from
+// the engine. Entries are tracked in a TTL cache and evicted automatically.
+// Seeding is skipped when speculativeIndexing is disabled.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
@@ -171,7 +178,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 	speculativePod := kvblock.PodEntry{
-		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
+		PodIdentifier: endpointAddress(targetMeta),
 		Speculative:   true,
 	}
 
@@ -190,7 +197,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
 		if prefillMeta := pr.TargetEndpoints[0].GetMetadata(); prefillMeta != nil {
 			prefillPod := kvblock.PodEntry{
-				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
+				PodIdentifier: endpointAddress(prefillMeta),
 				Speculative:   true,
 			}
 			for _, promptKeys := range state.perPromptKeys {
@@ -219,13 +226,13 @@ func (p *Producer) PreRequest(ctx context.Context,
 func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *scheduling.InferenceRequest,
 	schedulingResult *scheduling.SchedulingResult, state *blockKeysState,
 ) {
-	if p.fullReportRepair == nil || request == nil || request.Body == nil ||
-		request.Body.Payload == nil || schedulingResult == nil {
+	repair := p.fullReportRepair
+	if repair == nil || request == nil || schedulingResult == nil {
 		return
 	}
 	// A disaggregated prefill endpoint owns the cache state being repaired.
 	selected := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if prefill, ok := schedulingResult.ProfileResults[p.fullReportRepair.prefillProfile]; ok &&
+	if prefill, ok := schedulingResult.ProfileResults[repair.prefillProfile]; ok &&
 		prefill != nil && len(prefill.TargetEndpoints) > 0 {
 		selected = prefill
 	}
@@ -236,60 +243,30 @@ func (p *Producer) requestFullReportIfNeeded(ctx context.Context, request *sched
 	if metadata == nil {
 		return
 	}
-	endpoint := fmt.Sprintf("%s:%s", metadata.Address, metadata.Port)
+	endpoint := endpointAddress(metadata)
 	match, ok := state.repairMatches[endpoint]
 	if !ok {
 		return
 	}
-	payload, ok := request.Body.Payload.AsMap()
+	reason, ok := repair.shouldRequest(endpoint, match)
 	if !ok {
 		return
 	}
-	argsParent := map[string]any(payload)
-	if request.Body.Generate != nil {
-		argsParent, ok = repairPayloadMap(payload["sampling_params"])
-		if !ok {
-			return
-		}
-	}
-	xargs, ok := repairPayloadMap(argsParent["vllm_xargs"])
+	// Reserve the cooldown only for a body that carries the request, so
+	// unsupported bodies do not delay the next report.
+	mutate, ok := repair.request(request.Body)
 	if !ok {
-		log.FromContext(ctx).V(logging.DEBUG).Info("Skipping full report repair for malformed vllm_xargs",
-			"requestID", request.RequestID, "endpoint", endpoint)
+		log.FromContext(ctx).V(logging.DEBUG).Info("Skipping full KV-cache report for a body that cannot carry it",
+			"requestID", request.RequestID, "endpoint", endpoint, "reason", reason)
 		return
 	}
-	requestFull, reason := p.fullReportRepair.shouldRequest(endpoint, match)
-	if !requestFull {
+	if !repair.reserve(endpoint) {
 		return
 	}
 	// Use the body mutator so every protocol serializer sees the new argument.
-	request.Body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
-		if request.Body.Generate != nil {
-			payload["sampling_params"] = argsParent
-		}
-		argsParent["vllm_xargs"] = xargs
-		xargs["kv_cache_report_mode"] = "full"
-	})
+	request.Body.MutatePayloadMap(mutate)
 	metrics.FullReportRequests.WithLabelValues(reason).Inc()
 	log.FromContext(ctx).V(logging.DEBUG).Info("Requested full KV-cache report",
 		"requestID", request.RequestID, "endpoint", endpoint, "reason", reason,
 		"totalBlocks", match.total, "confirmedBlocks", match.confirmed)
-}
-
-// repairPayloadMap preserves existing JSON objects and rejects non-object values.
-func repairPayloadMap(value any) (map[string]any, bool) {
-	var result map[string]any
-	switch value := value.(type) {
-	case nil:
-	case map[string]any:
-		result = value
-	case fwkrh.PayloadMap:
-		result = map[string]any(value)
-	default:
-		return nil, false
-	}
-	if result == nil {
-		result = make(map[string]any)
-	}
-	return result, true
 }
