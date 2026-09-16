@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -145,6 +146,114 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	}
 }
 
+func TestEncodeStep_ParallelFanOutSharesRevisionDecisionIDAndAggregatesResponseHeaders(t *testing.T) {
+	const (
+		imageCount         = 5
+		revisionDecisionID = "decision-id"
+	)
+	type routingValues struct {
+		slice string
+		zone  string
+	}
+	valuesByHash := map[string]routingValues{
+		"h1": {slice: "slice-01", zone: "zone-b"},
+		"h2": {slice: "slice-02", zone: "zone-a"},
+		"h3": {slice: "slice-01", zone: "zone-b"},
+		"h4": {slice: "slice-02", zone: "zone-a"},
+		"h5": {slice: "slice-01", zone: "zone-b"},
+	}
+
+	var requestCount atomic.Int32
+	allRequestsStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(reqcommon.RevisionDecisionIDHeaderKey); got != revisionDecisionID {
+			t.Errorf("revision decision ID = %q, want %q", got, revisionDecisionID)
+		}
+		for _, name := range []string{"X-Disagg-Slice", "X-Route-Zone"} {
+			if got := r.Header.Get(name); got != "" {
+				t.Errorf("parallel encode request carried %s=%q from a sibling response", name, got)
+			}
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read encode body: %v", err)
+			return
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("decode encode body: %v", err)
+			return
+		}
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		if len(imageHashes) != 1 {
+			t.Errorf("encode request has %d image hashes, want 1", len(imageHashes))
+			return
+		}
+		hash, _ := imageHashes[0].(string)
+		values, found := valuesByHash[hash]
+		if !found {
+			t.Errorf("unexpected image hash %q", hash)
+			return
+		}
+
+		if requestCount.Add(1) == imageCount {
+			close(allRequestsStarted)
+		}
+		select {
+		case <-allRequestsStarted:
+		case <-r.Context().Done():
+			return
+		}
+
+		w.Header().Set("X-Disagg-Slice", values.slice)
+		w.Header().Set("X-Route-Zone", values.zone)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		"max_parallel":      imageCount,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:          "req-header-mode",
+		RevisionDecisionID: revisionDecisionID,
+		Model:              testModelName,
+		TokenIDs:           []int{1, 32000, 32000, 32000, 32000, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Index: 2, Hash: "h3", KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+			{Index: 3, Hash: "h4", KwargsData: "dDQ=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 1}},
+			{Index: 4, Hash: "h5", KwargsData: "dDU=", Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 1}},
+		},
+	}
+
+	p, err := pipeline.NewWithForwardResponseHeaders([]pipeline.Step{step}, []string{"X-Disagg-Slice", "X-Route-Zone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Execute(ctx, reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	forwarded := reqCtx.ForwardedHeaders()
+	if got := forwarded["x-disagg-slice"]; got != "slice-01" {
+		t.Errorf("forwarded slice = %q, want %q", got, "slice-01")
+	}
+	if got := forwarded["x-route-zone"]; got != "zone-b" {
+		t.Errorf("forwarded zone = %q, want %q", got, "zone-b")
+	}
+}
+
 // TestEncodeStep_SkipsInvalidECTransferParams verifies that an encoder
 // response whose ec_transfer_params is present but unusable (non-object,
 // explicit null, or empty object) is skipped rather than failing the encode,
@@ -252,15 +361,12 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
-		// Extract hash from tokens.features
-		tokens, _ := receivedBody["tokens"].(map[string]any)
-		features, _ := tokens["features"].(map[string]any)
-		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
-		hash, _ := imageHashes[0].(string)
+		// The chat/completions sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
-				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			},
 		})
 	}))
@@ -322,25 +428,9 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
 	}
 
-	// Verify tokens nested field
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 4 { // BOS + 3 placeholders
-		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data in chat format")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions format should not have a tokens field")
 	}
 
 	// Verify no top-level token_ids or features
@@ -626,5 +716,25 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	}
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
+	}
+}
+
+func TestEncodeStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test",
+	}
+
+	body, err := step.(*EncodeStep).buildEncodeBody(reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
+	if err == nil {
+		t.Fatalf("expected error for unsupported format, got body %v", body)
+	}
+	if want := "unsupported request format APIType(99)"; err.Error() != want {
+		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
 }

@@ -104,7 +104,6 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	switch format {
 	case reqcommon.APITypeChatCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
-		s.injectTokensField(reqCtx)
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
@@ -122,16 +121,6 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		setGenerateTransferParams(sampling, kvParams, nil)
 	}
-}
-
-func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
-	tokens := map[string]any{
-		"token_ids": reqCtx.TokenIDs,
-	}
-	if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
-		tokens["features"] = features
-	}
-	reqCtx.Body["tokens"] = tokens
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {

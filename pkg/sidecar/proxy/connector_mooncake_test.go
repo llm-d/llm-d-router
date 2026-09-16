@@ -135,7 +135,7 @@ var _ = Describe("Mooncake Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should strip min_tokens from the prefill leg and restore it in decode", func() {
+	It("should strip min_tokens from the prefill request and restore it in decode", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
 		body := chatCompletionsRequestBodyWithMinTokens

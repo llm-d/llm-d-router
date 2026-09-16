@@ -41,7 +41,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline/builder"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/server"
 )
@@ -113,13 +112,11 @@ func main() {
 
 	gwClient := gateway.New(cfg.Gateway)
 
-	steps, err := builder.Build(cfg, gwClient)
+	p, err := builder.Build(cfg, gwClient)
 	if err != nil {
 		log.Error(err, "failed to build pipeline")
 		os.Exit(1)
 	}
-
-	p := pipeline.New(steps)
 	srv, err := server.New(cfg.Server, p, gwClient)
 	if err != nil {
 		log.Error(err, "failed to create server")

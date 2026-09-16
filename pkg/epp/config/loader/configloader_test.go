@@ -126,6 +126,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 		want         *configapi.EndpointPickerConfig
 		wantFeatures map[string]bool
 		wantErr      bool
+		wantErrMsg   string
 		deprecated   bool
 	}{
 		{
@@ -330,71 +331,16 @@ func TestLoadRawConfiguration(t *testing.T) {
 			deprecated: true,
 		},
 		{
-			name:       "Success - Deprecated Top-level SaturationDetector",
-			configText: successDeprecatedTopLevelSaturationDetectorText,
-			want: &configapi.EndpointPickerConfig{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointPickerConfig",
-					APIVersion: configapi.GroupVersion.String(),
-				},
-				Plugins: []configapi.PluginSpec{
-					{Name: "maxScore", Type: "max-score-picker"},
-				},
-				SchedulingProfiles: []configapi.SchedulingProfile{
-					{
-						Name: "default",
-						Plugins: []configapi.SchedulingPlugin{
-							{PluginRef: "maxScore"},
-						},
-					},
-				},
-				FeatureGates: configapi.FeatureGates{
-					flowcontrol.FeatureGate,
-				},
-				FlowControl: &configapi.FlowControlConfig{
-					SaturationDetector: &configapi.SaturationDetectorConfig{
-						PluginRef: "utilization-detector",
-					},
-				},
-				SaturationDetector: &configapi.SaturationDetectorConfig{
-					PluginRef: "utilization-detector",
-				},
-			},
-			wantErr:    false,
-			deprecated: true,
+			name:       "Error - Removed Top-level SaturationDetector",
+			configText: errorRemovedTopLevelSaturationDetectorText,
+			wantErr:    true,
+			wantErrMsg: `unknown field "saturationDetector"`,
 		},
 		{
-			name:       "Success - Deprecated Top-level Parser",
-			configText: successDeprecatedTopLevelParserText,
-			want: &configapi.EndpointPickerConfig{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointPickerConfig",
-					APIVersion: configapi.GroupVersion.String(),
-				},
-				Plugins: []configapi.PluginSpec{
-					{Name: "maxScore", Type: "max-score-picker"},
-					{Name: "openai-parser", Type: "openai-parser"},
-				},
-				SchedulingProfiles: []configapi.SchedulingProfile{
-					{
-						Name: "default",
-						Plugins: []configapi.SchedulingPlugin{
-							{PluginRef: "maxScore"},
-						},
-					},
-				},
-				FeatureGates: configapi.FeatureGates{},
-				RequestHandler: &configapi.RequestHandlerConfig{
-					Parsers: []configapi.ParserConfig{
-						{PluginRef: "openai-parser"},
-					},
-				},
-				Parser: &configapi.ParserConfig{
-					PluginRef: "openai-parser",
-				},
-			},
-			wantErr:    false,
-			deprecated: true,
+			name:       "Error - Removed Top-level Parser",
+			configText: errorRemovedTopLevelParserText,
+			wantErr:    true,
+			wantErrMsg: `unknown field "parser"`,
 		},
 		{
 			name:       "Error - Invalid YAML",
@@ -426,6 +372,9 @@ func TestLoadRawConfiguration(t *testing.T) {
 
 			if tc.wantErr {
 				require.Error(t, err, "Expected LoadRawConfig to fail")
+				if tc.wantErrMsg != "" {
+					require.ErrorContains(t, err, tc.wantErrMsg)
+				}
 				return
 			}
 			require.NoError(t, err, "Expected LoadRawConfig to succeed")
@@ -816,16 +765,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Equal(t, "secondParser", parsers[1].TypedName().Name, "Second parser should be secondParser")
 			},
 		},
-
-		{
-			name:       "Success - Deprecated Top-level SaturationDetector",
-			configText: successDeprecatedTopLevelSaturationDetectorText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be loaded")
-				require.Equal(t, "utilization-detector", cfg.SaturationDetector.TypedName().Name)
-			},
-		},
 		{
 			name:       "Success - Explicit parsers keep their own fallback",
 			configText: successExplicitPassthroughConfigText,
@@ -838,17 +777,6 @@ func TestInstantiateAndConfigure(t *testing.T) {
 				require.Equal(t, "myFallback", parsers[1].TypedName().Name,
 					"The operator's own fallback is kept, under its own name")
 				require.Equal(t, passthrough.PassthroughParserType, parsers[1].TypedName().Type)
-			},
-		},
-		{
-			name:       "Success - Deprecated Top-level Parser",
-			configText: successDeprecatedTopLevelParserText,
-			wantErr:    false,
-			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
-				require.NotNil(t, cfg.ParserRegistry, "ParserRegistry should be loaded")
-				parsers := cfg.ParserRegistry.Parsers()
-				require.Len(t, parsers, 1, "Should have one parser")
-				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
 			},
 		},
 		// --- Instantiation Errors ---

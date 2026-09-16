@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -100,10 +101,8 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
-	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(s.maxParallel)
-
 	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
+	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
@@ -111,69 +110,87 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		imageParts = collectImageParts(reqCtx.Body)
 	}
 
-	for i, entry := range reqCtx.MultimodalEntries {
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(s.maxParallel)
+	for i := range reqCtx.MultimodalEntries {
 		g.Go(func() error {
-			tokenIDs := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
-
-			body := s.buildEncodeBody(reqCtx, tokenIDs, entry, format, imageParts)
-
-			bodyBytes, err := json.Marshal(body)
-			if err != nil {
-				err = fmt.Errorf("encode[%d]: marshal: %w", i, err)
-				logger.Error(err, "encode fanout marshal", "index", i)
-				return err
-			}
-
-			path := format.Path()
-			logger.V(logutil.DEFAULT).Info("sending sub-request", "index", i, "path", path)
-
-			headers := reqCtx.ForwardedHeaders()
-			headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-			headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
-
-			if v := logger.V(logutil.DEBUG); v.Enabled() {
-				v.Info("sub-request body", "index", i, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
-			}
-
-			call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamEncode)
-			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, headers)
-			call.Done()
-			if err != nil {
-				err = fmt.Errorf("encode[%d]: request: %w", i, err)
-				logger.Error(err, "encode fanout request", "index", i, "path", path)
-				return err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				respBody := readErrorBody(resp.Body)
-				err := upstreamError(fmt.Sprintf("%s[%d]", EncodeStepName, i), resp.StatusCode, respBody)
-				logger.Error(err, "encode fanout status", "index", i, "status", resp.StatusCode)
-				return err
-			}
-
-			var encResp encodeResponse
-			if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
-				err = fmt.Errorf("encode[%d]: decode response: %w", i, err)
-				logger.Error(err, "encode fanout decode", "index", i)
-				return err
-			}
-
-			results[i] = coerceParamsMap(logger.WithValues("index", i), encResp.ECTransferParams, "ec_transfer_params")
-			return nil
+			result, headers, err := s.executeOne(gCtx, logger, reqCtx, i, reqCtx.MultimodalEntries[i], format, imageParts)
+			results[i] = result
+			responseHeaders[i] = headers
+			return err
 		})
 	}
 
 	if err := g.Wait(); err != nil {
+		// Headers from successful siblings are discarded so a failed encode
+		// step cannot publish a partial aggregate.
 		return err
 	}
 
 	for _, r := range results {
 		s.ec.MergeEncodeResponse(ctx, reqCtx, r)
 	}
+	reqCtx.CaptureResponseHeaders(responseHeaders...)
 
 	logger.V(logutil.DEFAULT).Info("all sub-requests complete", "count", len(results))
 	return nil
+}
+
+func (s *EncodeStep) executeOne(
+	ctx context.Context,
+	logger logr.Logger,
+	reqCtx *pipeline.RequestContext,
+	index int,
+	entry pipeline.MultimodalEntry,
+	format reqcommon.APIType,
+	imageParts []map[string]any,
+) (map[string]any, http.Header, error) {
+	body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
+	if err != nil {
+		err = fmt.Errorf("encode[%d]: %w", index, err)
+		logger.Error(err, "encode fanout build body", "index", index)
+		return nil, nil, err
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		err = fmt.Errorf("encode[%d]: marshal: %w", index, err)
+		logger.Error(err, "encode fanout marshal", "index", index)
+		return nil, nil, err
+	}
+
+	path := format.Path()
+	logger.V(logutil.DEFAULT).Info("sending sub-request", "index", index, "path", path)
+	headers := reqCtx.ForwardedHeaders()
+	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
+	headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
+	if v := logger.V(logutil.DEBUG); v.Enabled() {
+		v.Info("sub-request body", "index", index, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
+	}
+
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamEncode)
+	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
+	call.Done()
+	if err != nil {
+		err = fmt.Errorf("encode[%d]: request: %w", index, err)
+		logger.Error(err, "encode fanout request", "index", index, "path", path)
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody := readErrorBody(resp.Body)
+		err := upstreamError(fmt.Sprintf("%s[%d]", EncodeStepName, index), resp.StatusCode, respBody)
+		logger.Error(err, "encode fanout status", "index", index, "status", resp.StatusCode)
+		return nil, nil, err
+	}
+
+	var encResp encodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
+		err = fmt.Errorf("encode[%d]: decode response: %w", index, err)
+		logger.Error(err, "encode fanout decode", "index", index)
+		return nil, nil, err
+	}
+	return coerceParamsMap(logger.WithValues("index", index), encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil
 }
 
 func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {
@@ -198,7 +215,7 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs []int, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) map[string]any {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
 	case reqcommon.APITypeChatCompletions:
 		imageContent := buildSingleImageContent(imageParts, entry.Index)
@@ -210,20 +227,13 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 					"content": []any{imageContent},
 				},
 			},
-			"tokens": map[string]any{
-				"token_ids": tokenIDs,
-				"features": map[string]any{
-					"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
-					"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
-				},
-			},
 		}
 		reqcommon.CapSingleToken(body, format)
-		return body
-	default:
+		return body, nil
+	case reqcommon.APITypeGenerate:
 		body := map[string]any{
 			"model":     reqCtx.Model,
-			"token_ids": tokenIDs,
+			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {entry.Hash}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
@@ -231,7 +241,15 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, tokenIDs [
 			},
 		}
 		reqcommon.CapSingleToken(body, format)
-		return body
+		return body, nil
+	default:
+		// resolveFormat can also return APITypeCompletions, but a completions
+		// request never carries images: render's executeCompletions never
+		// populates MultimodalEntries, so this fan-out never runs for one. That
+		// leaves APITypeCompletions and any future format value as cases that
+		// should not reach here; treat them as a programming error instead of
+		// silently sending a generate-shaped body to the wrong endpoint.
+		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
 }
 

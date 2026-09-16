@@ -70,3 +70,22 @@ func TestValidatePipeline(t *testing.T) {
 		})
 	}
 }
+
+func TestMergePipelineDefaultsDoesNotInjectResponseHeadersIntoSteps(t *testing.T) {
+	params := mergePipelineDefaults(nil, config.PipelineConfig{
+		ForwardResponseHeaders: []string{"x-llm-d-disagg-revision"},
+	})
+	if _, found := params["forward_response_headers"]; found {
+		t.Fatalf("pipeline response headers leaked into step parameters: %v", params)
+	}
+}
+
+func TestBuildRejectsInvalidForwardResponseHeaders(t *testing.T) {
+	cfg := &config.Config{Pipeline: config.PipelineConfig{
+		UseOpenAIFormat:        true,
+		ForwardResponseHeaders: []string{"content-type"},
+	}}
+	if _, err := Build(cfg, nil); err == nil {
+		t.Fatal("Build() expected an error for a non-forwardable response header")
+	}
+}

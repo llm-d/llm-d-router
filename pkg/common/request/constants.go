@@ -18,6 +18,9 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// DisaggregatedRevisionHeaderKey carries the selected rollout revision
+	// between phases of a disaggregated request.
+	DisaggregatedRevisionHeaderKey = "x-llm-d-disagg-revision"
 	// RevisionDecisionIDHeaderKey identifies requests that belong to the same
 	// rollout decision. This is needed only for roles such as encode that create
 	// several parallel subrequests from one user request (for example, one per

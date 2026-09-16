@@ -128,7 +128,7 @@ func TestDispatch_ExtractorFailure_ReturnsNil(t *testing.T) {
 	require.NoError(t, s.Dispatch(context.Background(), newTestEndpoint()),
 		"extractor failure must not surface as a returned error")
 	assert.Equal(t, float64(1), extDelta(t, src, ext, before),
-		"extractor failure must record one DataLayerExtractErrorsTotal increment")
+		"extractor failure must record one LlmdDataLayerExtractErrorsTotal increment")
 }
 
 func TestDispatch_ExtractorFailure_LabelsBothSrcAndExt(t *testing.T) {

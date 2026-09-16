@@ -28,11 +28,13 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/labels"
+
+	"github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // DisaggregatedSet rollout protocol and operator label defaults.
 const (
-	DefaultRevisionHeader = "x-llm-d-disagg-revision"
+	DefaultRevisionHeader = request.DisaggregatedRevisionHeaderKey
 	DefaultRevisionLabel  = "disaggregatedset.x-k8s.io/revision"
 	DefaultRoleLabel      = "disaggregatedset.x-k8s.io/role"
 )

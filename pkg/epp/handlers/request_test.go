@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -92,6 +93,26 @@ func TestExtractTraceContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractTraceContextPrefersHTTPHeadersOverGRPCMetadata(t *testing.T) {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	const (
+		metadataTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0c9902b7-01"
+		headerTraceparent   = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	)
+	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs("traceparent", metadataTraceparent))
+	req := &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{
+			Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{{Key: "traceparent", Value: headerTraceparent}}},
+		},
+	}
+
+	sc := trace.SpanContextFromContext(extractTraceContext(ctx, req))
+
+	assert.True(t, sc.IsValid())
+	assert.Equal(t, "0af7651916cd43dd8448eb211c80319c", sc.TraceID().String())
 }
 
 func TestHandleRequestHeaders(t *testing.T) {

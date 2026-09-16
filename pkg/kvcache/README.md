@@ -10,7 +10,8 @@ reuse.
 The `Indexer` is the read side of the KV-cache subsystem. It turns a tokenized
 prompt into KV-block keys, looks those keys up in the block index (kept current
 by the [`kvevents`](../kvevents/README.md) subscriber), and produces a per-pod
-score. The precise-prefix-cache scheduling scorer consumes these scores.
+score. The `precise-prefix-cache-producer` publishes these scores as
+per-endpoint prefix match info, which the `prefix-cache-scorer` consumes.
 
 Tokenization happens externally: callers pass tokens in via `ScoreTokens`. The
 indexer owns block-key computation, index lookup, and prefix matching.

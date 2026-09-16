@@ -63,6 +63,9 @@ func TestLoadDefaults(t *testing.T) {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
 	}
+	if got := cfg.Pipeline.ForwardResponseHeaders; len(got) != 1 || got[0] != "x-llm-d-disagg-revision" {
+		t.Errorf("pipeline.forward_response_headers = %v, want default revision header", got)
+	}
 }
 
 func TestLoadEnvOverride(t *testing.T) {
@@ -122,6 +125,9 @@ func TestLoadMetricsCertDir(t *testing.T) {
 func TestLoadStepParams(t *testing.T) {
 	const body = `log_level: 2
 pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
   steps:
     - type: replace-media-urls
       params:
@@ -139,6 +145,9 @@ pipeline:
 
 	if len(cfg.Pipeline.Steps) != 2 {
 		t.Fatalf("got %d steps, want 2", len(cfg.Pipeline.Steps))
+	}
+	if got := cfg.Pipeline.ForwardResponseHeaders; len(got) != 2 || got[0] != "x-llm-d-disagg-revision" || got[1] != "x-disagg-slice" {
+		t.Fatalf("pipeline.forward_response_headers = %v, want revision and slice headers", got)
 	}
 
 	first := cfg.Pipeline.Steps[0]
@@ -166,6 +175,16 @@ pipeline:
 	}
 	if len(cfg.Pipeline.Steps[1].Params) != 0 {
 		t.Errorf("step[1].params = %#v, want empty", cfg.Pipeline.Steps[1].Params)
+	}
+}
+
+func TestLoadExplicitEmptyForwardResponseHeaders(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "pipeline:\n  forward_response_headers: []\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Pipeline.ForwardResponseHeaders) != 0 {
+		t.Fatalf("pipeline.forward_response_headers = %v, want explicitly disabled", cfg.Pipeline.ForwardResponseHeaders)
 	}
 }
 

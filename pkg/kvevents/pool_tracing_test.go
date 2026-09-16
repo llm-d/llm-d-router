@@ -57,7 +57,9 @@ func newTracingPool(t *testing.T) *Pool {
 
 	cfg := DefaultConfig()
 	cfg.Tracing = true
-	return NewPool(cfg, idx, tp, nil)
+	pool, err := NewPool(cfg, idx, tp, nil)
+	require.NoError(t, err)
+	return pool
 }
 
 func eventSpanAttrs(span sdktrace.ReadOnlySpan) map[attribute.Key]attribute.Value {
@@ -182,7 +184,8 @@ func TestNewPool_EmitsDecodeSpan(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Tracing = true
-	pool := NewPool(cfg, idx, tokenProcessor, &sourceEndpointAdapter{})
+	pool, err := NewPool(cfg, idx, tokenProcessor, &sourceEndpointAdapter{})
+	require.NoError(t, err)
 	pool.processRawMessage(ctx, &RawMessage{
 		Topic:   "kv@10.0.0.1:8000@test-model",
 		Payload: []byte{1},
@@ -226,7 +229,8 @@ func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 
 	require.False(t, DefaultConfig().Tracing, "event tracing must default off")
 
-	pool := NewPool(DefaultConfig(), idx, tp, &sourceEndpointAdapter{})
+	pool, err := NewPool(DefaultConfig(), idx, tp, &sourceEndpointAdapter{})
+	require.NoError(t, err)
 	z := newZMQSubscriber(pool, "pod-1", "", "tcp://x", "", "kv@", false)
 
 	z.addTask(context.Background(), "kv@10.0.0.1:8000@test-model", 1, []byte{1})
@@ -237,7 +241,8 @@ func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 
 // The default path must not pay for spans it never records.
 func TestStartSpan_DisabledPathAllocatesNothing(t *testing.T) {
-	pool := NewPool(DefaultConfig(), nil, nil, nil)
+	pool, err := NewPool(DefaultConfig(), nil, nil, nil)
+	require.NoError(t, err)
 	require.Nil(t, pool.tracer, "event tracing must default off")
 
 	ctx := context.Background()
@@ -257,7 +262,8 @@ func TestStartSpan_DisabledPathAllocatesNothing(t *testing.T) {
 // BenchmarkPipelineSpans_Disabled measures the per-message span cost carried by
 // the default configuration: one receive, one process, one decode.
 func BenchmarkPipelineSpans_Disabled(b *testing.B) {
-	pool := NewPool(DefaultConfig(), nil, nil, nil)
+	pool, err := NewPool(DefaultConfig(), nil, nil, nil)
+	require.NoError(b, err)
 	ctx := context.Background()
 
 	b.ReportAllocs()
