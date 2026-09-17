@@ -417,6 +417,9 @@ func (opts *Options) Validate() error {
 			"requested", opts.RefreshMetricsInterval, "effective", MinRefreshMetricsInterval)
 		opts.RefreshMetricsInterval = MinRefreshMetricsInterval
 	}
+	if opts.RefreshPrometheusMetricsInterval <= 0 {
+		return fmt.Errorf("refresh-prometheus-metrics-interval must be positive, got %v", opts.RefreshPrometheusMetricsInterval)
+	}
 	if opts.GRPCMaxRecvMsgSize < 0 {
 		return fmt.Errorf("grpc-max-recv-msg-size must be non-negative, got %d", opts.GRPCMaxRecvMsgSize)
 	}
@@ -429,6 +432,9 @@ func (opts *Options) Validate() error {
 
 	if opts.PluginStateStalenessThreshold <= 0 {
 		return fmt.Errorf("plugin-state-staleness-threshold must be positive, got %v", opts.PluginStateStalenessThreshold)
+	}
+	if opts.MetricsStalenessThreshold <= 0 {
+		return fmt.Errorf("metrics-staleness-threshold must be positive, got %v", opts.MetricsStalenessThreshold)
 	}
 
 	// Validate deprecated metric flags are not explicitly set
