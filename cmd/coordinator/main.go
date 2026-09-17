@@ -145,9 +145,8 @@ func main() {
 	log.Info("starting coordinator",
 		"addr", cfg.Server.ListenAddr,
 		"metrics_port", cfg.Server.MetricsPort,
-		"metrics_tls", cfg.Server.MetricsCertDir != "",
-		"tls", cfg.Server.SecureServing,
-		"cert_path", cfg.Server.CertPath)
+		"metrics_tls", cfg.Server.MetricsCertDir != "")
+	log.Info("server TLS", "tls", cfg.Server.SecureServing, "cert_path", cfg.Server.CertPath)
 	if cfg.Server.MetricsPort <= 0 {
 		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
 	}
