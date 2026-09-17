@@ -371,9 +371,9 @@ func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers
 	if err != nil {
 		return err
 	}
-	// Store the result back so repackage serializes the mutated payload.
-	inferenceRequestBody.Payload = mutatedPayload
 	if mutated {
+		// Store the result back so repackage serializes the mutated payload.
+		inferenceRequestBody.Payload = mutatedPayload
 		inferenceRequestBody.Mutated = true
 	}
 	return nil

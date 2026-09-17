@@ -45,6 +45,8 @@ func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.Marshalable
 	if isVLLMTarget(ctx) {
 		priority = -priority
 	}
+	// OpenAI-compatible and Anthropic messages payloads both use the same
+	// backend priority field name.
 	m["priority"] = priority
 	return m, true, nil
 }
