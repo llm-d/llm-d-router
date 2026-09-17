@@ -32,6 +32,9 @@ const (
 	// KVConnectorOffloading enables the OffloadingConnector P/D KV disaggregation protocol
 	KVConnectorOffloading = "offloading"
 
+	// KVConnectorATOM enables the ATOM P/D KV disaggregation protocol (MoRIIO-based)
+	KVConnectorATOM = "atom"
+
 	// ECExampleConnector enables the Encoder disaggregation protocol (E/PD, E/P/D)
 	ECExampleConnector = "ec-example"
 
