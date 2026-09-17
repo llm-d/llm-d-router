@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -143,7 +142,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	ctx := log.IntoContext(r.Context(), logger)
 
 	if r.URL.Path == reqcommon.PathResponses {
-		dropStatefulResponsesFields(logger, parsed)
+		reqcommon.DropStatefulResponsesFields(logger, parsed)
 	}
 
 	if requestIDReplaced && clientRequestID != "" {
@@ -192,33 +191,6 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
 	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
-}
-
-// dropStatefulResponsesFields removes stateful Responses fields the
-// pipeline cannot honor: prefill, encode, and decode run on independent
-// worker pods with no shared response store, so previous_response_id cannot
-// be resolved and background would silently no-op rather than backgroundize
-// anything. previous_response_id and background are removed whenever
-// present, regardless of value. store is forced to false rather than
-// removed: vLLM defaults store to true when the field is absent, so deleting
-// it would leave storage enabled instead of disabling it.
-func dropStatefulResponsesFields(logger logr.Logger, body map[string]any) {
-	var changed []string
-	if _, ok := body["previous_response_id"]; ok {
-		delete(body, "previous_response_id")
-		changed = append(changed, "previous_response_id")
-	}
-	if store, ok := body["store"].(bool); !ok || store {
-		body["store"] = false
-		changed = append(changed, "store")
-	}
-	if _, ok := body["background"]; ok {
-		delete(body, "background")
-		changed = append(changed, "background")
-	}
-	if len(changed) > 0 {
-		logger.V(logutil.DEFAULT).Info("clearing unsupported responses fields", "fields", changed)
-	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
