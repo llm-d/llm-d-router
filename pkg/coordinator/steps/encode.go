@@ -152,7 +152,7 @@ func (s *EncodeStep) executeOne(
 	format reqcommon.APIType,
 	imageParts []map[string]any,
 ) (map[string]any, http.Header, error) {
-	body, err := s.buildEncodeBody(logger, reqCtx, entry, format, imageParts)
+	body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
 	if err != nil {
 		err = fmt.Errorf("encode[%d]: %w", index, err)
 		logger.Error(err, "encode fanout build body", "index", index)
@@ -222,10 +222,13 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(logger logr.Logger, reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
-		imageContent := buildSingleImageContent(logger, imageParts, entry.Index, format)
+		imageContent, err := buildSingleImageContent(imageParts, entry.Index, format)
+		if err != nil {
+			return nil, err
+		}
 		item := map[string]any{
 			"role":    "user",
 			"content": []any{imageContent},
@@ -297,35 +300,41 @@ func collectImageParts(items []any, partType string) []map[string]any {
 // part stores it as a bare string directly on the part; Responses' optional
 // detail field is a sibling of image_url on that same part, so it is copied
 // across separately rather than coming along with the URL.
-func buildSingleImageContent(logger logr.Logger, imageParts []map[string]any, index int, format reqcommon.APIType) map[string]any {
+//
+// A Responses input_image part whose image_url is not a string (e.g. a
+// file_id reference) is rejected rather than forwarded with a blank
+// image_url, for the same reason collectResponsesImageRefs rejects the
+// identical shape: encode's caller indexes imageParts positionally, so
+// substituting a placeholder here would silently encode the wrong image
+// worth of content instead of failing the request.
+func buildSingleImageContent(imageParts []map[string]any, index int, format reqcommon.APIType) (map[string]any, error) {
 	if format == reqcommon.APITypeResponses {
 		content := map[string]any{
 			"type":      inputImagePartType,
 			"image_url": "",
 		}
 		if index >= 0 && index < len(imageParts) {
-			if url, ok := imageParts[index][imageURLPartType].(string); ok {
-				content["image_url"] = url
-			} else {
-				logger.V(logutil.DEBUG).Info("input_image part has no string image_url; sending blank image_url to encode worker",
-					"index", index, "type", fmt.Sprintf("%T", imageParts[index][imageURLPartType]))
+			url, ok := imageParts[index][imageURLPartType].(string)
+			if !ok {
+				return nil, fmt.Errorf("input_image part %d has no string image_url: %w", index, pipeline.ErrBadRequest)
 			}
+			content["image_url"] = url
 			if detail, ok := imageParts[index][inputImageDetailField]; ok {
 				content[inputImageDetailField] = detail
 			}
 		}
-		return content
+		return content, nil
 	}
 	if index >= 0 && index < len(imageParts) {
 		return map[string]any{
 			"type":      imageURLPartType,
 			"image_url": imageParts[index][imageURLPartType],
-		}
+		}, nil
 	}
 	return map[string]any{
 		"type":      imageURLPartType,
 		"image_url": map[string]any{"url": ""},
-	}
+	}, nil
 }
 
 type encodeResponse struct {

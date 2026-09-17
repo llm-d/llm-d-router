@@ -209,6 +209,18 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				s.runChunkedDecode(w, r)
 				return
 			}
+			// The other branches above all read the body through
+			// readJSONBody, which strips unsupported Responses fields as a
+			// side effect. This is the one decoder-only path that otherwise
+			// forwards the client's body untouched, so it needs the same
+			// call to strip those fields on a Responses request.
+			if apiType == reqcommon.APITypeResponses {
+				raw, _, ok := s.readJSONBody(r, w)
+				if !ok {
+					return
+				}
+				r = cloneRequestWithBody(r.Context(), r, raw)
+			}
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}

@@ -17,10 +17,13 @@ limitations under the License.
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -141,6 +144,15 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 				recorder := httptest.NewRecorder()
 				recorder.Code = 0
 				req := tt.r.Clone(tt.r.Context())
+				if req.URL == nil {
+					// A server never hands a handler a nil URL or Body; the
+					// decoder-only passthrough for a Responses request reads
+					// both to strip unsupported stateful fields.
+					req.URL = &url.URL{Path: apiType.Path()}
+				}
+				if req.Body == nil {
+					req.Body = io.NopCloser(strings.NewReader("{}"))
+				}
 				s.disaggregatedPrefillHandler(apiType)(recorder, req)
 
 				resp := recorder.Result()
@@ -182,6 +194,42 @@ func TestServer_chatCompletionsHandler(t *testing.T) {
 
 func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
+}
+
+// TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields locks in
+// that a /v1/responses request with no prefill header, no encoder header,
+// and no P2P/data-parallel/chunked-decode routing (i.e. the plain decoder
+// passthrough) still has its unsupported stateful fields stripped, the same
+// as every other routing branch. Before the fix, this one branch forwarded
+// the client's body to the decoder untouched.
+func TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var capturedBody map[string]any
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+	})
+
+	reqBody := `{"model":"m","input":"hi","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(reqBody))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	for _, field := range []string{"previous_response_id", "background"} {
+		if _, ok := capturedBody[field]; ok {
+			t.Errorf("expected %q to be dropped from the body the decoder sees", field)
+		}
+	}
+	if capturedBody["store"] != false {
+		t.Errorf("expected store to be forced to false, got %v", capturedBody["store"])
+	}
+	if capturedBody["input"] != "hi" {
+		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
+	}
 }
 
 func TestServer_encoderEndpointRouting(t *testing.T) {

@@ -19,14 +19,13 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/go-logr/logr"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -579,6 +578,57 @@ func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL verifies that a
+// Responses input_image part whose image_url isn't a string (e.g. a
+// file_id-referenced image) fails the request rather than encoding a blank
+// image_url sub-request. This normally cannot reach encode because
+// replace-media-urls rejects the same shape first, but encode must reject it
+// too: its positional indexing into imageParts, shared with the same shape
+// collectResponsesImageRefs validates, would otherwise misassign a real
+// image's hash to this malformed part if replace-media-urls were ever
+// skipped or reordered.
+func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("encode worker should not be called for a malformed input_image part")
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-bad-image",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": inputImagePartType, "file_id": "file-abc123"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-bad", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for input_image part with no string image_url")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
 // TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens verifies the
 // encode chat sub-request carries max_completion_tokens=1 unconditionally
 // (via reqcommon.CapSingleToken), even though the
@@ -867,7 +917,7 @@ func TestEncodeStep_UnsupportedFormat(t *testing.T) {
 		Model:     "test",
 	}
 
-	body, err := step.(*EncodeStep).buildEncodeBody(logr.Discard(), reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
+	body, err := step.(*EncodeStep).buildEncodeBody(reqCtx, pipeline.MultimodalEntry{}, reqcommon.APIType(99), nil)
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}
