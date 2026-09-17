@@ -35,7 +35,7 @@ make -f Makefile.coord.mk run
 make -f Makefile.coord.mk test
 ```
 
-The listener serves HTTPS on `:8080`. Without `--cert-path` the certificate is self-signed and carries no subject alternative names, so clients have to skip verification (`curl -k`). Pass `--cert-path` with a directory holding `tls.crt` and `tls.key` for a certificate callers can verify, or `--secure-coordinator=false` to serve plaintext.
+The listener serves HTTPS on `:8080`. Without `--cert-path` the certificate is self-signed and carries no subject alternative names, so clients have to skip verification (`curl -k`). Pass `--cert-path` with a directory holding `tls.crt` and `tls.key` for a certificate callers can verify, or `--secure-serving=false` to serve plaintext.
 
 ## Configuration
 

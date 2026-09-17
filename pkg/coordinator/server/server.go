@@ -128,7 +128,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 		pipeline:           p,
 		maxRequestBodySize: maxBodySize,
 		passthrough:        passthrough,
-		secureServing:      cfg.SecureCoordinator,
+		secureServing:      cfg.SecureServing,
 		certPath:           cfg.CertPath,
 		tls:                profile,
 	}
