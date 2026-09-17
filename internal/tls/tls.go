@@ -46,7 +46,7 @@ func CreateSelfSignedTLSCertificate(logger logr.Logger) (tls.Certificate, error)
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{"Inference Ext"},
+			Organization: []string{"llm-d"},
 		},
 		NotBefore:             notBefore,
 		NotAfter:              now.Add(time.Hour * 24 * 365 * 10).UTC(), // 10 years
