@@ -137,9 +137,16 @@ func TestECPipelineTokenLimits(t *testing.T) {
 					prefillBody := <-prefillBodies
 					require.NotNil(t, decodeBody)
 
-					var original, wantPrefill map[string]any
-					require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
+					var wantPrefill, wantDecode map[string]any
 					require.NoError(t, json.Unmarshal([]byte(tt.body), &wantPrefill))
+					require.NoError(t, json.Unmarshal([]byte(tt.body), &wantDecode))
+					if tt.apiType == reqcommon.APITypeResponses {
+						// reqcommon.DropStatefulResponsesFields forces store to
+						// false on every request the sidecar builds from the
+						// client's body, prefill and decode alike.
+						wantPrefill[reqcommon.FieldStore] = false
+						wantDecode[reqcommon.FieldStore] = false
+					}
 					limits := wantPrefill
 					if tt.apiType == reqcommon.APITypeGenerate {
 						limits, _ = wantPrefill[reqcommon.FieldSamplingParams].(map[string]any)
@@ -160,7 +167,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 
 					delete(decodeBody, reqcommon.FieldKVTransferParams)
 					delete(decodeBody, reqcommon.FieldCacheHitThreshold)
-					assert.Equal(t, original, decodeBody)
+					assert.Equal(t, wantDecode, decodeBody)
 				})
 			}
 		})

@@ -20,6 +20,8 @@ import (
 	"maps"
 	"reflect"
 	"testing"
+
+	"github.com/go-logr/logr"
 )
 
 // Regression test for the sampling_params sharing that CapSingleToken documents.
@@ -261,6 +263,49 @@ func TestCapSingleToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			CapSingleToken(tt.body, tt.apiType)
+			if !reflect.DeepEqual(tt.body, tt.want) {
+				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			}
+		})
+	}
+}
+
+func TestDropStatefulResponsesFields(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+		want map[string]any
+	}{
+		{
+			name: "all three present",
+			body: map[string]any{"input": "hi", FieldPreviousResponseID: "resp-123", FieldStore: true, FieldBackground: true},
+			want: map[string]any{"input": "hi", FieldStore: false},
+		},
+		{
+			name: "store already false is left alone",
+			body: map[string]any{"input": "hi", FieldStore: false},
+			want: map[string]any{"input": "hi", FieldStore: false},
+		},
+		{
+			name: "store absent is forced to false",
+			body: map[string]any{"input": "hi"},
+			want: map[string]any{"input": "hi", FieldStore: false},
+		},
+		{
+			name: "store non-bool is forced to false",
+			body: map[string]any{"input": "hi", FieldStore: "yes"},
+			want: map[string]any{"input": "hi", FieldStore: false},
+		},
+		{
+			name: "background false is still removed",
+			body: map[string]any{"input": "hi", FieldBackground: false},
+			want: map[string]any{"input": "hi", FieldStore: false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			DropStatefulResponsesFields(logr.Discard(), tt.body)
 			if !reflect.DeepEqual(tt.body, tt.want) {
 				t.Fatalf("got %v, want %v", tt.body, tt.want)
 			}

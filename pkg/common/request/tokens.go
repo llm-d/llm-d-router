@@ -16,7 +16,13 @@ limitations under the License.
 
 package request
 
-import "maps"
+import (
+	"maps"
+
+	"github.com/go-logr/logr"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+)
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token prefill or encode request. It returns the map
@@ -49,4 +55,32 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	body[FieldStream] = false
 	delete(body, FieldStreamOptions)
 	return limits
+}
+
+// DropStatefulResponsesFields removes stateful Responses fields that neither
+// the coordinator's disaggregated pipeline nor the sidecar's
+// connectors can honor. Pure vllm-d supports stateless /responses requests.
+// The "store" field is forced to false rather than
+// removed: vLLM defaults "store" to true when the field is absent, so deleting
+// it would leave storage enabled instead of disabling it.
+//
+// Callers pass the request body before any per-request cloning, so every request body
+// is built from it (or from a clone of it) inherits the same stripped fields.
+func DropStatefulResponsesFields(logger logr.Logger, body map[string]any) {
+	var changed []string
+	if _, ok := body[FieldPreviousResponseID]; ok {
+		delete(body, FieldPreviousResponseID)
+		changed = append(changed, FieldPreviousResponseID)
+	}
+	if store, ok := body[FieldStore].(bool); !ok || store {
+		body[FieldStore] = false
+		changed = append(changed, FieldStore)
+	}
+	if _, ok := body[FieldBackground]; ok {
+		delete(body, FieldBackground)
+		changed = append(changed, FieldBackground)
+	}
+	if len(changed) > 0 {
+		logger.V(logutil.DEFAULT).Info("clearing unsupported responses fields", "fields", changed)
+	}
 }
