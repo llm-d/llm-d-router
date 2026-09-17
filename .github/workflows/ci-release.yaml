@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*'  # Runs when a tag like v0.1.0 is pushed
-  release:
-    types: [published]  # Also runs when a GitHub release is published
 
 permissions:
   contents: read
@@ -33,15 +31,14 @@ jobs:
       - name: Determine tag name
         id: tag
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
-            echo "tag=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF##refs/tags/}" >> "$GITHUB_OUTPUT"
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          # Release-candidate tags contain -rc (v0.10.0-rc.1, v0.2.0-RC1) and must not receive :latest.
+          if [[ "${tag}" == *-[Rr][Cc]* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
-          PRE_RELEASE=${{ github.event_name != 'release' || github.event.release.prerelease }}
-          echo "prerelease=${PRE_RELEASE}" >> "$GITHUB_OUTPUT"
         shell: bash
 
   build-and-push:
