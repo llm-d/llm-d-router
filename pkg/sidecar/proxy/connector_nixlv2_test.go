@@ -472,6 +472,63 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		<-testInfo.stoppedCh
 	})
 
+	It("should strip stateful Responses fields from both the prefill and the decode request", func() {
+		By("starting the proxy")
+		go func() {
+			defer GinkgoRecover()
+
+			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := testInfo.proxy.Start(testInfo.ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			testInfo.stoppedCh <- struct{}{}
+		}()
+
+		<-testInfo.proxy.readyCh
+		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+
+		By("sending a /v1/responses request carrying stateful fields")
+		body := `{
+				"model": "gpt-4o",
+				"input": "Hello, how are you?",
+				"previous_response_id": "resp-123",
+				"conversation": "conv-123",
+				"store": true,
+				"background": true
+			}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+
+		if rp.StatusCode != 200 {
+			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			Fail(string(bp))
+		}
+
+		By("verifying the prefill request dropped the stateful fields")
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		prefillReq := testInfo.prefillHandler.CompletionRequests[0]
+		Expect(prefillReq).ToNot(HaveKey("previous_response_id"))
+		Expect(prefillReq).ToNot(HaveKey("conversation"))
+		Expect(prefillReq).ToNot(HaveKey("background"))
+		Expect(prefillReq).To(HaveKeyWithValue("store", false))
+
+		By("verifying the decode request dropped the stateful fields too")
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
+		Expect(decodeReq).ToNot(HaveKey("previous_response_id"))
+		Expect(decodeReq).ToNot(HaveKey("conversation"))
+		Expect(decodeReq).ToNot(HaveKey("background"))
+		Expect(decodeReq).To(HaveKeyWithValue("store", false))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should set max_output_tokens=1 in prefill and restore original value in decode", func() {
 		By("starting the proxy")
 		go func() {
