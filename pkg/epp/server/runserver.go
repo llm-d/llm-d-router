@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"path/filepath"
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -208,19 +209,22 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			var cert tls.Certificate
 			var err error
 			if r.CertPath != "" {
-				cert, err = tls.LoadX509KeyPair(r.CertPath+"/tls.crt", r.CertPath+"/tls.key")
+				certFile, keyFile := filepath.Join(r.CertPath, "tls.crt"), filepath.Join(r.CertPath, "tls.key")
+				cert, err = tls.LoadX509KeyPair(certFile, keyFile)
+				if err != nil {
+					return fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
+				}
 			} else {
-				// Create tls based credential.
 				cert, err = tlsutil.CreateSelfSignedTLSCertificate(logger)
-			}
-			if err != nil {
-				return fmt.Errorf("failed to create self signed certificate - %w", err)
+				if err != nil {
+					return fmt.Errorf("create self-signed certificate: %w", err)
+				}
 			}
 
 			if r.CertPath != "" && r.EnableCertReload {
 				reloader, err := common.NewCertReloader(ctx, r.CertPath, &cert)
 				if err != nil {
-					return fmt.Errorf("failed to create cert reloader: %w", err)
+					return fmt.Errorf("start certificate reloader: %w", err)
 				}
 				tlsCfg := &tls.Config{
 					GetCertificate: func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
