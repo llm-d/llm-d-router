@@ -20,8 +20,6 @@ import (
 	"maps"
 	"reflect"
 	"testing"
-
-	"github.com/go-logr/logr"
 )
 
 // Regression test for the sampling_params sharing that CapSingleToken documents.
@@ -281,42 +279,51 @@ func TestCapSingleToken(t *testing.T) {
 
 func TestDropStatefulResponsesFields(t *testing.T) {
 	tests := []struct {
-		name string
-		body map[string]any
-		want map[string]any
+		name        string
+		body        map[string]any
+		want        map[string]any
+		wantChanged []string
 	}{
 		{
-			name: "all three present",
-			body: map[string]any{"input": "hi", FieldPreviousResponseID: "resp-123", FieldStore: true, FieldBackground: true},
-			want: map[string]any{"input": "hi", FieldStore: false},
+			name:        "all four present",
+			body:        map[string]any{"input": "hi", FieldPreviousResponseID: "resp-123", FieldConversation: "conv-123", FieldStore: true, FieldBackground: true},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldPreviousResponseID, FieldConversation, FieldStore, FieldBackground},
 		},
 		{
-			name: "store already false is left alone",
-			body: map[string]any{"input": "hi", FieldStore: false},
-			want: map[string]any{"input": "hi", FieldStore: false},
+			name:        "store already false is left alone and not reported as changed",
+			body:        map[string]any{"input": "hi", FieldStore: false},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: nil,
 		},
 		{
-			name: "store absent is forced to false",
-			body: map[string]any{"input": "hi"},
-			want: map[string]any{"input": "hi", FieldStore: false},
+			name:        "store absent is forced to false",
+			body:        map[string]any{"input": "hi"},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldStore},
 		},
 		{
-			name: "store non-bool is forced to false",
-			body: map[string]any{"input": "hi", FieldStore: "yes"},
-			want: map[string]any{"input": "hi", FieldStore: false},
+			name:        "store non-bool is forced to false",
+			body:        map[string]any{"input": "hi", FieldStore: "yes"},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldStore},
 		},
 		{
-			name: "background false is still removed",
-			body: map[string]any{"input": "hi", FieldBackground: false},
-			want: map[string]any{"input": "hi", FieldStore: false},
+			name:        "background false is still removed",
+			body:        map[string]any{"input": "hi", FieldBackground: false},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldStore, FieldBackground},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			DropStatefulResponsesFields(logr.Discard(), tt.body)
+			got := DropStatefulResponsesFields(tt.body)
 			if !reflect.DeepEqual(tt.body, tt.want) {
 				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			}
+			if !reflect.DeepEqual(got, tt.wantChanged) {
+				t.Fatalf("changed = %v, want %v", got, tt.wantChanged)
 			}
 		})
 	}

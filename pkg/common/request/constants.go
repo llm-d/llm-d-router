@@ -51,6 +51,7 @@ const (
 	// Responses API fields with no cross-pod story in a disaggregated
 	// deployment; see DropStatefulResponsesFields.
 	FieldPreviousResponseID = "previous_response_id"
+	FieldConversation       = "conversation"
 	FieldStore              = "store"
 	FieldBackground         = "background"
 )
