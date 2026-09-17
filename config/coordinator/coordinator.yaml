@@ -19,7 +19,7 @@ log_level: 2
 
 # -------------------------------------------------------------------------------
 # server: listener for incoming OpenAI-compatible requests. Serves TLS unless
-# secure_coordinator is false.
+# secure_serving is false.
 # -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
@@ -38,10 +38,10 @@ server:
   # env: COORDINATOR_SERVER_METRICS_CERT_DIR
   # metrics_cert_dir: ""
 
-  # secure_coordinator serves the inference listener over TLS. Default true.
-  # The --secure-coordinator CLI flag overrides this field.
-  # env: COORDINATOR_SERVER_SECURE_COORDINATOR
-  # secure_coordinator: true
+  # secure_serving serves the inference listener over TLS. Default true.
+  # The --secure-serving CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_SECURE_SERVING
+  # secure_serving: true
 
   # cert_path is the directory containing tls.crt and tls.key for the inference
   # listener. Empty generates a self-signed certificate, which is only suitable

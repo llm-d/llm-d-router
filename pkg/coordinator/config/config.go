@@ -45,7 +45,7 @@ type ServerConfig struct {
 	ListenAddr         string        `mapstructure:"listen_addr"`
 	MetricsPort        int           `mapstructure:"metrics_port"` // default 9090; non-positive disables the endpoint
 	MetricsCertDir     string        `mapstructure:"metrics_cert_dir"`
-	SecureCoordinator  bool          `mapstructure:"secure_coordinator"`
+	SecureServing      bool          `mapstructure:"secure_serving"`
 	CertPath           string        `mapstructure:"cert_path"`
 	TLSMinVersion      string        `mapstructure:"tls_min_version"`
 	TLSCipherSuites    []string      `mapstructure:"tls_cipher_suites"`
@@ -86,7 +86,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("server.listen_addr", ":8080")
 	v.SetDefault("server.metrics_port", 9090)
 	v.SetDefault("server.metrics_cert_dir", "")
-	v.SetDefault("server.secure_coordinator", true)
+	v.SetDefault("server.secure_serving", true)
 	v.SetDefault("server.cert_path", "")
 	v.SetDefault("server.tls_min_version", "")
 	v.SetDefault("server.tls_cipher_suites", []string{})
