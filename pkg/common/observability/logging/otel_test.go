@@ -1,9 +1,26 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package logging
 
 import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -34,6 +51,27 @@ func TestJSONRecordUsesOTelFields(t *testing.T) {
 	}
 	if rec["timestamp"] == nil || rec["timestamp"] == "" {
 		t.Error("timestamp missing")
+	}
+}
+
+func TestTimestampIsUTC(t *testing.T) {
+	enc := zapcore.NewJSONEncoder(EncoderConfig())
+	entry := zapcore.Entry{
+		Time:    time.Date(2026, time.September, 11, 12, 34, 56, 123000000, time.FixedZone("test", 3600)),
+		Level:   zapcore.InfoLevel,
+		Message: "request assembled",
+	}
+	encoded, err := enc.EncodeEntry(entry, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rec map[string]any
+	if err := json.Unmarshal(encoded.Bytes(), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec[otelTimestampKey] != "2026-09-11T11:34:56.123Z" {
+		t.Errorf("timestamp = %v, want UTC timestamp", rec[otelTimestampKey])
 	}
 }
 

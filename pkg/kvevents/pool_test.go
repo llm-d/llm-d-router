@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kvevents //nolint:testpackage // tests use unexported processEventBatch
 
 import (
@@ -34,7 +50,8 @@ func newTestPool(t *testing.T, blockSize int) (
 	require.NoError(t, err)
 
 	cfg := DefaultConfig()
-	pool := NewPool(cfg, idx, tp, nil)
+	pool, err := NewPool(cfg, idx, tp, nil)
+	require.NoError(t, err)
 	return pool, idx, tp
 }
 
@@ -121,6 +138,134 @@ func TestProcessRawMessage_UsesSubscriberSourceEndpoint(t *testing.T) {
 		result[keys[0]][1].PodIdentifier,
 	}
 	assert.ElementsMatch(t, []string{"10.0.0.1:8000", "10.0.0.1:8003"}, got)
+}
+
+func TestSubscriberManager_RemoveSubscriberResetsQueuedPodState(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tokenProcessor := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+	pool.concurrency = 1
+	defer pool.Shutdown(ctx)
+
+	const (
+		podIdentifier  = "ns/pod-1"
+		sourceEndpoint = "10.0.0.1:8000"
+	)
+	done := make(chan struct{})
+	subscriber := newZMQSubscriber(pool, podIdentifier, sourceEndpoint, "", "", "kv@", false)
+
+	manager := NewSubscriberManager(pool)
+	manager.subscribers[podIdentifier] = &subscriberEntry{
+		subscriber:     subscriber,
+		cancel:         func() {},
+		sourceEndpoint: sourceEndpoint,
+		done:           done,
+	}
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 1, []byte{1})
+
+	removed := make(chan struct{})
+	go func() {
+		manager.RemoveSubscriber(ctx, podIdentifier)
+		close(removed)
+	}()
+
+	select {
+	case <-removed:
+	case <-time.After(time.Second):
+		t.Fatal("endpoint reconciliation waited for the subscriber socket to close")
+	}
+	// A message arriving from the closing socket after retirement must be dropped.
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 2, []byte{2})
+	close(done)
+
+	require.Equal(t, 2, pool.queues[0].Len())
+	for _, wantReset := range []bool{false, true} {
+		msg, shutdown := pool.queues[0].Get()
+		require.False(t, shutdown)
+		assert.Equal(t, wantReset, msg.reset)
+		if !wantReset {
+			assert.Equal(t, uint64(1), msg.Sequence)
+		}
+		pool.processRawMessage(ctx, msg)
+		pool.queues[0].Done(msg)
+	}
+
+	keys, err := tokenProcessor.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	pool.dedup.mu.Lock()
+	_, tracked := pool.dedup.refs[sourceEndpoint]
+	pool.dedup.mu.Unlock()
+	assert.False(t, tracked)
+	result, err := idx.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result[keys[0]])
+}
+
+func TestSubscriberManager_RemoveSubscriberKeepsSharedSourceUntilLastSubscriber(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+	pool.concurrency = 1
+	defer pool.Shutdown(ctx)
+
+	const sourceEndpoint = "10.0.0.1:8000"
+	manager := NewSubscriberManager(pool)
+	dones := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	subscribers := []*zmqSubscriber{
+		newZMQSubscriber(pool, "ns/pod-rank-0", sourceEndpoint, "", "", "kv@", false),
+		newZMQSubscriber(pool, "ns/pod-rank-1", sourceEndpoint, "", "", "kv@", false),
+	}
+	for i, podIdentifier := range []string{"ns/pod-rank-0", "ns/pod-rank-1"} {
+		manager.subscribers[podIdentifier] = &subscriberEntry{
+			subscriber:     subscribers[i],
+			cancel:         func() {},
+			sourceEndpoint: sourceEndpoint,
+			done:           dones[i],
+		}
+	}
+
+	subscribers[0].addTask(ctx, "kv@", 1, []byte{1})
+	manager.RemoveSubscriber(ctx, "ns/pod-rank-0")
+	subscribers[0].addTask(ctx, "kv@", 2, []byte{2}) // retired: dropped
+	subscribers[1].addTask(ctx, "kv@", 3, []byte{3}) // shared source: retained
+	require.Equal(t, 2, pool.queues[0].Len(), "removing one rank must not reset a source still in use")
+
+	manager.RemoveSubscriber(ctx, "ns/pod-rank-1")
+	require.Equal(t, 3, pool.queues[0].Len(), "removing the last rank must queue one source reset")
+	for _, want := range []struct {
+		reset    bool
+		sequence uint64
+	}{{false, 1}, {false, 3}, {true, 0}} {
+		msg, shutdown := pool.queues[0].Get()
+		require.False(t, shutdown)
+		assert.Equal(t, want.reset, msg.reset)
+		assert.Equal(t, want.sequence, msg.Sequence)
+		pool.queues[0].Done(msg)
+	}
+	for _, done := range dones {
+		close(done)
+	}
+}
+
+func TestZMQSubscriber_RetireDropsMessagesWithoutSourceEndpoint(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+	pool.adapter = &sourceEndpointAdapter{}
+	pool.concurrency = 1
+	defer pool.Shutdown(ctx)
+
+	subscriber := newZMQSubscriber(pool, "local-subscriber", "", "", "", "kv@", false)
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 1, []byte{1})
+	subscriber.retire(false)
+	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 2, []byte{2})
+
+	require.Equal(t, 1, pool.queues[0].Len())
+	msg, shutdown := pool.queues[0].Get()
+	require.False(t, shutdown)
+	assert.Equal(t, uint64(1), msg.Sequence)
+	pool.queues[0].Done(msg)
 }
 
 func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
@@ -1297,6 +1442,20 @@ func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, erro
 
 func (stubAdapter) ShardingKey(_ *RawMessage) string { return "pod-1" }
 
+// A non-positive worker count leaves no shard for AddTask to select; the
+// first event would divide by zero in the subscriber goroutine. The
+// constructor rejects such configs instead of building the pool.
+func TestNewPool_RejectsNonPositiveConcurrency(t *testing.T) {
+	for _, concurrency := range []int{0, -1} {
+		cfg := DefaultConfig()
+		cfg.Concurrency = concurrency
+
+		_, err := NewPool(cfg, nil, nil, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "concurrency")
+	}
+}
+
 // TestPool_QueueDepthAccounting verifies that the queue depth gauge tracks
 // enqueues and dequeues, and is reset once the pool shuts down.
 func TestPool_QueueDepthAccounting(t *testing.T) {
@@ -1310,7 +1469,8 @@ func TestPool_QueueDepthAccounting(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Concurrency = 2
-	pool := NewPool(cfg, idx, tp, stubAdapter{})
+	pool, err := NewPool(cfg, idx, tp, stubAdapter{})
+	require.NoError(t, err)
 
 	const tasks = 3
 	for i := range uint64(tasks) {

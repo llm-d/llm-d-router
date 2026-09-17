@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -20,6 +36,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/llm-d/llm-d-router/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -175,7 +192,7 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 	defer func() { _ = r.Body.Close() }()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 	parsed, err := decodeRequestBody(raw)
 	if err != nil {
@@ -253,10 +270,8 @@ func decodeRequestBody(raw []byte) (map[string]any, error) {
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		if !errors.Is(err, errInvalidJSON) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(err.Error()))
-		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false

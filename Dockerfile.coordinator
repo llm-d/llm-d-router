@@ -24,6 +24,7 @@ RUN go mod download
 
 # Copy the go source
 COPY cmd/ cmd/
+COPY internal/ internal/
 COPY pkg/ pkg/
 COPY version/ version/
 COPY config/coordinator/ config/coordinator/

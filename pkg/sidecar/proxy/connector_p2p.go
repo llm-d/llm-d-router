@@ -18,8 +18,7 @@ package proxy
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,22 +39,11 @@ import (
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
 // prefiller stores KV under a kv_request_id with no peer address; the decoder
 // pulls it using the prefiller's OffloadingConnector P2P tier host/port. The
-// prefill leg runs to completion before decode is dispatched, so the decoder's
+// prefill request runs to completion before decode is dispatched, so the decoder's
 // fetch finds the blocks already stored, matching the NIXL path.
-func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if err := errorJSONInvalid(fmt.Errorf("failed to read request body: %w", err), w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	requestData, err := decodeRequestBody(body)
-	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -66,12 +54,9 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		"kv_request_id", kvRequestID,
 		"p2p_connector_port", prefillP2PPort)
 
-	// Prefill leg: store KV under kv_request_id, no peer address. Capped to a
+	// Prefill request: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
-	prefillData := make(map[string]any, len(requestData)+1)
-	for k, v := range requestData {
-		prefillData[k] = v
-	}
+	prefillData := maps.Clone(requestData)
 	prefillKVParams := map[string]any{
 		requestFieldRemoteDecoder: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
@@ -79,7 +64,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	reqcommon.PrimeSingleTokenRequest(prefillData)
+	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
@@ -92,12 +77,9 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		v.Info("prefill request body", logging.HTTPBodyKey, string(prefillBody))
 	}
 
-	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
+	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
-	decodeData := make(map[string]any, len(requestData)+1)
-	for k, v := range requestData {
-		decodeData[k] = v
-	}
+	decodeData := maps.Clone(requestData)
 	decodeData[requestFieldKVTransferParams] = map[string]any{
 		requestFieldRemotePrefiller: map[string]any{
 			requestFieldKVRequestID: kvRequestID,
@@ -120,7 +102,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort)
 }
 
-// handleP2PSequentialRequests runs the prefill leg to completion, then
+// handleP2PSequentialRequests runs the prefill request to completion, then
 // dispatches decode.
 //
 // The decoder's fetch has to find the prefiller's blocks already stored. A
@@ -128,7 +110,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 // session and burns the OffloadingConnector's fixed load deadline waiting for
 // KV that has not been produced yet; on expiry the decoder aborts the load and
 // recomputes the prompt locally, which is the work disaggregation exists to
-// avoid. Sequencing the legs also matches the NIXL connector, which forwards to
+// avoid. Sequencing the requests also matches the NIXL connector, which forwards to
 // the prefiller and waits for it to return before dispatching decode.
 func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string) {
 	tracer := tracing.Tracer(tracerScope)
@@ -142,7 +124,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// ---------- Prefill leg: store KV, response discarded ----------
+	// ---------- Prefill request: store KV, response discarded ----------
 	prefillCtx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
@@ -166,7 +148,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
-	s.logger.V(logging.DEBUG).Info("PD Multi Tier prefill leg completed", "status", pw.statusCode)
+	s.logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
 
 	if prefillFailed {
 		// Return the prefill error verbatim; decode is never dispatched, so it
@@ -189,7 +171,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// ---------- Decode leg: pulls the stored KV and streams the response ----------
+	// ---------- Decode request: pulls the stored KV and streams the response ----------
 	decodeCtx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
@@ -237,7 +219,7 @@ func (s *Server) p2pPullAvailable() bool {
 }
 
 // addP2PPullToPrefill adds the OffloadingConnector P2P pull block to a prefill
-// leg's kv_transfer_params so the prefiller pulls cached prefix from
+// request's kv_transfer_params so the prefiller pulls cached prefix from
 // kvCacheSource while keeping its own computed blocks available for the
 // decoder. It is a no-op when no source is set or the source is the selected
 // prefill endpoint, since there is nothing to pull from oneself. The

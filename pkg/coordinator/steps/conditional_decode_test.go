@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -37,7 +38,7 @@ import (
 )
 
 const (
-	testChatCompletionsPath = gateway.PathChatCompletions
+	testChatCompletionsPath = reqcommon.PathChatCompletions
 	testModelName           = "test-model"
 )
 
@@ -96,14 +97,9 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		t.Fatalf("expected Prefer: if-available header, got %q", receivedPreferHeader)
 	}
 
-	// Verify tokens field is present for chat completions format
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions conditional-decode request")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 3 {
-		t.Fatalf("expected 3 token_ids in tokens field, got %v", tokenIDs)
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions conditional-decode request should not have a tokens field")
 	}
 
 	result := recorder.Result()
@@ -114,6 +110,63 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	respBody, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(respBody), "cached response") {
 		t.Fatalf("expected 'cached response' in body, got: %s", string(respBody))
+	}
+}
+
+// Generate and Responses both resolve to the generate format, whose body is
+// forwarded without a tokens or prompt rewrite.
+func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
+	for _, path := range []string{reqcommon.PathGenerate, reqcommon.PathResponses} {
+		t.Run(path, func(t *testing.T) {
+			var receivedBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &receivedBody)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			reqCtx := &pipeline.RequestContext{
+				RequestID:      "req-1",
+				OriginalPath:   path,
+				Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
+				TokenIDs:       []int{1, 2345},
+				ResponseWriter: httptest.NewRecorder(),
+			}
+
+			err = step.Execute(context.Background(), reqCtx)
+			if !errors.Is(err, pipeline.ErrPipelineDone) {
+				t.Fatalf("expected ErrPipelineDone, got %v", err)
+			}
+			if _, ok := receivedBody["tokens"]; ok {
+				t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
+			}
+			if _, ok := receivedBody["prompt"]; ok {
+				t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
+			}
+			if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
+				t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
+			}
+		})
+	}
+}
+
+func TestConditionalDecodeStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := map[string]any{"model": testModelName}
+	err = step.(*ConditionalDecodeStep).prepareBody(&pipeline.RequestContext{TokenIDs: []int{1}}, body, reqcommon.APIType(99))
+	if want := "conditional-decode: unsupported request format APIType(99)"; err == nil || err.Error() != want {
+		t.Fatalf("expected error %q, got %v", want, err)
 	}
 }
 

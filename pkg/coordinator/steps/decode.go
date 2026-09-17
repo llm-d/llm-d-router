@@ -102,15 +102,14 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
-	case gateway.FormatChatCompletions:
+	case reqcommon.APITypeChatCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
-		s.injectTokensField(reqCtx)
-	case gateway.FormatCompletions:
+	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
-	case gateway.FormatGenerate:
+	case reqcommon.APITypeGenerate:
 		// The /inference/v1/generate engine reads transfer params only from
 		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
 		// so the decode worker never pulls the prefill KV over NIXL. Merge into
@@ -122,16 +121,6 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		setGenerateTransferParams(sampling, kvParams, nil)
 	}
-}
-
-func (s *DecodeStep) injectTokensField(reqCtx *pipeline.RequestContext) {
-	tokens := map[string]any{
-		"token_ids": reqCtx.TokenIDs,
-	}
-	if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
-		tokens["features"] = features
-	}
-	reqCtx.Body["tokens"] = tokens
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {

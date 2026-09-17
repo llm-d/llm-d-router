@@ -35,6 +35,8 @@ make -f Makefile.coord.mk run
 make -f Makefile.coord.mk test
 ```
 
+The listener serves HTTPS on `:8080`. Without `--cert-path` the certificate is self-signed and carries no subject alternative names, so clients have to skip verification (`curl -k`). Pass `--cert-path` with a directory holding `tls.crt` and `tls.key` for a certificate callers can verify, or `--secure-coordinator=false` to serve plaintext.
+
 ## Configuration
 
 Configuration is a YAML file passed via the `--config` flag. See `config/coordinator/coordinator.yaml` for the annotated default, and [Configuring the pipeline](docs/coordinator_architecture.md#configuring-the-pipeline) for the full reference (top-level structure, environment overrides, connector selection, and the built-in steps).
@@ -47,6 +49,8 @@ Configuration is a YAML file passed via the `--config` flag. See `config/coordin
 | POST | `/v1/completions` | OpenAI Completions API |
 | GET | `/healthz` | Health check |
 | GET | `/readyz` | Readiness check |
+
+All paths are served over HTTPS unless `--secure-coordinator=false` is set.
 
 Both completion endpoints support `"stream": true` for Server-Sent Events streaming.
 

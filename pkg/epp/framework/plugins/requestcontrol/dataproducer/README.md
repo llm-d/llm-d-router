@@ -23,7 +23,7 @@ Producers may also implement additional lifecycle hooks:
 | `latency-observer-producer-hub` | [`latencyobserver`](latencyobserver/) | `TTFTPercentiles` | Measures each request's actual time-to-first-token and publishes per-endpoint percentile anchors for `latency-observation-scorer-hub`. Needs nothing from the endpoint but its response. |
 | `session-id-producer` | [`sessionid`](sessionid/) | `SessionID` | Extracts a session identifier from a request header or cookie and publishes it for affinity-aware plugins. |
 | `mm-embeddings-cache-producer` | [`multimodal`](multimodal/) | `EncoderCacheMatchInfo` | Tracks which pods recently processed each multimodal input hash and scores encoder-cache affinity. |
-| `p2p-source-producer` | [`p2psource`](p2psource/) | request attribute only | Sets the `x-kv-cache-source-host-port` header to the candidate holding the most cached prefix tokens when it out-caches the pod computing the prefix, for P2P KV pulls. |
+| `p2p-source-producer` | [`p2psource`](p2psource/) | `ReusablePrefixTokens` | Samples a P2P source, publishes a reusable-prefix floor for scheduling, and sets the source header after the computing pod is selected. |
 
 ## Plugin ordering and dependencies
 
@@ -33,7 +33,8 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 - `burst-prefix-cache-producer` **requires** `token-producer` upstream (it consumes `TokenizedPrompt`).
 - `mm-embeddings-cache-producer` **optionally** consumes `TokenizedPrompt`; configure `token-producer` first when multimodal features need tokenizer-derived hashes.
 - `inflight-load-producer` **optionally** consumes `PrefixCacheMatchInfo` from an approx or precise prefix producer; prefix-discounting is applied automatically when the attribute is present.
-- `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error) — set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
+- `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error). Set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
+- `context-length-aware` can require the name-bound `ReusablePrefixTokens` output by setting `reusableTokensProducerName` to the `p2p-source-producer` instance name. See [P2P cache-aware prefill work](../../scheduling/scorer/contextlengthaware/README.md#p2p-cache-aware-prefill-work) for the profile and label requirements.
 - `predicted-latency-producer` **optionally** consumes `PrefixCacheMatchInfo`; set `prefixMatchInfoProducerName` in its config to the name of the prefix producer instance.
 - `latency-observer-producer-hub` **requires** `InFlightLoad`, so `inflight-load-producer` is ordered ahead of it and auto-created when absent. It must itself be listed under `dataLayer.sources`; auto-creation from `latency-observation-scorer-hub`'s required data key only wires the attribute, not the periodic tick that publishes it. See the [producer README](latencyobserver/README.md#configuration).
 

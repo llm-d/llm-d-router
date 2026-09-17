@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -237,14 +238,18 @@ func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *Reques
 }
 
 // extractTraceContext returns ctx augmented with the upstream trace context
-// carried in the incoming Envoy request headers (e.g. the traceparent set by the
-// client or the Gateway), using the globally configured text map propagator.
+// carried in the incoming ext_proc gRPC metadata and Envoy request headers (e.g.
+// the traceparent set by the client or the Gateway), using the globally configured
+// text map propagator. Header extraction happens last so an explicitly supplied
+// client trace context takes precedence over the proxy's context.
 //
 // The header wire format is the W3C Trace Context spec:
 // https://www.w3.org/TR/trace-context/
 // Extraction uses OpenTelemetry context propagation:
 // https://opentelemetry.io/docs/concepts/context-propagation/
 func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_RequestHeaders) context.Context {
+	ctx = tracing.ExtractGRPCMetadata(ctx)
+
 	carrier := make(propagation.MapCarrier)
 	if req != nil && req.RequestHeaders != nil && req.RequestHeaders.Headers != nil {
 		for _, header := range req.RequestHeaders.Headers.Headers {

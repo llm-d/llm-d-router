@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,11 +28,13 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/labels"
+
+	"github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // DisaggregatedSet rollout protocol and operator label defaults.
 const (
-	DefaultRevisionHeader = "x-llm-d-disagg-revision"
+	DefaultRevisionHeader = request.DisaggregatedRevisionHeaderKey
 	DefaultRevisionLabel  = "disaggregatedset.x-k8s.io/revision"
 	DefaultRoleLabel      = "disaggregatedset.x-k8s.io/role"
 )

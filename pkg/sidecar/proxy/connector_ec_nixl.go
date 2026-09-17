@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -8,7 +24,9 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // fanoutEncoderCollect fans out per-image encoder requests and merges
@@ -83,7 +101,7 @@ func (s *Server) fanoutEncoderCollect(
 // handleECNIXL fans out per-image encoder requests, aggregates each
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
-func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType APIType) {
+func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
