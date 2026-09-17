@@ -197,25 +197,27 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 // dropStatefulResponsesFields removes stateful Responses fields the
 // pipeline cannot honor: prefill, encode, and decode run on independent
 // worker pods with no shared response store, so previous_response_id cannot
-// be resolved and store/background would silently no-op rather than persist
-// or backgroundize anything. All three are removed whenever present,
-// regardless of value.
+// be resolved and background would silently no-op rather than backgroundize
+// anything. previous_response_id and background are removed whenever
+// present, regardless of value. store is forced to false rather than
+// removed: vLLM defaults store to true when the field is absent, so deleting
+// it would leave storage enabled instead of disabling it.
 func dropStatefulResponsesFields(logger logr.Logger, body map[string]any) {
-	var dropped []string
+	var changed []string
 	if _, ok := body["previous_response_id"]; ok {
 		delete(body, "previous_response_id")
-		dropped = append(dropped, "previous_response_id")
+		changed = append(changed, "previous_response_id")
 	}
-	if _, ok := body["store"]; ok {
-		delete(body, "store")
-		dropped = append(dropped, "store")
+	if store, ok := body["store"].(bool); !ok || store {
+		body["store"] = false
+		changed = append(changed, "store")
 	}
 	if _, ok := body["background"]; ok {
 		delete(body, "background")
-		dropped = append(dropped, "background")
+		changed = append(changed, "background")
 	}
-	if len(dropped) > 0 {
-		logger.V(logutil.DEFAULT).Info("dropping unsupported responses fields", "fields", dropped)
+	if len(changed) > 0 {
+		logger.V(logutil.DEFAULT).Info("clearing unsupported responses fields", "fields", changed)
 	}
 }
 
