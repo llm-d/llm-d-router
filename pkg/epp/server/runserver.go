@@ -244,6 +244,8 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			}
 		}
 
+		logger.Info("server TLS", "tls", r.SecureServing, "cert_path", r.CertPath)
+
 		var grpcOpts []grpc.ServerOption
 		if creds != nil {
 			grpcOpts = append(grpcOpts, grpc.Creds(creds))
