@@ -181,12 +181,12 @@ func (s *Server) metricsTLSConfig(ctx context.Context) (*tls.Config, error) {
 	keyFile := filepath.Join(s.config.MetricsCertDir, "tls.key")
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load metrics TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+		return nil, fmt.Errorf("metrics TLS: load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 	}
 
 	reloader, err := common.NewCertReloader(ctx, s.config.MetricsCertDir, &cert)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start metrics cert reloader: %w", err)
+		return nil, fmt.Errorf("metrics TLS: start certificate reloader: %w", err)
 	}
 
 	return &tls.Config{

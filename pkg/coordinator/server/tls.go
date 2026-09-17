@@ -43,13 +43,13 @@ func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, erro
 	if minVersion != "" {
 		version, err := flag.TLSVersion(minVersion)
 		if err != nil {
-			return tlsProfile{}, fmt.Errorf("server: invalid tls_min_version %q: %w", minVersion, err)
+			return tlsProfile{}, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", minVersion, minVersion)
 		}
 		profile.minVersion = version
 	}
 	suites, err := flag.TLSCipherSuites(cipherSuites)
 	if err != nil {
-		return tlsProfile{}, fmt.Errorf("server: invalid tls_cipher_suites: %w", err)
+		return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: %w", err)
 	}
 	profile.cipherSuites = suites
 	return profile, nil
@@ -68,7 +68,7 @@ func (s *Server) listenerTLSConfig(ctx context.Context) (*tls.Config, error) {
 	if s.certPath == "" {
 		cert, err := tlsutil.CreateSelfSignedTLSCertificate(serverLog)
 		if err != nil {
-			return nil, fmt.Errorf("server: create self-signed certificate: %w", err)
+			return nil, fmt.Errorf("create self-signed certificate: %w", err)
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 		return cfg, nil
@@ -78,12 +78,12 @@ func (s *Server) listenerTLSConfig(ctx context.Context) (*tls.Config, error) {
 	keyFile := filepath.Join(s.certPath, "tls.key")
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("server: load key pair from cert %q and key %q: %w", certFile, keyFile, err)
+		return nil, fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 	}
 
 	reloader, err := common.NewCertReloader(ctx, s.certPath, &cert)
 	if err != nil {
-		return nil, fmt.Errorf("server: start certificate reloader: %w", err)
+		return nil, fmt.Errorf("start certificate reloader: %w", err)
 	}
 	cfg.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return reloader.Get(), nil
