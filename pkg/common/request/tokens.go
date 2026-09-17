@@ -52,18 +52,19 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 }
 
 // DropStatefulResponsesFields removes stateful Responses fields that neither
-// the coordinator's pipeline nor the sidecar can
-// honor. "store" is forced to false rather
-// than removed: vLLM defaults store to true when the field is absent, so
-// deleting it would leave storage enabled instead of disabling it.
+// the coordinator's pipeline nor the sidecar can honor. "store" is forced to
+// false rather than removed: vLLM defaults store to true when the field is
+// absent, so deleting it would leave storage enabled instead of disabling
+// it.
 //
 // Callers call this once on the request body before any per-request
 // cloning, so every downstream body built from it, or from a clone of it,
 // inherits the same stripped fields. It returns the names of the fields it
-// changed, in the order above, so callers can log only when something
-// actually changed; a caller whose decoded value for store is never a Go
-// bool (e.g. the sidecar, which leaves uninspected fields as raw JSON)
-// would otherwise treat every request as changed.
+// changed, in the order the checks below run, so callers can log only when
+// something actually changed. That signal for store is only meaningful if
+// body[FieldStore], when present, has already been decoded into a Go bool:
+// an undecoded value (left as e.g. json.RawMessage) never satisfies the
+// type assertion below, so every call would report store as changed.
 func DropStatefulResponsesFields(body map[string]any) []string {
 	var changed []string
 	if _, ok := body[FieldPreviousResponseID]; ok {

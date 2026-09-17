@@ -65,10 +65,9 @@ const (
 	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
 	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
-	// requestFieldStore is inspected (not just forwarded raw) so
-	// DropStatefulResponsesFields can tell an already-false store apart from
-	// one it needs to change, instead of every value looking changed because
-	// it never decoded past json.RawMessage.
+	// requestFieldStore must stay inspected (decoded to a Go value, not left
+	// as raw JSON): see DropStatefulResponsesFields's doc comment for why an
+	// undecoded value would break its "changed" reporting.
 	requestFieldStore = reqcommon.FieldStore
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
