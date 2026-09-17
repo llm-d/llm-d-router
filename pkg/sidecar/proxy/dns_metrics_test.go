@@ -34,13 +34,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
 func writeSelfSignedCert(t *testing.T, dir string) {
 	t.Helper()
 
-	cert, err := CreateSelfSignedTLSCertificate()
+	cert, err := tlsutil.CreateSelfSignedTLSCertificate(logr.Discard())
 	require.NoError(t, err)
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
@@ -187,7 +188,7 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			certDir := t.TempDir()
 			if tt.writeCert || tt.writeKey {
-				cert, err := CreateSelfSignedTLSCertificate()
+				cert, err := tlsutil.CreateSelfSignedTLSCertificate(logr.Discard())
 				require.NoError(t, err)
 				if tt.writeCert {
 					certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
