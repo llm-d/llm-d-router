@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -78,7 +80,8 @@ func (e *UpstreamStreamedError) Unwrap() error { return e.Cause }
 
 // Pipeline orchestrates the sequential execution of steps.
 type Pipeline struct {
-	steps []Step
+	steps                  []Step
+	forwardResponseHeaders map[string]struct{}
 }
 
 // New creates a pipeline from an ordered list of steps.
@@ -99,9 +102,33 @@ type stepTiming struct {
 	duration time.Duration
 }
 
+// NewWithForwardResponseHeaders creates a pipeline that relays selected
+// response headers from each step to every later step.
+func NewWithForwardResponseHeaders(steps []Step, headers []string) (*Pipeline, error) {
+	forwardResponseHeaders := make(map[string]struct{}, len(headers))
+	for index, name := range headers {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return nil, fmt.Errorf("pipeline.forward_response_headers[%d] must not be empty", index)
+		}
+		if !isForwardableHeader(name) {
+			return nil, fmt.Errorf("pipeline.forward_response_headers contains non-forwardable header %q", name)
+		}
+		if _, duplicate := forwardResponseHeaders[name]; duplicate {
+			return nil, fmt.Errorf("pipeline.forward_response_headers contains duplicate header %q", name)
+		}
+		forwardResponseHeaders[name] = struct{}{}
+	}
+	return &Pipeline{steps: steps, forwardResponseHeaders: forwardResponseHeaders}, nil
+}
+
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
+	reqCtx.forwardResponseHeaders = p.forwardResponseHeaders
+	if reqCtx.RevisionDecisionID == "" {
+		reqCtx.RevisionDecisionID = uuid.NewString()
+	}
 
 	timings := make([]stepTiming, len(p.steps))
 	started := map[string]bool{}

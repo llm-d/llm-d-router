@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
@@ -283,10 +284,10 @@ func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 	ctx := discardCtx(t)
 
-	var clearedPod string
+	clearedPod := make(chan string, 1)
 	fakeIndex := &fakeKVBlockIndex{
 		clearFn: func(_ context.Context, podIdentifier string) error {
-			clearedPod = podIdentifier
+			clearedPod <- podIdentifier
 			return nil
 		},
 	}
@@ -296,9 +297,10 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 	cfg.DiscoverPods = true
 	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
 	cfg.PodDiscoveryConfig.SocketPort = 5557
-
-	pool, err := kvevents.NewPool(cfg, nil, nil, nil)
+	pool, err := kvevents.NewPool(cfg, fakeIndex, nil, nil)
 	require.NoError(t, err)
+	pool.Start(ctx)
+	defer pool.Shutdown(ctx)
 
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
@@ -321,7 +323,12 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 		Endpoint: ep,
 	}))
 
-	assert.Equal(t, "10.0.0.99:8080", clearedPod, "index should be cleared using pod IP:Port matching PodIdentifier format")
+	select {
+	case got := <-clearedPod:
+		assert.Equal(t, "10.0.0.99:8080", got, "index should be cleared using pod IP:Port matching PodIdentifier format")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for removed pod index state to clear")
+	}
 
 	ids, _ := p.subscribersManager.GetActiveSubscribers()
 	assert.Empty(t, ids)
@@ -445,32 +452,24 @@ func TestNew_PodLabelSelector(t *testing.T) {
 	}
 }
 
-func TestProducer_ExtractEndpoint_ExcludedUpdatesDoNotClearIndex(t *testing.T) {
+func TestProducer_ExtractEndpoint_ExcludedUpdatesManageSubscriber(t *testing.T) {
 	ctx := discardCtx(t)
 	p := newExtractorProducer(t, true)
 	defer p.subscribersManager.Shutdown(ctx)
 	p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
-	var clearedPods []string
-	p.kvCacheIndexer = &fakeKVCacheIndexer{index: &fakeKVBlockIndex{
-		clearFn: func(_ context.Context, podIdentifier string) error {
-			clearedPods = append(clearedPods, podIdentifier)
-			return nil
-		},
-	}}
 
 	steps := []struct {
 		name            string
 		eventType       fwkdl.EventType
 		role            string
-		wantClears      int
 		wantSubscribers int
 	}{
 		{name: "excluded add", eventType: fwkdl.EventAddOrUpdate, role: "decode"},
 		{name: "excluded update", eventType: fwkdl.EventAddOrUpdate, role: "decode"},
 		{name: "matching update", eventType: fwkdl.EventAddOrUpdate, role: "prefill", wantSubscribers: 1},
-		{name: "subscriber removed", eventType: fwkdl.EventAddOrUpdate, role: "decode", wantClears: 1},
-		{name: "repeated excluded update", eventType: fwkdl.EventAddOrUpdate, role: "decode", wantClears: 1},
-		{name: "delete without subscriber", eventType: fwkdl.EventDelete, role: "decode", wantClears: 2},
+		{name: "subscriber removed", eventType: fwkdl.EventAddOrUpdate, role: "decode"},
+		{name: "repeated excluded update", eventType: fwkdl.EventAddOrUpdate, role: "decode"},
+		{name: "delete without subscriber", eventType: fwkdl.EventDelete, role: "decode"},
 	}
 	for _, step := range steps {
 		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{
@@ -482,11 +481,9 @@ func TestProducer_ExtractEndpoint_ExcludedUpdatesDoNotClearIndex(t *testing.T) {
 				Labels:  map[string]string{"llm-d.ai/role": step.role},
 			}, nil),
 		}), step.name)
-		assert.Len(t, clearedPods, step.wantClears, step.name)
 		ids, _ := p.subscribersManager.GetActiveSubscribers()
 		assert.Len(t, ids, step.wantSubscribers, step.name)
 	}
-	assert.Equal(t, []string{"10.0.0.1:8080", "10.0.0.1:8080"}, clearedPods)
 }
 
 func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
@@ -509,13 +506,6 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 			p := newExtractorProducer(t, true)
 			defer p.subscribersManager.Shutdown(ctx)
 			p.podSelector = labels.SelectorFromSet(labels.Set{"llm-d.ai/role": "prefill"})
-			var clearedPods []string
-			p.kvCacheIndexer = &fakeKVCacheIndexer{index: &fakeKVBlockIndex{
-				clearFn: func(_ context.Context, podIdentifier string) error {
-					clearedPods = append(clearedPods, podIdentifier)
-					return nil
-				},
-			}}
 			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 				ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 				Address: "10.0.0.1",
@@ -537,11 +527,6 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 			}))
 			ids, _ = p.subscribersManager.GetActiveSubscribers()
 			assert.Empty(t, ids)
-			if tc.address == "" {
-				assert.Empty(t, clearedPods)
-			} else {
-				assert.Equal(t, []string{"10.0.0.1:8080"}, clearedPods)
-			}
 
 			if tc.eventType == fwkdl.EventAddOrUpdate {
 				require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))

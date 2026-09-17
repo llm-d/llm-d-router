@@ -42,8 +42,11 @@ jobs:
       (
         github.event_name == 'pull_request_target' &&
         !(
-          startsWith(github.head_ref, 'release-notes/assemble-') &&
-          endsWith(github.event.pull_request.user.login, '[bot]')
+          contains(fromJSON('["dependabot[bot]"]'), github.event.pull_request.user.login) ||
+          (
+            startsWith(github.head_ref, 'release-notes/assemble-') &&
+            endsWith(github.event.pull_request.user.login, '[bot]')
+          )
         )
       )
     runs-on: ubuntu-latest

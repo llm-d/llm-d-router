@@ -208,9 +208,10 @@ func (w *deferredCommitWriter) commit() bool {
 	return true
 }
 
-// abort discards buffered output and drops all future writes. It is a no-op if
-// decode's response has already been relayed to the client (which cannot happen
-// in the current flow, since the caller only aborts before committing).
+// abort discards buffered output and drops all future writes. It is a no-op
+// once decode's response has been relayed to the client, which the
+// concurrent-dispatch decode abort path reaches: the response is already on the
+// wire, so the caller tears the connection down instead.
 func (w *deferredCommitWriter) abort() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -219,6 +220,16 @@ func (w *deferredCommitWriter) abort() {
 	}
 	w.aborted = true
 	w.buffer.Reset()
+}
+
+// responseStarted reports whether decode's status/headers have reached the
+// client. Callers that need to fail a request after the commit point use it to
+// choose between writing their own error status, which is only possible while
+// nothing has been relayed, and tearing the connection down.
+func (w *deferredCommitWriter) responseStarted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.headerFlushed
 }
 
 type flushableResponseWriter interface {

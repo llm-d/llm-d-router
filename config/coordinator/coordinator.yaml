@@ -17,9 +17,10 @@
 # A compromised log store would expose them.
 log_level: 2
 
-# ---------------------------------------------------------------------------
-# server: HTTP listener for incoming OpenAI-compatible requests.
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
+# server: listener for incoming OpenAI-compatible requests. Serves TLS unless
+# secure_coordinator is false.
+# -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
@@ -36,6 +37,31 @@ server:
   # The --metrics-cert-dir CLI flag overrides this field.
   # env: COORDINATOR_SERVER_METRICS_CERT_DIR
   # metrics_cert_dir: ""
+
+  # secure_coordinator serves the inference listener over TLS. Default true.
+  # The --secure-coordinator CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_SECURE_COORDINATOR
+  # secure_coordinator: true
+
+  # cert_path is the directory containing tls.crt and tls.key for the inference
+  # listener. Empty generates a self-signed certificate, which is only suitable
+  # for testing. Certificate changes are picked up without a restart.
+  # The --cert-path CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_CERT_PATH
+  # cert_path: ""
+
+  # tls_min_version is the minimum TLS version the inference listener accepts,
+  # for example VersionTLS12 or VersionTLS13. Empty uses VersionTLS12.
+  # The --tls-min-version CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_MIN_VERSION
+  # tls_min_version: ""
+
+  # tls_cipher_suites are the cipher suites the inference listener accepts, by
+  # Go crypto/tls name. Empty uses the crypto/tls default. Only effective for
+  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.
+  # The --tls-cipher-suites CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_CIPHER_SUITES
+  # tls_cipher_suites: []
 
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
@@ -105,6 +131,17 @@ pipeline:
   # A step may override this in its own params.
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
+
+  # Carries selected response headers from each upstream phase into every
+  # later phase. Only listed headers are forwarded. This allows EPP-stamped
+  # scheduling metadata to constrain later roles in a disaggregated pipeline.
+  # Client-supplied values for listed headers are discarded until an upstream
+  # phase returns a replacement value. When this setting is omitted, it
+  # defaults to x-llm-d-disagg-revision. Declaring the setting replaces that
+  # default; use an empty list to disable response-header forwarding.
+  # forward_response_headers:
+  #   - x-llm-d-disagg-revision
+  #   - x-disagg-slice
 
   steps:
     # -------------------------------------------------------------------
