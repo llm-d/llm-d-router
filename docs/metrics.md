@@ -550,7 +550,7 @@ fallback, consulted only when `--metrics-port` is unset.
 The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a
 directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
 Missing or invalid files stop the sidecar; the metrics listener does not fall
-back to HTTP. The metrics TLS setting is independent of `--secure-proxy` and
+back to HTTP. The metrics TLS setting is independent of `--secure-serving` and
 `--cert-path`, which apply to the sidecar data-plane listener.
 
 | Full metric name | Type | Labels | Notes |
