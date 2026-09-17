@@ -45,6 +45,7 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -500,6 +501,10 @@ func TestPluginsWithDependencies(t *testing.T) {
 		{
 			name:       "pluginsOutOfOrder",
 			configText: pluginsOutOfOrderText,
+		},
+		{
+			name:       "maxSaturationDetectorSortsBeforeChildren",
+			configText: maxSaturationDetectorSortsBeforeChildrenText,
 		},
 		{
 			name:       "pluginsRefedByPointer",
@@ -1260,6 +1265,9 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(testProfileHandler, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockHandler{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileHandler}}}, nil
 	})
+
+	fwkplugin.RegisterWithPluginDependencies(composite.MaxSaturationDetectorType, fwkplugin.StabilityStable,
+		composite.MaxSaturationDetectorFactory, composite.MaxSaturationDetectorConfigParser)
 
 	fwkplugin.RegisterWithPluginDependencies(testWithDependencies, fwkplugin.StabilityStable,
 		func(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
