@@ -65,6 +65,11 @@ const (
 	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
 	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
+	// requestFieldStore is inspected (not just forwarded raw) so
+	// DropStatefulResponsesFields can tell an already-false store apart from
+	// one it needs to change, instead of every value looking changed because
+	// it never decoded past json.RawMessage.
+	requestFieldStore = reqcommon.FieldStore
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).

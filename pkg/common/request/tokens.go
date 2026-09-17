@@ -16,13 +16,7 @@ limitations under the License.
 
 package request
 
-import (
-	"maps"
-
-	"github.com/go-logr/logr"
-
-	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-)
+import "maps"
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token prefill or encode request. It returns the map
@@ -58,19 +52,27 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 }
 
 // DropStatefulResponsesFields removes stateful Responses fields that neither
-// the coordinator's disaggregated pipeline nor the sidecar's
-// connectors can honor. Pure vllm-d supports stateless /responses requests.
-// The "store" field is forced to false rather than
-// removed: vLLM defaults "store" to true when the field is absent, so deleting
-// it would leave storage enabled instead of disabling it.
+// the coordinator's pipeline nor the sidecar can
+// honor. "store" is forced to false rather
+// than removed: vLLM defaults store to true when the field is absent, so
+// deleting it would leave storage enabled instead of disabling it.
 //
-// Callers pass the request body before any per-request cloning, so every request body
-// is built from it (or from a clone of it) inherits the same stripped fields.
-func DropStatefulResponsesFields(logger logr.Logger, body map[string]any) {
+// Callers call this once on the request body before any per-request
+// cloning, so every downstream body built from it, or from a clone of it,
+// inherits the same stripped fields. It returns the names of the fields it
+// changed, in the order above, so callers can log only when something
+// actually changed; a caller whose decoded value for store is never a Go
+// bool (e.g. the sidecar, which leaves uninspected fields as raw JSON)
+// would otherwise treat every request as changed.
+func DropStatefulResponsesFields(body map[string]any) []string {
 	var changed []string
 	if _, ok := body[FieldPreviousResponseID]; ok {
 		delete(body, FieldPreviousResponseID)
 		changed = append(changed, FieldPreviousResponseID)
+	}
+	if _, ok := body[FieldConversation]; ok {
+		delete(body, FieldConversation)
+		changed = append(changed, FieldConversation)
 	}
 	if store, ok := body[FieldStore].(bool); !ok || store {
 		body[FieldStore] = false
@@ -80,7 +82,5 @@ func DropStatefulResponsesFields(logger logr.Logger, body map[string]any) {
 		delete(body, FieldBackground)
 		changed = append(changed, FieldBackground)
 	}
-	if len(changed) > 0 {
-		logger.V(logutil.DEFAULT).Info("clearing unsupported responses fields", "fields", changed)
-	}
+	return changed
 }

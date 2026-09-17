@@ -142,7 +142,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	ctx := log.IntoContext(r.Context(), logger)
 
 	if r.URL.Path == reqcommon.PathResponses {
-		reqcommon.DropStatefulResponsesFields(logger, parsed)
+		if changed := reqcommon.DropStatefulResponsesFields(parsed); len(changed) > 0 {
+			logger.V(logutil.DEFAULT).Info("clearing unsupported responses fields", "fields", changed)
+		}
 	}
 
 	if requestIDReplaced && clientRequestID != "" {

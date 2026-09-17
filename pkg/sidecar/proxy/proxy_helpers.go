@@ -221,6 +221,7 @@ var inspectedRequestFields = map[string]struct{}{
 	requestFieldCacheHitThreshold:    {},
 	requestFieldContinueFinalMessage: {},
 	requestFieldAddGenerationPrompt:  {},
+	requestFieldStore:                {},
 }
 
 // requestMessages returns the request's messages, decoding the array on first
@@ -281,19 +282,21 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	// this point, so stripping here once covers every request body built
 	// that way. A few paths (e.g. the shared-storage decode-first attempt)
 	// instead forward raw verbatim to skip re-marshaling when nothing
-	// changed; since something did change here, raw is re-marshaled from
-	// parsed so both forms agree.
+	// changed, so raw is only re-marshaled from parsed when something
+	// actually did change.
 	if r.URL.Path == reqcommon.PathResponses {
-		reqcommon.DropStatefulResponsesFields(s.logger, parsed)
-		newRaw, err := json.Marshal(parsed)
-		if err != nil {
-			s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
-			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-				s.logger.Error(writeErr, "failed to send error response to client")
+		if changed := reqcommon.DropStatefulResponsesFields(parsed); len(changed) > 0 {
+			s.logger.V(logging.DEBUG).Info("clearing unsupported responses fields", "fields", changed)
+			newRaw, err := json.Marshal(parsed)
+			if err != nil {
+				s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+				if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+					s.logger.Error(writeErr, "failed to send error response to client")
+				}
+				return nil, nil, false
 			}
-			return nil, nil, false
+			raw = newRaw
 		}
-		raw = newRaw
 	}
 	return raw, parsed, true
 }
