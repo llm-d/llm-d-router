@@ -46,7 +46,9 @@ trap 'e2e_handle_interrupt "e2e-coordinator-tests"' INT TERM
 
 echo "Running coordinator end-to-end tests"
 
-# Every spec deploys its own encode/prefill/decode workers and coordinator, so
-# each process carries several full workload cycles, and all nine with
-# E2E_NUM_PROCS=1; 120m leaves headroom over the shared 45m default.
-run_ginkgo_suite "${DIR}/../e2e/coordinator/" 120m
+# Every spec deploys its own encode/prefill/decode workers and coordinator, and
+# each group adds its own namespace and Envoy, so 50m leaves headroom over the
+# shared 45m default. It stays under the e2e-tests job cap in
+# .github/workflows/ci-coordinator.yaml (timeout-minutes: 60), so a slow run hits
+# the ginkgo timeout first and still dumps logs and tears down the kind cluster.
+run_ginkgo_suite "${DIR}/../e2e/coordinator/" 50m

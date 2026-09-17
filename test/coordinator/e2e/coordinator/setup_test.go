@@ -47,18 +47,36 @@ var coordinatorComponentDocs = sync.OnceValue(func() []string {
 	return e2eutil.RunKustomize(coordinatorComponentDir)
 })
 
-// portForwardExitTimeout bounds the wait for the port-forward process to exit
-// after SIGTERM.
+// portForwardExitTimeout bounds each wait for the port-forward process to exit,
+// first after SIGTERM and then after SIGKILL.
 const portForwardExitTimeout = 30 * time.Second
+
+// stopPortForward stops the port-forward process and waits for it to exit, so
+// the next group on this process can rebind the same host port: a bind that
+// fails surfaces only as a waitForCoordinatorReady timeout. It sends SIGKILL if
+// SIGTERM does not stop the process within portForwardExitTimeout. It does not
+// assert, so a slow exit does not fail the caller and skip the teardown after it.
+func stopPortForward(session *gexec.Session) {
+	session.Terminate()
+	select {
+	case <-session.Exited:
+		return
+	case <-time.After(portForwardExitTimeout):
+	}
+	ginkgo.By("Port-forward did not exit after SIGTERM, sending SIGKILL")
+	session.Kill()
+	select {
+	case <-session.Exited:
+	case <-time.After(portForwardExitTimeout):
+		ginkgo.By("Port-forward did not exit after SIGKILL")
+	}
+}
 
 // createEnvoy applies the active topology's Envoy routing ConfigMap plus the
 // shared Envoy Deployment and Service in nsName. Against an existing cluster
 // (K8S_CONTEXT set) the kind nodePort mapping is unavailable, so it also
 // forwards the gateway port and returns the session for the caller to terminate.
-// It appends to objects as it goes rather than returning them at the end, so a
-// failure partway through still leaves the already-created ids tracked for
-// teardown; the namespace delete does not cover this when the suite did not
-// create the namespace.
+// It appends to objects as it goes (see createTracked).
 func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 	infraSubs := map[string]string{
 		"${NAMESPACE}":       nsName,
@@ -75,9 +93,9 @@ func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 	}
 
 	ginkgo.By("Applying Envoy routing ConfigMap from " + manifest)
-	*objects = append(*objects, applyManifest(nsName, manifest, infraSubs)...)
+	applyManifest(nsName, manifest, infraSubs, objects)
 	ginkgo.By("Applying shared Envoy Deployment and Service from " + sharedEnvoyManifest)
-	*objects = append(*objects, applyManifest(nsName, sharedEnvoyManifest, infraSubs)...)
+	applyManifest(nsName, sharedEnvoyManifest, infraSubs, objects)
 
 	if k8sContext == "" {
 		return nil
@@ -129,11 +147,8 @@ func testWrapper(test func()) func() {
 		})
 
 		ginkgo.AfterAll(func() {
-			// Terminate only signals kubectl. The next group on this process rebinds
-			// the same host port, so wait for the process to exit and release it: a
-			// bind that fails surfaces only as a waitForCoordinatorReady timeout.
 			if portForwardSession != nil {
-				portForwardSession.Terminate().Wait(portForwardExitTimeout)
+				stopPortForward(portForwardSession)
 			}
 			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
 				return
@@ -151,13 +166,12 @@ func testWrapper(test func()) func() {
 }
 
 // specWorkload holds the ids of the per-spec workload (InferencePool, EPPs,
-// model servers, coordinator) in creation order. The specs create it and the
-// group's AfterEach deletes it, so a spec that fails mid-assertion leaves nothing
-// behind: the namespace delete is no backstop when the suite did not create the
-// namespace. Draining after each spec also keeps the next spec from adopting
-// these objects on AlreadyExists, since it repeats their names. Ginkgo hands an
-// Ordered group to one process start to finish and runs its specs one at a
-// time, so the tracker holds one spec's workload.
+// model servers, coordinator) in creation order. The specs create it (see
+// createTracked) and the group's AfterEach deletes it. Draining after each spec
+// keeps the next spec from adopting these objects on AlreadyExists, since it
+// repeats their names. Ginkgo hands an Ordered group to one process start to
+// finish and runs its specs one at a time, so the tracker holds one spec's
+// workload.
 var specWorkload []string
 
 // deleteSpecWorkload deletes the tracked per-spec objects and clears the
@@ -183,8 +197,7 @@ func createCRDs() {
 // createEndPointPickers creates each EPP's scheduling ConfigMap and Deployment
 // for the active topology and waits for the Deployments to become ready. The
 // single-EPP topology creates one EPP from eppConfig; the 3-EPP topology creates
-// one per role, each from its role config with a per-role ConfigMap. Each EPP's
-// ServiceAccount, RoleBinding, and Service come from createStableInfra.
+// one per role, each from its role config with a per-role ConfigMap.
 // It appends the created ids to objects (see createTracked).
 func createEndPointPickers(objects *[]string) {
 	for _, e := range eppsToCreate() {
@@ -204,8 +217,7 @@ func createOneEndPointPicker(e roleEPP, objects *[]string) {
 	createEPPConfigMap(cmName, e.config)
 	*objects = append(*objects, "ConfigMap/"+cmName)
 
-	// eppManifest is the EPP Deployment only; its Service, ServiceAccount, and
-	// RBAC come from createStableInfra.
+	// eppManifest is the EPP Deployment only (see createStableInfra).
 	docs := testutils.ReadYaml(eppManifest)
 	docs = e2eutil.SubstituteMany(docs, eppSubstitutionsFor(e.eppName, e.poolName))
 	if threeEPP {
@@ -301,9 +313,8 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int, obj
 }
 
 // createCoordinator builds the coordinator ConfigMap from the given pipeline
-// config, deploys the coordinator Deployment, and waits for readiness. Its
-// Service and ServiceAccount come from createStableInfra. It appends the created
-// ids to objects (see createTracked).
+// config, deploys the coordinator Deployment, and waits for readiness. It
+// appends the created ids to objects (see createTracked).
 func createCoordinator(config string, objects *[]string) {
 	nsName := getNamespace()
 	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
@@ -324,8 +335,7 @@ func createCoordinator(config string, objects *[]string) {
 	}
 	*objects = append(*objects, "ConfigMap/llm-d-coordinator-config")
 
-	// Service and ServiceAccount come from createStableInfra; recreate only the
-	// Deployment per spec.
+	// Only the Deployment is created per spec (see createStableInfra).
 	docs := e2eutil.FilterKinds(coordinatorComponentDocs(), "ConfigMap", "Service", "ServiceAccount")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
@@ -373,21 +383,23 @@ func createEPPConfigMap(name, content string) {
 }
 
 // applyManifest reads a manifest, substitutes vars, and creates the objects in
-// nsName. It does not strip empty args: the manifests it applies (Envoy, the
+// nsName, appending their ids to objects (see createTracked). It does not strip empty args: the manifests it applies (Envoy, the
 // EPP's Deployment/RBAC/ServiceAccount/Service) carry no empty
 // ${VLLM_EXTRA_ARGS_*} placeholders, and rbac.yaml's core API group ("") is a
 // legitimate `- ""` that RemoveEmptyArgs would wrongly drop. The vLLM workers,
 // which do need arg stripping, go through createModelServers instead.
-func applyManifest(nsName, path string, subs map[string]string) []string {
+func applyManifest(nsName, path string, subs map[string]string, objects *[]string) {
 	docs := testutils.ReadYaml(path)
 	docs = e2eutil.SubstituteMany(docs, subs)
-	return testutils.CreateObjsFromYaml(testConfig, docs, nsName)
+	createTracked(nsName, docs, objects)
 }
 
 // createTracked creates docs in nsName and waits for them like
 // testutils.CreateObjsFromYaml, but appends each object's id to objects as soon
-// as the object exists, before its readiness wait. A wait that fails then still
-// leaves the id tracked for deletion. It returns the ids of docs.
+// as the object exists, before its readiness wait. A failure partway through
+// then still leaves the already-created ids tracked for deletion, which matters
+// because the namespace delete does not cover objects when the suite did not
+// create the namespace. It returns the ids of docs.
 func createTracked(nsName string, docs []string, objects *[]string) []string {
 	objs := testutils.CreateUnstructuredObjs(testConfig, docs)
 	return testutils.CreateObjsWithVerifier(testConfig, objs, nsName, func(kind string, clientObj client.Object) {
@@ -400,14 +412,13 @@ func createTracked(nsName string, docs []string, objects *[]string) []string {
 // and RoleBindings the group's specs bind to. Envoy fronts the Services via
 // STRICT_DNS clusters and outlives the per-spec workload; recreating a Service
 // each spec would rotate its ClusterIP and force Envoy to re-resolve, so only
-// the Deployments behind them churn per spec. Like createEnvoy it appends to
-// objects as it goes, so a failure partway through still leaves the
-// already-created ids tracked for teardown.
+// the Deployments behind them churn per spec. It appends to objects as it goes
+// (see createTracked).
 func createStableInfra(nsName string, objects *[]string) {
 	docs := e2eutil.FilterKinds(coordinatorComponentDocs(), "ConfigMap", "Deployment")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
-	*objects = append(*objects, testutils.CreateObjsFromYaml(testConfig, docs, nsName)...)
+	createTracked(nsName, docs, objects)
 
 	// Each EPP's RBAC, ServiceAccount, and Service come from the shared
 	// inference-gateway component's split files; the Deployment is recreated per
@@ -415,7 +426,7 @@ func createStableInfra(nsName string, objects *[]string) {
 	for _, e := range eppsToCreate() {
 		subs := eppSubstitutionsFor(e.eppName, e.poolName)
 		for _, manifest := range []string{eppRbacManifest, eppServiceAccountManifest, eppServicesManifest} {
-			*objects = append(*objects, applyManifest(nsName, manifest, subs)...)
+			applyManifest(nsName, manifest, subs, objects)
 		}
 	}
 }
