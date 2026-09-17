@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -54,6 +55,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
@@ -66,6 +68,65 @@ import (
 var (
 	mockProducedDataKey = fwkplugin.NewDataKey("producedDataKey", "mock-producer")
 )
+
+func newOpenAIParserWithPriorityPropagation(t *testing.T) *openai.OpenAIParser {
+	t.Helper()
+	return openai.NewOpenAIParser()
+}
+
+func TestRepackagePreservesNativeRenderContent(t *testing.T) {
+	for _, tt := range []struct {
+		path, content string
+		parser        fwkrh.Parser
+	}{
+		{"/v1/chat/completions", `"messages":[{"role":"user","content":"hi"}]`, openai.NewOpenAIParser()},
+		{"/v1/messages", `"max_tokens":8,"messages":[{"role":"user","content":"hi"}]`, anthropic.NewAnthropicParser()},
+		{"/v1/completions", `"prompt":[1,2,3],"truncate_prompt_tokens":2`, openai.NewOpenAIParser()},
+		{"/v1/chat/completions/render", `"messages":[{"role":"user","content":"hi"}]`, openai.NewOpenAIParser()},
+		{"/v1/completions/render", `"prompt":[1,2,3]`, openai.NewOpenAIParser()},
+		{"/v1/messages/render", `"messages":[{"role":"user","content":"hi"}]`, anthropic.NewAnthropicParser()},
+	} {
+		for _, rewrite := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/rewrite=%t", tt.path, rewrite), func(t *testing.T) {
+				raw := []byte(` {"model":"alias",` + tt.content + `,"extension":{"z":9007199254740993,"a":1e0}} `)
+				parsed, err := tt.parser.ParseRequest(context.Background(), raw, map[string]string{":path": tt.path})
+				require.NoError(t, err)
+				body := parsed.Body
+				wantModel := `"alias"`
+				if rewrite {
+					body.Payload, err = tt.parser.(fwkrh.ModelNameRewriter).RewriteModelName(body.Payload.(fwkrh.MarshalablePayload), "adapter")
+					require.NoError(t, err)
+					body.Mutated = true
+					wantModel = `"adapter"`
+				}
+				var renderBody []byte
+				switch payload := body.WirePayload().(type) {
+				case fwkrh.RawPayload:
+					renderBody = payload
+				case fwkrh.Marshaler:
+					renderBody, err = payload.Marshal()
+				}
+				require.NoError(t, err)
+				var rendered map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(renderBody, &rendered))
+				require.Equal(t, wantModel, string(rendered["model"]))
+				reqCtx := &handlers.RequestContext{Request: &handlers.Request{RawBody: raw}}
+				dir := &Director{}
+				require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+				require.Equal(t, renderBody, reqCtx.Request.RawBody)
+				body.MutatePayloadMap(func(payload fwkrh.PayloadMap) {
+					payload["vllm_xargs"] = map[string]any{"kv_cache_report_mode": "full"}
+				})
+				require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+				var final map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(reqCtx.Request.RawBody, &final))
+				require.Equal(t, wantModel, string(final["model"]))
+				require.Equal(t, `{"z":9007199254740993,"a":1e0}`, string(final["extension"]))
+				require.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
+			})
+		}
+	}
+}
 
 // --- Mocks ---
 
@@ -423,16 +484,50 @@ func TestDirector_HandleRequest(t *testing.T) {
 		preRequestPlugins       []*mockPreRequestPlugin
 		requestHeaderPlugin     *mockRequestHeaderPlugin
 		wantMutatedBody         map[string]any
-		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
+		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
+		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
-			name: "successful completions request",
+			name: "successful completions request with priority propagation",
 			reqBodyMap: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			parser:                 newOpenAIParserWithPriorityPropagation(t),
+			propagatePriority:      true,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(2),
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "successful completions request leaves client priority untouched when propagation disabled",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
 			},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			schedulerMockSetup: func(m *mockScheduler) {
@@ -449,10 +544,6 @@ func TestDirector_HandleRequest(t *testing.T) {
 					MetricsHost: "192.168.1.100:8000",
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
-			},
-			wantMutatedBody: map[string]any{
-				"model":  model,
-				"prompt": "critical prompt",
 			},
 			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
@@ -1127,6 +1218,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					config = config.WithRequestHeaderPlugins(test.requestHeaderPlugin)
 				}
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
+				if test.propagatePriority {
+					config = config.WithPropagatePriority(true)
+				}
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
@@ -1169,7 +1263,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
 				}
 
-				reqCtx.Parser = openai.NewOpenAIParser()
+				reqCtx.Parser = test.parser
+				if reqCtx.Parser == nil {
+					reqCtx.Parser = openai.NewOpenAIParser()
+				}
 				parseResult, parseErr := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				var returnedReqCtx *handlers.RequestContext
 				if parseErr != nil {

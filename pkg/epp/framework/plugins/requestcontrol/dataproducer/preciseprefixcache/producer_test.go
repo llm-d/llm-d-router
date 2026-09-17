@@ -468,14 +468,14 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 		},
 		matchBlockKeys: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
 			if keys[0] == keysA[0] {
-				// Prompt A: block 0 on gpu+cpu, block 1 on gpu only.
+				// Prompt A: block 0 confirmed on gpu+cpu, block 1 speculative only.
 				return map[string]kvcache.PodMatch{
-					addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2, "cpu": 1}},
+					addr: {WeightedScore: 2, MatchedBlocks: 2, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1, "cpu": 1}},
 				}, nil
 			}
-			// Prompt B: single block on gpu+cpu.
+			// Prompt B: single block confirmed on gpu+cpu.
 			return map[string]kvcache.PodMatch{
-				addr: {WeightedScore: 1, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1, "cpu": 1}},
+				addr: {WeightedScore: 1, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1, "cpu": 1}},
 			}, nil
 		},
 	}
@@ -502,14 +502,16 @@ func TestProduce_WritesCachedBlocksByTier(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, 3, info.MatchBlocks())
 	assert.Equal(t, 3, info.CachedBlockCount())
-	// gpu: 2 (prompt A) + 1 (prompt B); cpu: 1 (prompt A) + 1 (prompt B).
-	assert.Equal(t, map[string]int{"gpu": 3, "cpu": 2}, info.CachedBlocksByTier())
+	assert.Equal(t, 2, info.ConfirmedCachedBlockCount())
+	// Each confirmed tier covers one block from each prompt.
+	assert.Equal(t, map[string]int{"gpu": 2, "cpu": 2}, info.CachedBlocksByTier())
 
 	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
 	require.True(t, ok)
 	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, 0, info.CachedBlockCount())
+	assert.Equal(t, 0, info.ConfirmedCachedBlockCount())
 	assert.NotNil(t, info.CachedBlocksByTier())
 	assert.Empty(t, info.CachedBlocksByTier())
 }
@@ -720,6 +722,36 @@ func TestPluginFactory_RejectsTokenizersPoolConfig(t *testing.T) {
 	require.Contains(t, err.Error(), `unknown field "tokenizersPoolConfig"`)
 }
 
+// A null kvEventsConfig resets the seeded defaults to a nil pointer; the
+// producer falls back to the kvevents defaults instead of dereferencing nil.
+func TestPluginFactory_NullKVEventsConfigUsesDefaults(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	handle := plugin.NewEppHandle(ctx, nil)
+	raw := json.RawMessage(`{"kvEventsConfig":null}`)
+
+	result, err := PluginFactory("test", plugin.StrictDecoder(raw), handle)
+	require.NoError(t, err)
+	p := result.(*Producer)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	require.Equal(t, kvevents.DefaultConfig(), p.kvEventsConfig)
+}
+
+// A non-positive kvEventsConfig.concurrency fails plugin creation with a
+// config error naming the field.
+func TestPluginFactory_RejectsNonPositiveKVEventsConcurrency(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"kvEventsConfig":{"concurrency":0}}`),
+		json.RawMessage(`{"kvEventsConfig":{"concurrency":-1}}`),
+	} {
+		handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
+
+		_, err := PluginFactory("test", plugin.StrictDecoder(raw), handle)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "concurrency")
+	}
+}
+
 // Key built from string literals so an upstream rename trips the test.
 func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	p := &Producer{
@@ -830,7 +862,7 @@ func (f *fakeSubscriberManager) EnsureSubscriber(
 	f.endpoints = append(f.endpoints, endpoint)
 	return nil
 }
-func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) {}
+func (f *fakeSubscriberManager) RemoveSubscriber(_ context.Context, _ string) bool { return false }
 func (f *fakeSubscriberManager) GetActiveSubscribers() ([]string, []string) {
 	return f.ids, f.endpoints
 }

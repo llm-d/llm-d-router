@@ -85,6 +85,7 @@ func TestECTransferParams_NotForwardedToDecodeBackend(t *testing.T) {
 }
 
 func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
+	const revisionDecisionID = "decision-id"
 	expectedKVParams := map[string]any{
 		"block_id":  "block-999",
 		"peer_host": "10.0.0.42",
@@ -95,6 +96,9 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phase := r.Header.Get(gateway.EPPProfileHeader)
+		if got := r.Header.Get(reqcommon.RevisionDecisionIDHeaderKey); got != revisionDecisionID {
+			t.Errorf("%s revision decision ID = %q, want %q", phase, got, revisionDecisionID)
+		}
 		switch phase {
 		case gateway.PhasePrefill:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -125,11 +129,12 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 
 	reqCtx := &pipeline.RequestContext{
-		RequestID:    "test-flow",
-		OriginalPath: reqcommon.PathChatCompletions,
-		Model:        "llama-3",
-		Stream:       false,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		RequestID:          "test-flow",
+		RevisionDecisionID: revisionDecisionID,
+		OriginalPath:       reqcommon.PathChatCompletions,
+		Model:              "llama-3",
+		Stream:             false,
+		TokenIDs:           []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -182,5 +187,76 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	}
 	if decodeReceivedKVParams["peer_host"] != "10.0.0.42" {
 		t.Fatalf("decode sent wrong peer_host: %v", decodeReceivedKVParams["peer_host"])
+	}
+}
+
+func TestResponseHeaders_FlowFromPrefillToDecode(t *testing.T) {
+	var decodeHeaders http.Header
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get(gateway.EPPProfileHeader) {
+		case gateway.PhasePrefill:
+			w.Header().Set("X-LLM-D-Disagg-Revision", "revision-b")
+			w.Header().Set("X-Disagg-Slice", "nvl72-domain-2")
+			w.Header().Set("X-Worker-Only", "must-not-be-forwarded")
+			_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+
+		case gateway.PhaseDecode:
+			decodeHeaders = r.Header.Clone()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": "done"}},
+				},
+			})
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("build prefill step: %v", err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "test-header-flow",
+		OriginalPath: reqcommon.PathChatCompletions,
+		OriginalHeaders: http.Header{
+			"X-LLM-D-Disagg-Revision": {"client-revision"},
+			"X-Disagg-Slice":          {"client-slice"},
+		},
+		Body: map[string]any{
+			"model":    "llama-3",
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		},
+	}
+
+	decodeStep, err := NewDecodeStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("build decode step: %v", err)
+	}
+	reqCtx.ResponseWriter = httptest.NewRecorder()
+	p, err := pipeline.NewWithForwardResponseHeaders(
+		[]pipeline.Step{prefillStep, decodeStep},
+		[]string{"X-LLM-D-Disagg-Revision", "x-disagg-slice"},
+	)
+	if err != nil {
+		t.Fatalf("build pipeline: %v", err)
+	}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	if got := decodeHeaders.Get("X-LLM-D-Disagg-Revision"); got != "revision-b" {
+		t.Errorf("decode revision header = %q, want %q", got, "revision-b")
+	}
+	if got := decodeHeaders.Get("X-Disagg-Slice"); got != "nvl72-domain-2" {
+		t.Errorf("decode slice header = %q, want %q", got, "nvl72-domain-2")
+	}
+	if got := decodeHeaders.Get("X-Worker-Only"); got != "" {
+		t.Errorf("unconfigured response header was forwarded: %q", got)
 	}
 }

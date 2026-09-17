@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1026,7 +1027,7 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 
 	t.Run("ShouldCollectBand_AfterFlowIdle", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{})
+		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
 		// Create flow

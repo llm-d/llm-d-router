@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -307,6 +308,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err != nil {
 		return reqCtx, err
 	}
+	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
+		return reqCtx, err
+	}
 	if err := d.repackage(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
@@ -347,6 +351,35 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 	return nil
 }
 
+func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	logger := log.FromContext(ctx)
+	// Priority propagation is an explicit opt-in policy; when disabled the request
+	// body is forwarded unchanged.
+	if !d.requestControlPlugins.propagatePriority {
+		return nil
+	}
+	rewriter, ok := reqCtx.Parser.(fwkrh.PriorityRewriter)
+	if !ok {
+		logger.V(logutil.DEBUG).Info("parser does not implement PriorityRewriter, skipping priority rewrite")
+		return nil
+	}
+	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
+	if !ok {
+		logger.V(logutil.DEBUG).Info("payload does not implement MarshalablePayload, skipping priority rewrite")
+		return nil
+	}
+	mutatedPayload, mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: reqCtx.TargetPod}, payload, reqCtx.Priority)
+	if err != nil {
+		return err
+	}
+	if mutated {
+		// Store the result back so repackage serializes the mutated payload.
+		inferenceRequestBody.Payload = mutatedPayload
+		inferenceRequestBody.Mutated = true
+	}
+	return nil
+}
+
 // repackage re-serializes the request body when inferenceRequestBody was mutated since
 // parsing (see InferenceRequestBody.Mutated), skipping the marshal otherwise so the
 // originally received bytes are forwarded unchanged.
@@ -355,7 +388,7 @@ func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContex
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
 		return nil
 	}
-	marshaler, ok := inferenceRequestBody.Payload.(fwkrh.Marshaler)
+	marshaler, ok := inferenceRequestBody.WirePayload().(fwkrh.Marshaler)
 	if !ok {
 		// Payload forwarded unchanged (raw or proto).
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)

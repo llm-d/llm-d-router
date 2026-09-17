@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -97,6 +97,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Stream:  true,
 					Payload: fwkrh.PayloadProto{Message: reqMsg},
+					RawBody: reqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
 			},

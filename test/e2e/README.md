@@ -4,11 +4,21 @@ This document provides instructions on how to run the end-to-end tests.
 
 ## Overview
 
-The end-to-end tests are designed to validate end-to-end Gateway API Inference Extension functionality. These tests are executed against a Kubernetes cluster and use the Ginkgo testing framework to ensure the extension behaves as expected.
+The end-to-end tests validate router functionality against a Kubernetes cluster using Ginkgo.
+Each case renders the repository's `config/charts/llm-d-router-standalone` chart with its local
+`routerlib` dependency. The default standalone topology runs Envoy and EPP in the same Pod.
+The chart supplies the InferencePool, plugin configuration, Services, and RBAC. Model simulators,
+disaggregation sidecars, and the shared renderer use the development Kustomize manifests.
+
+`utils/standalone/standalone-values.yaml` supplies the test resource requests, experimental plugin flags, unauthenticated
+metrics, and KV event port. Each case supplies its plugin configuration, EPP image, replica count,
+and model target ports. The suite creates all rendered objects before waiting for readiness.
+With three EPP replicas, exactly one router Pod must be Ready and two must remain standbys.
+These tests exercise rendered chart workloads; they do not exercise Helm release upgrades or rollbacks.
 
 ## Prerequisites
 
-- [Go](https://golang.org/doc/install) installed on your machine.
+- Docker or Podman to run the builder container, which includes Go, kubectl, Kind, and Helm.
 - [Make](https://www.gnu.org/software/make/manual/make.html) installed to run the end-to-end test target.
 - (Optional) When using the GPU-based vLLM deployment, a Hugging Face Hub token with access to the
   [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) model is required.
@@ -21,10 +31,11 @@ The end-to-end tests are designed to validate end-to-end Gateway API Inference E
 ## Running the End-to-End Tests in Parallel
 
 By default the end to end tests run in groups that run in parallel to each other on the same Kubernetes cluster.
-As each group is setup various Kubernetes objects are created for the test group. They include the Namespace,
-the Envoy Deployment and Service, ServiceAccount, EPP Service, and RBAC. When running on Kind each Namespace is
-assigned its own pair of NodePorts for Envoy and the EPP's metrics port. When the test group ends the created
-Kubernetes objects are delete.
+Each process uses an independent Namespace and a pair of NodePorts for HTTP and metrics. A test-only
+`router-access` Service selects the chart's router Pods. The chart's EPP Service also accepts simulator
+KV events on port 5557. Each case registers cleanup before creating chart and model resources and waits
+for their Pods to terminate before reusing resource names. `E2E_KEEP_CLUSTER_ON_FAILURE` preserves failed
+cases for inspection.
 
 ## Running the End-to-End Tests
 
@@ -52,8 +63,9 @@ Follow these steps to run the end-to-end tests:
 
      Where `kubernetes context` is the context of the cluster in question in your Kubernetes config file.
 
-     **Note:** When running on a real cluster the tests will start a pair of `kubectl port-forward` processes
-     to sent various requests to the cluster under test.
+     **Note:** Existing-context runs use a supervised `kubectl port-forward` process for both HTTP and
+     metrics. It selects a Ready, non-terminating router Pod and reconnects after Pod deletion, leader
+     failover, or process exit. Cleanup stops the forwarder and waits for it to exit.
 
    - **Set the test namespace**: The namespace(s) in which the tests run vary based on whether or not the tests
      are being run in parallel or not. 
@@ -81,6 +93,10 @@ Follow these steps to run the end-to-end tests:
      export VLLM_IMAGE=<vLLM image of your choice>
      ```
 
+   - **Set the router image**: `EPP_IMAGE` defaults to
+     `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev`. Registry names with ports are supported.
+     The chart's image fields require a tag, so digest references are rejected. An omitted tag uses `latest`.
+
    - **Keep the cluster available after a failure**: Normally the cluster is deleted after the end to end tests run. To keep the cluster
      available after the tests have failed, useful for debugging the state of the cluster after the test has run, set the environment
      variable `E2E_KEEP_CLUSTER_ON_FAILURE` to `true`.
@@ -93,3 +109,11 @@ Follow these steps to run the end-to-end tests:
 
    The test suite prints details for each step. Note that the `vllm-qwen3-32b` model server deployment
    may take several minutes to report an `Available=True` status due to the time required for bootstrapping.
+
+The runner builds the chart dependency once before starting parallel workers. For focused helper tests
+inside the builder, run:
+
+```sh
+helm dependency build --skip-refresh config/charts/llm-d-router-standalone
+go test ./test/e2e/utils/... -count=1
+```

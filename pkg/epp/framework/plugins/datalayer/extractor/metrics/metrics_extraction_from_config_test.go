@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,7 +52,7 @@ import (
 
 // pipeline pairs a typed HTTPDataSource with its extractor. Tests assert
 // against the dispatcher contract via Poll (which fans extract errors out
-// through DataLayerExtractErrorsTotal, not the return value), and against
+// through LlmdDataLayerExtractErrorsTotal, not the return value), and against
 // the extractor's error logic by reaching into source/ext directly.
 type pipeline struct {
 	source *sourcehttp.HTTPDataSource[sourcemetrics.PrometheusMetricMap]
@@ -60,7 +61,7 @@ type pipeline struct {
 
 // Poll dispatches the source: fetches data and runs every bound extractor.
 // Per the PollingDispatcher contract, per-extractor failures are recorded via
-// DataLayerExtractErrorsTotal and do NOT surface as a returned error here.
+// LlmdDataLayerExtractErrorsTotal and do NOT surface as a returned error here.
 func (p *pipeline) Poll(ctx context.Context, ep fwkdl.Endpoint) error {
 	return p.source.Dispatch(ctx, ep)
 }
@@ -306,7 +307,7 @@ func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 
 			// Drive Poll + Extract directly so the extractor's error surfaces.
 			// The dispatcher contract intentionally swallows extractor errors
-			// into DataLayerExtractErrorsTotal; this test asserts on the error
+			// into LlmdDataLayerExtractErrorsTotal; this test asserts on the error
 			// itself.
 			data, err := p.source.Poll(ctx, ep)
 			require.NoError(t, err, "fetch should succeed; we are testing the extractor's error path")
@@ -324,7 +325,7 @@ func TestMetricsExtractionMissingMetricFamilyReturnsError(t *testing.T) {
 // vllm:lora_requests_info family, Extract returns no error and still populates
 // the other (required) metrics. Before the fix the extractor would return an
 // "lora_requests_info not found" error and the EPP would increment
-// DataLayerExtractErrorsTotal on every poll of any vanilla deployment.
+// LlmdDataLayerExtractErrorsTotal on every poll of any vanilla deployment.
 func TestMetricsExtractionLoRAFamilyAbsentNoError(t *testing.T) {
 	srv := createMockServer([]MetricMock{
 		{Name: WaitingMetric, Value: 4},
@@ -618,7 +619,7 @@ func TestMetricsExtractionSGLangDefaultConfig(t *testing.T) {
 	})
 
 	// Drive Poll + Extract directly: the dispatcher swallows extractor errors
-	// into DataLayerExtractErrorsTotal, and a spurious per-scrape error is
+	// into LlmdDataLayerExtractErrorsTotal, and a spurious per-scrape error is
 	// part of what this test guards against.
 	data, err := p.source.Poll(ctx, ep)
 	require.NoError(t, err)

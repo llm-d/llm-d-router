@@ -177,15 +177,14 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 
 	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
 
+	// No MultimodalEntries: /v1/completions is text-only, so a real completions
+	// request never carries images and never reaches the encode fan-out.
 	reqCtx := &pipeline.RequestContext{
-		RequestID:    "req-openai-false",
-		OriginalPath: reqcommon.PathCompletions,
-		Model:        "test-model",
-		Stream:       false,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
-		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-		},
+		RequestID:        "req-openai-false",
+		OriginalPath:     reqcommon.PathCompletions,
+		Model:            "test-model",
+		Stream:           false,
+		TokenIDs:         []int{1, 32000, 32000, 32000, 2345},
 		KVTransferParams: make(map[string]any),
 		Body:             map[string]any{"model": "test-model", "stream": false, "prompt": "hello"},
 	}

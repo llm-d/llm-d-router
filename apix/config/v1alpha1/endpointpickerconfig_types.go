@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -62,20 +63,6 @@ type EndpointPickerConfig struct {
 	// +optional
 	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
-
-	// +optional
-	// SaturationDetector specifies which saturation detector plugin to use.
-	//
-	// Deprecated: use flowControl.saturationDetector instead. If both are set, the new field is used.
-	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
-	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
-
-	// +optional
-	// Parser specifies the parsing logic used by the EPP to process protocol messages.
-	//
-	// Deprecated: use requestHandler.parser instead. If both are set, the new field is used.
-	// Tracked in https://github.com/llm-d/llm-d-router/issues/1308
-	Parser *ParserConfig `json:"parser,omitempty"`
 }
 
 func (cfg EndpointPickerConfig) String() string {
@@ -97,12 +84,6 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.RequestHandler != nil {
 		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
-	}
-	if cfg.SaturationDetector != nil {
-		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", cfg.SaturationDetector))
-	}
-	if cfg.Parser != nil {
-		parts = append(parts, fmt.Sprintf("Parser: %v", cfg.Parser))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -368,6 +349,13 @@ type RequestHandlerConfig struct {
 	// Parsers specifies the parsing plugins used by the EPP to process protocol messages.
 	// If unspecified, default parsing behavior will be applied.
 	Parsers []ParserConfig `json:"parsers,omitempty"`
+
+	// +optional
+	// PropagatePriority, when true, lets the EPP inject the resolved request
+	// priority into the outbound request body's top-level "priority" field so the
+	// backend's native priority scheduler can consume it. It is off by default:
+	// when disabled the request body is forwarded unchanged.
+	PropagatePriority bool `json:"propagatePriority,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -381,6 +369,9 @@ func (rhc *RequestHandlerConfig) String() string {
 			parserStrs[i] = rhc.Parsers[i].String()
 		}
 		parts = append(parts, fmt.Sprintf("Parsers: [%s]", strings.Join(parserStrs, ", ")))
+	}
+	if rhc.PropagatePriority {
+		parts = append(parts, "PropagatePriority: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }

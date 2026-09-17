@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package bylabel
 
 import (
@@ -7,9 +23,22 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
+
+func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[string]string) scheduling.Endpoint {
+	return scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      nsn,
+			Address: ipaddr,
+			Labels:  labels,
+		},
+		&fwkdl.Metrics{},
+		nil,
+	)
+}
 
 func TestRoleFilterDecodeRole(t *testing.T) {
 	endpoints := []scheduling.Endpoint{
@@ -118,17 +147,17 @@ func TestRoleFilterFactory(t *testing.T) {
 		expectedName string
 	}{
 		{
-			name:         "DecodeRoleFactory returns ByLabel",
+			name:         "DecodeRoleFactory returns RoleFilter",
 			roleName:     DecodeRoleType,
 			expectedName: "test-decode",
 		},
 		{
-			name:         "PrefillRoleFactory returns ByLabel",
+			name:         "PrefillRoleFactory returns RoleFilter",
 			roleName:     PrefillRoleType,
 			expectedName: "test-prefill",
 		},
 		{
-			name:         "EncodeRoleFactory returns ByLabel",
+			name:         "EncodeRoleFactory returns RoleFilter",
 			roleName:     EncodeRoleType,
 			expectedName: "test-encode",
 		},
@@ -136,29 +165,29 @@ func TestRoleFilterFactory(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var rf *ByLabel
+			var rf *RoleFilter
 			switch tt.roleName {
 			case DecodeRoleType:
 				p, err := DecodeRoleFactory("test-decode", nil, nil)
 				require.NoError(t, err)
 				var ok bool
-				rf, ok = p.(*ByLabel)
-				require.True(t, ok, "factory should return *ByLabel")
+				rf, ok = p.(*RoleFilter)
+				require.True(t, ok, "factory should return *RoleFilter")
 			case PrefillRoleType:
 				p, err := PrefillRoleFactory("test-prefill", nil, nil)
 				require.NoError(t, err)
 				var ok bool
-				rf, ok = p.(*ByLabel)
-				require.True(t, ok, "factory should return *ByLabel")
+				rf, ok = p.(*RoleFilter)
+				require.True(t, ok, "factory should return *RoleFilter")
 			case EncodeRoleType:
 				p, err := EncodeRoleFactory("test-encode", nil, nil)
 				require.NoError(t, err)
 				var ok bool
-				rf, ok = p.(*ByLabel)
-				require.True(t, ok, "factory should return *ByLabel")
+				rf, ok = p.(*RoleFilter)
+				require.True(t, ok, "factory should return *RoleFilter")
 			}
 
-			assert.Equal(t, ByLabelType, rf.TypedName().Type)
+			assert.Equal(t, tt.roleName, rf.TypedName().Type)
 			assert.Equal(t, tt.expectedName, rf.TypedName().Name)
 		})
 	}
@@ -167,11 +196,11 @@ func TestRoleFilterFactory(t *testing.T) {
 func TestRoleFilterWithName(t *testing.T) {
 	rf := NewDecodeRole()
 	assert.Equal(t, DecodeRoleType, rf.TypedName().Name)
-	assert.Equal(t, ByLabelType, rf.TypedName().Type)
+	assert.Equal(t, DecodeRoleType, rf.TypedName().Type)
 
 	rf.WithName("my-custom-name")
 	assert.Equal(t, "my-custom-name", rf.TypedName().Name)
-	assert.Equal(t, ByLabelType, rf.TypedName().Type)
+	assert.Equal(t, DecodeRoleType, rf.TypedName().Type)
 }
 
 func TestRoleFilterEmptyEndpoints(t *testing.T) {
