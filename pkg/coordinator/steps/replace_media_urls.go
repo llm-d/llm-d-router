@@ -147,7 +147,11 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeChatCompletions:
 		if messages, ok := reqCtx.Body["messages"].([]any); ok {
-			imageURLs = collectChatCompletionsImageRefs(messages)
+			var err error
+			imageURLs, err = collectChatCompletionsImageRefs(messages)
+			if err != nil {
+				return err
+			}
 		}
 	case reqcommon.APITypeResponses:
 		if input, ok := reqCtx.Body["input"].([]any); ok {
@@ -228,8 +232,13 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 }
 
 // collectChatCompletionsImageRefs walks a chat-completions messages array for
-// image_url parts, whose url lives nested at part["image_url"]["url"].
-func collectChatCompletionsImageRefs(messages []any) []imageRef {
+// image_url parts, whose url lives nested at part["image_url"]["url"]. An
+// image_url part with no nested object or no string url is rejected for the
+// same reason collectResponsesImageRefs rejects its equivalent malformed
+// shape: encode's collectImageParts counts every image_url part regardless
+// of shape, so skipping one here would desync the two functions' positional
+// indexing and misassign hashes to the wrong image.
+func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 	var refs []imageRef
 	for msgIdx, msg := range messages {
 		msgMap, ok := msg.(map[string]any)
@@ -250,11 +259,11 @@ func collectChatCompletionsImageRefs(messages []any) []imageRef {
 			}
 			imageURL, ok := partMap[imageURLPartType].(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("message %d part %d: image_url is not an object: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
 			}
 			url, ok := imageURL["url"].(string)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("message %d part %d: image_url.url is not a string: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
 			}
 			refs = append(refs, imageRef{
 				msgIdx:  msgIdx,
@@ -264,7 +273,7 @@ func collectChatCompletionsImageRefs(messages []any) []imageRef {
 			})
 		}
 	}
-	return refs
+	return refs, nil
 }
 
 // collectResponsesImageRefs walks a Responses-API input array for input_image
