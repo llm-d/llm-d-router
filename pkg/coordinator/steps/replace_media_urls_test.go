@@ -658,6 +658,32 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 				},
 			},
 		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+			reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathChatCompletions, Body: tt.body}
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(reqCtx.MultimodalEntries) != 0 {
+				t.Fatalf("expected 0 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+			}
+		})
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsMalformedImageURLPart locks in the fix for
+// the desync collectResponsesImageRefs's rejection behavior highlighted:
+// encode's collectImageParts counts every image_url part regardless of
+// shape, so collectChatCompletionsImageRefs must reject a malformed one
+// rather than silently skip it, the same way collectResponsesImageRefs
+// already does for its own equivalent shape.
+func TestReplaceMediaURLsStep_RejectsMalformedImageURLPart(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
 		{
 			name: "image_url field not a map",
 			body: map[string]any{
@@ -683,13 +709,49 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathChatCompletions, Body: tt.body}
-			if err := step.Execute(context.Background(), reqCtx); err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			err := step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatal("expected error for malformed image_url part")
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Fatalf("expected ErrBadRequest, got %v", err)
 			}
 			if len(reqCtx.MultimodalEntries) != 0 {
-				t.Fatalf("expected 0 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+				t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
 			}
 		})
+	}
+}
+
+// TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts is the
+// scenario the desync would otherwise produce: silently skipping the
+// malformed part would leave MultimodalEntries with one entry for the valid
+// image, while encode's collectImageParts still counts both parts, so the
+// valid image's hash would end up attached to the malformed part instead.
+// Rejecting outright avoids that misassignment.
+func TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "image_url", "image_url": "http://bad/a.png"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "http://good/b.png"}},
+				}},
+			},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for the malformed part")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
 	}
 }
 
