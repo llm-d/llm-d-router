@@ -196,9 +196,10 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 func TestHandleInference_ResponsesDropsUnsupportedStatefulFields(t *testing.T) {
 	// prefill, encode, and decode run on independent worker pods with no
 	// shared response store: previous_response_id can't be resolved and
-	// store/background would silently no-op. The handler strips them before
-	// the pipeline sees the body, rather than forwarding a promise it can't
-	// keep.
+	// background would silently no-op. The handler strips them before the
+	// pipeline sees the body, rather than forwarding a promise it can't
+	// keep. store is forced to false rather than dropped, since vLLM
+	// defaults it to true when absent.
 	var seenBody map[string]any
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
 		seenBody = rc.Body
@@ -217,40 +218,54 @@ func TestHandleInference_ResponsesDropsUnsupportedStatefulFields(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	for _, field := range []string{"previous_response_id", "store", "background"} {
+	for _, field := range []string{"previous_response_id", "background"} {
 		if _, ok := seenBody[field]; ok {
 			t.Errorf("expected %q to be dropped from the body the pipeline sees", field)
 		}
+	}
+	if seenBody["store"] != false {
+		t.Errorf("expected store to be forced to false, got %v", seenBody["store"])
 	}
 	if seenBody["input"] != "hi" {
 		t.Errorf("expected unrelated fields to survive, got input=%v", seenBody["input"])
 	}
 }
 
-func TestHandleInference_ResponsesDropsStoreRegardlessOfValue(t *testing.T) {
-	// store is removed whenever present, regardless of value: the field's
-	// value doesn't change whether the pipeline can honor it, so there's
-	// nothing to gain by keeping store: false around.
-	var seenBody map[string]any
-	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
-		seenBody = rc.Body
-		return nil
-	}}})
-	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+func TestHandleInference_ResponsesForcesStoreFalseRegardlessOfValue(t *testing.T) {
+	// store is forced to false regardless of its input value: deleting the
+	// key instead would leave it unset, and vLLM defaults an unset store to
+	// true, which would enable exactly the persistence this is meant to
+	// prevent.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "true", body: `{"model":"m","input":"hi","store":true}`},
+		{name: "false", body: `{"model":"m","input":"hi","store":false}`},
+		{name: "absent", body: `{"model":"m","input":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenBody map[string]any
+			p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+				seenBody = rc.Body
+				return nil
+			}}})
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
 
-	body := `{"model":"m","input":"hi","store":false}`
-	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.handleInference(rec, req)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	if _, ok := seenBody["store"]; ok {
-		t.Errorf("expected store to be dropped regardless of value, got %v", seenBody["store"])
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			if seenBody["store"] != false {
+				t.Errorf("expected store forced to false, got %v", seenBody["store"])
+			}
+		})
 	}
 }
 
