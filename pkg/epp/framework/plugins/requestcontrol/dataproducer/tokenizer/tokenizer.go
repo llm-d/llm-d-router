@@ -88,13 +88,40 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. Multimodal image and video
-// estimation are the only tunables; an empty config uses built-in defaults.
+// estimateConfig configures the estimation backend. Multimodal image, video,
+// and audio estimation are the only tunables; an empty config uses built-in defaults.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
 	// Video tunes multimodal video placeholder-token estimation.
 	Video *videoEstimateConfig `json:"video,omitempty"`
+	// Audio tunes multimodal audio placeholder-token estimation.
+	Audio *audioEstimateConfig `json:"audio,omitempty"`
+}
+
+// audioEstimateConfig tunes how an audio's placeholder-token count is estimated.
+type audioEstimateConfig struct {
+	// Mode selects "dynamic" (tokens-per-second * duration) or "static" (a constant count).
+	Mode string `json:"mode,omitempty"`
+	// Static configures the static (constant per-audio) mode.
+	Static *staticAudioConfig `json:"static,omitempty"`
+	// Dynamic configures the dynamic (tokens-per-second) mode.
+	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
+}
+
+// staticAudioConfig is the static-mode parameter.
+type staticAudioConfig struct {
+	// NumTokens is the per-audio placeholder count.
+	NumTokens int `json:"numTokens,omitempty"`
+}
+
+// dynamicAudioConfig is the dynamic-mode parameter.
+type dynamicAudioConfig struct {
+	// TokensPerSecond is the placeholder tokens per second of audio.
+	TokensPerSecond int `json:"tokensPerSecond,omitempty"`
+	// OverheadTokens is the fixed prompt template + text token overhead added
+	// to every audio estimate.
+	OverheadTokens int `json:"overheadTokens,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -281,7 +308,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
 		backendName = backendEstimate
 	}
 
