@@ -37,6 +37,20 @@ const (
 )
 
 var _ = Describe("Data Parallel support", func() {
+	It("should preserve the NIXLv2 request ID generator when cloning", func() {
+		const requestID = "fixed-request-id"
+		proxy := NewProxy(Config{})
+		proxy.nixlRequestIDFn = func() (string, error) {
+			return requestID, nil
+		}
+
+		clone := proxy.Clone()
+		got, err := clone.nixlRequestIDFn()
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(got).To(Equal(requestID))
+	})
+
 	When("configured with --data-parallel-size > 1", func() {
 		It("should create an extra proxy", func() {
 			ctx := newTestContext()
