@@ -252,7 +252,7 @@ To accommodate this **without code changes**, you can configure the **EndpointPi
 Below is a minimal `EndpointPickerConfig` for P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   # Prefill selection: match Pods with label role=prefill
@@ -308,7 +308,7 @@ schedulingProfiles:
 Below is an `EndpointPickerConfig` for full E/P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   # Encoding selection: match Pods with label role=encode
@@ -431,7 +431,7 @@ Deployments that do not declare any conditional-decode gate plugin still reject 
 A minimal coordinator-topology configuration:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: token-producer
