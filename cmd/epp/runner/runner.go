@@ -189,7 +189,7 @@ type Runner struct {
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
 	healthGRPCServer *grpc.Server
-	healthGRPCPort   int
+	healthGRPCPort   uint16
 	draining         *atomic.Bool
 }
 
@@ -508,7 +508,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	// DrainTimeout of 0 stops them as soon as the manager terminates.
 	r.draining = &atomic.Bool{}
 	r.serverRunner = serverRunner
-	r.healthGRPCPort = int(opts.GRPCHealthPort)
+	r.healthGRPCPort = opts.GRPCHealthPort
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
@@ -1187,10 +1187,10 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, int(opts.GRPCHealthPort))).Start(ctx)
+		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, int(opts.MetricsPort), opts.EnablePprof)
+		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof)
 	})
 	return g.Run(ctx)
 }
@@ -1205,7 +1205,7 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
