@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
@@ -37,6 +38,8 @@ const (
 	DefaultFairnessPolicyRef string = globalstrict.GlobalStrictFairnessPolicyType
 	// DefaultUsageLimitPolicyRef is the default policy to compute usage limit of a priority band dynamically.
 	DefaultUsageLimitPolicyRef string = usagelimits.StaticUsageLimitPolicyType
+	// DefaultBandSelectionPolicyRef is the default policy for ordering priority bands within a dispatch cycle.
+	DefaultBandSelectionPolicyRef string = bandselection.StrictBandSelectionPolicyType
 )
 
 const (

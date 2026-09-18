@@ -80,6 +80,7 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -644,6 +645,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(edf.EDFOrderingPolicyType, fwkplugin.StabilityBeta, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, fwkplugin.StabilityBeta, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityBeta, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(bandselection.StrictBandSelectionPolicyType, fwkplugin.StabilityBeta, bandselection.StrictPolicyFactory)
 	// Alpha
 	fwkplugin.Register(evictfiltering.SheddableFilterType, fwkplugin.StabilityAlpha, evictfiltering.SheddableFilterFactory)
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
@@ -966,10 +968,11 @@ func (r *Runner) initAdmissionControl(
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 
 	deps := fccontroller.Deps{
-		Registry:           registry,
-		SaturationDetector: eppConfig.SaturationDetector,
-		EndpointCandidates: endpointCandidates,
-		UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+		Registry:            registry,
+		SaturationDetector:  eppConfig.SaturationDetector,
+		EndpointCandidates:  endpointCandidates,
+		UsageLimitPolicy:    eppConfig.FlowControlConfig.UsageLimitPolicy,
+		BandSelectionPolicy: eppConfig.FlowControlConfig.BandSelectionPolicy,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor
