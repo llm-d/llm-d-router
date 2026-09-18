@@ -75,6 +75,7 @@ type Processor struct {
 	saturationDetector   flowcontrol.SaturationDetector
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
+	bandSelectionPolicy  flowcontrol.BandSelectionPolicy
 	clock                clock.WithTicker
 	noEndpointRequestTTL time.Duration
 	cleanupSweepInterval time.Duration
@@ -101,6 +102,11 @@ type Processor struct {
 	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
 	// synchronization.
 	ceilings []float64
+
+	// order is the reusable output buffer handed to the BandSelectionPolicy each dispatch cycle, holding
+	// the sequence in which bands are offered a dispatch opportunity as indices into the priority slice.
+	// Only accessed from the Run goroutine, so it needs no synchronization.
+	order []int
 
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
@@ -131,6 +137,7 @@ func NewProcessor(
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
+	bandSelectionPolicy flowcontrol.BandSelectionPolicy,
 	clock clock.WithTicker,
 	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
@@ -145,6 +152,7 @@ func NewProcessor(
 		saturationDetector:   saturationDetector,
 		endpointCandidates:   endpointCandidates,
 		usageLimitPolicy:     usageLimitPolicy,
+		bandSelectionPolicy:  bandSelectionPolicy,
 		clock:                clock,
 		noEndpointRequestTTL: noEndpointRequestTTL,
 		cleanupSweepInterval: cleanupSweepInterval,
@@ -436,17 +444,18 @@ func (p *Processor) recordCapacityUtilization() {
 	}
 }
 
-// dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
-// It applies the configured policies for each band to select an item and then attempts to dispatch it.
-// It returns true if an item was successfully dispatched, and false otherwise.
-// It enforces Head-of-Line (HoL) blocking if the selected item is saturated.
+// dispatchCycle attempts to dispatch a single item by offering priority bands a dispatch opportunity in the
+// order chosen by the BandSelectionPolicy. It applies the configured policies for each band to select an item
+// and then attempts to dispatch it. It returns true if an item was successfully dispatched, and false
+// otherwise. It enforces Head-of-Line (HoL) blocking for bands the UsageLimitPolicy gates.
 //
 // # Work Conservation and Head-of-Line (HoL) Blocking
 //
 // The cycle attempts to be work-conserving by skipping bands where selection fails.
-// However, if a selected item is saturated (cannot be scheduled), the cycle stops immediately. This enforces HoL
-// blocking to respect the policy's decision and prevent priority inversion, where dispatching lower-priority work might
-// exacerbate the saturation affecting the high-priority item.
+// A band gated by its usage ceiling is skipped for the same reason: dispatching it would exacerbate the
+// saturation holding back higher-priority work. Ceilings are monotonically non-increasing across descending
+// priority, so gated bands form a contiguous tail and a skip under strict order only ever reaches further
+// gated bands.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	dispatchCycleStart := time.Now()
 	defer func() {
@@ -502,19 +511,25 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	ceilings := p.ceilingsBuffer(len(priorities))
 	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
 
-	for i, priority := range priorities {
-		// --- Viability Check (Saturation/HoL Blocking) ---
-		// Check before selecting an item: if we are already saturated for this priority, stop immediately.
-		usageLimit := ceilings[i]
-		if saturation >= usageLimit {
-			p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
-				"priority", priority, "saturation", saturation, "usageLimit", usageLimit)
-			if p.reclamation != nil {
-				p.maybeReclaim(ctx, saturation, priorities, ceilings, i)
-			}
-			// Stop the dispatch cycle entirely to respect strict policy decision and prevent priority inversion where
-			// lower-priority work might exacerbate the saturation affecting high-priority work.
-			return false
+	// --- Viability Check (Saturation/HoL Blocking) ---
+	// Ceilings are monotonically non-increasing per the UsageLimitPolicy contract, so the gated bands form a
+	// contiguous tail of priorities and the first of them marks the head-of-line break.
+	breakIdx := len(priorities)
+	for i := range priorities {
+		if saturation >= ceilings[i] {
+			breakIdx = i
+			break
+		}
+	}
+
+	order := p.orderBuffer(len(priorities))
+	p.bandSelectionPolicy.Rank(ctx, saturation, priorities, ceilings, order)
+
+	for _, i := range order {
+		priority := priorities[i]
+		// Gating is per band, so a gated band is skipped wherever it is ranked rather than ending the cycle.
+		if saturation >= ceilings[i] {
+			continue
 		}
 
 		originalBand, err := p.registry.PriorityBandAccessor(priority)
@@ -540,7 +555,18 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
 		}
+		p.bandSelectionPolicy.RecordDispatch(ctx, priority)
 		return true
+	}
+
+	// The cycle dispatched nothing. When a band is gated, the break is where head-of-line blocking bit, and
+	// reclamation is evaluated there to recover capacity for the work it holds back.
+	if breakIdx < len(priorities) {
+		p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
+			"priority", priorities[breakIdx], "saturation", saturation, "usageLimit", ceilings[breakIdx])
+		if p.reclamation != nil {
+			p.maybeReclaim(ctx, saturation, priorities, ceilings, breakIdx)
+		}
 	}
 	return false
 }
@@ -555,6 +581,20 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 	buf := p.ceilings[:n]
 	for i := range buf {
 		buf[i] = 1.0
+	}
+	return buf
+}
+
+// orderBuffer returns the reusable band order buffer sized to n, reset to the identity permutation.
+// Pre-filling with strict highest-to-lowest order guarantees that a policy which writes nothing falls
+// back to strict dispatch rather than replaying the previous cycle's order.
+func (p *Processor) orderBuffer(n int) []int {
+	if cap(p.order) < n {
+		p.order = make([]int, n)
+	}
+	buf := p.order[:n]
+	for i := range buf {
+		buf[i] = i
 	}
 	return buf
 }
