@@ -17,6 +17,9 @@ spec:
     - jsonPath: .spec.poolRef.name
       name: Inference Pool
       type: string
+    - jsonPath: .spec.poolRefs[*].name
+      name: Inference Pools
+      type: string
     - jsonPath: .spec.priority
       name: Priority
       type: string
@@ -59,8 +62,10 @@ spec:
               InferenceObjectives, defined by the Inference Platform Admin.
             properties:
               poolRef:
-                description: PoolRef is a reference to the inference pool, the pool
-                  must exist in the same namespace.
+                description: |-
+                  PoolRef targets a single inference pool in the same namespace.
+                  Prefer PoolRefs. Set PoolRef, PoolRefs, or PoolSelector. An
+                  objective applies to a pool when any entry matches.
                 properties:
                   group:
                     default: inference.networking.k8s.io
@@ -83,6 +88,89 @@ spec:
                 required:
                 - name
                 type: object
+              poolRefs:
+                description: |-
+                  PoolRefs targets multiple inference pools in the same namespace.
+                  Set PoolRef, PoolRefs, or PoolSelector. An objective applies to a
+                  pool when any entry matches.
+                items:
+                  description: |-
+                    PoolObjectReference identifies an API object within the namespace of the
+                    referrer.
+                  properties:
+                    group:
+                      default: inference.networking.k8s.io
+                      description: Group is the group of the referent.
+                      maxLength: 253
+                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    kind:
+                      default: InferencePool
+                      description: Kind is kind of the referent. For example "InferencePool".
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                      type: string
+                    name:
+                      description: Name is the name of the referent.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                minItems: 1
+                type: array
+              poolSelector:
+                description: |-
+                  PoolSelector selects inference pools in the same namespace by
+                  label. Set PoolRef, PoolRefs, or PoolSelector. An objective
+                  applies to a pool when any entry matches. An empty selector
+                  matches every pool in the namespace.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
               priority:
                 description: |-
                   Priority defines how important it is to serve the request compared to other requests in the same pool.
@@ -99,8 +187,6 @@ spec:
                   Similarly requests with a Priority of -10 will always be served after requests with Priority of 0.
                 format: int32
                 type: integer
-            required:
-            - poolRef
             type: object
           status:
             description: InferenceObjectiveStatus defines the observed state of InferenceObjective

@@ -7,6 +7,8 @@ IST = "IST"
 unmarshaling = "unmarshaling"
 # image_grid_thw is a vLLM/CUDA tensor shape parameter
 thw = "thw"
+# "ANDed" is Kubernetes API wording embedded in generated CRDs
+Ded = "Ded"
 
 [files]
 extend-exclude = [

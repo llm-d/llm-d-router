@@ -27,6 +27,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Inference Pool",type=string,JSONPath=`.spec.poolRef.name`
+// +kubebuilder:printcolumn:name="Inference Pools",type=string,JSONPath=`.spec.poolRefs[*].name`
 // +kubebuilder:printcolumn:name="Priority",type=string,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +genclient
@@ -73,10 +74,28 @@ type InferenceObjectiveSpec struct {
 	// +optional
 	Priority *int32 `json:"priority,omitempty"`
 
-	// PoolRef is a reference to the inference pool, the pool must exist in the same namespace.
+	// PoolRef targets a single inference pool in the same namespace.
+	// Prefer PoolRefs. Set PoolRef, PoolRefs, or PoolSelector. An
+	// objective applies to a pool when any entry matches.
 	//
-	// +kubebuilder:validation:Required
-	PoolRef PoolObjectReference `json:"poolRef"`
+	// +optional
+	PoolRef *PoolObjectReference `json:"poolRef,omitempty"`
+
+	// PoolRefs targets multiple inference pools in the same namespace.
+	// Set PoolRef, PoolRefs, or PoolSelector. An objective applies to a
+	// pool when any entry matches.
+	//
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	PoolRefs []PoolObjectReference `json:"poolRefs,omitempty"`
+
+	// PoolSelector selects inference pools in the same namespace by
+	// label. Set PoolRef, PoolRefs, or PoolSelector. An objective
+	// applies to a pool when any entry matches. An empty selector
+	// matches every pool in the namespace.
+	//
+	// +optional
+	PoolSelector *metav1.LabelSelector `json:"poolSelector,omitempty"`
 }
 
 // InferenceObjectiveStatus defines the observed state of InferenceObjective
