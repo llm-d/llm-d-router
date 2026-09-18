@@ -1,0 +1,624 @@
+/*
+Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const nilString = "<nil>"
+
+// +kubebuilder:object:root=true
+
+// EndpointPickerConfig is the Schema for the endpointpickerconfigs API
+type EndpointPickerConfig struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// +optional
+	// FeatureGates is a set of flags that toggle optional EPP features. Each entry is a gate name,
+	// optionally suffixed with "=true" or "=false" (a bare name means "=true"). Gates carry
+	// per-gate defaults that apply when omitted; some default to enabled.
+	FeatureGates FeatureGates `json:"featureGates,omitempty"`
+
+	// +required
+	// +kubebuilder:validation:Required
+	// Plugins is the list of plugins that will be instantiated.
+	Plugins []PluginSpec `json:"plugins"`
+
+	// +required
+	// +kubebuilder:validation:Required
+	// SchedulingProfiles is the list of named SchedulingProfiles
+	// that will be created.
+	SchedulingProfiles []SchedulingProfile `json:"schedulingProfiles"`
+
+	// +optional
+	// DataLayer configures the DataLayer. It is required if the new DataLayer is enabled.
+	DataLayer *DataLayerConfig `json:"dataLayer"`
+
+	// +optional
+	// FlowControl configures the Flow Control layer.
+	// This configuration is only respected if the "flowControl" FeatureGate is enabled.
+	FlowControl *FlowControlConfig `json:"flowControl,omitempty"`
+
+	// +optional
+	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
+	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
+}
+
+func (cfg EndpointPickerConfig) String() string {
+	var parts []string
+	if len(cfg.FeatureGates) > 0 {
+		parts = append(parts, fmt.Sprintf("FeatureGates: %s", cfg.FeatureGates))
+	}
+	if len(cfg.Plugins) > 0 {
+		parts = append(parts, fmt.Sprintf("Plugins: %v", cfg.Plugins))
+	}
+	if len(cfg.SchedulingProfiles) > 0 {
+		parts = append(parts, fmt.Sprintf("SchedulingProfiles: %v", cfg.SchedulingProfiles))
+	}
+	if cfg.DataLayer != nil {
+		parts = append(parts, fmt.Sprintf("DataLayer: %v", cfg.DataLayer))
+	}
+	if cfg.FlowControl != nil {
+		parts = append(parts, fmt.Sprintf("FlowControl: %v", cfg.FlowControl))
+	}
+	if cfg.RequestHandler != nil {
+		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// PluginSpec contains the information that describes a plugin that
+// will be instantiated.
+type PluginSpec struct {
+	// +optional
+	// Name provides a name for plugin entries to reference. If
+	// omitted, the value of the Plugin's Type field will be used.
+	Name string `json:"name"`
+
+	// +required
+	// +kubebuilder:validation:Required
+	// Type specifies the plugin type to be instantiated.
+	Type string `json:"type"`
+
+	// +optional
+	// Parameters are the set of parameters to be passed to the plugin's
+	// factory function. The factory function is responsible
+	// to parse the parameters.
+	Parameters json.RawMessage `json:"parameters"`
+}
+
+func (ps PluginSpec) String() string {
+	var parts []string
+	if ps.Name != "" {
+		parts = append(parts, "Name: "+ps.Name)
+	}
+	parts = append(parts, "Type: "+ps.Type)
+	if len(ps.Parameters) > 0 {
+		parts = append(parts, "Parameters: "+string(ps.Parameters))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// SchedulingProfile contains the information to create a SchedulingProfile
+// entry to be used by the scheduler.
+type SchedulingProfile struct {
+	// +kubebuilder:validation:Required
+	// Name specifies the name of this SchedulingProfile
+	Name string `json:"name"`
+
+	// +required
+	// +kubebuilder:validation:Required
+	// Plugins is the list of plugins for this SchedulingProfile. They are assigned
+	// to the appropriate "slots" based on their type.
+	Plugins []SchedulingPlugin `json:"plugins"`
+}
+
+func (sp SchedulingProfile) String() string {
+	var parts []string
+	parts = append(parts, "Name: "+sp.Name)
+	if len(sp.Plugins) > 0 {
+		parts = append(parts, fmt.Sprintf("Plugins: %v", sp.Plugins))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// SchedulingPlugin describes a plugin that will be associated with a
+// SchedulingProfile entry.
+type SchedulingPlugin struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance to be associated with
+	// this SchedulingProfile. The reference is to the name of an
+	// entry of the Plugins defined in the configuration's Plugins
+	// section
+	PluginRef string `json:"pluginRef"`
+
+	// +optional
+	// Weight is the weight to be used if this plugin is a Scorer.
+	Weight *float64 `json:"weight"`
+}
+
+func (sp SchedulingPlugin) String() string {
+	var parts []string
+	parts = append(parts, "PluginRef: "+sp.PluginRef)
+	if sp.Weight != nil {
+		parts = append(parts, fmt.Sprintf("Weight: %.2f", *sp.Weight))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// FeatureGates is a set of flags that toggle optional EPP features ("name", "name=true", or
+// "name=false"); omitted gates use their registered defaults.
+type FeatureGates []string
+
+func (fg FeatureGates) String() string {
+	if fg == nil {
+		return "{}"
+	}
+
+	builder := strings.Builder{}
+	for _, gate := range fg {
+		builder.WriteString(gate + ",")
+	}
+
+	result := builder.String()
+	if len(result) > 0 {
+		result = result[:len(result)-1]
+	}
+	return "{" + result + "}"
+}
+
+// SaturationDetectorConfig contains the configuration for a saturation detector.
+type SaturationDetectorConfig struct {
+	// +optional
+	// PluginRef specifies the name of the plugin instance to use for saturation detection.
+	// The reference is to the name of an entry of the Plugins defined in the configuration's Plugins section.
+	// If unspecified, "utilization-detector" is used by default.
+	PluginRef string `json:"pluginRef,omitempty"`
+}
+
+func (sdc *SaturationDetectorConfig) String() string {
+	if sdc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", sdc.PluginRef)
+}
+
+// DataLayerConfig contains the configuration of the DataLayer feature
+type DataLayerConfig struct {
+	// +optional
+	// InjectDefaults controls automatic injection of the default metrics source and extractor.
+	// Defaults to true when omitted. Set to false to disable all default source injection.
+	InjectDefaults *bool `json:"injectDefaults,omitempty"`
+	// +optional
+	// Sources is the list of sources to define to the DataLayer
+	Sources []DataLayerSource `json:"sources,omitempty"`
+	// +optional
+	// Discovery groups configuration for all discovery plugins (endpoint discovery
+	// and peer discovery). If omitted, the EPP uses Kubernetes-based discovery for
+	// endpoints and disables peer discovery.
+	Discovery *DiscoveryConfig `json:"discovery,omitempty"`
+	// +optional
+	// CrossReplica groups the settings that publish local per-endpoint state to
+	// other EPP replicas and read theirs back. If omitted, no cross-replica syncer
+	// is used and plugins that read cross-replica state fall back to local data.
+	CrossReplica *CrossReplicaConfig `json:"crossReplica,omitempty"`
+}
+
+func (dlc *DataLayerConfig) String() string {
+	if dlc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{Sources: %v, Discovery: %v, CrossReplica: %v}",
+		dlc.Sources, dlc.Discovery, dlc.CrossReplica)
+}
+
+// CrossReplicaConfig configures publication of local per-endpoint state to peer EPP replicas.
+type CrossReplicaConfig struct {
+	// +optional
+	// SyncerPluginRef names the plugin instance to use as the cross-EPP cross-replica
+	// syncer. The reference is to the name of an entry in the top-level Plugins section.
+	SyncerPluginRef string `json:"syncerPluginRef,omitempty"`
+	// +optional
+	// SyncInterval is the cadence at which each replica publishes its local
+	// per-endpoint state to the cross-replica syncer. This cadence is independent of
+	// the datalayer polling interval. If omitted, a default is used.
+	SyncInterval *metav1.Duration `json:"syncInterval,omitempty"`
+	// +optional
+	// PublishTimeout bounds one endpoint publish, including all concurrent
+	// contributor writes. If omitted, a default is used.
+	PublishTimeout *metav1.Duration `json:"publishTimeout,omitempty"`
+}
+
+func (crc *CrossReplicaConfig) String() string {
+	if crc == nil {
+		return nilString
+	}
+
+	var parts []string
+	if crc.SyncerPluginRef != "" {
+		parts = append(parts, "SyncerPluginRef: "+crc.SyncerPluginRef)
+	}
+	if crc.SyncInterval != nil {
+		parts = append(parts, fmt.Sprintf("SyncInterval: %s", crc.SyncInterval.Duration))
+	}
+	if crc.PublishTimeout != nil {
+		parts = append(parts, fmt.Sprintf("PublishTimeout: %s", crc.PublishTimeout.Duration))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// DiscoveryConfig groups endpoint and peer discovery plugin references.
+type DiscoveryConfig struct {
+	// +optional
+	// Endpoints specifies which EndpointDiscovery plugin to use for populating the
+	// endpoint datastore. When set, the EPP bypasses Kubernetes CRD reconcilers and
+	// relies entirely on the referenced plugin to enumerate and track inference
+	// endpoints. This enables running the EPP without a Kubernetes cluster.
+	Endpoints *EndpointDiscoveryConfig `json:"endpoints,omitempty"`
+	// +optional
+	// Peers specifies which PeerDiscovery plugin to use for discovering
+	// peer EPP replicas. If omitted, peer discovery is disabled.
+	Peers *PeerDiscoveryConfig `json:"peers,omitempty"`
+}
+
+func (dc *DiscoveryConfig) String() string {
+	if dc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{Endpoints: %v, Peers: %v}", dc.Endpoints, dc.Peers)
+}
+
+// EndpointDiscoveryConfig references the EndpointDiscovery plugin to use.
+type EndpointDiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements EndpointDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (edc *EndpointDiscoveryConfig) String() string {
+	if edc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", edc.PluginRef)
+}
+
+// PeerDiscoveryConfig references the PeerDiscovery plugin to use.
+type PeerDiscoveryConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef is the name of the plugin instance (from the Plugins list) that
+	// implements PeerDiscovery.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (pdc *PeerDiscoveryConfig) String() string {
+	if pdc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", pdc.PluginRef)
+}
+
+// DataLayerSource contains the configuration of a DataSource of the DataLayer feature
+type DataLayerSource struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance to be associated with
+	// this Source. The reference is to the name of an entry of the Plugins
+	// defined in the configuration's Plugins section
+	PluginRef string `json:"pluginRef"`
+
+	// +required
+	// +kubebuilder:validation:Required
+	// Extractors specifies the list of Plugin instances to be associated with
+	// this Source. The entries are references to the names of entries of the Plugins
+	// defined in the configuration's Plugins section
+	Extractors []DataLayerExtractor `json:"extractors"`
+}
+
+func (dls DataLayerSource) String() string {
+	var parts []string
+	parts = append(parts, "PluginRef: "+dls.PluginRef)
+	if len(dls.Extractors) > 0 {
+		parts = append(parts, fmt.Sprintf("Extractors: %v", dls.Extractors))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// DataLayerExtractor contains the configuration of an Extractor of the DataLayer feature
+type DataLayerExtractor struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance to be associated with
+	// this Extractor. The reference is to the name of an entry of the Plugins
+	// defined in the configuration's Plugins section
+	PluginRef string `json:"pluginRef"`
+}
+
+func (dle DataLayerExtractor) String() string {
+	return fmt.Sprintf("{PluginRef: %s}", dle.PluginRef)
+}
+
+// RequestHandlerConfig contains the configuration for incoming request handling.
+type RequestHandlerConfig struct {
+	// +optional
+	// Parsers specifies the parsing plugins used by the EPP to process protocol messages.
+	// If unspecified, default parsing behavior will be applied.
+	Parsers []ParserConfig `json:"parsers,omitempty"`
+
+	// +optional
+	// PropagatePriority, when true, lets the EPP inject the resolved request
+	// priority into the outbound request body's top-level "priority" field so the
+	// backend's native priority scheduler can consume it. It is off by default:
+	// when disabled the request body is forwarded unchanged.
+	PropagatePriority bool `json:"propagatePriority,omitempty"`
+}
+
+func (rhc *RequestHandlerConfig) String() string {
+	if rhc == nil {
+		return nilString
+	}
+	var parts []string
+	if len(rhc.Parsers) > 0 {
+		parserStrs := make([]string, len(rhc.Parsers))
+		for i := range rhc.Parsers {
+			parserStrs[i] = rhc.Parsers[i].String()
+		}
+		parts = append(parts, fmt.Sprintf("Parsers: [%s]", strings.Join(parserStrs, ", ")))
+	}
+	if rhc.PropagatePriority {
+		parts = append(parts, "PropagatePriority: true")
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func (pc *ParserConfig) String() string {
+	if pc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", pc.PluginRef)
+}
+
+// ParserConfig contains the configuration for a parser.
+type ParserConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance to be associated with
+	// this Parser. The reference is to the name of an entry of the Plugins
+	// defined in the configuration's Plugins section
+	// Default: openai-parser
+	PluginRef string `json:"pluginRef"`
+}
+
+// FlowControlConfig configures the Flow Control layer.
+type FlowControlConfig struct {
+	// +optional
+	// MaxBytes defines the global maximum aggregate byte size of all active requests across all priority
+	// levels. If this limit is exceeded, new requests will be rejected even if their specific
+	// priority band has capacity.
+	// Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+	// If omitted or "0", no global byte limit is enforced.
+	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
+
+	// +optional
+	// MaxRequests defines the global maximum number of concurrent requests across all priority
+	// levels. If this limit is exceeded, new requests will be rejected even if their specific
+	// priority band has capacity.
+	// Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+	// If omitted or "0", no global request limit is enforced.
+	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
+
+	// +optional
+	// DefaultRequestTTL bounds how long a request may wait in the queue while the candidate pool has
+	// endpoints; NoEndpointRequestTTL bounds that wait while it has none.
+	// If omitted, it defaults to 60s. This is a queue-wait budget: a request that cannot dispatch
+	// within it is shed with a retryable backpressure error rather than served late, and with no
+	// client or gateway deadline it is the only bound on waiting against a pool that has endpoints.
+	// Where such deadlines exist and fire sooner, they evict the request first (client disconnect).
+	// An explicit "0s" disables eviction while the pool has endpoints, and, unless NoEndpointRequestTTL
+	// overrides it, while the pool is empty as well: such requests then wait until client disconnect or
+	// controller shutdown.
+	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
+
+	// +optional
+	// NoEndpointRequestTTL bounds queue wait while the candidate pool has no endpoints, replacing
+	// DefaultRequestTTL for as long as that holds. The two regimes want opposite budgets: with no
+	// endpoint to dispatch to, waiting is the only path to success and the budget should cover a cold
+	// start (image pull plus weight load), whereas a saturated pool should shed early enough to keep
+	// time-to-first-token within an SLO. A request that exhausts this budget is evicted as genuine
+	// unavailability rather than as backpressure.
+	// The budget in force is re-evaluated while the request is queued, so a pool that scales from zero
+	// moves its queued requests onto DefaultRequestTTL, and each regime change starts a fresh budget.
+	// Total queue wait stays bounded by the longer of the two budgets, plus a short expiry-sweep margin;
+	// a regime change grants a fresh budget but does not extend that bound, so a request that changes
+	// regime near the bound may be evicted before the fresh budget elapses.
+	// If omitted, it follows DefaultRequestTTL, so splitting the regimes is opt-in and a configuration that
+	// sets only DefaultRequestTTL keeps that bound in both; it defaults to 60s when neither is set. An
+	// explicit "0s" disables eviction while the pool is empty: requests then wait until an endpoint
+	// appears, the client disconnects, or the controller shuts down.
+	NoEndpointRequestTTL *metav1.Duration `json:"noEndpointRequestTTL,omitempty"`
+
+	// +optional
+	// DefaultPriorityBand allows you to define a template for handling traffic with priority levels
+	// that are not explicitly configured in `PriorityBands`.
+	// This ensures that unforeseen traffic classes are still managed (e.g., given a default capacity
+	// limit) rather than being rejected or treated arbitrarily.
+	// If not specified, a system-default template is used to dynamically provision bands for new
+	// priority levels. This template cascades to the standard `PriorityBandConfig` defaults.
+	DefaultPriorityBand *PriorityBandConfig `json:"defaultPriorityBand,omitempty"`
+
+	// +optional
+	// DefaultNegativePriorityBand allows you to define a separate template for priority levels
+	// strictly below zero. This enables designating negative-priority traffic as sheddable by
+	// setting lower capacity limits (e.g., a small maxRequests, so that under saturation the band
+	// fills quickly and subsequent requests are rejected immediately rather than queued).
+	// Note that a value of "0" is treated as unset and receives the system default, not zero
+	// capacity.
+	// If not specified, negative priorities fall back to DefaultPriorityBand.
+	DefaultNegativePriorityBand *PriorityBandConfig `json:"defaultNegativePriorityBand,omitempty"`
+
+	// PriorityBands allows you to explicitly define policies (like capacity limits) for specific
+	// priority levels. Traffic matching these priorities will be handled according to these rules.
+	// If a priority band is not specified, it uses specific defaults.
+	PriorityBands []PriorityBandConfig `json:"priorityBands,omitempty"`
+
+	// +optional
+	// UsageLimitPolicyPluginRef specifies the UsageLimitPolicy plugin to use for adaptive capacity management.
+	// Must reference a named plugin instance defined in the top-level Plugins section.
+	// If omitted, a default static policy (threshold=1.0, no gating) is used.
+	UsageLimitPolicyPluginRef string `json:"usageLimitPolicyPluginRef,omitempty"`
+
+	// +optional
+	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
+	// Flow Control. If omitted, "utilization-detector" is used by default.
+	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
+
+	// +optional
+	// EnableEviction enables demand-driven in-flight eviction. When higher-priority requests are
+	// blocked by pool saturation, lower-priority in-flight requests (priority < 0) may be
+	// terminated to reclaim capacity. Pacing and sizing self-configure from the selected
+	// saturation detector. See docs/flow-control-eviction.md.
+	// Defaults to false.
+	EnableEviction bool `json:"enableEviction,omitempty"`
+}
+
+func (fcc *FlowControlConfig) String() string {
+	if fcc == nil {
+		return nilString
+	}
+
+	var parts []string
+	if fcc.MaxBytes != nil {
+		parts = append(parts, fmt.Sprintf("MaxBytes: %d", fcc.MaxBytes.Value()))
+	} else {
+		parts = append(parts, "MaxBytes: unlimited")
+	}
+
+	if fcc.MaxRequests != nil {
+		parts = append(parts, fmt.Sprintf("MaxRequests: %d", fcc.MaxRequests.Value()))
+	} else {
+		parts = append(parts, "MaxRequests: unlimited")
+	}
+
+	if fcc.DefaultRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", fcc.DefaultRequestTTL.Duration))
+	}
+
+	if fcc.NoEndpointRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("NoEndpointRequestTTL: %s", fcc.NoEndpointRequestTTL.Duration))
+	}
+
+	if fcc.DefaultPriorityBand != nil {
+		parts = append(parts, fmt.Sprintf("DefaultPriorityBand: %v", fcc.DefaultPriorityBand))
+	}
+
+	if fcc.DefaultNegativePriorityBand != nil {
+		parts = append(parts, fmt.Sprintf("DefaultNegativePriorityBand: %v", fcc.DefaultNegativePriorityBand))
+	}
+
+	if len(fcc.PriorityBands) > 0 {
+		parts = append(parts, fmt.Sprintf("PriorityBands: %v", fcc.PriorityBands))
+	}
+
+	if fcc.UsageLimitPolicyPluginRef != "" {
+		parts = append(parts, "UsageLimitPolicyRef: "+fcc.UsageLimitPolicyPluginRef)
+	}
+
+	if fcc.SaturationDetector != nil {
+		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", fcc.SaturationDetector))
+	}
+
+	if fcc.EnableEviction {
+		parts = append(parts, "EnableEviction: true")
+	}
+
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// PriorityBandConfig configures a single priority band.
+type PriorityBandConfig struct {
+	// Priority is the integer priority level for this band.
+	// Higher values indicate higher priority.
+	Priority int `json:"priority"`
+
+	// +optional
+	// MaxBytes is the maximum number of bytes allowed for this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+	// If omitted or "0", the system default (1G) is used. Per-band limits are always bounded; to
+	// effectively remove the bound, set an explicit large value.
+	MaxBytes *resource.Quantity `json:"maxBytes,omitempty"`
+
+	// +optional
+	// MaxRequests is the maximum number of concurrent requests allowed for this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+	// If omitted or "0", the system default (5000) is used. Per-band limits are always bounded; to
+	// effectively remove the bound, set an explicit large value.
+	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
+
+	// +optional
+	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
+	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
+	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
+	// eviction in this band while the pool has endpoints.
+	DefaultRequestTTL *metav1.Duration `json:"defaultRequestTTL,omitempty"`
+
+	// +optional
+	// FairnessPolicyRef specifies the name of the policy that governs flow selection.
+	// If omitted, the system default ("global-strict-fairness-policy") is used.
+	FairnessPolicyRef string `json:"fairnessPolicyRef,omitempty"`
+
+	// +optional
+	// OrderingPolicyRef specifies the name of the policy that governs request selection within a flow.
+	// If omitted, the system default ("fcfs-ordering-policy") is used.
+	OrderingPolicyRef string `json:"orderingPolicyRef,omitempty"`
+}
+
+func (pbc PriorityBandConfig) String() string {
+	var parts []string
+	parts = append(parts, fmt.Sprintf("Priority: %d", pbc.Priority))
+
+	if pbc.MaxBytes != nil {
+		parts = append(parts, fmt.Sprintf("MaxBytes: %d", pbc.MaxBytes.Value()))
+	}
+
+	if pbc.MaxRequests != nil {
+		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.DefaultRequestTTL != nil {
+		parts = append(parts, fmt.Sprintf("DefaultRequestTTL: %s", pbc.DefaultRequestTTL.Duration))
+	}
+
+	if pbc.FairnessPolicyRef != "" {
+		parts = append(parts, "FairnessPolicyRef: "+pbc.FairnessPolicyRef)
+	}
+
+	if pbc.OrderingPolicyRef != "" {
+		parts = append(parts, "OrderingPolicyRef: "+pbc.OrderingPolicyRef)
+	}
+
+	return "{" + strings.Join(parts, ", ") + "}"
+}

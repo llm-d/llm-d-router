@@ -70,7 +70,7 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     diff -u "${SCRIPT_ROOT}/hack/testdata/plugins-config-expected.yaml" "${TEMP_DIR}/actual.yaml"
     grep -Fq -- "\"/config/${filename}\"" "${output}"
     extract_config "${output}" extra-plugins.yaml > "${TEMP_DIR}/raw.yaml"
-    diff -u <(printf 'apiVersion: llm-d.ai/v1alpha1\nkind: EndpointPickerConfig\n') "${TEMP_DIR}/raw.yaml"
+    diff -u <(printf 'apiVersion: llm-d.ai/v1\nkind: EndpointPickerConfig\n') "${TEMP_DIR}/raw.yaml"
     for builtin in default-plugins.yaml payload-agnostic.yaml; do
       if [[ ${filename} != "${builtin}" ]]; then
         assert_config_equal "${baseline}" "${output}" "${builtin}"
@@ -103,7 +103,7 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     assert_config_equal "${baseline}" "${output}" "${builtin}"
   done
   extract_config "${output}" extra-plugins.yaml > "${TEMP_DIR}/raw.yaml"
-  diff -u <(printf 'apiVersion: llm-d.ai/v1alpha1\nkind: EndpointPickerConfig\n') "${TEMP_DIR}/raw.yaml"
+  diff -u <(printf 'apiVersion: llm-d.ai/v1\nkind: EndpointPickerConfig\n') "${TEMP_DIR}/raw.yaml"
   grep -Fq -- '"/config/extra-plugins.yaml"' "${output}"
 
   for invalid in '"raw YAML"' '[{"type":"queue-scorer"}]'; do

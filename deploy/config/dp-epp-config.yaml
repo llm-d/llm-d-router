@@ -1,6 +1,6 @@
 # Sample EPP configuration for running with Data Parallel
 #
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: prefix-cache-scorer
