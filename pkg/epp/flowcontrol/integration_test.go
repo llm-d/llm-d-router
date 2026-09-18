@@ -42,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictionordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -1399,10 +1400,11 @@ func TestHighConcurrencyFlowChurnNoDeadlock(t *testing.T) {
 		ExpiryCleanupInterval:    50 * time.Millisecond,
 		EnqueueChannelBufferSize: 200,
 	}, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: detector,
-		EndpointCandidates: &contractmocks.MockEndpointCandidates{},
-		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+		Registry:            reg,
+		SaturationDetector:  detector,
+		EndpointCandidates:  &contractmocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	time.Sleep(10 * time.Millisecond)

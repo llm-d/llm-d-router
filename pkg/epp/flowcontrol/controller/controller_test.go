@@ -44,6 +44,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 )
 
@@ -115,12 +116,13 @@ func newUnitHarness(
 	}
 
 	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
-		Registry:           registry,
-		SaturationDetector: mockDetector,
-		EndpointCandidates: mockEndpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
-		Clock:              harnessOpts.clock,
-		ProcessorFactory:   mockProcessorFactory.new,
+		Registry:            registry,
+		SaturationDetector:  mockDetector,
+		EndpointCandidates:  mockEndpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               harnessOpts.clock,
+		ProcessorFactory:    mockProcessorFactory.new,
 	})
 	h := &testHarness{
 		fc:                   fc,
@@ -154,11 +156,12 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 	}
 
 	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
-		Registry:           registry,
-		SaturationDetector: mockDetector,
-		EndpointCandidates: mockEndpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
-		Clock:              mockClock,
+		Registry:            registry,
+		SaturationDetector:  mockDetector,
+		EndpointCandidates:  mockEndpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               mockClock,
 	})
 
 	h := &testHarness{
@@ -281,6 +284,7 @@ func (f *mockProcessorFactory) new(
 	_ flowcontrol.SaturationDetector,
 	_ contracts.EndpointCandidates,
 	_ flowcontrol.UsageLimitPolicy,
+	_ flowcontrol.BandSelectionPolicy,
 	_ clock.WithTicker,
 	_ time.Duration,
 	_ time.Duration,

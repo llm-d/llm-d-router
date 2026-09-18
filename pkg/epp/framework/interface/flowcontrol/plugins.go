@@ -158,11 +158,10 @@ func SaturationStageFromContext(ctx context.Context) string {
 // smoothing) is not, and belongs in the SaturationDetector layer.
 //
 // Integration:
-// This policy is called during dispatch decision-making, before a request is allowed to proceed. For each
-// priority band, the computed ceiling is compared against current saturation. If saturation exceeds the
-// ceiling for a given priority, requests at that priority are gated (not dispatched). The dispatch loop
-// visits bands from highest to lowest priority and stops at the first gated band; lower bands are not
-// considered on that call.
+// This policy is called during dispatch decision-making, before a request is allowed to proceed. Each band's
+// ceiling is authoritative for that band alone: if saturation is at or above the ceiling computed for a
+// priority, requests at that priority are gated (not dispatched). Gating is decided per band, independent of
+// the order in which bands are visited and of the outcome at any other band.
 //
 // The framework calls ComputeLimit exactly once per dispatch cycle. This is a contract term, not an
 // implementation detail: dispatch-spreading policies use the call itself as their time base (one tick
@@ -170,9 +169,9 @@ func SaturationStageFromContext(ctx context.Context) string {
 // open/closed decision within a cycle. The batch shape exists to preserve both properties.
 //
 // Conformance: Implementations MUST ensure all methods are goroutine-safe. Computed ceilings MUST be
-// monotonically non-increasing in the given priority order (highest priority first): because the
-// dispatch loop stops at the first gated band, a lower band whose ceiling exceeds that of a higher band
-// can be marked open on calls where it is unreachable, starving it.
+// monotonically non-increasing in the given priority order (highest priority first). Monotonicity makes the
+// open bands a prefix of that order, so every band that may dispatch outranks every gated band. Ceilings that
+// rise as priority descends invert that: a lower band dispatches while a higher band is held back.
 type UsageLimitPolicy interface {
 	plugin.Plugin
 
@@ -197,4 +196,57 @@ type UsageLimitPolicy interface {
 	//     - 1.0 = no gating (can dispatch until fully saturated)
 	//     - Values between 0.0 and 1.0 reserve capacity headroom
 	ComputeLimit(ctx context.Context, saturation float64, priorities []int, ceilings []float64)
+}
+
+// BandSelectionPolicy governs the order in which priority bands are offered a dispatch opportunity.
+//
+// In simple terms, this policy answers the question: "Which priority band gets to dispatch next?"
+//
+// While FairnessPolicy shares dispatch opportunities among the flows inside one band, band selection decides
+// which bands compete and in what sequence. Strict order serves bands from highest to lowest priority, which
+// lets a band starve while any higher band has work. Alternative implementations spread opportunities across
+// bands to bound that starvation.
+//
+// Architecture (Stateful Singleton):
+// A single instance serves the whole dispatch loop. Both methods are called only from the processor's dispatch
+// goroutine, so scheduling state (round credits, virtual time) can live in plugin fields without
+// synchronization.
+//
+// Conformance: state exposed outside the dispatch goroutine, such as metrics or introspection endpoints, MUST
+// be goroutine-safe.
+type BandSelectionPolicy interface {
+	plugin.Plugin
+
+	// Rank writes the sequence in which bands should be offered a dispatch opportunity, as indices into the
+	// priorities slice, into the caller-provided order buffer.
+	//
+	// The framework walks that sequence and dispatches from the first band that yields an item, so a band
+	// that is gated, empty, or fails to dispatch costs only its position in the sequence. Implementations
+	// rank candidates without modelling queue occupancy or dispatch failure.
+	//
+	// The framework guarantees len(order) == len(priorities) and pre-fills it with the identity permutation,
+	// which is strict highest-to-lowest order, so a policy that writes nothing falls back to strict dispatch.
+	// Writing into the framework-owned buffer means a result of the wrong size cannot exist; there is no
+	// return value to validate. An order that omits or repeats an index is a programming error: an omitted
+	// band never dispatches, and a repeated one is retried in place.
+	//
+	// Parameters:
+	//   - ctx: Request context for logging, tracing, etc.
+	//   - saturation: Current pool-wide resource saturation as a fraction [0.0, 1.0]
+	//   - priorities: Ordered list of currently active priority levels (highest first).
+	//     The slice is a shared snapshot owned by the framework: read-only, and it MUST NOT be
+	//     retained after the call returns.
+	//   - ceilings: Ceilings computed by the UsageLimitPolicy for this cycle, indexed in step with
+	//     priorities. A band whose ceiling is at or below saturation is gated and is skipped wherever it is
+	//     ranked. Read-only, and it MUST NOT be retained after the call returns.
+	//   - order: Output buffer owned by the framework, valid only for the duration of the call.
+	Rank(ctx context.Context, saturation float64, priorities []int, ceilings []float64, order []int)
+
+	// RecordDispatch reports the priority of the band that dispatched an item. The framework calls it at
+	// most once per dispatch cycle, after the dispatch succeeds, and not at all on cycles that dispatch
+	// nothing.
+	//
+	// Settling share accounting here ties it to the service a band actually received. A band charged at
+	// ranking time for an item it never dispatched drifts away from its configured share.
+	RecordDispatch(ctx context.Context, priority int)
 }
