@@ -37,6 +37,14 @@ const (
 	LLMDEPPPickerTopEndpointsKey        = attribute.Key("llm_d.epp.picker.top_endpoints")
 	LLMDEPPPickerTopScoresKey           = attribute.Key("llm_d.epp.picker.top_scores")
 
+	// EPP Request attribution attributes
+	// LLMDRequestAttributionIDKey is the resolved request attribution identity.
+	// Always paired with LLMDRequestAttributionSourceKey.
+	LLMDRequestAttributionIDKey = attribute.Key("llm_d.epp.tenant_id")
+	// LLMDRequestAttributionSourceKey is which branch resolved the identity.
+	// "header" is never evidence that the producer was authenticated.
+	LLMDRequestAttributionSourceKey = attribute.Key("llm_d.epp.tenant_id.source")
+
 	// EPP Scorer attributes
 	LLMDEPPScorerTypeKey               = attribute.Key("llm_d.epp.scorer.type")
 	LLMDEPPScorerNameKey               = attribute.Key("llm_d.epp.scorer.name")
@@ -155,6 +163,18 @@ const (
 )
 
 // Typed helper functions for llm-d internal attributes.
+
+// EPP Request attribution helpers
+
+// LLMDRequestAttributionID returns an attribute for the resolved request attribution identity.
+func LLMDRequestAttributionID(id string) attribute.KeyValue {
+	return LLMDRequestAttributionIDKey.String(id)
+}
+
+// LLMDRequestAttributionSource returns an attribute for how the attribution identity was resolved.
+func LLMDRequestAttributionSource(source string) attribute.KeyValue {
+	return LLMDRequestAttributionSourceKey.String(source)
+}
 
 // EPP Scheduling helpers
 
