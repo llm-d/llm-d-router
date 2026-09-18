@@ -59,7 +59,16 @@ func buildFlowControlConfig(
 		return nil, fmt.Errorf("failed to resolve usage limit policy: %w", err)
 	}
 
-	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy), nil
+	bandSelectionRef := registry.DefaultBandSelectionPolicyRef
+	if apiConfig != nil && apiConfig.BandSelectionPolicyPluginRef != "" {
+		bandSelectionRef = apiConfig.BandSelectionPolicyPluginRef
+	}
+	bandSelectionPolicy, err := resolvePlugin[fwkfc.BandSelectionPolicy](handle, bandSelectionRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve band selection policy: %w", err)
+	}
+
+	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy, bandSelectionPolicy), nil
 }
 
 func buildPriorityBandPolicyDefaults(handle fwkplugin.Handle) (registry.PriorityBandPolicyDefaults, error) {

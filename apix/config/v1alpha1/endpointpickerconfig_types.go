@@ -473,6 +473,13 @@ type FlowControlConfig struct {
 	UsageLimitPolicyPluginRef string `json:"usageLimitPolicyPluginRef,omitempty"`
 
 	// +optional
+	// BandSelectionPolicyPluginRef specifies the BandSelectionPolicy plugin that orders priority bands
+	// within a dispatch cycle.
+	// Must reference a named plugin instance defined in the top-level Plugins section.
+	// If omitted, bands are offered a dispatch opportunity from highest to lowest priority.
+	BandSelectionPolicyPluginRef string `json:"bandSelectionPolicyPluginRef,omitempty"`
+
+	// +optional
 	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
 	// Flow Control. If omitted, "utilization-detector" is used by default.
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
@@ -526,6 +533,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.UsageLimitPolicyPluginRef != "" {
 		parts = append(parts, "UsageLimitPolicyRef: "+fcc.UsageLimitPolicyPluginRef)
+	}
+
+	if fcc.BandSelectionPolicyPluginRef != "" {
+		parts = append(parts, "BandSelectionPolicyRef: "+fcc.BandSelectionPolicyPluginRef)
 	}
 
 	if fcc.SaturationDetector != nil {

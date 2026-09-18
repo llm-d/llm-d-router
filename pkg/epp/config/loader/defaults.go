@@ -236,6 +236,11 @@ func ensureFlowControlLayer(cfg *configapiv1.EndpointPickerConfig, handle fwkplu
 			return err
 		}
 	}
+	if _, ok := allPlugins[registry.DefaultBandSelectionPolicyRef]; !ok {
+		if err := registerDefaultPlugin(cfg, handle, registry.DefaultBandSelectionPolicyRef); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
