@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -35,6 +36,22 @@ type notADetector struct{}
 
 func (n *notADetector) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "not-a-detector", Name: "not-a-detector"}
+}
+
+// stageRecorder is a saturation detector that records the stage of every evaluation.
+type stageRecorder struct {
+	name       string
+	saturation float64
+	stages     []string
+}
+
+func (r *stageRecorder) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "stage-recorder", Name: r.name}
+}
+
+func (r *stageRecorder) Saturation(ctx context.Context, _ []datalayer.Endpoint) float64 {
+	r.stages = append(r.stages, flowcontrol.SaturationStageFromContext(ctx))
+	return r.saturation
 }
 
 func newHandle(t *testing.T) fwkplugin.Handle {
@@ -118,6 +135,21 @@ func TestFactory_Errors(t *testing.T) {
 			wantErr: "duplicate entry",
 		},
 		{
+			name:    "stages entry not in detectors",
+			params:  `{"detectors":["a"],"stages":{"b":["decode"]}}`,
+			wantErr: "stages entry b is not listed in detectors",
+		},
+		{
+			name:    "stages entry without stages",
+			params:  `{"detectors":["a"],"stages":{"a":[]}}`,
+			wantErr: "stages entry a must name at least one stage",
+		},
+		{
+			name:    "unsupported stage",
+			params:  `{"detectors":["a"],"stages":{"a":["encode"]}}`,
+			wantErr: `stages entry a has unsupported stage "encode"`,
+		},
+		{
 			name:    "malformed parameters",
 			params:  `{"detectors":"not-a-list"}`,
 			wantErr: "failed to unmarshal",
@@ -135,6 +167,47 @@ func TestFactory_Errors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestSaturation_StageScopedChildren(t *testing.T) {
+	decodeConcurrency := &stageRecorder{name: "decode-concurrency", saturation: 0.9}
+	prefillQueue := &stageRecorder{name: "prefill-queue", saturation: 0.3}
+	unscoped := &stageRecorder{name: "unscoped", saturation: 0.1}
+	handle := newHandle(t)
+	for _, child := range []*stageRecorder{decodeConcurrency, prefillQueue, unscoped} {
+		handle.AddPlugin(child.name, child)
+	}
+
+	p, err := MaxSaturationDetectorFactory("combined", fwkplugin.StrictDecoder([]byte(
+		`{"detectors":["decode-concurrency","prefill-queue","unscoped"],`+
+			`"stages":{"decode-concurrency":["decode"],"prefill-queue":["prefill"]}}`)), handle)
+	require.NoError(t, err)
+	d := p.(flowcontrol.SaturationDetector)
+
+	prefillCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStagePrefill)
+	decodeCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStageDecode)
+	assert.InDelta(t, 0.3, d.Saturation(prefillCtx, nil), 1e-9)
+	assert.InDelta(t, 0.9, d.Saturation(decodeCtx, nil), 1e-9)
+	assert.InDelta(t, 0.9, d.Saturation(context.Background(), nil), 1e-9)
+
+	assert.Equal(t, []string{"decode", ""}, decodeConcurrency.stages)
+	assert.Equal(t, []string{"prefill", ""}, prefillQueue.stages)
+	assert.Equal(t, []string{"prefill", "decode", ""}, unscoped.stages)
+}
+
+func TestSaturation_StageWithoutChildrenInScope(t *testing.T) {
+	handle := newHandle(t)
+	handle.AddPlugin("decode-concurrency", mockDetector("decode-concurrency", 1.2))
+
+	p, err := MaxSaturationDetectorFactory("combined", fwkplugin.StrictDecoder([]byte(
+		`{"detectors":["decode-concurrency"],"stages":{"decode-concurrency":["decode"]}}`)), handle)
+	require.NoError(t, err)
+	d := p.(flowcontrol.SaturationDetector)
+
+	prefillCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStagePrefill)
+	assert.InDelta(t, 0.0, d.Saturation(prefillCtx, nil), 1e-9, "a stage with no child in scope must not gate")
+	decodeCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStageDecode)
+	assert.InDelta(t, 1.2, d.Saturation(decodeCtx, nil), 1e-9)
 }
 
 func TestFactory_NilHandle(t *testing.T) {

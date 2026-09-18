@@ -507,6 +507,10 @@ func TestPluginsWithDependencies(t *testing.T) {
 			configText: maxSaturationDetectorSortsBeforeChildrenText,
 		},
 		{
+			name:       "maxSaturationDetectorStageScoped",
+			configText: maxSaturationDetectorStageScopedText,
+		},
+		{
 			name:       "pluginsRefedByPointer",
 			configText: pluginsRefedByPointerText,
 		},

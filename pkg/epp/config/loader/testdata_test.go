@@ -126,6 +126,25 @@ plugins:
     detectors: [decode-concurrency, prefill-queue]
 `
 
+// maxSaturationDetectorStageScopedText represents a valid config with a composite saturation
+// detector whose children are restricted to pipeline stages
+const maxSaturationDetectorStageScopedText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: decode-concurrency
+  type: utilization-detector
+- name: prefill-queue
+  type: utilization-detector
+- name: admission-split
+  type: max-saturation-detector
+  parameters:
+    detectors: [decode-concurrency, prefill-queue]
+    stages:
+      decode-concurrency: [decode]
+      prefill-queue: [prefill]
+`
+
 // pluginsRefedByPointerText represents a valid config with a plugin that is dependent
 // on another plugin. In this case the dependent plugin is before the dependency and is
 // referenced via a pointer

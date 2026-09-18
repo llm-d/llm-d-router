@@ -472,8 +472,8 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		name      string
 		endpoints []fwkdl.Endpoint
 	}{
-		{"prefill", prefill},
-		{"decode", decode},
+		{flowcontrol.SaturationStagePrefill, prefill},
+		{flowcontrol.SaturationStageDecode, decode},
 	} {
 		if len(part.endpoints) == 0 {
 			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
