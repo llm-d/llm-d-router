@@ -28,12 +28,15 @@ limitations under the License.
 //
 // Or manually:
 //
-//	KV_CACHE_ENABLED=true make env-dev-kind
+//	KV_CACHE_ENABLED=true \
+//	VLLM_EXTRA_ARGS_D='--max-model-len=131072 --kv-cache-size=8192' \
+//	make env-dev-kind
 //	MODEL_NAME="TinyLlama/TinyLlama-1.1B-Chat-v1.0" go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/
 package tokenizerbench
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -52,6 +55,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	flag.Parse()
+	if flag.Lookup("test.bench").Value.String() == "" {
+		os.Exit(m.Run())
+	}
+
 	port := envOrDefault("E2E_PORT", "30080")
 	baseURL = fmt.Sprintf("http://localhost:%s/v1", port)
 	model = envOrDefault("MODEL_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
@@ -95,7 +103,9 @@ func waitForReady(timeout time.Duration) error {
 
 const shortPrompt = "What is the capital of France?"
 
-const longPrompt = `You are an expert food critic. You have been asked to review the following restaurant.
+const longPromptBytes = 220 * 1024
+
+const longPromptParagraph = `You are an expert food critic. You have been asked to review the following restaurant.
 Please provide a detailed analysis of the food quality, service, ambiance, and overall experience.
 Consider the menu variety, ingredient freshness, presentation, and value for money.
 Your review should be comprehensive and cover all aspects of the dining experience.
@@ -103,6 +113,8 @@ The restaurant is located in downtown San Francisco and specializes in modern Ca
 with influences from Japanese and Mediterranean cooking traditions. The chef has over 20 years
 of experience working in Michelin-starred restaurants across Europe and Asia. The menu changes
 seasonally to reflect the freshest local ingredients available from nearby farms and fisheries.`
+
+var longPrompt = repeatPromptToSize(longPromptParagraph, longPromptBytes)
 
 var sharedPrefixSuffixes = []string{
 	" What appetizer would you recommend?",
@@ -193,7 +205,7 @@ func benchCompletion(b *testing.B, prompt string) {
 		b.Fatalf("warmup: %v", err)
 	}
 	promptTokens := resp.Usage.PromptTokens
-	b.Logf("prompt_tokens=%d prompt_chars=%d", promptTokens, len(prompt))
+	b.Logf("prompt_tokens=%d prompt_bytes=%d", promptTokens, len(prompt))
 
 	b.ResetTimer()
 	for i := range b.N {
@@ -202,6 +214,7 @@ func benchCompletion(b *testing.B, prompt string) {
 		}
 	}
 	b.ReportMetric(float64(promptTokens), "prompt_tokens")
+	b.ReportMetric(float64(len(prompt)), "prompt_bytes")
 }
 
 func benchChatCompletion(b *testing.B, prompt string) {
@@ -218,7 +231,7 @@ func benchChatCompletion(b *testing.B, prompt string) {
 		b.Fatalf("warmup: %v", err)
 	}
 	promptTokens := resp.Usage.PromptTokens
-	b.Logf("prompt_tokens=%d prompt_chars=%d", promptTokens, len(prompt))
+	b.Logf("prompt_tokens=%d prompt_bytes=%d", promptTokens, len(prompt))
 
 	b.ResetTimer()
 	for i := range b.N {
@@ -227,6 +240,15 @@ func benchChatCompletion(b *testing.B, prompt string) {
 		}
 	}
 	b.ReportMetric(float64(promptTokens), "prompt_tokens")
+	b.ReportMetric(float64(len(prompt)), "prompt_bytes")
+}
+
+func repeatPromptToSize(paragraph string, size int) string {
+	if size <= 0 {
+		return ""
+	}
+	repetitions := (size + len(paragraph) - 1) / len(paragraph)
+	return strings.Repeat(paragraph, repetitions)[:size]
 }
 
 func completionParams(prompt string) openai.CompletionNewParams {

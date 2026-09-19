@@ -274,7 +274,7 @@ jobs:
         with:
           name: e2e-image-${{ matrix.image.name }}
           path: ${{ runner.temp }}/${{ matrix.image.archive }}.tar
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
 
   e2e-image-common-status:
@@ -338,7 +338,7 @@ jobs:
         with:
           name: e2e-image-${{ matrix.image.name }}
           path: ${{ runner.temp }}/${{ matrix.image.archive }}.tar
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
 
   e2e-image-router-status:
