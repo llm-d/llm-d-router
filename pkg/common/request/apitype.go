@@ -43,10 +43,12 @@ const (
 	APITypeCompletions
 	// APITypeResponses is the Responses API (/v1/responses).
 	APITypeResponses
-	// APITypeGenerate is vLLM's token-in generate API (/inference/v1/generate).
-	APITypeGenerate
+	// APITypeVLLMGenerate is vLLM's token-in generate API (/inference/v1/generate).
+	APITypeVLLMGenerate
 	// APITypeMessages is the Anthropic Messages API (/v1/messages).
 	APITypeMessages
+	// APITypeSGLangGenerate is SGLang's native generation API (/generate).
+	APITypeSGLangGenerate
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -58,8 +60,10 @@ func (a APIType) String() string {
 		return "completions"
 	case APITypeResponses:
 		return "responses"
-	case APITypeGenerate:
-		return "generate"
+	case APITypeVLLMGenerate:
+		return "vllm_generate"
+	case APITypeSGLangGenerate:
+		return "sglang_generate"
 	case APITypeMessages:
 		return "messages"
 	default:
@@ -73,8 +77,10 @@ func (a APIType) Path() string {
 		return PathCompletions
 	case APITypeResponses:
 		return PathResponses
-	case APITypeGenerate:
+	case APITypeVLLMGenerate:
 		return PathVLLMGenerate
+	case APITypeSGLangGenerate:
+		return PathSGLangGenerate
 	case APITypeMessages:
 		return PathMessages
 	default:
@@ -96,9 +102,9 @@ func DetectAPIType(path string) APIType {
 	case strings.Contains(path, PathMessages):
 		return APITypeMessages
 	case strings.Contains(path, PathVLLMGenerate):
-		return APITypeGenerate
+		return APITypeVLLMGenerate
 	case strings.Contains(path, PathSGLangGenerate):
-		return APITypeGenerate
+		return APITypeSGLangGenerate
 	default:
 		return APITypeChatCompletions
 	}
@@ -108,7 +114,7 @@ func DetectAPIType(path string) APIType {
 // both max_tokens and max_completion_tokens: vLLM and SGLang accept the two
 // together and prefer max_completion_tokens, so capping both bounds the request
 // regardless of which field the engine consults. The Completions, Messages, and
-// generate APIs share a list: none of them defines max_completion_tokens, so
+// vLLM generate APIs share a list: none of them defines max_completion_tokens, so
 // capping it would put a field on the wire that a strict server is free to
 // reject.
 var (
@@ -123,7 +129,7 @@ func (a APIType) tokenLimitFields() []string {
 	switch a {
 	case APITypeResponses:
 		return responsesTokenLimitFields
-	case APITypeCompletions, APITypeGenerate, APITypeMessages:
+	case APITypeCompletions, APITypeVLLMGenerate, APITypeMessages:
 		return maxTokensOnlyTokenLimitFields
 	default:
 		return chatCompletionTokenLimitFields

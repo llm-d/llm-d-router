@@ -26,8 +26,9 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeChatCompletions: {"chat_completions", PathChatCompletions},
 		APITypeCompletions:     {"completions", PathCompletions},
 		APITypeResponses:       {"responses", PathResponses},
-		APITypeGenerate:        {"generate", PathVLLMGenerate},
+		APITypeVLLMGenerate:    {"vllm_generate", PathVLLMGenerate},
 		APITypeMessages:        {"messages", PathMessages},
+		APITypeSGLangGenerate:  {"sglang_generate", PathSGLangGenerate},
 		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
 	for apiType, want := range cases {
@@ -50,11 +51,13 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "completions", path: PathCompletions, want: APITypeCompletions},
 		{name: "responses", path: PathResponses, want: APITypeResponses},
 		{name: "messages", path: PathMessages, want: APITypeMessages},
-		{name: "generate", path: PathVLLMGenerate, want: APITypeGenerate},
+		{name: "generate", path: PathVLLMGenerate, want: APITypeVLLMGenerate},
+		{name: "sglang generate", path: PathSGLangGenerate, want: APITypeSGLangGenerate},
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
 		{name: "prefixed messages", path: "/prefix" + PathMessages, want: APITypeMessages},
-		{name: "prefixed generate", path: "/prefix" + PathVLLMGenerate, want: APITypeGenerate},
+		{name: "prefixed generate", path: "/prefix" + PathVLLMGenerate, want: APITypeVLLMGenerate},
+		{name: "prefixed sglang generate", path: "/prefix" + PathSGLangGenerate, want: APITypeSGLangGenerate},
 		{name: "unknown path falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
 		{name: "empty path falls back to chat completions", path: "", want: APITypeChatCompletions},
 	}
@@ -72,7 +75,7 @@ func TestAPIType_tokenLimitFields(t *testing.T) {
 		APITypeChatCompletions: {FieldMaxTokens, FieldMaxCompletionTokens},
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
-		APITypeGenerate:        {FieldMaxTokens},
+		APITypeVLLMGenerate:    {FieldMaxTokens},
 		APITypeMessages:        {FieldMaxTokens},
 		APIType(7):             {FieldMaxTokens, FieldMaxCompletionTokens},
 	}

@@ -115,8 +115,10 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, bod
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
 		}
-	case reqcommon.APITypeGenerate:
+	case reqcommon.APITypeVLLMGenerate:
 		// The client's generate body already carries token_ids.
+	case reqcommon.APITypeSGLangGenerate:
+		return fmt.Errorf("conditional-decode: SGLang /generate cache-only probing is not implemented: %w", pipeline.ErrUnsupportedSGLangPD)
 	default:
 		// resolveFormat only ever yields the three formats above.
 		return fmt.Errorf("conditional-decode: unsupported request format %v", format)
