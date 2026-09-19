@@ -304,6 +304,51 @@ func TestValidateRefreshMetricsIntervalFloor(t *testing.T) {
 	}
 }
 
+func TestValidateMetricsTimingFlags(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshPrometheusMetricsInterval = 0
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for zero RefreshPrometheusMetricsInterval, but it succeeded")
+	} else if !strings.Contains(err.Error(), "refresh-prometheus-metrics-interval") {
+		t.Errorf("Expected error to reference the flag, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshPrometheusMetricsInterval = -time.Second
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative RefreshPrometheusMetricsInterval, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.MetricsStalenessThreshold = 0
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for zero MetricsStalenessThreshold, but it succeeded")
+	} else if !strings.Contains(err.Error(), "metrics-staleness-threshold") {
+		t.Errorf("Expected error to reference the flag, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.MetricsStalenessThreshold = -5 * time.Second
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative MetricsStalenessThreshold, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to pass for default timing values, got: %v", err)
+	}
+}
+
 func TestDrainTimeoutFlag(t *testing.T) {
 	// Defaults to DefaultDrainTimeout.
 	def := NewOptions()
