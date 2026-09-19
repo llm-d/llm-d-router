@@ -40,18 +40,13 @@ func init() {
 }
 
 type DecodeStep struct {
-	useOpenAIFormat bool
-	gwClient        *gateway.Client
-	kv              kv.Connector
+	gwClient *gateway.Client
+	kv       kv.Connector
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("decode: gateway client is required")
-	}
-	useOpenAI, err := parseUseOpenAIFormat(params)
-	if err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
 	}
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
@@ -61,7 +56,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn}, nil
+	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -73,7 +68,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
+	proxyReq, err := newDecodeProxyRequest(ctx, reqCtx, DecodeStepName, s.gwClient, reqCtx.Body, nil, logger)
 	if err != nil {
 		return err
 	}
@@ -100,9 +95,9 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
@@ -120,6 +115,11 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
 		}
 		setGenerateTransferParams(sampling, kvParams, nil)
+	default:
+		// The coordinator registers only supported formats;
+		// this would be a routing bug, not a client error.
+		log.FromContext(ctx).WithName(DecodeStepName).Error(
+			unreachableFormatError(format), "decode: unreachable request format", "path", reqCtx.OriginalPath)
 	}
 }
 
