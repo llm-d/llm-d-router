@@ -517,6 +517,13 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
 	}
 
+	// The encode sub-request body is built fresh rather than cloned from the
+	// client's already-stripped body, so store must be forced to false here
+	// too; otherwise vLLM defaults it to true on the encoder pod.
+	if receivedBody[reqcommon.FieldStore] != false {
+		t.Fatalf("expected store forced to false, got %v", receivedBody[reqcommon.FieldStore])
+	}
+
 	// Verify no tokens field (dead field, never consumed downstream)
 	if _, ok := receivedBody["tokens"]; ok {
 		t.Fatal("responses format should not have a tokens field")
