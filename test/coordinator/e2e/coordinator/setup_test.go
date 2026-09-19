@@ -54,21 +54,23 @@ const portForwardExitTimeout = 30 * time.Second
 // stopPortForward stops the port-forward process and waits for it to exit, so
 // the next group on this process can rebind the same host port: a bind that
 // fails surfaces only as a waitForCoordinatorReady timeout. It sends SIGKILL if
-// SIGTERM does not stop the process within portForwardExitTimeout. It does not
-// assert, so a slow exit does not fail the caller and skip the teardown after it.
-func stopPortForward(session *gexec.Session) {
+// SIGTERM does not stop the process within portForwardExitTimeout. It returns an
+// error if the process is still running after SIGKILL, and does not assert, so
+// the caller can finish its teardown before it fails.
+func stopPortForward(session *gexec.Session) error {
 	session.Terminate()
 	select {
 	case <-session.Exited:
-		return
+		return nil
 	case <-time.After(portForwardExitTimeout):
 	}
 	ginkgo.By("Port-forward did not exit after SIGTERM, sending SIGKILL")
 	session.Kill()
 	select {
 	case <-session.Exited:
+		return nil
 	case <-time.After(portForwardExitTimeout):
-		ginkgo.By("Port-forward did not exit after SIGKILL")
+		return fmt.Errorf("port-forward did not exit %s after SIGKILL", portForwardExitTimeout)
 	}
 }
 
@@ -148,8 +150,15 @@ func testWrapper(test func()) func() {
 
 		ginkgo.AfterAll(func() {
 			if portForwardSession != nil {
-				stopPortForward(portForwardSession)
+				err := stopPortForward(portForwardSession)
+				// A port-forward that did not exit still holds the host port, so
+				// fail this group instead of the next. Deferred so the teardown
+				// below runs first.
+				defer gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
+			// Without ginkgo.ContinueOnFailure, an Ordered group stops at its first
+			// failed spec and runs AfterAll in that spec, so CurrentSpecReport
+			// reflects the whole group.
 			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
 				return
 			}
