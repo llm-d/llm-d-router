@@ -233,11 +233,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 // collectChatCompletionsImageRefs walks a chat-completions messages array for
 // image_url parts, whose url lives nested at part["image_url"]["url"]. An
-// image_url part with no nested object or no string url is rejected for the
-// same reason collectResponsesImageRefs rejects its equivalent malformed
-// shape: encode's collectImageParts counts every image_url part regardless
-// of shape, so skipping one here would desync the two functions' positional
-// indexing and misassign hashes to the wrong image.
+// image_url part with no nested object or no string url is rejected rather
+// than skipped: encode's collectImageParts counts every image_url part
+// regardless of shape, so skipping one here would desync the two functions'
+// positional indexing and misassign hashes to the wrong image.
 func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 	var refs []imageRef
 	for msgIdx, msg := range messages {
@@ -281,10 +280,9 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 // string field on the part itself (part["image_url"]), not a nested object.
 //
 // An input_image part with no string image_url (e.g. a file_id reference to a
-// previously uploaded file) is rejected: encode's collectImageParts counts
-// every input_image part regardless of how its image is referenced, so
-// excluding one here would desync the two functions' positional indexing and
-// misassign hashes to the wrong image.
+// previously uploaded file) is rejected for the same reason
+// collectChatCompletionsImageRefs rejects its equivalent malformed shape:
+// see that function's doc comment.
 func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 	var refs []imageRef
 	for itemIdx, item := range input {

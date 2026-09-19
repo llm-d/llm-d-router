@@ -121,10 +121,13 @@ type RequestContext struct {
 	RevisionDecisionID string
 	OriginalPath       string
 	OriginalHeaders    http.Header
-	OriginalBody       []byte
-	Body               map[string]any
-	Model              string
-	Stream             bool
+	// OriginalBody is the exact bytes the client sent, captured before Body's
+	// stripping (e.g. reqcommon.DropStatefulResponsesFields): it still
+	// carries any fields Body no longer does.
+	OriginalBody []byte
+	Body         map[string]any
+	Model        string
+	Stream       bool
 
 	// ParseDuration is the time the server spent reading and JSON-parsing the
 	// request body before the pipeline ran. Execute reports it as the first

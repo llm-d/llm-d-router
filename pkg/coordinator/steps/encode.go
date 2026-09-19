@@ -239,11 +239,9 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		if format == reqcommon.APITypeResponses {
 			body["input"] = []any{item}
 			// This body is built fresh rather than cloned from reqCtx.Body,
-			// so it never inherits the store:false DropStatefulResponsesFields
-			// already forced on the client's request; force it here too, or
-			// the encoder defaults it to true and persists a response object
-			// per image.
-			body[reqcommon.FieldStore] = false
+			// so it never inherited the stripping already applied to the
+			// client's request; apply it here too.
+			reqcommon.DropStatefulResponsesFields(body)
 		} else {
 			body["messages"] = []any{item}
 		}

@@ -194,12 +194,9 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 }
 
 func TestHandleInference_ResponsesDropsUnsupportedStatefulFields(t *testing.T) {
-	// prefill, encode, and decode run on independent worker pods with no
-	// shared response store: previous_response_id can't be resolved and
-	// background would silently no-op. The handler strips them before the
-	// pipeline sees the body, rather than forwarding a promise it can't
-	// keep. store is forced to false rather than dropped, since vLLM
-	// defaults it to true when absent.
+	// Locks in that the handler strips previous_response_id/background and
+	// forces store to false before the pipeline sees the body; see
+	// reqcommon.DropStatefulResponsesFields for why.
 	var seenBody map[string]any
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
 		seenBody = rc.Body
@@ -232,10 +229,9 @@ func TestHandleInference_ResponsesDropsUnsupportedStatefulFields(t *testing.T) {
 }
 
 func TestHandleInference_ResponsesForcesStoreFalseRegardlessOfValue(t *testing.T) {
-	// store is forced to false regardless of its input value: deleting the
-	// key instead would leave it unset, and vLLM defaults an unset store to
-	// true, which would enable exactly the persistence this is meant to
-	// prevent.
+	// store is forced to false regardless of its input value; see
+	// reqcommon.DropStatefulResponsesFields for why deleting the key
+	// instead wouldn't work.
 	for _, tc := range []struct {
 		name string
 		body string

@@ -673,12 +673,9 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 	}
 }
 
-// TestReplaceMediaURLsStep_RejectsMalformedImageURLPart locks in the fix for
-// the desync collectResponsesImageRefs's rejection behavior highlighted:
-// encode's collectImageParts counts every image_url part regardless of
-// shape, so collectChatCompletionsImageRefs must reject a malformed one
-// rather than silently skip it, the same way collectResponsesImageRefs
-// already does for its own equivalent shape.
+// TestReplaceMediaURLsStep_RejectsMalformedImageURLPart locks in that
+// collectChatCompletionsImageRefs rejects a malformed image_url part rather
+// than silently skipping it; see its doc comment for why.
 func TestReplaceMediaURLsStep_RejectsMalformedImageURLPart(t *testing.T) {
 	tests := []struct {
 		name string
@@ -723,12 +720,10 @@ func TestReplaceMediaURLsStep_RejectsMalformedImageURLPart(t *testing.T) {
 	}
 }
 
-// TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts is the
-// scenario the desync would otherwise produce: silently skipping the
-// malformed part would leave MultimodalEntries with one entry for the valid
-// image, while encode's collectImageParts still counts both parts, so the
-// valid image's hash would end up attached to the malformed part instead.
-// Rejecting outright avoids that misassignment.
+// TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts covers the
+// concrete failure collectChatCompletionsImageRefs's doc comment describes:
+// skipping the malformed part instead of rejecting it would leave the valid
+// image's hash misassigned to the malformed part.
 func TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
