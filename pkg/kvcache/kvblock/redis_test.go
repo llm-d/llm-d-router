@@ -48,3 +48,38 @@ func createRedisIndexForTesting(t *testing.T) Index {
 func TestRedisIndexBehavior(t *testing.T) {
 	testCommonIndexBehavior(t, createRedisIndexForTesting)
 }
+
+// TestRedisBatchEvictPreservesMappingAndPrunesNext verifies that the batched
+// engine-key prune script advances to the next group after a group whose
+// request key is retained by another pod's entry.
+func TestRedisBatchEvictPreservesMappingAndPrunesNext(t *testing.T) {
+	ctx := t.Context()
+	index := createRedisIndexForTesting(t)
+	pod := PodEntry{PodIdentifier: "target", DeviceTier: "gpu"}
+	keeper := PodEntry{PodIdentifier: "keeper", DeviceTier: "gpu"}
+
+	require.NoError(t, index.Add(ctx,
+		[]BlockHash{11}, []BlockHash{21, 22}, []PodEntry{pod}))
+	require.NoError(t, index.Add(ctx,
+		[]BlockHash{12}, []BlockHash{23}, []PodEntry{pod}))
+	require.NoError(t, index.Add(ctx,
+		nil, []BlockHash{21}, []PodEntry{keeper}))
+
+	require.NoError(t, index.Evict(ctx,
+		EngineKey, []BlockHash{11, 12}, []PodEntry{pod}))
+
+	result, err := index.Lookup(ctx, []BlockHash{21}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []PodEntry{keeper}, result[21])
+
+	for _, key := range []BlockHash{22, 23} {
+		result, err := index.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		require.Empty(t, result[key])
+	}
+
+	_, err = index.GetRequestKey(ctx, 11)
+	require.NoError(t, err)
+	_, err = index.GetRequestKey(ctx, 12)
+	require.Error(t, err)
+}

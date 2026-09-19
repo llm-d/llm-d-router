@@ -114,6 +114,26 @@ func testCommonIndexBehavior(t *testing.T, indexFactory func(t *testing.T) Index
 		testEvictOneToOne(t, ctx, index)
 	})
 
+	t.Run("EvictRequestKeys", func(t *testing.T) {
+		index := indexFactory(t)
+		testEvictRequestKeys(t, ctx, index)
+	})
+
+	t.Run("EvictEngineKeysOneToOne", func(t *testing.T) {
+		index := indexFactory(t)
+		testEvictEngineKeysOneToOne(t, ctx, index)
+	})
+
+	t.Run("EvictEngineKeysManyToOne", func(t *testing.T) {
+		index := indexFactory(t)
+		testEvictEngineKeysManyToOne(t, ctx, index)
+	})
+
+	t.Run("EvictEmptyInput", func(t *testing.T) {
+		index := indexFactory(t)
+		testEvictEmptyInput(t, ctx, index)
+	})
+
 	t.Run("EvictPreservesEngineMappingForOtherTiers", func(t *testing.T) {
 		index := indexFactory(t)
 		testEvictPreservesEngineMappingForOtherTiers(t, ctx, index)
@@ -367,7 +387,7 @@ func testEvictBasic(t *testing.T, ctx context.Context, index Index) {
 		{PodIdentifier: "pod3", DeviceTier: "cpu"}, // Device tier may differ from stored entry
 	}
 
-	err = index.Evict(ctx, engineKey, EngineKey, evictEntries)
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKey}, evictEntries)
 	require.NoError(t, err)
 
 	// Verify that pod1 was evicted but pod2 and pod3 remain
@@ -412,7 +432,7 @@ func testConcurrentOperations(t *testing.T, ctx context.Context, index Index) {
 					}
 				case 2: // Evict
 					entries := []PodEntry{{PodIdentifier: fmt.Sprintf("pod-%d-%d", id, operationIndex-2), DeviceTier: "gpu"}}
-					if err := index.Evict(ctx, engineKey, EngineKey, entries); err != nil {
+					if err := index.Evict(ctx, EngineKey, []BlockHash{engineKey}, entries); err != nil {
 						errChan <- err
 					}
 				}
@@ -512,7 +532,7 @@ func testStressConcurrentAddEvictInterleaved(t *testing.T, ctx context.Context, 
 			defer wg.Done()
 			for i := range numIterations {
 				entry := PodEntry{PodIdentifier: fmt.Sprintf("add-%d-%d", id, i), DeviceTier: "gpu"}
-				if err := index.Evict(ctx, engineKey, EngineKey, []PodEntry{entry}); err != nil {
+				if err := index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{entry}); err != nil {
 					errChan <- err
 				}
 			}
@@ -613,7 +633,7 @@ func testStressConcurrentEvictDuringLookup(t *testing.T, ctx context.Context, in
 			defer wg.Done()
 			for k := range numKeys {
 				entry := PodEntry{PodIdentifier: fmt.Sprintf("pod-a-%d", k), DeviceTier: "gpu"}
-				if err := index.Evict(ctx, engineKeys[k], EngineKey, []PodEntry{entry}); err != nil {
+				if err := index.Evict(ctx, EngineKey, []BlockHash{engineKeys[k]}, []PodEntry{entry}); err != nil {
 					errChan <- err
 				}
 			}
@@ -682,7 +702,7 @@ func testStressHighCardinality(t *testing.T, ctx context.Context, index Index) {
 					}
 				case 2:
 					entry := PodEntry{PodIdentifier: fmt.Sprintf("hc-%d", id), DeviceTier: "gpu"}
-					if err := index.Evict(ctx, engineKeys[k], EngineKey, []PodEntry{entry}); err != nil {
+					if err := index.Evict(ctx, EngineKey, []BlockHash{engineKeys[k]}, []PodEntry{entry}); err != nil {
 						errChan <- err
 						return
 					}
@@ -757,7 +777,7 @@ func testAddMappingManyToOne(t *testing.T, ctx context.Context, index Index) {
 	assert.Equal(t, "pod-many1", result[requestKeys[0]][0].PodIdentifier)
 
 	// Evicting one engine key should remove pods from R0
-	err = index.Evict(ctx, engineKeys[0], EngineKey, pod)
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKeys[0]}, pod)
 	require.NoError(t, err)
 
 	result, err = index.Lookup(ctx, requestKeys, nil)
@@ -792,7 +812,7 @@ func testAddMappingOneToMany(t *testing.T, ctx context.Context, index Index) {
 	}
 
 	// Evicting E0 should remove pods from all 4 request keys
-	err = index.Evict(ctx, engineKeys[0], EngineKey, pod)
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKeys[0]}, pod)
 	require.NoError(t, err)
 
 	result, err = index.Lookup(ctx, requestKeys, nil)
@@ -814,7 +834,7 @@ func testEvictOneToOne(t *testing.T, ctx context.Context, index Index) {
 	require.NoError(t, err)
 
 	// Evict middle engine key
-	err = index.Evict(ctx, engineKeys[1], EngineKey, pod)
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKeys[1]}, pod)
 	require.NoError(t, err)
 
 	// Look up each key individually to avoid prefix-chain early-stop semantics
@@ -829,6 +849,92 @@ func testEvictOneToOne(t *testing.T, ctx context.Context, index Index) {
 	r2, err := index.Lookup(ctx, []BlockHash{requestKeys[2]}, nil)
 	require.NoError(t, err)
 	assert.Len(t, r2[requestKeys[2]], 1, "R2 should still have pod")
+}
+
+// testEvictRequestKeys verifies a multi-key RequestKey eviction: seeded
+// keys lose the evicted pod, a key whose pod survives stays, and a key that was
+// never added is a no-op.
+func testEvictRequestKeys(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	pod := PodEntry{PodIdentifier: "pod-batch", DeviceTier: "gpu"}
+	keeper := PodEntry{PodIdentifier: "pod-keep", DeviceTier: "gpu"}
+	k1 := BlockHash(0xBACC0001)
+	k2 := BlockHash(0xBACC0002)
+	k3 := BlockHash(0xBACC0003)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{k1}, []PodEntry{pod}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{k2}, []PodEntry{pod}))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{k3}, []PodEntry{pod, keeper}))
+
+	missing := BlockHash(0xBACC0004)
+	require.NoError(t, index.Evict(ctx, RequestKey, []BlockHash{k1, k2, k3, missing}, []PodEntry{pod}))
+
+	for _, k := range []BlockHash{k1, k2} {
+		result, err := index.Lookup(ctx, []BlockHash{k}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, result[k], "key %d should be empty after eviction", k)
+	}
+
+	result, err := index.Lookup(ctx, []BlockHash{k3}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []PodEntry{keeper}, result[k3], "k3 must keep the surviving pod")
+}
+
+// testEvictEngineKeysOneToOne verifies a multi-key engine-key eviction under 1:1
+// mapping: every request key is emptied and every engine mapping is removed.
+func testEvictEngineKeysOneToOne(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	engineKeys := []BlockHash{101, 102, 103}
+	requestKeys := []BlockHash{201, 202, 203}
+	pod := []PodEntry{{PodIdentifier: "pod-batch-1to1", DeviceTier: "gpu"}}
+
+	require.NoError(t, index.Add(ctx, engineKeys, requestKeys, pod))
+	require.NoError(t, index.Evict(ctx, EngineKey, engineKeys, pod))
+
+	for i := range requestKeys {
+		result, err := index.Lookup(ctx, []BlockHash{requestKeys[i]}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, result[requestKeys[i]], "request key %d should be empty", requestKeys[i])
+
+		_, err = index.GetRequestKey(ctx, engineKeys[i])
+		assert.Error(t, err, "engine mapping for %d should be removed", engineKeys[i])
+	}
+}
+
+// testEvictEngineKeysManyToOne verifies a multi-key engine-key eviction under
+// many:1 mapping: evicted engine keys lose their mappings and the shared request
+// key is emptied, while mappings of non-evicted engine keys are untouched.
+func testEvictEngineKeysManyToOne(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	// 4 engine keys, 1 request key -> each engine key maps to R0.
+	engineKeys := []BlockHash{110, 111, 112, 113}
+	requestKeys := []BlockHash{210}
+	pod := []PodEntry{{PodIdentifier: "pod-batch-many1", DeviceTier: "gpu"}}
+
+	require.NoError(t, index.Add(ctx, engineKeys, requestKeys, pod))
+	require.NoError(t, index.Evict(ctx, EngineKey, engineKeys[:2], pod))
+
+	result, err := index.Lookup(ctx, requestKeys, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result[requestKeys[0]], "R0 should be empty after batch eviction")
+
+	for _, ek := range engineKeys[:2] {
+		_, err := index.GetRequestKey(ctx, ek)
+		assert.Error(t, err, "evicted engine key %d should not resolve", ek)
+	}
+	_, err = index.GetRequestKey(ctx, engineKeys[2])
+	assert.NoError(t, err, "non-evicted engine key mapping must be untouched")
+}
+
+// testEvictEmptyInput verifies the error contract shared with Add:
+// empty keys or entries are rejected.
+func testEvictEmptyInput(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	err := index.Evict(ctx, RequestKey, nil, []PodEntry{{PodIdentifier: "pod", DeviceTier: "gpu"}})
+	assert.Error(t, err, "empty keys must be rejected")
+
+	err = index.Evict(ctx, RequestKey, []BlockHash{1}, nil)
+	assert.Error(t, err, "empty entries must be rejected")
 }
 
 // testAddWithNilEngineKeys tests that Add() with nil engineKeys only creates
@@ -879,7 +985,7 @@ func testEvictPreservesEngineMappingForOtherTiers(t *testing.T, ctx context.Cont
 	require.Len(t, result[requestKey], 2)
 
 	// Evict GPU tier via engine key.
-	err = index.Evict(ctx, engineKey, EngineKey, gpuEntry)
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKey}, gpuEntry)
 	require.NoError(t, err)
 
 	// CPU entry must survive.
@@ -894,7 +1000,7 @@ func testEvictPreservesEngineMappingForOtherTiers(t *testing.T, ctx context.Cont
 	assert.Equal(t, requestKey, rk)
 
 	// Evict CPU tier via engine key.
-	err = index.Evict(ctx, engineKey, EngineKey, cpuEntry)
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKey}, cpuEntry)
 	require.NoError(t, err)
 
 	// Everything cleaned up.
@@ -935,7 +1041,7 @@ func testGroupedEvictRemovesOneGroup(t *testing.T, ctx context.Context, index In
 	err := index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podG0, podG1})
 	require.NoError(t, err)
 
-	err = index.Evict(ctx, engineKey, EngineKey, []PodEntry{podG1})
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{podG1})
 	require.NoError(t, err)
 
 	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
@@ -952,7 +1058,7 @@ func testGroupedEvictRemovesLastGroup(t *testing.T, ctx context.Context, index I
 	err := index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podG0})
 	require.NoError(t, err)
 
-	err = index.Evict(ctx, engineKey, EngineKey, []PodEntry{podG0})
+	err = index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{podG0})
 	require.NoError(t, err)
 
 	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
