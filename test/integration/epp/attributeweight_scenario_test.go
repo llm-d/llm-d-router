@@ -26,8 +26,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 // Keep metrics neutral so attribute weight is the only scoring signal.
@@ -103,7 +103,7 @@ func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
 			labels["topology.kubernetes.io/region"] = p.region
 		}
 
-		pod := testutil.MakePod(fmt.Sprintf("pod-%d", p.index)).
+		pod := fwkk8s.MakePod(fmt.Sprintf("pod-%d", p.index)).
 			Namespace(h.Namespace).
 			ReadyCondition().
 			Labels(labels).
@@ -137,11 +137,11 @@ func TestAttributeWeightScorer(t *testing.T) {
 	withGPUPods(h, pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
-	requests := integration.ReqRaw(
+	requests := fwkepp.ReqRaw(
 		map[string]string{"hi": "mom", reqcommon.RequestIDHeaderKey: "test-request-id"},
 		"passthrough-body",
 	)
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 2)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
 	require.NoError(t, err)
 	require.Len(t, responses, 2)
 
