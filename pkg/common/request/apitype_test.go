@@ -27,8 +27,8 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeCompletions:     {"completions", PathCompletions},
 		APITypeResponses:       {"responses", PathResponses},
 		APITypeVLLMGenerate:    {"vllm_generate", PathVLLMGenerate},
-		APITypeMessages:        {"messages", PathMessages},
 		APITypeSGLangGenerate:  {"sglang_generate", PathSGLangGenerate},
+		APITypeMessages:        {"messages", PathMessages},
 		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
 	for apiType, want := range cases {
