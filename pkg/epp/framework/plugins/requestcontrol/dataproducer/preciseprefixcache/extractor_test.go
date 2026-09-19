@@ -233,6 +233,30 @@ func TestProducer_EnsureSubscriber_PassesServingEndpoint(t *testing.T) {
 	assert.Equal(t, []string{"tcp://10.0.0.1:5560"}, subscribers.endpoints)
 }
 
+func TestProducer_EnsureSnapshotSubscriberSupportsRankIndex(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		snapshots:          &kvevents.SnapshotManager{},
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-3"},
+		Address:   "10.0.0.1",
+		Port:      "8003",
+		RankIndex: 3,
+	}))
+	require.Equal(t, []string{"tcp://10.0.0.1:5560"}, subscribers.endpoints)
+}
+
 // IPv6 addresses must be bracketed in the zmq endpoint.
 func TestProducer_EnsureSubscriber_IPv6BracketsEndpoint(t *testing.T) {
 	cfg := kvevents.DefaultConfig()

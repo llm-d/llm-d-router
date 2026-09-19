@@ -70,9 +70,6 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}
 
-	if v.SnapshotMode && vllmBatch.DataParallelRank != nil && *vllmBatch.DataParallelRank != 0 {
-		return "", "", kvevents.EventBatch{}, fmt.Errorf("snapshot recovery requires one DP rank")
-	}
 	genericEvents := make([]kvevents.GenericEvent, len(vllmBatch.Events))
 	for i, rawEventBytes := range vllmBatch.Events {
 		genericEvent, err := v.decodeVLLMEvent(rawEventBytes)

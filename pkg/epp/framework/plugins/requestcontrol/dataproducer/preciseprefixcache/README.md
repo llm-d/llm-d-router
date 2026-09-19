@@ -75,8 +75,9 @@ routing accuracy for salted requests.
 
 Set `kvEventsConfig.snapshotPort` to the vLLM snapshot service port. Zero disables
 snapshot recovery. This requires the vLLM snapshot protocol with publisher UUIDs
-and idle heartbeats, per-pod discovery, the in-memory index, and one DP rank per
-pod. Replay, shared subscriber sockets, speculative indexing, and non-vLLM engines are
+and idle heartbeats, per-pod discovery, and the in-memory index. Each DP rank
+uses `socketPort + RankIndex` for live events and `snapshotPort + RankIndex` for
+snapshots. Replay, shared subscriber sockets, speculative indexing, and non-vLLM engines are
 rejected. Events with locality or ownership scopes are rejected until the router
 can preserve those dimensions.
 

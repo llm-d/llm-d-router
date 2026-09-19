@@ -45,13 +45,14 @@ const (
 // SnapshotManager owns an independent, replaceable event index per publisher.
 // Only complete snapshots with a consecutive live suffix are visible to the matcher.
 type SnapshotManager struct {
-	matcher     *kvcache.Indexer
-	mu          sync.RWMutex
-	subscribers map[string]*snapshotSubscriber
-	port        int
-	indexConfig kvblock.InMemoryIndexConfig
-	tokens      kvblock.TokenProcessor
-	adapter     EngineAdapter
+	matcher      *kvcache.Indexer
+	mu           sync.RWMutex
+	subscribers  map[string]*snapshotSubscriber
+	livePort     int
+	snapshotPort int
+	indexConfig  kvblock.InMemoryIndexConfig
+	tokens       kvblock.TokenProcessor
+	adapter      EngineAdapter
 }
 
 type snapshotSubscriber struct {
@@ -78,7 +79,15 @@ func NewSnapshotManager(cfg *Config, indexCfg *kvblock.IndexConfig, tokens kvblo
 	if indexCfg.InMemoryConfig == nil || indexCfg.RedisConfig != nil || indexCfg.CostAwareMemoryConfig != nil {
 		return nil, fmt.Errorf("snapshot recovery requires the in-memory index")
 	}
-	return &SnapshotManager{subscribers: make(map[string]*snapshotSubscriber), port: cfg.SnapshotPort, indexConfig: *indexCfg.InMemoryConfig, tokens: tokens, adapter: adapter, matcher: matcher}, nil
+	return &SnapshotManager{
+		subscribers:  make(map[string]*snapshotSubscriber),
+		livePort:     cfg.PodDiscoveryConfig.SocketPort,
+		snapshotPort: cfg.SnapshotPort,
+		indexConfig:  *indexCfg.InMemoryConfig,
+		tokens:       tokens,
+		adapter:      adapter,
+		matcher:      matcher,
+	}, nil
 }
 
 func (m *SnapshotManager) EnsureSubscriber(ctx context.Context, id, sourceEndpoint, endpoint, replayEndpoint, topic string, remote bool) error {
@@ -88,9 +97,18 @@ func (m *SnapshotManager) EnsureSubscriber(ctx context.Context, id, sourceEndpoi
 	if !remote || !strings.HasPrefix(endpoint, "tcp://") {
 		return fmt.Errorf("snapshot recovery requires a remote TCP publisher")
 	}
-	host, _, err := net.SplitHostPort(strings.TrimPrefix(endpoint, "tcp://"))
+	host, livePortText, err := net.SplitHostPort(strings.TrimPrefix(endpoint, "tcp://"))
 	if err != nil {
 		return err
+	}
+	livePort, err := strconv.Atoi(livePortText)
+	if err != nil {
+		return fmt.Errorf("invalid live publisher port %q: %w", livePortText, err)
+	}
+	rankIndex := livePort - m.livePort
+	snapshotPort := m.snapshotPort + rankIndex
+	if rankIndex < 0 || snapshotPort > 65535 {
+		return fmt.Errorf("live publisher port %d is outside the snapshot port range", livePort)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -102,7 +120,7 @@ func (m *SnapshotManager) EnsureSubscriber(ctx context.Context, id, sourceEndpoi
 		delete(m.subscribers, id)
 	}
 	subCtx, cancel := context.WithCancel(ctx)
-	s := &snapshotSubscriber{manager: m, endpoint: endpoint, sourceEndpoint: sourceEndpoint, snapshotEndpoint: "tcp://" + net.JoinHostPort(host, strconv.Itoa(m.port)), topicFilter: topic, cancel: cancel, done: make(chan struct{})}
+	s := &snapshotSubscriber{manager: m, endpoint: endpoint, sourceEndpoint: sourceEndpoint, snapshotEndpoint: "tcp://" + net.JoinHostPort(host, strconv.Itoa(snapshotPort)), topicFilter: topic, cancel: cancel, done: make(chan struct{})}
 	m.subscribers[id] = s
 	go s.run(subCtx)
 	return nil
