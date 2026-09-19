@@ -132,9 +132,10 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 // "messages", so which field to walk is decided by path, not by which fields
 // happen to be present.
 //
-// DetectAPIType rather than resolveFormat: decode proxies reqCtx.Body to
-// reqCtx.OriginalPath, so the wire shape to walk is the one the client sent,
-// independent of the encode/prefill wire-format setting resolveFormat applies.
+// The switch below keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
+// reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
+// the client sent. resolveFormat's answer instead reflects the encode/prefill
+// wire-format setting, which can differ from the client's own shape.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeChatCompletions:
