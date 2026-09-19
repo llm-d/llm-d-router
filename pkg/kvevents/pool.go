@@ -88,6 +88,8 @@ func blockStoredEventDigestible(ev *BlockStoredEvent) (bool, string) {
 
 // Config holds the configuration for the event processing pool.
 type Config struct {
+	// SnapshotPort enables per-publisher vLLM snapshot recovery when nonzero.
+	SnapshotPort int `json:"snapshotPort,omitempty"`
 	// ZMQEndpoint is the ZMQ address to connect to (e.g., "tcp://indexer:5557").
 	ZMQEndpoint string `json:"zmqEndpoint,omitempty"`
 	// TopicFilter is the ZMQ subscription filter (e.g., "kv@").
@@ -174,6 +176,8 @@ type Pool struct {
 	// tier, KV-cache group, DP rank) and a store must be counted only after
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
+	// strict makes incomplete event application fail snapshot reconstruction.
+	strict bool
 	// tracer is resolved once: tracing.Tracer rebuilds its instrumentation
 	// options on every call, which is not free on the per-message event path.
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
@@ -408,7 +412,9 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		)
 	}
 
-	p.processEventBatch(ctx, &batch, podID, modelName)
+	if err := p.processEventBatch(ctx, &batch, podID, modelName); err != nil {
+		logger.Error(err, "Failed to apply event batch")
+	}
 }
 
 // decode spans the adapter's payload decode. It wraps the call rather than the
@@ -500,44 +506,58 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 func (p *Pool) handleDeviceTierUpdate(
 	ctx context.Context, tokens []uint32, engineKeys []kvblock.BlockHash,
 	podEntries []kvblock.PodEntry, podIdentifier, deviceTier string,
-) bool {
+) (bool, error) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	// Only attempt resolution when tokens are truly absent; partial-block
 	// events (tokens < blockSize) should just be skipped.
 	if len(tokens) != 0 || len(engineKeys) == 0 {
-		return false
+		return false, nil
 	}
 
 	seen := make(map[kvblock.BlockHash]struct{})
 	var resolvedKeys []kvblock.BlockHash
 	for _, ek := range engineKeys {
-		rk, err := p.index.GetRequestKey(ctx, ek)
+		var keys []kvblock.BlockHash
+		var err error
+		if p.strict {
+			// Snapshot pools exclusively own an in-memory index.
+			keys, err = p.index.(*kvblock.InMemoryIndex).GetRequestKeys(ctx, ek)
+		} else {
+			var key kvblock.BlockHash
+			key, err = p.index.GetRequestKey(ctx, ek)
+			keys = []kvblock.BlockHash{key}
+		}
 		if err != nil {
+			if p.strict {
+				return false, err
+			}
 			continue
 		}
-		if _, ok := seen[rk]; !ok {
-			seen[rk] = struct{}{}
-			resolvedKeys = append(resolvedKeys, rk)
+		for _, key := range keys {
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				resolvedKeys = append(resolvedKeys, key)
+			}
 		}
 	}
 
 	if len(resolvedKeys) == 0 {
 		debugLogger.Info("no indexed engine keys found for device-tier update, skipping",
 			"podIdentifier", podIdentifier, "engineKeyCount", len(engineKeys))
-		return false
+		return false, nil
 	}
 
 	if err := p.index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
 		debugLogger.Error(err, "Failed to add device-tier update to index",
 			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
-		return false
+		return false, err
 	}
-	return true
+	return true, nil
 }
 
 // processEventBatch processes a batch of events using type switches.
-func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) {
+func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) error {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	debugLogger.V(logging.TRACE).Info("Processing event batch",
 		"podID", podIdentifier,
@@ -608,6 +628,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				parentEngineKey := kvblock.BlockHash(ev.ParentHash)
 				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
 				if err != nil {
+					if p.strict {
+						return err
+					}
 					debugLogger.Error(err, "Failed to get request key for parent block",
 						"parentEngineKey", parentEngineKey,
 						"effectiveModelName", effectiveModelName,
@@ -630,6 +653,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				var err error
 				extraFeatures, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys, loraName)
 				if err != nil {
+					if p.strict {
+						return err
+					}
 					debugLogger.Error(err, "Failed to parse extra keys",
 						"podIdentifier", podIdentifier)
 					continue
@@ -679,13 +705,20 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			requestKeys, err := p.tokenProcessor.TokensToKVBlockKeys(
 				parentRequestKey, ev.Tokens, effectiveModelName, extraFeatures)
 			if err != nil {
+				if p.strict {
+					return err
+				}
 				debugLogger.Error(err, "Failed to generate request keys",
 					"podIdentifier", podIdentifier, "effectiveModelName", effectiveModelName)
 				continue
 			}
 
 			if len(requestKeys) == 0 {
-				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
+				stored, err := p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier)
+				if err != nil && p.strict {
+					return err
+				}
+				if stored {
 					p.dedup.trackStore(storeScope, ev.BlockHashes)
 				}
 				continue
@@ -694,6 +727,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			// Index.Add infers the engine->request mapping from the ratio of
 			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many).
 			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
+				if p.strict {
+					return err
+				}
 				debugLogger.Error(err, "Failed to add event to index",
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
@@ -758,6 +794,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			for _, hash := range hashesToEvict {
 				engineKey := kvblock.BlockHash(hash)
 				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
+					if p.strict {
+						return err
+					}
 					debugLogger.Error(err, "Failed to evict engine key from index",
 						"podIdentifier", podIdentifier, "engineKey", engineKey)
 					continue
@@ -765,6 +804,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 		case *AllBlocksClearedEvent:
+			if p.strict {
+				if err := p.clearSnapshotGPU(ctx, podIdentifier); err != nil {
+					return err
+				}
+				continue
+			}
 			debugLogger.Info("All blocks cleared event received",
 				"podIdentifier", podIdentifier,
 				"deviceTier", ev.DeviceTier,
@@ -787,4 +832,5 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)
 		}
 	}
+	return nil
 }

@@ -18,6 +18,7 @@ package preciseprefixcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -66,6 +67,9 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
+	}
+	if p.snapshots != nil && meta.GetRankIndex() != 0 {
+		return errors.New("snapshot recovery requires one DP rank per pod")
 	}
 	endpointKey := meta.ID.String()
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()

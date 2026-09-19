@@ -33,6 +33,7 @@ import (
 // []any layout, extracted with length guards instead of fixed structs, so the
 // converters stay encoding-agnostic and tolerate appended or omitted fields.
 type VLLMAdapter struct {
+	SnapshotMode    bool
 	eventConverters map[string]func([]any) (kvevents.GenericEvent, error)
 }
 
@@ -69,6 +70,9 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}
 
+	if v.SnapshotMode && vllmBatch.DataParallelRank != nil && *vllmBatch.DataParallelRank != 0 {
+		return "", "", kvevents.EventBatch{}, fmt.Errorf("snapshot recovery requires one DP rank")
+	}
 	genericEvents := make([]kvevents.GenericEvent, len(vllmBatch.Events))
 	for i, rawEventBytes := range vllmBatch.Events {
 		genericEvent, err := v.decodeVLLMEvent(rawEventBytes)
@@ -101,6 +105,16 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 	case []any:
 		fields = ev
 	case map[string]any:
+		if v.SnapshotMode {
+			for _, key := range []string{"locality", "ownership"} {
+				if value := ev[key]; value != nil {
+					if text, ok := value.(string); ok && text == "" {
+						continue
+					}
+					return nil, fmt.Errorf("snapshot recovery does not support %s", key)
+				}
+			}
+		}
 		var err error
 		if fields, err = mapEventToFields(ev); err != nil {
 			return nil, err

@@ -523,6 +523,16 @@ func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) 
 	return rks[len(rks)-1], nil
 }
 
+// GetRequestKeys returns every canonical block covered by an engine block.
+// Device-tier updates need the whole span, whereas parent chaining uses its end.
+func (m *InMemoryIndex) GetRequestKeys(_ context.Context, engineKey BlockHash) ([]BlockHash, error) {
+	keys, found := m.engineToRequestKeys.Get(engineKey)
+	if !found || len(keys) == 0 {
+		return nil, fmt.Errorf("engine key not found: %s", engineKey.String())
+	}
+	return append([]BlockHash(nil), keys...), nil
+}
+
 // podsPerKeyPrintHelper formats a map of keys to pod names for printing.
 func podsPerKeyPrintHelper(ks map[BlockHash][]PodEntry) string {
 	var b strings.Builder

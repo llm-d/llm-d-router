@@ -58,6 +58,18 @@ func getHashAsUint64(raw any) (uint64, error) {
 	switch val := raw.(type) {
 	case uint64:
 		return val, nil
+	case uint8:
+		return uint64(val), nil
+	case uint16:
+		return uint64(val), nil
+	case uint32:
+		return uint64(val), nil
+	case int8:
+		return uint64(val), nil //nolint:gosec // Match the signed int64 wire representation.
+	case int16:
+		return uint64(val), nil //nolint:gosec // Match the signed int64 wire representation.
+	case int32:
+		return uint64(val), nil //nolint:gosec // Match the signed int64 wire representation.
 	case int64:
 		// msgpack can decode small integers as int64
 		//nolint:gosec // int64 to uint64 conversion is safe here

@@ -70,3 +70,65 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+## vLLM snapshot recovery
+
+Set `kvEventsConfig.snapshotPort` to the vLLM snapshot service port. Zero disables
+snapshot recovery. This requires the vLLM snapshot protocol with publisher UUIDs
+and idle heartbeats, per-pod discovery, the in-memory index, and one DP rank per
+pod. Replay, shared subscriber sockets, speculative indexing, and non-vLLM engines are
+rejected. Events with locality or ownership scopes are rejected until the router
+can preserve those dimensions.
+
+```yaml
+- type: precise-prefix-cache-producer
+  parameters:
+    speculativeIndexing: false
+    kvEventsConfig:
+      discoverPods: true
+      topicFilter: "kv@"
+      snapshotPort: 5559
+      podDiscoveryConfig:
+        socketPort: 5557
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+```
+
+Configure each engine's topic as `kv@<pod-IP>:<serving-port>@<model-name>`. The
+model name must match the model requested through the EPP. Endpoint attribution
+uses the discovered serving address. The live and snapshot ports must be
+reachable from the EPP.
+
+The producer subscribes before requesting a snapshot, builds a private index,
+and applies consecutive buffered live events after the snapshot cut. It exposes
+that index only after reconstruction succeeds. A sequence gap, publisher UUID
+change, malformed event, missing reconstruction metadata, or heartbeat timeout
+removes that publisher's cache affinity and triggers another snapshot request.
+Other publishers remain independently available. Endpoint deletion removes its
+snapshot state. Ordinary routing remains available during recovery.
+
+GPU resets preserve CPU residency. Duplicate stores retain their reference
+counts, and tokenless offload events preserve every router block covered by an
+engine block. The prefix scorer retains its configured device-tier weights.
+
+Snapshot requests time out after 10 seconds. A publisher is unavailable after
+5 seconds without a live message. Recovery retries after 1 second. Bootstrap
+buffering is bounded to 4,096 messages and 64 MiB; the receive queue is bounded to
+256 messages and 64 MiB. Snapshot replies are limited to 256 MiB. An unavailable
+snapshot produces no cache affinity; if the engine recorder is invalid, the
+publisher must be restarted to restore snapshots.
+
+The cross-language regression starts the real vLLM publisher and recorder from
+an installed feature checkout. It generates KV events without loading a model:
+
+```bash
+VLLM_PYTHON=/path/to/vllm/.venv/bin/python \
+PYTHONPATH=/path/to/vllm \
+VLLM_TEST_BLOCK_SIZE=8 \
+go test -race ./pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache \
+  -run TestSnapshotVLLMPublisher -count=1
+```
+
+The ordinary Go suite exercises recovery faults with controlled ZMQ publishers.
+Neither test starts Envoy, Kubernetes, or GPU inference.
