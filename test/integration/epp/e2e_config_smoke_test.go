@@ -10,7 +10,11 @@ You may obtain a copy of the License at
 
 package epp
 
-import "testing"
+import (
+	"testing"
+
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
+)
 
 // e2eConfigsForSmoke mirrors the YAML strings in test/e2e/configs_test.go so
 // the hermetic harness validates that the e2e fixtures actually parse +
@@ -233,9 +237,9 @@ schedulingProfiles:
 func TestE2EConfigs_StartupParseSmoke(t *testing.T) {
 	for name, yaml := range e2eConfigsForSmoke {
 		t.Run(name, func(t *testing.T) {
-			// NewTestHarness fails the test if config-parse / plugin-init
+			// eppharness.NewTestHarness fails the test if config-parse / plugin-init
 			// errors — exactly what we want to catch before pushing.
-			_ = NewTestHarness(t.Context(), t, WithConfigText(yaml))
+			_ = eppharness.NewTestHarness(t.Context(), t, eppharness.WithConfigText(yaml))
 		})
 	}
 }
