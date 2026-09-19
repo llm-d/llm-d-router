@@ -41,6 +41,7 @@ var (
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		metadata.AudioDurationHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
 	)
 
