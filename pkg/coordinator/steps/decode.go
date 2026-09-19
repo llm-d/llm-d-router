@@ -110,16 +110,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
 	case reqcommon.APITypeGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
-		// so the decode worker never pulls the prefill KV over NIXL. Merge into
-		// the client's sampling_params to preserve max_tokens and other fields.
-		sampling, ok := reqCtx.Body[reqcommon.FieldSamplingParams].(map[string]any)
-		if !ok {
-			sampling = map[string]any{}
-			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
-		}
-		setGenerateTransferParams(sampling, kvParams, nil)
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	}
 }
 

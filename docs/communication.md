@@ -627,38 +627,6 @@ EPP-Profile: prefill
 
 `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage). Each blob is a msgpack-serialized `MultiModalKwargsItem` containing both `pixel_values` and `image_grid_thw` (and any other model-specific keys). The prefill worker needs `image_grid_thw` to compute mRoPE (multimodal Rotary Position Embedding) positional encodings for the visual tokens.
 
-> [!NOTE]
-> Due to a bug in the `/inference/v1/generate` implementation, top-level `kv_transfer_params` and `ec_transfer_params` are not propagated to the engine: the endpoint reads transfer parameters only from `sampling_params.extra_args`. The coordinator nests both under `extra_args`:
-
-```
-POST <gateway>/inference/v1/generate
-Content-Type: application/json
-X-Request-ID: <request_id>
-EPP-Profile: prefill
-```
-
-```json
-{
-  "request_id": "req-abc-123",
-  "model": "llava-v1.5-7b",
-  "token_ids": [1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789],
-  "features": {
-    "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-    "mm_placeholders": {"image": [
-      {"offset": 1, "length": 3},
-      {"offset": 4, "length": 3}
-    ]},
-    "kwargs_data": {"image": ["<base64-encoded-pixel-tensor-1>", "<base64-encoded-pixel-tensor-2>"]}
-  },
-  "sampling_params": {
-    "max_tokens": 1,
-    "extra_args": {
-      "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false}
-    }
-  }
-}
-```
-
 #### Response
 
 ```json
@@ -907,7 +875,7 @@ EPP-Profile: decode
 - For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response, if the render step exists
 - `uuid` is added to each `image_url` content part (value is the mm_hash from the render step) for multimodal cache lookup
 - `image_url` retains the original base64 data URI from the replace-media-urls step so the decode worker can process images and produce the correct token sequence (matching what prefill computed)
-- `kv_transfer_params` is injected at the top level of the request body for `/v1/chat/completions` and `/v1/completions`; for `/inference/v1/generate` it is nested in `sampling_params.extra_args`, since that engine reads transfer params only from there (same as the prefill request)
+- `kv_transfer_params` is injected at the top level of the request body for all three endpoints (`/v1/chat/completions`, `/v1/completions`, and `/inference/v1/generate`)
 - `do_remote_decode: false, do_remote_prefill: true` is added by the coordinator to signal the decode worker to fetch KV from the remote prefill worker
 - The `EPP-Profile: decode` header is used for routing (replaces the old `/decode/` path prefix)
 
@@ -986,7 +954,7 @@ A `/inference/v1/generate` client request always uses the generate wire format r
 |---------------------|---------------|----------------|---------------|
 | `/v1/chat/completions` | Per-image body | Original body + `ec_transfer_params` + `kv_transfer_params` | Original body + `kv_transfer_params` + per-image `uuid` |
 | `/v1/completions` | N/A (no images) | `{"prompt": [...], "max_tokens": 1, "kv_transfer_params": {...}, ...}` | `{"prompt": [...], "kv_transfer_params": {...}, ...}` |
-| `/inference/v1/generate` | N/A (skipped; prefill encodes inline from `kwargs_data`) | `token_ids` + `features` (incl. `kwargs_data`) + `kv_transfer_params` nested in `sampling_params.extra_args` | `token_ids` + `kv_transfer_params` nested in `sampling_params.extra_args` |
+| `/inference/v1/generate` | N/A (skipped; prefill encodes inline from `kwargs_data`) | `token_ids` + `features` (incl. `kwargs_data`) + `kv_transfer_params` | `token_ids` + `kv_transfer_params` |
 
 When `use_openai_format: false`:
 
@@ -1025,14 +993,14 @@ When a `/v1/chat/completions` request contains no `image_url` parts:
 
 ## Generate Requests (/inference/v1/generate)
 
-A `/inference/v1/generate` client request is already tokenized (`token_ids` in the body), optionally with multimodal `features`. Every stage uses the generate wire format, and transfer params are nested in `sampling_params.extra_args` (see [Request Format Configuration](#request-format-configuration)):
+A `/inference/v1/generate` client request is already tokenized (`token_ids` in the body), optionally with multimodal `features`. Every stage uses the generate wire format, and transfer params are injected at the top level of the request body (see [Request Format Configuration](#request-format-configuration)):
 
 1. **replace-media-urls**: no-op (no `messages` array; images arrive as `kwargs_data` tensors keyed by `mm_hashes`, not URLs)
 2. **render**: no upstream call -- parses `token_ids` and `features` from the body, validates `sampling_params` and placeholder bounds, and populates `TokenIDs` + `MultimodalEntries` (see [2.C](#2c-inferencev1generate))
 3. **conditional-decode**: forwards the original body (`token_ids` + `features`) to `/inference/v1/generate` with `EPP-Profile: decode` and `Prefer: if-available`
 4. **encode**: skipped entirely. We choose not to use encoder disaggregation (a separate encode stage that produces embeddings and hands them to prefill via EC handoff) for `/inference/v1/generate` due to [vllm-project/vllm#46722](https://github.com/vllm-project/vllm/issues/46722). Instead the prefill worker runs the vision encoder inline from `kwargs_data`, so there is no encode fan-out and no EC handoff, and the preprocessed pixel tensor is shipped once (to prefill) instead of twice (to a separate encoder and then to prefill). That remaining copy still carries the full preprocessed tensor; shrinking it by sending the raw image for prefill to preprocess is proposed in the same issue
-5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `kv_transfer_params` nested in `sampling_params.extra_args`. No `ec_transfer_params`, since encode did not run
-6. **decode**: sends `token_ids` with `kv_transfer_params` nested in `sampling_params.extra_args`
+5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `kv_transfer_params` at the top level. No `ec_transfer_params`, since encode did not run
+6. **decode**: sends `token_ids` with `kv_transfer_params` at the top level
 
 ## Questions
 - Should we include ec_transfer_params into Decode request? if we want that Decoder will provide Prefill functionality for small deltas. 

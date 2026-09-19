@@ -128,6 +128,14 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
+	if len(reqCtx.KVTransferParams) == 0 && s.kv.Name() == kv.NIXL {
+		// vLLM before v0.29.0 (without vllm-project/vllm#42644) ignores the
+		// top-level kv_transfer_params on /inference/v1/generate and returns
+		// none, so decode recomputes the whole prompt. The request still
+		// succeeds, so surface the missing handoff.
+		logger.Info("warning: prefill returned no kv_transfer_params; decode will recompute the prompt",
+			"kvConnector", s.kv.Name(), "path", path)
+	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
@@ -172,16 +180,18 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		return body, nil
 
 	case reqcommon.APITypeGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
 		body := map[string]any{
-			"request_id": reqCtx.RequestID,
-			"token_ids":  reqCtx.TokenIDs,
-			"model":      reqCtx.Model,
+			"request_id":                    reqCtx.RequestID,
+			"token_ids":                     reqCtx.TokenIDs,
+			"model":                         reqCtx.Model,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
-		setGenerateTransferParams(reqcommon.CapSingleToken(body, format), kvParams, ecParams)
+		reqcommon.CapSingleToken(body, format)
 		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features
+		}
+		if len(ecParams) > 0 {
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 

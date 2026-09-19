@@ -189,12 +189,8 @@ func prefillBody(modality string, tokenIDs []int, items []mmSpec) []byte {
 		"token_ids":          tokenIDs,
 		"features":           mmFeatures(modality, items),
 		"ec_transfer_params": map[string]any{modality: ecTransferEntries(items)},
-		"sampling_params": map[string]any{
-			"max_tokens": 1,
-			"extra_args": map[string]any{
-				"kv_transfer_params": map[string]any{"do_remote_decode": true},
-			},
-		},
+		"kv_transfer_params": map[string]any{"do_remote_decode": true},
+		"sampling_params":    map[string]any{"max_tokens": 1},
 	}
 	return mustMarshal(body)
 }
