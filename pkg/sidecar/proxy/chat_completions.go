@@ -200,6 +200,18 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
+		// dataParallelHandler and the plain decoder passthrough below never
+		// read the body at all, so without this they would forward a
+		// Responses request's stateful fields untouched; decodeWithP2PSource
+		// and runChunkedDecode already read it themselves further down and
+		// simply find nothing left to strip.
+		if apiType == reqcommon.APITypeResponses {
+			raw, _, ok := s.readJSONBody(r, w)
+			if !ok {
+				return
+			}
+			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
@@ -208,18 +220,6 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
 				s.runChunkedDecode(w, r)
 				return
-			}
-			// The other branches above all read the body through
-			// readJSONBody, which strips unsupported Responses fields as a
-			// side effect. This is the one decoder-only path that otherwise
-			// forwards the client's body untouched, so it needs the same
-			// call to strip those fields on a Responses request.
-			if apiType == reqcommon.APITypeResponses {
-				raw, _, ok := s.readJSONBody(r, w)
-				if !ok {
-					return
-				}
-				r = cloneRequestWithBody(r.Context(), r, raw)
 			}
 			s.decoderProxy.ServeHTTP(w, r)
 		}

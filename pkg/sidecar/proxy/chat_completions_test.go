@@ -200,8 +200,7 @@ func TestServer_responsesHandler(t *testing.T) {
 // that a /v1/responses request with no prefill header, no encoder header,
 // and no P2P/data-parallel/chunked-decode routing (i.e. the plain decoder
 // passthrough) still has its unsupported stateful fields stripped, the same
-// as every other routing branch. Before the fix, this one branch forwarded
-// the client's body to the decoder untouched.
+// as every other routing branch.
 func TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
@@ -222,6 +221,45 @@ func TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields(t *testing.T
 	for _, field := range []string{"previous_response_id", "background"} {
 		if _, ok := capturedBody[field]; ok {
 			t.Errorf("expected %q to be dropped from the body the decoder sees", field)
+		}
+	}
+	if capturedBody["store"] != false {
+		t.Errorf("expected store to be forced to false, got %v", capturedBody["store"])
+	}
+	if capturedBody["input"] != "hi" {
+		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
+	}
+}
+
+// TestServer_ResponsesDataParallelPassthroughStripsStatefulFields locks in
+// that a /v1/responses request routed by the (deprecated)
+// x-data-parallel-host-port header still has its unsupported stateful
+// fields stripped. dataParallelHandler forwards straight to another rank's
+// decoder proxy and never reads the body itself, so it depends entirely on
+// disaggregatedPrefillHandler stripping the fields before calling it.
+func TestServer_ResponsesDataParallelPassthroughStripsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+
+	var capturedBody map[string]any
+	const dpHostPort = "10.0.0.5:8001"
+	s.dataParallelProxies = map[string]http.Handler{
+		dpHostPort: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedBody)
+		}),
+	}
+
+	reqBody := `{"model":"m","input":"hi","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(reqBody))
+	req.Header.Set(routing.DataParallelEndpointHeader, dpHostPort)
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	for _, field := range []string{"previous_response_id", "background"} {
+		if _, ok := capturedBody[field]; ok {
+			t.Errorf("expected %q to be dropped from the body the data-parallel decoder sees", field)
 		}
 	}
 	if capturedBody["store"] != false {
