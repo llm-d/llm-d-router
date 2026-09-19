@@ -49,57 +49,70 @@ var (
 )
 
 var _ = ginkgo.Describe("Coordinator pipeline", func() {
-	ginkgo.It("routes a text only chat completion end-to-end", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`,
-			modelName,
-		)), textOnlySteps, 0, tokenLimits{})
-	})
+	ginkgo.When("the request is text only", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a text only chat completion end-to-end", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`,
+				modelName,
+			)), textOnlySteps, 0, tokenLimits{})
+		})
+	}))
 
-	ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
-			modelName, inlineImageDataURI,
-		)), allSteps, 1, tokenLimits{min: 3, max: 5, maxCompletion: 100})
-	})
+	ginkgo.When("the request carries token limits", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{min: 3, max: 5, maxCompletion: 100})
+		})
+	}))
 
-	// Passthrough disabled collapses the chat request to the generate wire format
-	// on the encode and prefill requests.
-	ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode with OpenAI passthrough disabled", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
-			modelName, inlineImageDataURI,
-		)), allSteps, 1, tokenLimits{min: 3, max: 5, maxCompletion: 100}, coordinatorConfigNIXLGenerate)
-	})
+	ginkgo.When("the request carries token limits and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
+		// Passthrough disabled collapses the chat request to the generate wire format
+		// on the encode and prefill requests.
+		ginkgo.It("forwards the client token limits to decode and caps them on prefill and encode with OpenAI passthrough disabled", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"min_tokens":3,"max_tokens":5,"max_completion_tokens":100}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{min: 3, max: 5, maxCompletion: 100}, coordinatorConfigNIXLGenerate)
+		})
+	}))
 
-	ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
-			modelName, testImageURL,
-		)), allSteps, 1, tokenLimits{})
-	})
+	ginkgo.When("the request carries one remote image", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
+				modelName, testImageURL,
+			)), allSteps, 1, tokenLimits{})
+		})
+	}))
 
-	ginkgo.It("routes a multimodal chat completion with two images end-to-end", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"What is in these two images?"}]}],"max_tokens":150}`,
-			modelName, testImageURL, testImageURL2,
-		)), allSteps, 2, tokenLimits{})
-	})
+	ginkgo.When("the request carries two remote images", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a multimodal chat completion with two images end-to-end", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"What is in these two images?"}]}],"max_tokens":150}`,
+				modelName, testImageURL, testImageURL2,
+			)), allSteps, 2, tokenLimits{})
+		})
+	}))
 
-	ginkgo.It("routes a multimodal chat completion with an inline base64 image end-to-end", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
-			modelName, inlineImageDataURI,
-		)), allSteps, 1, tokenLimits{})
-	})
+	ginkgo.When("the request carries one inline base64 image", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a multimodal chat completion with an inline base64 image end-to-end", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{})
+		})
+	}))
 
-	ginkgo.It("routes a multimodal chat completion with one inline and one remote image end-to-end", func() {
-		runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
-			`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"Describe what you see in both images."}]}],"max_tokens":150}`,
-			modelName, inlineImageDataURI, testImageURL,
-		)), allSteps, 2, tokenLimits{})
-	})
-
+	ginkgo.When("the request mixes an inline and a remote image", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a multimodal chat completion with one inline and one remote image end-to-end", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"image_url","image_url":{"url":%q},"uuid":"image-1"},{"type":"text","text":"Describe what you see in both images."}]}],"max_tokens":150}`,
+				modelName, inlineImageDataURI, testImageURL,
+			)), allSteps, 2, tokenLimits{})
+		})
+	}))
 })
 
 // inlineImageDataURI is a 64x64 solid-color PNG encoded as a base64 data URI.
@@ -113,51 +126,27 @@ type tokenLimits struct{ min, max, maxCompletion int }
 
 // runCoordinatorPipeline deploys the e-p-d topology and coordinator, posts the
 // given body to path (e.g. /v1/chat/completions or /inference/v1/generate),
-// asserts a 200 with a non-empty body, verifies that the coordinator logs show
-// all expected pipeline steps completed, then tears the workload down.
+// asserts a 200 with a non-empty body, and verifies that the coordinator logs
+// show all expected pipeline steps completed. The workload it creates is tracked
+// in specWorkload for the group's AfterEach to delete.
 // expectedImages is the number of images in the request; when > 0 the encoder
 // log assertions are also verified. A non-zero limits.max additionally asserts
 // the token-limit contract described on verifyTokenLimits.
 // coordinatorConfig, when supplied, overrides the default coordinatorConfigNIXL
 // pipeline config for the coordinator deployment.
-func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages int, limits tokenLimits, coordinatorConfig ...string) {
+// It returns the coordinator logs it asserted against so callers can make further
+// assertions on them.
+func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, expectedImages int, limits tokenLimits, coordinatorConfig ...string) string {
 	nsName := getNamespace()
-	var (
-		coordinator  []string
-		modelServers []string
-		epp          []string
-		pool         []string
-	)
-
-	// Registered first → runs last (LIFO), after the log dump below.
-	ginkgo.DeferCleanup(func() {
-		if keepClusterOnFailure && ginkgo.CurrentSpecReport().Failed() {
-			return
-		}
-		testutils.DeleteObjects(testConfig, coordinator, nsName)
-		testutils.DeleteObjects(testConfig, modelServers, nsName)
-		testutils.DeleteObjects(testConfig, epp, nsName)
-		testutils.DeleteObjects(testConfig, pool, nsName)
-	})
-
-	// Dump all pod logs (coordinator, EPPs, Envoy, workers) on failure, or always
-	// when E2E_PRINT_LOGS is set. Registered second → runs first (LIFO), so the
-	// pods still exist.
-	ginkgo.DeferCleanup(func() {
-		if !ginkgo.CurrentSpecReport().Failed() && !printLogs {
-			return
-		}
-		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
-	})
 
 	// Pool first so the EPP can resolve its --pool-name.
-	pool = createInferencePool(true)
+	createInferencePool(true, &specWorkload)
 	expectPoolExists()
 
-	epp = createEndPointPickers()
+	createEndPointPickers(&specWorkload)
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
-	modelServers = createModelServers(encodeReplicas, prefillReplicas, decodeReplicas)
+	createModelServers(encodeReplicas, prefillReplicas, decodeReplicas, &specWorkload)
 
 	encodePods := getPodNames(encodeSelector)
 	prefillPods := getPodNames(prefillSelector)
@@ -170,7 +159,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	if len(coordinatorConfig) > 0 {
 		cfg = coordinatorConfig[0]
 	}
-	coordinator = createCoordinator(cfg)
+	createCoordinator(cfg, &specWorkload)
 
 	req, err := http.NewRequest(http.MethodPost,
 		gatewayBaseURL()+path,
@@ -180,8 +169,9 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	// Envoy's pipeline listener preserves a client-supplied x-request-id
 	// (preserve_external_request_id) and the coordinator propagates it to every
 	// pipeline request, so a unique id here scopes the per-role routing check to this
-	// one request. Envoy is shared infra whose access log accumulates across specs,
-	// so an unscoped parse would match earlier specs' requests on since-recycled IPs.
+	// one request. Envoy outlives the per-spec workload and its access log
+	// accumulates every request and readiness probe the group sends, so an unscoped
+	// parse would match unrelated entries on since-recycled pod IPs.
 	reqID := uuid.NewString()
 	req.Header.Set("X-Request-Id", reqID)
 
@@ -214,6 +204,12 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		requestsSpeakChat := path != reqcommon.PathGenerate && cfg != coordinatorConfigNIXLGenerate
 		verifyTokenLimits(logs, limits, requestsSpeakChat, capSteps)
 	}
+
+	if printLogs {
+		testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
+	}
+
+	return logs
 }
 
 // verifyCoordinatorSteps asserts that the coordinator logs show every expected
@@ -327,8 +323,8 @@ func verifyPerRoleRouting(nsName string, expectEncode bool, reqID string) {
 // parseEnvoyProfileRoutes extracts the per-role pipeline requests from the Envoy access
 // log (format defined in envoy-3-epp.yaml). It returns, per EPP-Profile value in
 // roles, the upstream pod IPs Envoy routed those requests to. Only lines carrying
-// reqID are considered: Envoy is shared across specs and its access log
-// accumulates, so scoping by request id keeps earlier specs' requests (on
+// reqID are considered: Envoy outlives the per-spec workload and its access log
+// accumulates, so scoping by request id keeps unrelated requests (on
 // since-recycled pod IPs) out. Lines whose profile is not a known role (the
 // external client request and readiness probes take the default route) are ignored.
 func parseEnvoyProfileRoutes(logs string, roles map[string]map[string]bool, reqID string) map[string][]string {
@@ -432,10 +428,10 @@ func verifyTokenLimits(logs string, limits tokenLimits, requestsSpeakChat bool, 
 // verifyEncodeSkipped asserts the coordinator skipped the encode fan-out on the
 // generate path. The skip marker is logged immediately before the step returns,
 // so its presence is dispositive: the prefill worker encodes inline from
-// kwargs_data and no encode sub-request is issued.
-func verifyEncodeSkipped(nsName string) {
-	logs := fetchCoordinatorLogs(nsName)
-
+// kwargs_data and no encode sub-request is issued. It takes the logs rather than
+// fetching them again: runCoordinatorPipeline already holds the logs it asserted
+// against.
+func verifyEncodeSkipped(logs string) {
 	ginkgo.By("Verifying encode was skipped for the generate request")
 	gomega.Expect(logHasLine(logs, `"body":"skipping encode for generate request"`)).To(gomega.BeTrue(),
 		"coordinator logs missing 'skipping encode for generate request'")
