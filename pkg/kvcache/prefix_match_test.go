@@ -628,3 +628,117 @@ func legacyMatchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblo
 	}
 	return counts
 }
+
+// TestMatchBlockKeysRetrievalSpanCPUOnly covers issue #2889: a single
+// engine-retrievable 64-token CPU block mapped onto four canonical keys must
+// not credit partial matches. Expected CPU hits for shared prefixes of
+// 16/32/48/64 tokens (1/2/3/4 keys) are 0, 0, 0, 4.
+func TestMatchBlockKeysRetrievalSpanCPUOnly(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-cpu"
+	keys := []kvblock.BlockHash{10, 20, 30, 40}
+	span := 4
+	cpu := kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: span}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	require.NoError(t, idx.Add(ctx, []kvblock.BlockHash{1}, keys, []kvblock.PodEntry{
+		{PodIdentifier: pod, DeviceTier: "cpu"},
+	}))
+
+	// Index.Add must stamp RetrievalSpan from the 1:many mapping.
+	looked, err := idx.Lookup(ctx, keys[:1], nil)
+	require.NoError(t, err)
+	require.Len(t, looked[keys[0]], 1)
+	assert.Equal(t, span, looked[keys[0]][0].RetrievalSpan)
+
+	for _, n := range []int{1, 2, 3, 4} {
+		got, err := indexer.MatchBlockKeys(ctx, keys[:n], nil)
+		require.NoError(t, err, "prefix len %d", n)
+		if n < span {
+			assertPodMatches(t, map[string]kvcache.PodMatch{
+				pod: {WeightedScore: 0, MatchedBlocks: 0, ConfirmedBlocks: 0, BlocksByTier: map[string]int{"cpu": 0}},
+			}, normalizeZeroTier(got, "cpu"))
+			continue
+		}
+		assertPodMatches(t, map[string]kvcache.PodMatch{
+			pod: {WeightedScore: 0.8 * float64(span), MatchedBlocks: span, ConfirmedBlocks: span, BlocksByTier: map[string]int{"cpu": span}},
+		}, got)
+	}
+
+	// Direct Add with an explicit span (materialized path) must agree.
+	matIdx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 256})
+	require.NoError(t, err)
+	for _, key := range keys {
+		require.NoError(t, matIdx.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{cpu}))
+	}
+	got, err := newMaterializedMatcher(matIdx, kvcache.DefaultKVCacheBackendConfig()).MatchBlockKeys(ctx, keys[:2], nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {WeightedScore: 0, MatchedBlocks: 0, ConfirmedBlocks: 0, BlocksByTier: map[string]int{"cpu": 0}},
+	}, normalizeZeroTier(got, "cpu"))
+}
+
+// TestMatchBlockKeysRetrievalSpanGPURetainedWhenCPUPartial ensures independent
+// GPU blocks still score when a covering CPU chunk is only partially matched.
+func TestMatchBlockKeysRetrievalSpanGPURetainedWhenCPUPartial(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-mixed"
+	keys := []kvblock.BlockHash{10, 20, 30, 40}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	for i, key := range keys {
+		entries := []kvblock.PodEntry{{PodIdentifier: pod, DeviceTier: "gpu"}}
+		if i < 4 {
+			entries = append(entries, kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 4})
+		}
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, entries))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys[:2], nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   2.0, // gpu weight 1.0 per key
+			MatchedBlocks:   2,
+			ConfirmedBlocks: 2,
+			BlocksByTier:   map[string]int{"gpu": 2, "cpu": 0},
+		},
+	}, normalizeZeroTier(got, "cpu"))
+
+	got, err = indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   4.0,
+			MatchedBlocks:   4,
+			ConfirmedBlocks: 4,
+			BlocksByTier:   map[string]int{"gpu": 4, "cpu": 4},
+		},
+	}, got)
+}
+
+// normalizeZeroTier ensures a missing tier is present as 0 so assertPodMatches
+// can compare partial-credit cases where the matcher omits empty tiers.
+func normalizeZeroTier(got map[string]kvcache.PodMatch, tiers ...string) map[string]kvcache.PodMatch {
+	out := make(map[string]kvcache.PodMatch, len(got))
+	for pod, m := range got {
+		byTier := m.BlocksByTier
+		if byTier == nil {
+			byTier = map[string]int{}
+		} else {
+			cp := make(map[string]int, len(byTier)+len(tiers))
+			for k, v := range byTier {
+				cp[k] = v
+			}
+			byTier = cp
+		}
+		for _, tier := range tiers {
+			if _, ok := byTier[tier]; !ok {
+				byTier[tier] = 0
+			}
+		}
+		m.BlocksByTier = byTier
+		out[pod] = m
+	}
+	return out
+}

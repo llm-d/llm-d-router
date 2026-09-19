@@ -151,7 +151,7 @@ func (pc *PodCache) addAll(recs []EntryRef) {
 	for _, rec := range recs {
 		found := false
 		for i := range pc.entries {
-			if pc.entries[i].PodEntry == rec.PodEntry {
+			if pc.entries[i].PodEntry.SameIdentity(rec.PodEntry) {
 				copy(pc.entries[i:], pc.entries[i+1:])
 				pc.entries[len(pc.entries)-1] = rec
 				found = true
@@ -177,7 +177,7 @@ func (pc *PodCache) removeAll(entries []PodEntry) (empty bool) {
 	defer pc.mu.Unlock()
 	for _, entry := range entries {
 		for i := range pc.entries {
-			if pc.entries[i].PodEntry == entry {
+			if pc.entries[i].PodEntry.SameIdentity(entry) {
 				pc.entries = append(pc.entries[:i], pc.entries[i+1:]...)
 				break
 			}
@@ -348,11 +348,9 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Add")
 
-	// Intern once per call, before anything is written: a rejected batch
-	// leaves no mapping and no ordinal behind. The same records apply to
-	// every request key.
-	records, err := m.internRecords(entries)
-	if err != nil {
+	// Validate ordinals once before writing: a rejected batch leaves no
+	// mapping behind. RetrievalSpan does not affect pod/tier interning.
+	if _, err := m.internRecords(entries); err != nil {
 		return err
 	}
 
@@ -367,6 +365,8 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 			m.engineToRequestKeys.Add(ek, rks)
 		}
 	}
+
+	spans := requestKeyRetrievalSpans(engineKeys, requestKeys)
 
 	// Store requestKey -> PodCache mappings for all request keys.
 	// Hold m.mu to prevent Evict from checking emptiness and removing the
@@ -395,10 +395,16 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 			}
 		}
 
-		podCache.addAll(records)
+		span := spans[requestKey]
+		keyedEntries := withRetrievalSpan(entries, span)
+		keyedRecords, err := m.internRecords(keyedEntries)
+		if err != nil {
+			return err
+		}
+		podCache.addAll(keyedRecords)
 
 		if traceLogger.Enabled() {
-			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
+			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", keyedEntries)
 		}
 	}
 

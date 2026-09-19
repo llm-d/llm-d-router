@@ -121,12 +121,12 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 
 	// pipeline for single RTT
 	pipe := r.RedisClient.Pipeline()
-	results := make([]*redis.StringSliceCmd, len(requestKeys))
+	results := make([]*redis.MapStringStringCmd, len(requestKeys))
 
-	// queue an HKeys command for each key in the pipeline
+	// queue an HGetAll command for each key in the pipeline so field values
+	// (retrieval spans) are available for scoring.
 	for i, key := range requestKeys {
-		// HKeys gets all field names
-		results[i] = pipe.HKeys(ctx, key.String())
+		results[i] = pipe.HGetAll(ctx, key.String())
 	}
 
 	_, execErr := pipe.Exec(ctx)
@@ -139,8 +139,7 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	for idx, cmd := range results {
 		key := requestKeys[idx]
 
-		// cmd.Result() returns the slice of strings (pod IDs) which is the first layer in the mapping
-		pods, cmdErr := cmd.Result()
+		fields, cmdErr := cmd.Result()
 		if cmdErr != nil {
 			if !errors.Is(cmdErr, redis.Nil) {
 				logger.Error(cmdErr, "failed to get pods for key", "key", key)
@@ -148,10 +147,14 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 
 			return podsPerKey, nil // early stop since prefix-chain breaks here
 		}
+		if len(fields) == 0 {
+			logger.Info("no pods found for key, cutting search", "key", key)
+			return podsPerKey, nil
+		}
 
 		var filteredPods []PodEntry
-		for _, p := range pods {
-			pod, ok := decodeRedisPodField(p)
+		for field, value := range fields {
+			pod, ok := decodeRedisPodField(field, value)
 			if !ok {
 				continue
 			}
@@ -196,15 +199,28 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 		}
 	}
 
+	spans := requestKeyRetrievalSpans(engineKeys, requestKeys)
+
 	// Store requestKey -> PodEntry mappings for all request keys.
+	// Hash field is the identity (without RetrievalSpan) so Evict can match;
+	// the value carries the span for scoring.
 	for _, requestKey := range requestKeys {
 		redisKey := requestKey.String()
+		span := spans[requestKey]
 		for _, entry := range entries {
-			field, err := encodeRedisPodField(entry)
+			keyed := entry
+			if keyed.RetrievalSpan < 1 && span > 1 {
+				keyed.RetrievalSpan = span
+			}
+			field, err := encodeRedisPodFieldIdentity(keyed)
 			if err != nil {
 				return err
 			}
-			pipe.HSet(ctx, redisKey, field, "")
+			value := ""
+			if keyed.RetrievalSpan > 1 {
+				value = strconv.Itoa(keyed.RetrievalSpan)
+			}
+			pipe.HSet(ctx, redisKey, field, value)
 		}
 	}
 
@@ -258,7 +274,7 @@ func (r *RedisIndex) evictPodsFromRequestKey(ctx context.Context, requestKey Blo
 	pipe := r.RedisClient.Pipeline()
 
 	for _, entry := range entries {
-		field, err := encodeRedisPodField(entry)
+		field, err := encodeRedisPodFieldIdentity(entry)
 		if err != nil {
 			return err
 		}
@@ -277,20 +293,28 @@ func (r *RedisIndex) evictPodsFromRequestKey(ctx context.Context, requestKey Blo
 	return nil
 }
 
-func encodeRedisPodField(entry PodEntry) (string, error) {
-	value, err := json.Marshal(entry)
+func encodeRedisPodFieldIdentity(entry PodEntry) (string, error) {
+	identity := entry
+	identity.RetrievalSpan = 0
+	value, err := json.Marshal(identity)
 	if err != nil {
 		return "", fmt.Errorf("failed to encode pod entry for Redis: %w", err)
 	}
 	return string(value), nil
 }
 
-func decodeRedisPodField(field string) (PodEntry, bool) {
+func decodeRedisPodField(field, value string) (PodEntry, bool) {
 	var entry PodEntry
 	if err := json.Unmarshal([]byte(field), &entry); err != nil {
 		return PodEntry{}, false
 	}
-
+	if value != "" {
+		if span, err := strconv.Atoi(value); err == nil && span > 0 {
+			entry.RetrievalSpan = span
+		}
+	}
+	// Legacy rows stored the full entry (including any span) as the field
+	// with an empty value; identity decoding already covers span 0/1.
 	return entry, true
 }
 
@@ -371,7 +395,7 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 
 			var stale []string
 			for _, field := range fields {
-				if entry, ok := decodeRedisPodField(field); ok && entry.PodIdentifier == podIdentifier {
+				if entry, ok := decodeRedisPodField(field, ""); ok && entry.PodIdentifier == podIdentifier {
 					stale = append(stale, field)
 				}
 			}

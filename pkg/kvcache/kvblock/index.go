@@ -182,6 +182,22 @@ type PodEntry struct {
 	HasGroup bool
 	// GroupIdx identifies the vLLM KV cache group for HMA events.
 	GroupIdx GroupID
+	// RetrievalSpan is how many consecutive canonical request keys form one
+	// engine-retrievable unit for this entry. Index.Add sets it from the
+	// engine→request mapping (1 for independently reusable blocks). Prefix
+	// matching only credits a tier once a full span matches. Zero means 1.
+	// It is a scoring annotation and is ignored by SameIdentity.
+	RetrievalSpan int `json:"retrievalSpan,omitempty"`
+}
+
+// SameIdentity reports whether two entries name the same indexed record,
+// ignoring RetrievalSpan (derived at Add time for scoring).
+func (e PodEntry) SameIdentity(o PodEntry) bool {
+	return e.PodIdentifier == o.PodIdentifier &&
+		e.DeviceTier == o.DeviceTier &&
+		e.Speculative == o.Speculative &&
+		e.HasGroup == o.HasGroup &&
+		e.GroupIdx == o.GroupIdx
 }
 
 // String returns a string representation of the PodEntry.
@@ -193,7 +209,54 @@ func (e *PodEntry) String() string {
 	if e.HasGroup {
 		suffix += fmt.Sprintf("[group=%d]", e.GroupIdx)
 	}
+	if e.RetrievalSpan > 1 {
+		suffix += fmt.Sprintf("[span=%d]", e.RetrievalSpan)
+	}
 	return fmt.Sprintf("%s@%s%s", e.PodIdentifier, e.DeviceTier, suffix)
+}
+
+// requestKeyRetrievalSpans maps each request key to the number of canonical
+// keys covered by its engine block. When engineKeys is nil (speculative),
+// every request key is independently retrievable (span 1).
+func requestKeyRetrievalSpans(engineKeys, requestKeys []BlockHash) map[BlockHash]int {
+	spans := make(map[BlockHash]int, len(requestKeys))
+	if len(requestKeys) == 0 {
+		return spans
+	}
+	if engineKeys == nil {
+		for _, rk := range requestKeys {
+			spans[rk] = 1
+		}
+		return spans
+	}
+	for _, rks := range engineToRequestMapping(engineKeys, requestKeys) {
+		span := len(rks)
+		if span < 1 {
+			span = 1
+		}
+		for _, rk := range rks {
+			spans[rk] = span
+		}
+	}
+	return spans
+}
+
+// withRetrievalSpan returns a copy of entries with RetrievalSpan set when the
+// engine mapping spans multiple canonical keys and the entry does not already
+// carry one. Span 1 is left as zero (matcher treats zero as 1) so existing
+// callers that compare PodEntry values keep working.
+func withRetrievalSpan(entries []PodEntry, span int) []PodEntry {
+	if span <= 1 {
+		return entries
+	}
+	out := make([]PodEntry, len(entries))
+	for i := range entries {
+		out[i] = entries[i]
+		if out[i].RetrievalSpan < 1 {
+			out[i].RetrievalSpan = span
+		}
+	}
+	return out
 }
 
 // engineToRequestMapping computes engine-key → request-key mappings using
