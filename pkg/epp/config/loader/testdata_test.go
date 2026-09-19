@@ -19,11 +19,44 @@ package loader
 
 // --- Valid Configurations ---
 
-// successDeprecatedText represents a fully populated, valid configuration
+// successDeprecatedXK8sText represents a fully populated, valid configuration
 // using the deprecated group name for the Pseudo CRD config structure.
 // It uses a mix of explicit names and type-derived names.
-const successDeprecatedText = `
+const successDeprecatedXK8sText = `
 apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: test1
+  type: test-plugin
+  parameters:
+    threshold: 10
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+  parameters:
+    blockSize: 32
+- name: testPicker
+  type: test-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: test1
+  - pluginRef: test-scorer
+    weight: 50
+  - pluginRef: testPicker
+featureGates:
+- test-feature-gate
+- flowControl
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
+`
+
+// successDeprecatedV1alpha1Text is successDeprecatedXK8sText in the deprecated
+// v1alpha1 version of the current group name. Both load to the same v1
+// configuration.
+const successDeprecatedV1alpha1Text = `
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -55,7 +88,7 @@ flowControl:
 // successConfigText represents a fully populated, valid configuration.
 // It uses a mix of explicit names and type-derived names.
 const successConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -87,7 +120,7 @@ flowControl:
 // pluginsInOrderText represents a valid config with a plugin that is dependent
 // on another plugin. In this case the dependency is before the dependent plugin
 const pluginsInOrderText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -100,7 +133,7 @@ plugins:
 // pluginsOutOfOrderText represents a valid config with a plugin that is dependent
 // on another plugin. In this case the dependent plugin is before the dependency
 const pluginsOutOfOrderText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: test-with-dependencies
@@ -149,7 +182,7 @@ plugins:
 // on another plugin. In this case the dependent plugin is before the dependency and is
 // referenced via a pointer
 const pluginsRefedByPointerText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: test-with-dependencies
@@ -166,7 +199,7 @@ plugins:
 // on another plugin. In this case the dependent plugin is before the dependency and is
 // referenced via a pointer
 const pluginsRefedInNestedingText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: test-with-nested-dependencies
@@ -192,7 +225,7 @@ plugins:
 // successNoProfilesText represents a valid config with plugins but no profiles.
 // The loader should apply the system default profile automatically.
 const successNoProfilesText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -205,7 +238,7 @@ featureGates:
 
 // successSchedulerConfigText represents a complex scheduler setup.
 const successSchedulerConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: testScorer
@@ -238,7 +271,7 @@ featureGates:
 
 // successWithNoWeightText tests that scorers receive the default weight if unspecified.
 const successWithNoWeightText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -255,7 +288,7 @@ schedulingProfiles:
 
 // successWithNoProfileHandlersText tests that a default profile handler is injected.
 const successWithNoProfileHandlersText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -269,7 +302,7 @@ schedulingProfiles:
 // successPickerBeforeScorerText tests the regression case where a Picker appears before a Scorer (without weight) in
 // the plugin list.
 const successPickerBeforeScorerText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: single-profile-handler
@@ -284,7 +317,7 @@ schedulingProfiles:
 
 // successFlowControlConfigText tests that Flow Control configuration is correctly loaded.
 const successFlowControlConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -304,7 +337,7 @@ flowControl:
 // successFlowControlInheritedTTLText covers a config that names only defaultRequestTTL: the no-endpoint budget follows
 // it, so disabling the TTL is not silently narrowed to the regime where the pool has endpoints.
 const successFlowControlInheritedTTLText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -320,7 +353,7 @@ flowControl:
 `
 
 const successflowControlConfigDisabledText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -337,7 +370,7 @@ flowControl:
 // successFlowControlConfigNoGatesText carries flowControl settings with no featureGates stanza, so
 // the section is ignored under the gate's disabled default.
 const successFlowControlConfigNoGatesText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -353,7 +386,7 @@ flowControl:
 // successFlowControlDisabledNoSectionText is the plain legacy-path config: an explicit opt-out with
 // nothing for the loader to report as ignored.
 const successFlowControlDisabledNoSectionText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -368,7 +401,7 @@ featureGates: ["flowControl=false"]
 // successFlowControlDisabledSaturationDetectorText pairs an explicit opt-out with a saturation
 // detector, which the legacy admission path honors and so must not be reported as ignored.
 const successFlowControlDisabledSaturationDetectorText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -385,7 +418,7 @@ flowControl:
 
 // successComplexFlowControlConfigText tests that Flow Control configuration with custom plugins is correctly loaded.
 const successComplexFlowControlConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -413,7 +446,7 @@ flowControl:
 
 // successParserConfigText tests that configuration with parser plugin is correctly loaded.
 const successParserConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -430,7 +463,7 @@ requestHandler:
 
 // successWithNoParserConfigText tests that a default openaiParser is injected when no parser is configured.
 const successWithNoParserConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -443,7 +476,7 @@ schedulingProfiles:
 
 // successParserWithNameConfigText tests that configuration with parser plugin with custom name is correctly loaded.
 const successParserWithNameConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -461,7 +494,7 @@ requestHandler:
 
 // successMultipleParsersConfigText tests that multiple parser plugins are correctly loaded.
 const successMultipleParsersConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -482,7 +515,7 @@ requestHandler:
 // successExplicitPassthroughConfigText configures a fallback explicitly under a
 // custom name, alongside a claimed-path parser.
 const successExplicitPassthroughConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -504,7 +537,7 @@ requestHandler:
 // The loader should auto-populate default datalayer plugins.
 // successDataLayerAutoDefaultText has NO featureGates — datalayer is enabled by default.
 const successDataLayerAutoDefaultText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -518,7 +551,7 @@ schedulingProfiles:
 // successDataLayerNoSourcesText has an explicit empty dataLayer section with no sources.
 // The loader should additively inject the default metrics source because InjectDefaults is unset (default: true).
 const successDataLayerNoSourcesText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -532,7 +565,7 @@ dataLayer: {}
 
 // successDataLayerOptOutText has dataLayer with injectDefaults: false, disabling automatic injection.
 const successDataLayerOptOutText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -548,7 +581,7 @@ dataLayer:
 // successDataLayerExplicitConfigText has the datalayer enabled with an explicit non-metrics source.
 // The loader should inject the default metrics source in addition to the user's source (additive).
 const successDataLayerExplicitConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -572,7 +605,7 @@ dataLayer:
 
 // errorBadYamlText contains invalid YAML syntax.
 const errorBadYamlText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - testing 1 2 3
@@ -580,7 +613,7 @@ plugins:
 
 // errorBadPluginReferenceText is missing the required 'type' field.
 const errorBadPluginReferenceText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - parameters:
@@ -589,7 +622,7 @@ plugins:
 
 // errorBadPluginReferencePluginText references a plugin type that does not exist in the registry.
 const errorBadPluginReferencePluginText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: testx
@@ -600,7 +633,7 @@ plugins:
 
 // errorBadPluginJSONText has invalid JSON in parameters (string where int expected).
 const errorBadPluginJSONText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -618,7 +651,7 @@ schedulingProfiles:
 
 // errorUnknownFeatureGateText includes a feature gate not defined in the code.
 const errorUnknownFeatureGateText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -631,7 +664,7 @@ featureGates:
 
 // errorBadFeatureGateText includes a feature gate with an invalid value
 const errorBadFeatureGateText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -646,7 +679,7 @@ featureGates:
 
 // errorNoProfileNameText is missing the required profile name.
 const errorNoProfileNameText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -662,7 +695,7 @@ schedulingProfiles:
 
 // errorBadProfilePluginText is missing the required pluginRef.
 const errorBadProfilePluginText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -675,7 +708,7 @@ schedulingProfiles:
 
 // errorBadProfilePluginRefText references a plugin name that wasn't defined.
 const errorBadProfilePluginRefText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -688,7 +721,7 @@ schedulingProfiles:
 
 // errorDuplicatePluginText defines the same plugin name twice.
 const errorDuplicatePluginText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -709,7 +742,7 @@ schedulingProfiles:
 
 // errorDuplicateProfileText defines the same profile name twice.
 const errorDuplicateProfileText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -733,7 +766,7 @@ schedulingProfiles:
 
 // errorTwoPickersText defines multiple pickers in a single profile (invalid).
 const errorTwoPickersText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -751,7 +784,7 @@ schedulingProfiles:
 
 // errorTwoProfileHandlersText defines multiple profile handlers (global singleton).
 const errorTwoProfileHandlersText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -768,7 +801,7 @@ schedulingProfiles:
 
 // errorNoProfileHandlersText fails to define any profile handler.
 const errorNoProfileHandlersText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -784,7 +817,7 @@ schedulingProfiles:
 
 // errorMultiProfilesUseSingleProfileHandlerText uses SingleProfileHandler with multiple profiles.
 const errorMultiProfilesUseSingleProfileHandlerText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: profileHandler
@@ -802,7 +835,7 @@ schedulingProfiles:
 
 // errorPluginsRefedInLoopText has a cycle in the plugin dependencies and should fail due to cycle detection
 const errorPluginsRefedInLoopText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: test-with-dependencies
@@ -819,7 +852,7 @@ plugins:
 
 // errorBadSourceReferenceText has a bad DataSource plugin reference
 const errorBadSourceReferenceText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -840,7 +873,7 @@ featureGates:
 
 // errorBadExtractorReferenceText has a bad Extractor plugin reference
 const errorBadExtractorReferenceText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: test1
@@ -864,7 +897,7 @@ featureGates:
 
 // errorFlowControlMissingPluginText references a policy that does not exist.
 const errorFlowControlMissingPluginText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -883,7 +916,7 @@ flowControl:
 
 // errorFlowControlWrongPluginTypeText references a plugin of the wrong type (Scorer instead of Policy).
 const errorFlowControlWrongPluginTypeText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -906,7 +939,7 @@ flowControl:
 
 // errorParserWrongPluginTypeText references a plugin of the wrong type (Scorer instead of Parser).
 const errorParserWrongPluginTypeText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -924,7 +957,7 @@ requestHandler:
 
 // errorParserWrongPluginNameText references a plugin of the wrong name.
 const errorParserWrongPluginNameText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -944,7 +977,7 @@ requestHandler:
 // Used to verify that the full YAML→config→profile pipeline preserves
 // plugin declaration order.
 const successFilterOrderConfigText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: filter-A
@@ -995,7 +1028,7 @@ dataLayer:
 
 // errorRemovedTopLevelSaturationDetectorText tests that the removed top-level saturationDetector field is rejected.
 const errorRemovedTopLevelSaturationDetectorText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -1012,7 +1045,7 @@ saturationDetector:
 
 // errorRemovedTopLevelParserText tests that the removed top-level parser field is rejected.
 const errorRemovedTopLevelParserText = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore

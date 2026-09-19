@@ -4,7 +4,7 @@
 # highest-priority band is never gated, and progressively lower-priority
 # bands are gated first as pool saturation rises. Gated items remain in
 # their queues; the ceiling controls dispatch, not admission.
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl

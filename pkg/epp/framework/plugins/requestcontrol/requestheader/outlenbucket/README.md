@@ -71,7 +71,7 @@ output length and only adds noise.
 runner discovers it as a `RequestHeaderProcessor` and wires it in. No parameters.
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: outlen-bucket

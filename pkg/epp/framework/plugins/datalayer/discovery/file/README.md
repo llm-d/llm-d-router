@@ -50,7 +50,7 @@ endpoints:
 
 ## Configuration
 
-**Location:** `dataLayer.discovery.pluginRef` referencing a plugin entry of
+**Location:** `dataLayer.discovery.endpoints.pluginRef` referencing a plugin entry of
 type `file-discovery` in `plugins`.
 **Enabled by default:** No.
 
