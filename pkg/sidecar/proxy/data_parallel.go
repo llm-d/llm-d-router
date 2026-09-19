@@ -91,6 +91,9 @@ func (s *Server) startDataParallel(ctx context.Context, grp *errgroup.Group) err
 		clone.config.Port = rankPort
 		clone.config.DecoderURL = decoderURL
 		clone.forwardDataParallel = false
+		if idx < len(s.DataParallelListeners) {
+			clone.HTTPListener = s.DataParallelListeners[idx]
+		}
 
 		grp.Go(func() error {
 			clone.logger = log.FromContext(ctx).WithName("proxy server on port " + rankPort)
