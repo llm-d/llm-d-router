@@ -26,8 +26,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 // Keep metrics neutral so attribute weight is the only scoring signal.
@@ -84,18 +84,18 @@ type gpuPod struct {
 	region string
 }
 
-func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
-	h.t.Helper()
+func withGPUPods(t *testing.T, h *TestHarness, pods []gpuPod) *TestHarness {
+	t.Helper()
 
 	metricsMap := make(map[types.NamespacedName]*fwkdl.Metrics, len(pods))
 	for _, p := range pods {
 		key := types.NamespacedName{Namespace: h.Namespace, Name: fmt.Sprintf("pod-%d-rank-0", p.index)}
 		metricsMap[key] = fwkdl.NewMetrics()
 	}
-	h.metricsBackend.SetPodMetrics(metricsMap)
+	h.SetPodMetrics(metricsMap)
 
 	for _, p := range pods {
-		labels := map[string]string{"app": testPoolName}
+		labels := map[string]string{"app": TestPoolName}
 		if p.label != "" {
 			labels["nvidia.com/gpu.product"] = p.label
 		}
@@ -103,7 +103,7 @@ func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
 			labels["topology.kubernetes.io/region"] = p.region
 		}
 
-		pod := testutil.MakePod(fmt.Sprintf("pod-%d", p.index)).
+		pod := fwkk8s.MakePod(fmt.Sprintf("pod-%d", p.index)).
 			Namespace(h.Namespace).
 			ReadyCondition().
 			Labels(labels).
@@ -112,9 +112,9 @@ func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
 			ObjRef()
 
 		intendedStatus := pod.Status
-		require.NoError(h.t, k8sClient.Create(h.ctx, pod), "failed to create pod pod-%d", p.index)
+		require.NoError(t, K8sClient().Create(t.Context(), pod), "failed to create pod pod-%d", p.index)
 		pod.Status = intendedStatus
-		require.NoError(h.t, k8sClient.Status().Update(h.ctx, pod), "failed to update status for pod pod-%d", p.index)
+		require.NoError(t, K8sClient().Status().Update(t.Context(), pod), "failed to update status for pod pod-%d", p.index)
 	}
 	return h
 }
@@ -134,14 +134,14 @@ func TestAttributeWeightScorer(t *testing.T) {
 		{index: 6, label: "NVIDIA-H100", region: "unknown"},
 		{index: 7, label: "NVIDIA-A10", region: "region-1"},
 	}
-	withGPUPods(h, pods).WaitForSync(len(pods), modelMyModel)
+	withGPUPods(t, h, pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
-	requests := integration.ReqRaw(
+	requests := fwkepp.ReqRaw(
 		map[string]string{"hi": "mom", reqcommon.RequestIDHeaderKey: "test-request-id"},
 		"passthrough-body",
 	)
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 2)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
 	require.NoError(t, err)
 	require.Len(t, responses, 2)
 
