@@ -65,6 +65,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
+	attrinterturn "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/interturn"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -99,6 +100,7 @@ import (
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/burstprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/interturnlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/latencyobserver"
 	mmproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/multimodal"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
@@ -106,6 +108,7 @@ import (
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/kvcacheretention"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
@@ -660,6 +663,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, fwkplugin.StabilityBeta, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, fwkplugin.StabilityBeta, sessionid.Factory, attrsession.SessionIDDataKey)
 	fwkplugin.RegisterAsDefaultProducer(latencyobserver.LatencyObserverProducerType, fwkplugin.StabilityAlpha, latencyobserver.LatencyObserverFactory, attrlatency.TTFTPercentilesDataKey)
+	fwkplugin.RegisterAsDefaultProducer(interturnlatency.InterTurnLatencyProducerType, fwkplugin.StabilityAlpha, interturnlatency.Factory, attrinterturn.InterTurnPredictionDataKey)
 
 	// Latency predictor plugins
 	// Beta
@@ -720,6 +724,10 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
+
+	// register KV-cache retention plugins
+	// Alpha
+	fwkplugin.Register(kvcacheretention.PluginType, fwkplugin.StabilityAlpha, kvcacheretention.Factory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
