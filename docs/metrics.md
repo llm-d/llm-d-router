@@ -220,6 +220,7 @@ This plugin records the routing decision for each request.
     *   `model_name`: the target model name, or "unknown" if empty
     *   `decision_type`: one of
         *   `decode-only` - decode-only path (no disaggregation)
+        *   `aggregated-fallback` - complete request routed through the configured [experimental aggregated P/D fallback profile](../pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md#experimental-aggregated-pd-fallback)
         *   `prefill-decode` - split into prefill and decode stages (P/D or EP/D)
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
