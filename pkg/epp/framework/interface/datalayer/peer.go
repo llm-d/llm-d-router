@@ -74,9 +74,10 @@ type PeerDiscovery interface {
 	// error occurs. The caller invokes Start in a dedicated goroutine.
 	Start(ctx context.Context, notifier PeerNotifier) error
 
-	// Ready returns a channel that is closed once after the plugin has
-	// completed its initial reconciliation with the underlying source.
-	// Callers use it to gate components that depend on a populated peer set.
+	// Ready returns a channel that is closed once discovery is delivering
+	// peers. The peer set may be incomplete when Ready closes and changes over
+	// time as replicas come and go, so consumers must tolerate a partial set.
+	// A missing peer degrades sync accuracy; it does not block serving.
 	Ready() <-chan struct{}
 }
 

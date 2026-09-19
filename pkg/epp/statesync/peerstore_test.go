@@ -97,10 +97,10 @@ func (d *fakePeerDiscovery) Start(ctx context.Context, notifier fwkdl.PeerNotifi
 	return nil
 }
 
-// TestPeerDiscoveryFullStack exercises the full PeerDiscovery -> PeerNotifier
+// TestPeerDiscoveryFullWiring exercises the full PeerDiscovery -> PeerNotifier
 // -> MemoryPeerStore pipeline with a fake plugin, verifying that peers flow
 // through to the real store.
-func TestPeerDiscoveryFullStack(t *testing.T) {
+func TestPeerDiscoveryFullWiring(t *testing.T) {
 	store := NewMemoryPeerStore()
 	disc := &fakePeerDiscovery{
 		typedName: fwkplugin.TypedName{Type: "fake-peer-discovery", Name: "test"},
