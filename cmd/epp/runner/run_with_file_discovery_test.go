@@ -213,13 +213,13 @@ dataLayer:
 	}
 }
 
-func freeTCPPort(t *testing.T) int {
+func freeTCPPort(t *testing.T) uint16 {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	port := l.Addr().(*net.TCPAddr).Port
 	require.NoError(t, l.Close())
-	return port
+	return uint16(port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
 }
 
 func checkHealthServing(addr string) bool {

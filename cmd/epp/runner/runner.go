@@ -189,7 +189,7 @@ type Runner struct {
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
 	healthGRPCServer *grpc.Server
-	healthGRPCPort   int
+	healthGRPCPort   uint16
 	draining         *atomic.Bool
 }
 
@@ -1205,7 +1205,7 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {

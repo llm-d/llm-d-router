@@ -51,7 +51,7 @@ import (
 
 // ExtProcServerRunner provides methods to manage an external process server.
 type ExtProcServerRunner struct {
-	GrpcPort int
+	GrpcPort uint16
 	// GrpcListener is an optional pre-bound listener for the ext_proc server.
 	// When set, GrpcPort is ignored. Reserving the port in advance of this
 	// runnable starting closes the window in which another process can take a

@@ -93,12 +93,12 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	}
 
 	// IsZero cannot see two fields wired to each other's source, so pin every field that
-	// shares its type with another one: the three ints, the two durations, and each
-	// dependency. The bools cannot be told apart by value and are covered by
+	// shares its type with another one: the two ints, the two uint16s, the two durations,
+	// and each dependency. The bools cannot be told apart by value and are covered by
 	// TestNewExtProcServerRunnerMapsEachBoolOption below.
 	require.Equal(t, 4<<20, r.GRPCMaxRecvMsgSize)
 	require.Equal(t, 5<<20, r.GRPCMaxSendMsgSize)
-	require.Equal(t, 19002, r.GrpcPort)
+	require.Equal(t, uint16(19002), r.GrpcPort)
 	require.Equal(t, uint16(tls.VersionTLS13), r.TLSMinVersion)
 	require.Equal(t, 7*time.Second, r.RefreshPrometheusMetricsInterval)
 	require.Equal(t, 11*time.Second, r.MetricsStalenessThreshold)
