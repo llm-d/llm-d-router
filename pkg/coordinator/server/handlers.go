@@ -141,6 +141,16 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 
+	if r.URL.Path == reqcommon.PathResponses {
+		// Stateful Responses fields have no cross-pod story in this
+		// disaggregated deployment and are expected to be resolved
+		// upstream of the router; clearing them here is routine, not an
+		// anomaly, so it logs at DEBUG rather than once-per-request DEFAULT.
+		if changed := reqcommon.DropStatefulResponsesFields(parsed); len(changed) > 0 {
+			logger.V(logutil.DEBUG).Info("clearing unsupported responses fields", "fields", changed)
+		}
+	}
+
 	if requestIDReplaced && clientRequestID != "" {
 		// Log the rejected length, never the raw value, to avoid reflecting
 		// attacker-controlled content into the log.

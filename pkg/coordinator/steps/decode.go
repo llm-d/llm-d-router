@@ -102,7 +102,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
@@ -123,19 +123,38 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	}
 }
 
+// injectUUIDs stamps image parts with their multimodal hash, walking whichever
+// body field reqcommon.DetectAPIType's result implies (see its doc comment for
+// why the field is chosen by path rather than by presence).
+//
+// The switch below keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
+// reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
+// the client sent. resolveFormat's answer instead reflects the encode/prefill
+// wire-format setting, which can differ from the client's own shape.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries)
+		}
 	}
+}
 
+// injectImagePartUUIDs walks items (chat-completions messages or a Responses
+// input array) for content parts of partType and stamps each with the hash of
+// its corresponding multimodal entry, in order.
+func injectImagePartUUIDs(items []any, partType string, entries []pipeline.MultimodalEntry) {
 	hashIdx := 0
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
+		content, ok := itemMap["content"].([]any)
 		if !ok {
 			continue
 		}
@@ -144,11 +163,11 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" {
+			if partMap["type"] != partType {
 				continue
 			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
+			if hashIdx < len(entries) {
+				partMap["uuid"] = entries[hashIdx].Hash
 				hashIdx++
 			}
 		}

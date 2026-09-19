@@ -149,6 +149,44 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	}
 }
 
+func TestRenderStep_Responses_CallsRender(t *testing.T) {
+	var called bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.URL.Path != reqcommon.PathResponses+"/render" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 2345, 6789},
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{ModalityImage: {}},
+				"mm_placeholders": map[string][]any{ModalityImage: {}},
+				"kwargs_data":     map[string][]string{ModalityImage: {}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathResponses,
+		Body:         map[string]any{"model": "test", "input": "describe this"},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !called {
+		t.Fatal("render should be called for a responses request")
+	}
+	if len(reqCtx.TokenIDs) != 3 {
+		t.Fatalf("expected 3 token_ids, got %d", len(reqCtx.TokenIDs))
+	}
+}
+
 func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("render service should not be called for token array prompt")
@@ -184,7 +222,6 @@ func TestRenderStep_OtherAPIs_SkipRender(t *testing.T) {
 		path string
 		body map[string]any
 	}{
-		{name: "responses", path: reqcommon.PathResponses, body: map[string]any{"model": "test", "input": "hello"}},
 		{name: "messages", path: reqcommon.PathMessages, body: map[string]any{"model": "test", "max_tokens": 10}},
 	}
 	for _, tt := range tests {

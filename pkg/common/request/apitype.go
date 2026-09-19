@@ -84,6 +84,12 @@ func (a APIType) Path() string {
 // DetectAPIType classifies a request path. An unrecognized path maps to
 // APITypeChatCompletions: callers that route only known paths never reach the
 // fallback.
+//
+// A caller that walks a request body for a format-specific field (e.g.
+// "messages" for chat completions, "input" for responses) must gate on the
+// path returned here. A client could send a chat-completions request
+// carrying a stray "input" field, and presence-based sniffing would process
+// the wrong one.
 func DetectAPIType(path string) APIType {
 	switch {
 	case strings.Contains(path, PathChatCompletions):
