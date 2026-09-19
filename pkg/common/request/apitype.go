@@ -45,10 +45,10 @@ const (
 	APITypeResponses
 	// APITypeVLLMGenerate is vLLM's token-in generate API (/inference/v1/generate).
 	APITypeVLLMGenerate
-	// APITypeMessages is the Anthropic Messages API (/v1/messages).
-	APITypeMessages
 	// APITypeSGLangGenerate is SGLang's native generation API (/generate).
 	APITypeSGLangGenerate
+	// APITypeMessages is the Anthropic Messages API (/v1/messages).
+	APITypeMessages
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
