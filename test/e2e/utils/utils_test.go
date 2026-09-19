@@ -19,8 +19,13 @@ package utils
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -168,5 +173,51 @@ func TestCleanupWaitsForPods(t *testing.T) {
 	}
 	if deleted, err := resources.Deleted(ctx); !deleted || err != nil {
 		t.Fatalf("cleanup did not finish after router Pod deletion: %t, %v", deleted, err)
+	}
+}
+
+func TestGetMetricsReturnsBoilerplateHTTP200(t *testing.T) {
+	const boilerplate = "controller_runtime_active_workers 0\ncertwatcher_read_errors_total 0\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(boilerplate))
+	}))
+	t.Cleanup(srv.Close)
+
+	joined := strings.Join(GetMetrics(srv.URL), "\n")
+	if !strings.Contains(joined, "certwatcher_read_errors_total") || strings.Contains(joined, "llm_d_epp_info") {
+		t.Fatalf("GetMetrics must return the first HTTP 200 body: %q", joined)
+	}
+}
+
+func TestCallerRetriesUntilEPPRegistry(t *testing.T) {
+	const boilerplate = "controller_runtime_active_workers 0\ncertwatcher_read_errors_total 0\n"
+	const ready = "controller_runtime_active_workers 0\nllm_d_epp_info{commit=\"test\"} 1\n"
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		body := boilerplate
+		if hits.Add(1) > 1 {
+			body = ready
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var joined string
+	for {
+		joined = strings.Join(GetMetrics(srv.URL), "\n")
+		if strings.Contains(joined, "llm_d_epp_info") && !strings.Contains(joined, "certwatcher_read_errors_total") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("did not see llm_d_epp_info without certwatcher boilerplate: %q", joined)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hits.Load() < 2 {
+		t.Fatalf("assertion succeeded after %d scrapes; caller retry must pass the first 200 OK", hits.Load())
 	}
 }
