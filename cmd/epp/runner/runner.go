@@ -76,10 +76,12 @@ import (
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	exttopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/topology"
+	extractorzmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/zmqmetrics"
 	srcdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/dcgm"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	sourcezmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/zmqmetrics"
 	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -686,6 +688,9 @@ func (r *Runner) registerInTreePlugins() {
 	// multicluster variants: a pool-aggregate metrics source and extractor
 	fwkplugin.Register(sourcemetrics.MultiClusterMetricsDataSourceType, fwkplugin.StabilityAlpha, sourcemetrics.MultiClusterMetricsDataSourceFactory)
 	fwkplugin.Register(extractormetrics.MultiClusterMetricsExtractorType, fwkplugin.StabilityAlpha, extractormetrics.MultiClusterMetricsExtractorFactory)
+	// Alpha
+	fwkplugin.Register(sourcezmq.ZMQDataSourceType, fwkplugin.StabilityAlpha, sourcezmq.ZMQDataSourceFactory)
+	fwkplugin.Register(extractorzmq.ZMQExtractorType, fwkplugin.StabilityAlpha, extractorzmq.ZMQExtractorFactory)
 
 	// register datalayer notification source plugins
 	// Beta

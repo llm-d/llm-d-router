@@ -29,6 +29,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	sourcezmq "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/zmqmetrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -158,6 +159,24 @@ func TestEnsureDataLayer(t *testing.T) {
 		require.Equal(t, "metricsSource", cfg.DataLayer.Sources[0].PluginRef)
 		require.Len(t, cfg.DataLayer.Sources[0].Extractors, 1, "no duplicate metrics extractor")
 		require.Equal(t, "customMetricsExtractor", cfg.DataLayer.Sources[0].Extractors[0].PluginRef)
+	})
+
+	t.Run("existing zmq-metrics-data-source suppresses default metrics-data-source injection", func(t *testing.T) {
+		cfg := &configapi.EndpointPickerConfig{
+			DataLayer: &configapi.DataLayerConfig{
+				Sources: []configapi.DataLayerSource{
+					{PluginRef: "zmq-metrics-data-source"},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+		handle.AddPlugin("zmq-metrics-data-source", &mockPlugin{t: fwkplugin.TypedName{Type: sourcezmq.ZMQDataSourceType, Name: "zmq-metrics-data-source"}})
+
+		err := ensureDataLayer(cfg, handle, handle.GetAllPluginsWithNames())
+
+		require.NoError(t, err)
+		require.Len(t, cfg.DataLayer.Sources, 1)
+		require.Equal(t, "zmq-metrics-data-source", cfg.DataLayer.Sources[0].PluginRef)
 	})
 
 	t.Run("injectDefaults: false suppresses injection", func(t *testing.T) {
