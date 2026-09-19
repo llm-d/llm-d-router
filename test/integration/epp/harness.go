@@ -57,7 +57,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	"github.com/llm-d/llm-d-router/test/integration"
 )
@@ -376,7 +376,7 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	for _, p := range pods {
 		name := fmt.Sprintf("pod-%d", p.index)
 
-		pod := testutil.MakePod(name).
+		pod := fwkk8s.MakePod(name).
 			Namespace(h.Namespace).
 			ReadyCondition(). // Sets Status.Conditions.
 			Labels(map[string]string{"app": testPoolName}).
