@@ -394,7 +394,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 					"role": "user",
 					"content": []any{
 						map[string]any{"type": "text", "text": "describe"},
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": imageURLPartType, imageURLField: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},
@@ -678,7 +678,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 				map[string]any{
 					"role": "user",
 					"content": []any{
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": imageURLPartType, imageURLField: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},

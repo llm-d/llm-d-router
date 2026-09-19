@@ -122,8 +122,7 @@ type RequestContext struct {
 	OriginalPath       string
 	OriginalHeaders    http.Header
 	// OriginalBody is the exact bytes the client sent, captured before Body's
-	// stripping (e.g. reqcommon.DropStatefulResponsesFields): it still
-	// carries any fields Body no longer does.
+	// stripping.
 	OriginalBody []byte
 	Body         map[string]any
 	Model        string
