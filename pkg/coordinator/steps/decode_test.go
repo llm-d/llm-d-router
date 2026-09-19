@@ -204,7 +204,7 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false, ParamKVConnector: kv.NIXL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +250,48 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 	}
 	if kvParams["do_remote_prefill"] != true {
 		t.Errorf("kv_transfer_params.do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+	}
+}
+
+// TestDecodeStep_ResponsesFormat_SameAsChatCompletions verifies that a
+// /v1/responses request gets the same top-level kv_transfer_params injection
+// as /v1/chat/completions, since both are OpenAI-shaped bodies forwarded
+// unchanged to the client's original path.
+func TestDecodeStep_ResponsesFormat_SameAsChatCompletions(t *testing.T) {
+	var parsed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{{"content": "ok"}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-responses",
+		OriginalPath:     reqcommon.PathResponses,
+		Model:            "test-model",
+		KVTransferParams: map[string]any{"block_id": "block-resp-1"},
+		Body:             map[string]any{"model": "test-model", "input": "hi"},
+		ResponseWriter:   recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatal("expected top-level kv_transfer_params for the responses path")
+	}
+	if kvParams["block_id"] != "block-resp-1" {
+		t.Errorf("kv_transfer_params.block_id = %v, want block-resp-1", kvParams["block_id"])
 	}
 }
 

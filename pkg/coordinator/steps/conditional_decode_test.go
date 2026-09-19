@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
@@ -113,8 +114,10 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	}
 }
 
-// Generate and Responses both resolve to the generate format, whose body is
-// forwarded without a tokens or prompt rewrite.
+// Generate forwards the body as-is because it already carries token_ids;
+// Responses forwards it as-is because it is an OpenAI-shaped body (grouped
+// with chat-completions in prepareBody). Both land on the same assertions
+// here even though they take different switch cases.
 func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 	for _, path := range []string{reqcommon.PathVLLMGenerate, reqcommon.PathResponses} {
 		t.Run(path, func(t *testing.T) {
@@ -157,16 +160,28 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 	}
 }
 
-func TestConditionalDecodeStep_UnsupportedFormat(t *testing.T) {
+// TestConditionalDecodeStep_MessagesFormat_PassesBodyThroughUnchanged verifies
+// that a request path detecting as APITypeMessages falls into prepareBody's
+// default case without mutating the body: the coordinator never registers a
+// /v1/messages route (see server.go), so this is a routing bug rather than a
+// client error, and prepareBody only logs it rather than failing the request.
+// format is derived from reqCtx.OriginalPath via reqcommon.DetectAPIType, which
+// only ever returns one of its five named constants, so APITypeMessages (via
+// reqcommon.PathMessages) is the only way to reach this default case; an
+// arbitrary unknown APIType value is no longer constructible from a path.
+func TestConditionalDecodeStep_MessagesFormat_PassesBodyThroughUnchanged(t *testing.T) {
 	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	body := map[string]any{"model": testModelName}
-	err = step.(*ConditionalDecodeStep).prepareBody(&pipeline.RequestContext{TokenIDs: []int{1}}, body, reqcommon.APIType(99))
-	if want := "conditional-decode: unsupported request format APIType(99)"; err == nil || err.Error() != want {
-		t.Fatalf("expected error %q, got %v", want, err)
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body:         map[string]any{"model": testModelName},
+	}
+	body := step.(*ConditionalDecodeStep).prepareBody(reqCtx, logr.Discard())
+	if body["model"] != testModelName {
+		t.Fatalf("expected body to pass through unchanged, got %v", body)
 	}
 }
 

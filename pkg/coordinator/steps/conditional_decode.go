@@ -19,12 +19,12 @@ package steps
 import (
 	"context"
 	"errors"
-	"fmt"
 	"maps"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -40,19 +40,14 @@ func init() {
 }
 
 type ConditionalDecodeStep struct {
-	useOpenAIFormat bool
-	gwClient        *gateway.Client
+	gwClient *gateway.Client
 }
 
-func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
+func NewConditionalDecodeStep(gwClient *gateway.Client, _ map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("conditional-decode: gateway client is required")
 	}
-	useOpenAI, err := parseUseOpenAIFormat(params)
-	if err != nil {
-		return nil, err
-	}
-	return &ConditionalDecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient}, nil
+	return &ConditionalDecodeStep{gwClient: gwClient}, nil
 }
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
@@ -60,14 +55,11 @@ func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
-	body := maps.Clone(reqCtx.Body)
-	if err := s.prepareBody(reqCtx, body, resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)); err != nil {
-		return err
-	}
+	body := s.prepareBody(reqCtx, logger)
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, map[string]string{"Prefer": "if-available"})
+	proxyReq, err := newDecodeProxyRequest(ctx, reqCtx, ConditionalDecodeStepName, s.gwClient, body, map[string]string{"Prefer": "if-available"}, logger)
 	if err != nil {
 		return err
 	}
@@ -107,10 +99,13 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
-func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any, format reqcommon.APIType) error {
+func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, logger logr.Logger) map[string]any {
+	body := maps.Clone(reqCtx.Body)
+	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		// The client's chat-completions body is forwarded as-is.
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		// The client's body is forwarded as-is.
 	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
@@ -118,8 +113,10 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, bod
 	case reqcommon.APITypeVLLMGenerate:
 		// The client's generate body already carries token_ids.
 	default:
-		// resolveFormat only ever yields the three formats above.
-		return fmt.Errorf("conditional-decode: unsupported request format %v", format)
+		// The coordinator registers only supported formats;
+		// this would be a routing bug, not a client error.
+		logger.Error(
+			unreachableFormatError(format), "conditional-decode: unreachable request format", "path", reqCtx.OriginalPath)
 	}
-	return nil
+	return body
 }
