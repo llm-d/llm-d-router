@@ -150,27 +150,15 @@
             {{- toYaml .Values.router.epp.extraContainerPorts | nindent 12 }}
         {{- end }}
           livenessProbe:
-          {{- if gt (.Values.router.epp.replicas | int) 1 }}
             grpc:
               port: {{ $grpcHealthPort }}
               service: liveness
-          {{- else }}
-            grpc:
-              port: {{ $grpcHealthPort }}
-              service: inference-extension
-          {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-          {{- if gt (.Values.router.epp.replicas | int) 1 }}
             grpc:
               port: {{ $grpcHealthPort }}
               service: readiness
-          {{- else }}
-            grpc:
-              port: {{ $grpcHealthPort }}
-              service: inference-extension
-          {{- end }}
             periodSeconds: 2
           # Allow in-flight gRPC streams to drain and give Envoy health checks
           # time to detect termination and shift traffic to standby endpoints before SIGTERM.
