@@ -103,7 +103,7 @@ func TestServe_PlainHTTPWhenNotSecure(t *testing.T) {
 }
 
 func TestServe_SelfSignedTLSWithoutCertPath(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true})
+	addr := serve(t, config.ServerConfig{SecureServing: true})
 
 	client := &http.Client{
 		Timeout:   5 * time.Second,
@@ -127,7 +127,7 @@ func TestServe_TLSServesCertFromCertPath(t *testing.T) {
 	certDir := t.TempDir()
 	want := writeSelfSignedCert(t, certDir)
 
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true, CertPath: certDir})
+	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: certDir})
 
 	require.Equal(t, want, servedCert(t, addr), "listener served a certificate other than the one in cert-path")
 }
@@ -136,7 +136,7 @@ func TestServe_TLSReloadsRotatedCert(t *testing.T) {
 	certDir := t.TempDir()
 	first := writeSelfSignedCert(t, certDir)
 
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true, CertPath: certDir})
+	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: certDir})
 	require.Equal(t, first, servedCert(t, addr))
 
 	second := writeSelfSignedCert(t, certDir)
@@ -161,7 +161,7 @@ func servedCert(t *testing.T, addr string) []byte {
 }
 
 func TestServe_TLSMinVersionRejectsOlderClient(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true, TLSMinVersion: "VersionTLS13"})
+	addr := serve(t, config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS13"})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test
@@ -177,11 +177,11 @@ func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
 	}{
 		{
 			name: "unknown TLS version",
-			cfg:  config.ServerConfig{SecureCoordinator: true, TLSMinVersion: "VersionTLS99"},
+			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS99"},
 		},
 		{
 			name: "unknown cipher suite",
-			cfg:  config.ServerConfig{SecureCoordinator: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
+			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
 		},
 	}
 	for _, tt := range tests {
@@ -200,7 +200,7 @@ func TestParseTLSProfile_EmptyUsesTLS12(t *testing.T) {
 }
 
 func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true})
+	addr := serve(t, config.ServerConfig{SecureServing: true})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test

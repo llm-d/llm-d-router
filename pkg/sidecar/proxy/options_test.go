@@ -56,7 +56,7 @@ enable-tls:
 - decoder
 tls-insecure-skip-verify:
 - prefiller
-secure-proxy: false
+secure-serving: false
 cert-path: "/etc/certificates-file"
 inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
@@ -99,7 +99,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		enable-p2p-pull: true,
 		enable-tls: ['prefiller', 'decoder'],
 		tls-insecure-skip-verify: ['decoder'],
-		secure-proxy: false,
+		secure-serving: false,
 		cert-path: '/etc/certificates-inline',
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
@@ -423,6 +423,44 @@ func TestSidecarConfiguration(t *testing.T) {
 			compareOptions(t, expected, opts)
 		})
 	}
+}
+
+func TestSecureServingFlag(t *testing.T) {
+	_, fs := newTestOptions(t)
+
+	require.NotNil(t, fs.Lookup(secureServing))
+	require.NotNil(t, fs.Lookup(secureProxy))
+	require.Equal(t, "use --secure-serving instead", fs.Lookup(secureProxy).Deprecated)
+}
+
+func TestDeprecatedSecureProxyFlag(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	setFlag(t, fs, secureProxy, false)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
+}
+
+func TestDeprecatedSecureProxyYAML(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	yaml := "{secure-proxy: false}"
+	setFlag(t, fs, inlineConfiguration, &yaml)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
+}
+
+func TestSecureServingFlagBeatsYAML(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	yaml := "{secure-serving: true}"
+	setFlag(t, fs, inlineConfiguration, &yaml)
+	setFlag(t, fs, secureProxy, false)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
 }
 
 func newTestOptions(t *testing.T) (*Options, *pflag.FlagSet) {

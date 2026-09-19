@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
@@ -78,16 +80,16 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if s.config.SecureServing {
 		var tempCert tls.Certificate
 		if s.config.CertPath != "" {
-			certFile := s.config.CertPath + "/tls.crt"
-			keyFile := s.config.CertPath + "/tls.key"
+			certFile := filepath.Join(s.config.CertPath, "tls.crt")
+			keyFile := filepath.Join(s.config.CertPath, "tls.key")
 			tempCert, err = tls.LoadX509KeyPair(certFile, keyFile)
 			if err != nil {
-				return fmt.Errorf("failed to load TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+				return fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 			}
 		} else {
-			tempCert, err = CreateSelfSignedTLSCertificate()
+			tempCert, err = tlsutil.CreateSelfSignedTLSCertificate(s.logger)
 			if err != nil {
-				return fmt.Errorf("failed to generate self-signed TLS certificate: %w", err)
+				return fmt.Errorf("create self-signed certificate: %w", err)
 			}
 		}
 		cert = &tempCert
@@ -100,7 +102,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		if s.config.CertPath != "" {
 			reloader, err := common.NewCertReloader(ctx, s.config.CertPath, cert)
 			if err != nil {
-				return fmt.Errorf("failed to start reloader: %w", err)
+				return fmt.Errorf("start certificate reloader: %w", err)
 			}
 			getCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				return reloader.Get(), nil
@@ -111,24 +113,15 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		if minVersion == 0 {
 			minVersion = tls.VersionTLS12
 		}
-		cipherSuites := s.config.TLSCipherSuites
-		if len(cipherSuites) == 0 {
-			cipherSuites = []uint16{
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			}
-		}
+		// An empty suite list leaves CipherSuites nil, which selects the
+		// crypto/tls default, matching the coordinator and EPP.
 		server.TLSConfig = &tls.Config{
 			MinVersion:     minVersion,
-			CipherSuites:   cipherSuites,
+			CipherSuites:   s.config.TLSCipherSuites,
 			GetCertificate: getCertificate,
 		}
-		s.logger.Info("server TLS configured")
 	}
+	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
 	// Setup graceful termination (not strictly needed for sidecars)
 	go func() {

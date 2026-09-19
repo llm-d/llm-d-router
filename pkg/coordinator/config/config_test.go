@@ -50,7 +50,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"server.listen_addr", cfg.Server.ListenAddr, ":8080"},
 		{"server.metrics_port", cfg.Server.MetricsPort, 9090},
 		{"server.metrics_cert_dir", cfg.Server.MetricsCertDir, ""},
-		{"server.secure_coordinator", cfg.Server.SecureCoordinator, true},
+		{"server.secure_serving", cfg.Server.SecureServing, true},
 		{"server.cert_path", cfg.Server.CertPath, ""},
 		{"server.tls_min_version", cfg.Server.TLSMinVersion, ""},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
@@ -107,10 +107,10 @@ func TestLoadEnvOverride(t *testing.T) {
 			check:  func(c *Config) (any, any) { return c.Server.MetricsCertDir, "/etc/coordinator-metrics" },
 		},
 		{
-			name:   "secure coordinator",
-			envKey: "COORDINATOR_SERVER_SECURE_COORDINATOR",
+			name:   "secure serving",
+			envKey: "COORDINATOR_SERVER_SECURE_SERVING",
 			envVal: "false",
-			check:  func(c *Config) (any, any) { return c.Server.SecureCoordinator, false },
+			check:  func(c *Config) (any, any) { return c.Server.SecureServing, false },
 		},
 		{
 			name:   "inference listener certificate path",
@@ -144,12 +144,12 @@ func TestLoadMetricsCertDir(t *testing.T) {
 }
 
 func TestLoadInferenceListenerTLS(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "server:\n  secure_coordinator: false\n  cert_path: /etc/coordinator-tls\n"))
+	cfg, err := Load(writeConfig(t, "server:\n  secure_serving: false\n  cert_path: /etc/coordinator-tls\n"))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Server.SecureCoordinator {
-		t.Error("server.secure_coordinator = true, want false")
+	if cfg.Server.SecureServing {
+		t.Error("server.secure_serving = true, want false")
 	}
 	if got, want := cfg.Server.CertPath, "/etc/coordinator-tls"; got != want {
 		t.Errorf("server.cert_path = %q, want %q", got, want)
