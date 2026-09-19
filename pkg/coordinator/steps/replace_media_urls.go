@@ -47,6 +47,12 @@ const ReplaceMediaURLsStepName = "replace-media-urls"
 
 const imageURLPartType = "image_url"
 
+// imageURLField is the map key holding the URL, in both formats: nested one
+// level under a chat-completions image_url part, or directly on a Responses
+// input_image part. It shares imageURLPartType's string value by coincidence,
+// not by relation, so it is named separately for clarity at each use site.
+const imageURLField = "image_url"
+
 const inputImagePartType = "input_image"
 
 const inputImageDetailField = "detail"
@@ -256,7 +262,7 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 			if partMap["type"] != imageURLPartType {
 				continue
 			}
-			imageURL, ok := partMap[imageURLPartType].(map[string]any)
+			imageURL, ok := partMap[imageURLField].(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("message %d part %d: image_url is not an object: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
 			}
@@ -302,7 +308,7 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 			if partMap["type"] != inputImagePartType {
 				continue
 			}
-			url, ok := partMap[imageURLPartType].(string)
+			url, ok := partMap[imageURLField].(string)
 			if !ok {
 				return nil, fmt.Errorf("input item %d part %d: input_image with no image_url string is not supported: %w", itemIdx, partIdx, pipeline.ErrBadRequest)
 			}
@@ -310,7 +316,7 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 				msgIdx:  itemIdx,
 				partIdx: partIdx,
 				url:     url,
-				setURL:  func(v string) { partMap[imageURLPartType] = v },
+				setURL:  func(v string) { partMap[imageURLField] = v },
 			})
 		}
 	}

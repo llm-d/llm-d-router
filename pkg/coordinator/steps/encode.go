@@ -318,7 +318,7 @@ func buildSingleImageContent(imageParts []map[string]any, index int, format reqc
 			"image_url": "",
 		}
 		if index >= 0 && index < len(imageParts) {
-			url, ok := imageParts[index][imageURLPartType].(string)
+			url, ok := imageParts[index][imageURLField].(string)
 			if !ok {
 				return nil, fmt.Errorf("input_image part %d has no string image_url: %w", index, pipeline.ErrBadRequest)
 			}
@@ -332,7 +332,7 @@ func buildSingleImageContent(imageParts []map[string]any, index int, format reqc
 	if index >= 0 && index < len(imageParts) {
 		return map[string]any{
 			"type":      imageURLPartType,
-			"image_url": imageParts[index][imageURLPartType],
+			"image_url": imageParts[index][imageURLField],
 		}, nil
 	}
 	return map[string]any{

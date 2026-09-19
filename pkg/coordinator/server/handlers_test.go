@@ -266,7 +266,7 @@ func TestHandleInference_ResponsesForcesStoreFalseRegardlessOfValue(t *testing.T
 }
 
 func TestHandleInference_ResponsesFieldStrippingScopedToPath(t *testing.T) {
-	// The stripping in dropStatefulResponsesFields must not run for other
+	// The stripping in DropStatefulResponsesFields must not run for other
 	// paths: a chat-completions client is free to send its own store/
 	// previous_response_id/background fields (even if meaningless there)
 	// without the coordinator silently rewriting its request.
