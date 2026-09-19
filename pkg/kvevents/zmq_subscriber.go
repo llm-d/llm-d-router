@@ -309,7 +309,12 @@ func (z *zmqSubscriber) retire(resetSource bool) {
 	defer z.queueMu.Unlock()
 	z.retired = true
 	if resetSource && z.sourceEndpoint != "" {
-		z.pool.resetForSource(z.topicFilter, z.sourceEndpoint)
+		z.pool.AddTask(&RawMessage{
+			Topic:          z.topicFilter,
+			SourceEndpoint: z.sourceEndpoint,
+			reset:          true,
+			retire:         true,
+		})
 	}
 }
 
