@@ -63,36 +63,36 @@ func TestECPipelineTokenLimits(t *testing.T) {
 		},
 		{
 			name:        "generate",
-			apiType:     reqcommon.APITypeGenerate,
-			path:        reqcommon.PathGenerate,
+			apiType:     reqcommon.APITypeVLLMGenerate,
+			path:        reqcommon.PathVLLMGenerate,
 			body:        `{"model":"m","token_ids":[1,2],"sampling_params":{"max_tokens":800,"min_tokens":5,"temperature":0.7}}`,
 			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 		{
 			name:        "generate without limits",
-			apiType:     reqcommon.APITypeGenerate,
-			path:        reqcommon.PathGenerate,
+			apiType:     reqcommon.APITypeVLLMGenerate,
+			path:        reqcommon.PathVLLMGenerate,
 			body:        `{"model":"m","token_ids":[1,2],"sampling_params":{"temperature":0.7}}`,
 			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 		{
 			name:        "generate without sampling params",
-			apiType:     reqcommon.APITypeGenerate,
-			path:        reqcommon.PathGenerate,
+			apiType:     reqcommon.APITypeVLLMGenerate,
+			path:        reqcommon.PathVLLMGenerate,
 			body:        `{"model":"m","token_ids":[1,2]}`,
 			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 		{
 			name:        "generate with null sampling params",
-			apiType:     reqcommon.APITypeGenerate,
-			path:        reqcommon.PathGenerate,
+			apiType:     reqcommon.APITypeVLLMGenerate,
+			path:        reqcommon.PathVLLMGenerate,
 			body:        `{"model":"m","token_ids":[1,2],"sampling_params":null}`,
 			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
 		{
 			name:        "generate with non-object sampling params",
-			apiType:     reqcommon.APITypeGenerate,
-			path:        reqcommon.PathGenerate,
+			apiType:     reqcommon.APITypeVLLMGenerate,
+			path:        reqcommon.PathVLLMGenerate,
 			body:        `{"model":"m","token_ids":[1,2],"sampling_params":"not-an-object"}`,
 			tokenFields: []string{reqcommon.FieldMaxTokens},
 		},
@@ -141,7 +141,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 					require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
 					require.NoError(t, json.Unmarshal([]byte(tt.body), &wantPrefill))
 					limits := wantPrefill
-					if tt.apiType == reqcommon.APITypeGenerate {
+					if tt.apiType == reqcommon.APITypeVLLMGenerate {
 						limits, _ = wantPrefill[reqcommon.FieldSamplingParams].(map[string]any)
 						if limits == nil {
 							limits = make(map[string]any)

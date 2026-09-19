@@ -30,7 +30,7 @@ func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	}
 
 	prefill := maps.Clone(client)
-	CapSingleToken(prefill, APITypeGenerate)
+	CapSingleToken(prefill, APITypeVLLMGenerate)
 
 	decodeLimits := client[FieldSamplingParams].(map[string]any)
 	if got := decodeLimits[FieldMaxTokens]; got != 200 {
@@ -66,13 +66,13 @@ func TestCapSingleToken_ReturnsTheCappedMap(t *testing.T) {
 		},
 		{
 			name:    "generate returns the body's sampling_params",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"model": "m", FieldSamplingParams: map[string]any{"temperature": 0.5}},
 			limits:  func(body map[string]any) map[string]any { return body[FieldSamplingParams].(map[string]any) },
 		},
 		{
 			name:    "generate returns a synthesized sampling_params",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"model": "m"},
 			limits:  func(body map[string]any) map[string]any { return body[FieldSamplingParams].(map[string]any) },
 		},
@@ -165,7 +165,7 @@ func TestCapSingleToken(t *testing.T) {
 		},
 		{
 			name:    "generate caps max_tokens and strips min_tokens inside sampling_params",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body: map[string]any{
 				"model":           "m",
 				"sampling_params": map[string]any{"max_tokens": 100, "min_tokens": 5},
@@ -178,7 +178,7 @@ func TestCapSingleToken(t *testing.T) {
 		},
 		{
 			name:    "generate synthesizes sampling_params when absent",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"model": "m"},
 			want: map[string]any{
 				"model":           "m",
@@ -192,7 +192,7 @@ func TestCapSingleToken(t *testing.T) {
 			// it, so a malformed sampling_params arrives here. The request still
 			// has to carry a cap, so the field is replaced.
 			name:    "generate replaces a non-object sampling_params",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"model": "m", "sampling_params": "not-an-object"},
 			want: map[string]any{
 				"model":           "m",
@@ -202,7 +202,7 @@ func TestCapSingleToken(t *testing.T) {
 		},
 		{
 			name:    "generate replaces a null sampling_params",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"model": "m", "sampling_params": nil},
 			want: map[string]any{
 				"model":           "m",
@@ -212,7 +212,7 @@ func TestCapSingleToken(t *testing.T) {
 		},
 		{
 			name:    "generate leaves the top-level fields alone",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body: map[string]any{
 				"max_tokens":            100,
 				"max_completion_tokens": 100,
@@ -242,7 +242,7 @@ func TestCapSingleToken(t *testing.T) {
 		},
 		{
 			name:    "generate preserves other sampling_params entries",
-			apiType: APITypeGenerate,
+			apiType: APITypeVLLMGenerate,
 			body: map[string]any{
 				"sampling_params": map[string]any{
 					"extra_args": map[string]any{"kv_transfer_params": "x"},
