@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -191,6 +192,12 @@ type Runner struct {
 	healthGRPCServer *grpc.Server
 	healthGRPCPort   int
 	draining         *atomic.Bool
+
+	// grpcListener and healthListener are optional pre-bound listeners for the
+	// runWithFileDiscovery path; when set, the ext_proc and health servers serve
+	// on them instead of binding opts.GRPCPort / opts.GRPCHealthPort.
+	grpcListener   net.Listener
+	healthListener net.Listener
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -1132,6 +1139,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
 	}
+	if r.grpcListener != nil {
+		serverRunner.GrpcListener = r.grpcListener
+	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.Register(r.customCollectors...)
@@ -1186,6 +1196,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		case <-disc.Ready():
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+		if r.healthListener != nil {
+			return runnable.NoLeaderElection(runnable.GRPCServerOnListener("health", healthSrv, r.healthListener)).Start(ctx)
 		}
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})

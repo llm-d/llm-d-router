@@ -127,7 +127,7 @@ featureGates:
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
 			opts.FeatureGates = tc.extraGates
-			opts.PoolName = "test-pool"
+			opts.PoolName = testPoolName
 
 			r := NewRunner()
 			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
