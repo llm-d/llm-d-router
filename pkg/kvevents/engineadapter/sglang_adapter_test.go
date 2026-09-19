@@ -123,6 +123,35 @@ func TestSGLangBlockStored_FullFields(t *testing.T) {
 	assert.Nil(t, blockStored.ExtraKeys)
 }
 
+// TestSGLangBlockStoredNegativeHashPreservesBits verifies the signed hash
+// representation emitted by SGLang survives adapter conversion.
+func TestSGLangBlockStoredNegativeHashPreservesBits(t *testing.T) {
+	adapter := NewSGLangAdapter()
+	hash := int64(-987654321987654321)
+	parentHash := int64(-1234567890123456789)
+
+	// MessagePack: ["BlockStored", [-987654321987654321],
+	// -1234567890123456789, [1], 1, nil, "GPU"].
+	rawEvent := []byte{
+		0x97, // array of 7
+		0xab, 'B', 'l', 'o', 'c', 'k', 'S', 't', 'o', 'r', 'e', 'd',
+		0x91, 0xd3, 0xf2, 0x4b, 0x25, 0xa0, 0x81, 0x0b, 0xed, 0x4f,
+		0xd3, 0xee, 0xdd, 0xef, 0x0b, 0x82, 0x16, 0x7e, 0xeb,
+		0x91, 0x01,
+		0x01,
+		0xc0,
+		0xa3, 'G', 'P', 'U',
+	}
+
+	event, err := decodeEvent(rawEvent, adapter.eventConverters)
+	require.NoError(t, err)
+
+	blockStored, ok := event.(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, []uint64{uint64(hash)}, blockStored.BlockHashes)
+	assert.Equal(t, uint64(parentHash), blockStored.ParentHash)
+}
+
 // TestSGLangBlockStored_7Fields tests decoding with 7 fields (no lora_name, no extra_keys).
 func TestSGLangBlockStored_7Fields(t *testing.T) {
 	adapter := NewSGLangAdapter()
