@@ -29,6 +29,22 @@ import (
 )
 
 var (
+	streamingAccountingRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "streaming_accounting_requests_total",
+			Help:      metricsutil.HelpMsgWithStability("Requests using streaming token accounting, classified by requested usage reporting mode.", compbasemetrics.ALPHA),
+		},
+		[]string{"producer_name", "usage_mode"},
+	)
+	streamingOutputObservations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "streaming_output_observations_total",
+			Help:      metricsutil.HelpMsgWithStability("Cumulative output usage increases applied to in-flight accounting before end of stream; counts observations, not tokens.", compbasemetrics.ALPHA),
+		},
+		[]string{"producer_name"},
+	)
 	inflightRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -42,7 +58,7 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "inflight_tokens",
-			Help:      metricsutil.HelpMsgWithStability("Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Current token charge per endpoint from the configured in-flight load accounting mode.", compbasemetrics.ALPHA),
 		},
 		[]string{"endpoint_name", "namespace", "producer_name", "fairness_id", "priority"},
 	)
@@ -56,7 +72,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return errors.New("inflight load metrics registerer is required")
 	}
-	for _, collector := range []prometheus.Collector{inflightRequests, inflightTokens} {
+	for _, collector := range []prometheus.Collector{inflightRequests, inflightTokens, streamingAccountingRequests, streamingOutputObservations} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
