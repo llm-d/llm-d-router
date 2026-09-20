@@ -795,7 +795,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathGenerate, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathVLLMGenerate, strings.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
 		if withPrefillHeader {
 			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
@@ -1134,7 +1134,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		env := startMoRIProxy(func(c *Config) {
 			c.MoRIIOParallelDispatch = true
 		})
-		env.sendTo(reqcommon.PathGenerate, generateRequestBodyWithTokenLimits)
+		env.sendTo(reqcommon.PathVLLMGenerate, generateRequestBodyWithTokenLimits)
 
 		expectGenerateRequestTokenLimitsOn(env.prefillHandler, env.decodeHandler)
 	})

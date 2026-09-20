@@ -66,8 +66,15 @@ jobs:
             base="${{ github.event.pull_request.base.sha }}"
             head="${{ github.event.pull_request.head.sha }}"
           fi
+          # GitHub Apps we allow to satisfy DCO by name instead of email:
+          # dependabot commits its own Signed-off-by trailer, but under the
+          # noreply author address rather than the support@github.com address
+          # in the trailer, so the exact-email match never succeeds.
+          bot_allowlist="dependabot[bot]"
+
           fail=0
           for c in $(git rev-list "$base..$head"); do
+            author_name=$(git show -s --format='%an' "$c")
             author_email=$(git show -s --format='%ae' "$c")
             trailers=$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")
             if [ -z "$trailers" ]; then
@@ -80,6 +87,13 @@ jobs:
               [ -z "$line" ] && continue
               case "$line" in
                 *"<$author_email>"*) match=1 ;;
+              esac
+              case " $bot_allowlist " in
+                *" $author_name "*)
+                  case "$line" in
+                    "$author_name "*) match=1 ;;
+                  esac
+                  ;;
               esac
             done <<<"$trailers"
             if [ "$match" -ne 1 ]; then

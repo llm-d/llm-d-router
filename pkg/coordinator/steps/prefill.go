@@ -171,7 +171,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		return body, nil
 
-	case reqcommon.APITypeGenerate:
+	case reqcommon.APITypeVLLMGenerate:
 		// The /inference/v1/generate engine reads transfer params only from
 		// sampling_params.extra_args; top-level fields are ignored on input.
 		body := map[string]any{

@@ -131,7 +131,7 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:      "req-1",
-		OriginalPath:   reqcommon.PathGenerate,
+		OriginalPath:   reqcommon.PathVLLMGenerate,
 		Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
 		TokenIDs:       []int{1, 2345},
 		ResponseWriter: httptest.NewRecorder(),
