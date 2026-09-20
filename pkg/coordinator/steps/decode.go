@@ -64,7 +64,9 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	s.prepareDecodeBody(ctx, reqCtx)
+	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
+		return err
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
@@ -91,7 +93,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // would also be insufficient, since injectUUIDs mutates nested values that a shallow
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
-func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
+func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
@@ -116,11 +118,9 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		setGenerateTransferParams(sampling, kvParams, nil)
 	default:
-		// The coordinator registers only supported formats;
-		// this would be a routing bug, not a client error.
-		log.FromContext(ctx).WithName(DecodeStepName).Error(
-			unreachableFormatError(format), "decode: unreachable request format", "path", reqCtx.OriginalPath)
+		return unreachableFormatError(format)
 	}
+	return nil
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {

@@ -688,7 +688,7 @@ func TestPrefillStep_UnsupportedFormat(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}
-	if want := "unsupported request format APIType(99)"; err.Error() != want {
+	if want := "request should not be here: no coordinator route serves APIType APIType(99)"; err.Error() != want {
 		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
 }

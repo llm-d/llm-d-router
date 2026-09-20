@@ -24,7 +24,6 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -55,7 +54,10 @@ func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
-	body := s.prepareBody(reqCtx, logger)
+	body, err := s.prepareBody(reqCtx)
+	if err != nil {
+		return err
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
@@ -99,7 +101,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
-func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, logger logr.Logger) map[string]any {
+func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (map[string]any, error) {
 	body := maps.Clone(reqCtx.Body)
 	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
@@ -113,10 +115,7 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, log
 	case reqcommon.APITypeGenerate:
 		// The client's generate body already carries token_ids.
 	default:
-		// The coordinator registers only supported formats;
-		// this would be a routing bug, not a client error.
-		logger.Error(
-			unreachableFormatError(format), "conditional-decode: unreachable request format", "path", reqCtx.OriginalPath)
+		return nil, unreachableFormatError(format)
 	}
-	return body
+	return body, nil
 }
