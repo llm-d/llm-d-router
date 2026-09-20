@@ -31,6 +31,7 @@ import (
 	"time"
 
 	zmq "github.com/go-zeromq/zmq4"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
@@ -39,26 +40,36 @@ import (
 )
 
 const (
-	snapshotTimeout     = 10 * time.Second
-	heartbeatTimeout    = 5 * time.Second
-	snapshotBufferBytes = 64 << 20
-	snapshotReplyBytes  = 256 << 20
-	retryInitial        = time.Second
-	retryMaximum        = 30 * time.Second
+	snapshotTimeout       = 10 * time.Second
+	heartbeatTimeout      = 5 * time.Second
+	snapshotBufferBytes   = 64 << 20
+	snapshotReplyBytes    = 256 << 20
+	retryInitial          = time.Second
+	retryMaximum          = 30 * time.Second
+	maxConcurrentRecovery = 4
+	// Snapshot generations use one entry per publisher, tier, and cache group.
+	// Keep the shared index well above the ordinary request index's small
+	// per-key routing cache so recovery never silently drops publishers.
+	snapshotEntriesPerKey = 1 << 20
+	// Eviction is fail closed: a later event that references metadata older than
+	// this bounded history deactivates the generation and starts a fresh snapshot.
+	snapshotEngineMappings = 1 << 20
 )
 
 // SnapshotManager owns a shared index with replaceable publisher generations.
 // Only complete generations with a consecutive live suffix are visible to the matcher.
 type SnapshotManager struct {
-	matcher      *kvcache.Indexer
-	index        kvblock.Index
-	mu           sync.RWMutex
-	subscribers  map[string]*snapshotSubscriber
-	livePort     int
-	snapshotPort int
-	tokens       kvblock.TokenProcessor
-	adapter      EngineAdapter
-	nextGen      atomic.Uint64
+	matcher       *kvcache.Indexer
+	index         kvblock.Index
+	mu            sync.RWMutex
+	metricsMu     sync.Mutex
+	subscribers   map[string]*snapshotSubscriber
+	livePort      int
+	snapshotPort  int
+	tokens        kvblock.TokenProcessor
+	adapter       EngineAdapter
+	nextGen       atomic.Uint64
+	recoverySlots chan struct{}
 }
 
 type snapshotSubscriber struct {
@@ -87,7 +98,11 @@ func NewSnapshotManager(cfg *Config, indexCfg *kvblock.IndexConfig, tokens kvblo
 	if indexCfg.InMemoryConfig == nil || indexCfg.RedisConfig != nil || indexCfg.CostAwareMemoryConfig != nil {
 		return nil, fmt.Errorf("snapshot recovery requires the in-memory index")
 	}
-	index, err := kvblock.NewInMemoryIndex(indexCfg.InMemoryConfig)
+	snapshotIndexCfg := *indexCfg.InMemoryConfig
+	if snapshotIndexCfg.PodCacheSize < snapshotEntriesPerKey {
+		snapshotIndexCfg.PodCacheSize = snapshotEntriesPerKey
+	}
+	index, err := kvblock.NewInMemoryIndex(&snapshotIndexCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -96,13 +111,14 @@ func NewSnapshotManager(cfg *Config, indexCfg *kvblock.IndexConfig, tokens kvblo
 	}
 	metrics.Register()
 	return &SnapshotManager{
-		subscribers:  make(map[string]*snapshotSubscriber),
-		livePort:     cfg.PodDiscoveryConfig.SocketPort,
-		snapshotPort: cfg.SnapshotPort,
-		index:        index,
-		tokens:       tokens,
-		adapter:      adapter,
-		matcher:      matcher,
+		subscribers:   make(map[string]*snapshotSubscriber),
+		livePort:      cfg.PodDiscoveryConfig.SocketPort,
+		snapshotPort:  cfg.SnapshotPort,
+		index:         index,
+		tokens:        tokens,
+		adapter:       adapter,
+		matcher:       matcher,
+		recoverySlots: make(chan struct{}, maxConcurrentRecovery),
 	}, nil
 }
 
@@ -139,9 +155,8 @@ func (m *SnapshotManager) EnsureSubscriber(ctx context.Context, id, sourceEndpoi
 	generationID := fmt.Sprintf("%s#snapshot-%d", sourceEndpoint, m.nextGen.Add(1))
 	s := &snapshotSubscriber{manager: m, endpoint: endpoint, sourceEndpoint: sourceEndpoint, snapshotEndpoint: "tcp://" + net.JoinHostPort(host, strconv.Itoa(snapshotPort)), topicFilter: topic, cancel: cancel, done: make(chan struct{}), generationID: generationID}
 	m.subscribers[id] = s
-	registered := len(m.subscribers)
 	m.mu.Unlock()
-	metrics.SubscriberActive.Set(float64(registered))
+	m.updateSubscriberMetric()
 	go s.run(subCtx)
 	return nil
 }
@@ -151,9 +166,8 @@ func (m *SnapshotManager) RemoveSubscriber(_ context.Context, id string) bool {
 	if s := m.subscribers[id]; s != nil {
 		s.cancel()
 		delete(m.subscribers, id)
-		registered := len(m.subscribers)
 		m.mu.Unlock()
-		metrics.SubscriberActive.Set(float64(registered))
+		m.updateSubscriberMetric()
 		m.updateReadyMetric()
 		return true
 	}
@@ -207,7 +221,18 @@ func (m *SnapshotManager) Status() SnapshotStatus {
 }
 
 func (m *SnapshotManager) updateReadyMetric() {
+	m.metricsMu.Lock()
+	defer m.metricsMu.Unlock()
 	metrics.SnapshotReady.Set(float64(m.Status().Ready))
+}
+
+func (m *SnapshotManager) updateSubscriberMetric() {
+	m.metricsMu.Lock()
+	defer m.metricsMu.Unlock()
+	m.mu.RLock()
+	registered := len(m.subscribers)
+	m.mu.RUnlock()
+	metrics.SubscriberActive.Set(float64(registered))
 }
 
 func (m *SnapshotManager) GetActiveSubscribers() ([]string, []string) {
@@ -284,8 +309,15 @@ func (s *snapshotSubscriber) run(ctx context.Context) {
 	defer close(s.done)
 	backoff := retryInitial
 	for ctx.Err() == nil {
+		select {
+		case s.manager.recoverySlots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		release := sync.OnceFunc(func() { <-s.manager.recoverySlots })
 		successes := s.successes.Load()
-		err := s.consume(ctx)
+		err := s.consume(ctx, release)
+		release()
 		if ctx.Err() != nil {
 			return
 		}
@@ -339,15 +371,12 @@ func decodeSnapshotLive(msg zmq.Msg) (snapshotLive, error) {
 	return snapshotLive{string(msg.Frames[0]), binary.BigEndian.Uint64(msg.Frames[1][:8]), msg.Frames[1][8:], msg.Frames[2]}, nil
 }
 
-func (s *snapshotSubscriber) consume(parent context.Context) error {
+func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete func()) error {
 	bootstrapStarted := time.Now()
 	ctx, cancel := context.WithCancel(parent)
 	generation := s.generationID
 	defer func() {
 		s.deactivate(generation)
-		if err := s.manager.index.Clear(context.Background(), generation); err != nil {
-			log.FromContext(parent).Error(err, "Failed to clear KV snapshot generation", "endpoint", s.endpoint)
-		}
 	}()
 	sub := zmq.NewSub(ctx, zmq.WithDialerMaxRetries(0), zmq.WithDialerTimeout(time.Second))
 	defer sub.Close()
@@ -483,6 +512,11 @@ waiting:
 	}
 	defer pool.queues[0].ShutDown()
 	pool.strict = true
+	defer func() {
+		if err := pool.clearSnapshotGeneration(context.Background()); err != nil {
+			log.FromContext(parent).Error(err, "Failed to clear KV snapshot generation", "endpoint", s.endpoint)
+		}
+	}()
 	apply := func(payload []byte) error {
 		_, model, batch, err := s.manager.adapter.ParseMessage(&RawMessage{Topic: first.topic, Payload: payload})
 		if err != nil {
@@ -541,6 +575,7 @@ waiting:
 	s.manager.updateReadyMetric()
 	metrics.SnapshotRecoveries.WithLabelValues("success", "none").Inc()
 	metrics.SnapshotBootstrapDuration.Observe(time.Since(bootstrapStarted).Seconds())
+	recoveryComplete()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -572,10 +607,85 @@ func (p *Pool) clearSnapshotGPU(ctx context.Context, pod string) error {
 			entry.HasGroup = true
 			entry.GroupIdx = kvblock.GroupID(key.groupIdx)
 		}
-		if err := p.index.Evict(ctx, kvblock.BlockHash(key.blockHash), kvblock.EngineKey, []kvblock.PodEntry{entry}); err != nil {
+		engineKey := kvblock.BlockHash(key.blockHash)
+		requestKeys, err := p.snapshotRequestKeys(ctx, engineKey)
+		if err != nil {
 			return err
 		}
+		for _, requestKey := range requestKeys {
+			if err := p.index.Evict(ctx, requestKey, kvblock.RequestKey, []kvblock.PodEntry{entry}); err != nil {
+				return err
+			}
+		}
+		p.untrackSnapshotStore(requestKeys, []kvblock.PodEntry{entry})
 		delete(p.dedup.refs[pod], key)
 	}
+	return nil
+}
+
+func (p *Pool) snapshotRequestKeys(ctx context.Context, engineKey kvblock.BlockHash) ([]kvblock.BlockHash, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.snapshotEngineKeys == nil {
+		return nil, fmt.Errorf("snapshot engine key not found: %s", engineKey.String())
+	}
+	keys, found := p.snapshotEngineKeys.Get(engineKey)
+	if !found || len(keys) == 0 {
+		return nil, fmt.Errorf("snapshot engine key not found: %s", engineKey.String())
+	}
+	return append([]kvblock.BlockHash(nil), keys...), nil
+}
+
+func (p *Pool) trackSnapshotEngineKeys(engineKeys, requestKeys []kvblock.BlockHash) error {
+	if len(engineKeys) == 0 || len(requestKeys) == 0 {
+		return fmt.Errorf("snapshot engine mapping requires engine and request keys")
+	}
+	if p.snapshotEngineKeys == nil {
+		cache, err := lru.New[kvblock.BlockHash, []kvblock.BlockHash](snapshotEngineMappings)
+		if err != nil {
+			return err
+		}
+		p.snapshotEngineKeys = cache
+	}
+	mappings := make(map[kvblock.BlockHash][]kvblock.BlockHash, len(engineKeys))
+	n := max(len(engineKeys), len(requestKeys))
+	for i := range n {
+		engineKey := engineKeys[i*len(engineKeys)/n]
+		requestKey := requestKeys[i*len(requestKeys)/n]
+		mappings[engineKey] = append(mappings[engineKey], requestKey)
+	}
+	for engineKey, keys := range mappings {
+		p.snapshotEngineKeys.Add(engineKey, keys)
+	}
+	return nil
+}
+
+func (p *Pool) trackSnapshotStore(keys []kvblock.BlockHash, entries []kvblock.PodEntry) {
+	if p.snapshotEntries == nil {
+		p.snapshotEntries = make(map[snapshotOwnedEntry]struct{})
+	}
+	for _, key := range keys {
+		for _, entry := range entries {
+			p.snapshotEntries[snapshotOwnedEntry{key: key, entry: entry}] = struct{}{}
+		}
+	}
+}
+
+func (p *Pool) untrackSnapshotStore(keys []kvblock.BlockHash, entries []kvblock.PodEntry) {
+	for _, key := range keys {
+		for _, entry := range entries {
+			delete(p.snapshotEntries, snapshotOwnedEntry{key: key, entry: entry})
+		}
+	}
+}
+
+func (p *Pool) clearSnapshotGeneration(ctx context.Context) error {
+	for owned := range p.snapshotEntries {
+		if err := p.index.Evict(ctx, owned.key, kvblock.RequestKey, []kvblock.PodEntry{owned.entry}); err != nil {
+			return err
+		}
+	}
+	clear(p.snapshotEntries)
 	return nil
 }

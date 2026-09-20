@@ -82,6 +82,17 @@ snapshots. The two port ranges must not overlap and must remain at or below
 engines are rejected. Events with locality or ownership scopes are rejected
 until the router can preserve those dimensions.
 
+The recovery index raises its per-key entry capacity to 1,048,576 so the
+ordinary request index's small `podCacheSize` cannot silently discard snapshot
+generations. Entries are allocated only when a publisher reports a matching
+block; the configured key-count limit still bounds the number of indexed keys.
+Each recovery generation keeps at most 1,048,576 engine-to-canonical mappings
+so publishers cannot overwrite each other's reconstruction metadata. If a live
+event references mapping history older than this bound, that generation is
+removed from routing and rebuilt from a fresh snapshot.
+At most four publishers fetch and install snapshots concurrently; additional
+publishers remain non-routable until a recovery slot is available.
+
 ```yaml
 - type: precise-prefix-cache-producer
   parameters:

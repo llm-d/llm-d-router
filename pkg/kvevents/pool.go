@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -177,7 +178,9 @@ type Pool struct {
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
 	// strict makes incomplete event application fail snapshot reconstruction.
-	strict bool
+	strict             bool
+	snapshotEntries    map[snapshotOwnedEntry]struct{}
+	snapshotEngineKeys *lru.Cache[kvblock.BlockHash, []kvblock.BlockHash]
 	// tracer is resolved once: tracing.Tracer rebuilds its instrumentation
 	// options on every call, which is not free on the per-message event path.
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
@@ -188,6 +191,11 @@ type Pool struct {
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
 	queueDepth atomic.Int64
+}
+
+type snapshotOwnedEntry struct {
+	key   kvblock.BlockHash
+	entry kvblock.PodEntry
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -521,8 +529,7 @@ func (p *Pool) handleDeviceTierUpdate(
 		var keys []kvblock.BlockHash
 		var err error
 		if p.strict {
-			// Snapshot pools exclusively own an in-memory index.
-			keys, err = p.index.(*kvblock.InMemoryIndex).GetRequestKeys(ctx, ek)
+			keys, err = p.snapshotRequestKeys(ctx, ek)
 		} else {
 			var key kvblock.BlockHash
 			key, err = p.index.GetRequestKey(ctx, ek)
@@ -552,6 +559,9 @@ func (p *Pool) handleDeviceTierUpdate(
 		debugLogger.Error(err, "Failed to add device-tier update to index",
 			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
 		return false, err
+	}
+	if p.strict {
+		p.trackSnapshotStore(resolvedKeys, podEntries)
 	}
 	return true, nil
 }
@@ -626,7 +636,17 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			parentRequestKey := kvblock.EmptyBlockHash
 			if ev.ParentHash != 0 {
 				parentEngineKey := kvblock.BlockHash(ev.ParentHash)
-				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
+				var key kvblock.BlockHash
+				var err error
+				if p.strict {
+					var keys []kvblock.BlockHash
+					keys, err = p.snapshotRequestKeys(ctx, parentEngineKey)
+					if err == nil {
+						key = keys[len(keys)-1]
+					}
+				} else {
+					key, err = p.index.GetRequestKey(ctx, parentEngineKey)
+				}
 				if err != nil {
 					if p.strict {
 						return err
@@ -726,13 +746,26 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Index.Add infers the engine->request mapping from the ratio of
 			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many).
-			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
+			storedEngineKeys := engineKeys
+			if p.strict {
+				// Validate and install generation-local reconstruction metadata
+				// before publishing entries to the shared request-key index. This
+				// keeps a malformed strict store from leaving an untracked entry.
+				if err := p.trackSnapshotEngineKeys(engineKeys, requestKeys); err != nil {
+					return err
+				}
+				storedEngineKeys = nil
+			}
+			if err := p.index.Add(ctx, storedEngineKeys, requestKeys, podEntries); err != nil {
 				if p.strict {
 					return err
 				}
 				debugLogger.Error(err, "Failed to add event to index",
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
+			}
+			if p.strict {
+				p.trackSnapshotStore(requestKeys, podEntries)
 			}
 			p.dedup.trackStore(storeScope, ev.BlockHashes)
 
@@ -788,18 +821,42 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"received", len(ev.BlockHashes), "forwarded", len(hashesToEvict), "suppressed", suppressed)
 			}
 
-			// Iterate over the surviving hashes and evict each key.
-			// The Index handles engine->request key resolution internally for both
-			// 1:1 (legacy) and 1:many (canonical) mappings.
+			// Iterate over the surviving hashes and evict each key. Strict snapshot
+			// pools resolve through generation-local metadata so another publisher
+			// cannot alter the canonical span for the same engine hash.
 			for _, hash := range hashesToEvict {
 				engineKey := kvblock.BlockHash(hash)
-				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
-					if p.strict {
+				var requestKeys []kvblock.BlockHash
+				if p.strict {
+					var err error
+					requestKeys, err = p.snapshotRequestKeys(ctx, engineKey)
+					if err != nil {
 						return err
 					}
-					debugLogger.Error(err, "Failed to evict engine key from index",
+				}
+				keyType := kvblock.EngineKey
+				keys := []kvblock.BlockHash{engineKey}
+				if p.strict {
+					keyType = kvblock.RequestKey
+					keys = requestKeys
+				}
+				var evictErr error
+				for _, key := range keys {
+					if err := p.index.Evict(ctx, key, keyType, podEntries); err != nil {
+						evictErr = err
+						break
+					}
+				}
+				if evictErr != nil {
+					if p.strict {
+						return evictErr
+					}
+					debugLogger.Error(evictErr, "Failed to evict engine key from index",
 						"podIdentifier", podIdentifier, "engineKey", engineKey)
 					continue
+				}
+				if p.strict {
+					p.untrackSnapshotStore(requestKeys, podEntries)
 				}
 			}
 

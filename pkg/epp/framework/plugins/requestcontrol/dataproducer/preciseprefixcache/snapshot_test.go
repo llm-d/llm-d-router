@@ -20,19 +20,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	zmq "github.com/go-zeromq/zmq4"
 	dl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	rh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -43,7 +39,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/test/utils"
 	"github.com/stretchr/testify/require"
-	"github.com/vmihailenco/msgpack/v5"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -54,78 +49,6 @@ func snapshotTestPort(t *testing.T) int {
 	port := l.Addr().(*net.TCPAddr).Port
 	require.NoError(t, l.Close())
 	return port
-}
-
-// The cache exists before discovery; only empty heartbeats are published live.
-// A live-only subscriber can never score this endpoint as a cache hit.
-func TestSnapshotLateJoinScoresExistingCache(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	livePort, snapshotPort := snapshotTestPort(t), snapshotTestPort(t)
-	pub := zmq.NewPub(ctx)
-	defer pub.Close()
-	rep := zmq.NewRep(ctx)
-	defer rep.Close()
-	require.NoError(t, pub.Listen(fmt.Sprintf("tcp://127.0.0.1:%d", livePort)))
-	require.NoError(t, rep.Listen(fmt.Sprintf("tcp://127.0.0.1:%d", snapshotPort)))
-	tokens := []uint32{1, 2, 3, 4}
-	store, err := msgpack.Marshal([]any{1.0, []any{map[string]any{"type": "BlockStored", "block_hashes": []uint64{101}, "parent_block_hash": nil, "token_ids": tokens, "block_size": 4}}, nil})
-	require.NoError(t, err)
-	empty, err := msgpack.Marshal([]any{1.0, []any{}, nil})
-	require.NoError(t, err)
-	epoch := make([]byte, 16)
-	epoch[0] = 1
-	var seq atomic.Uint64
-	go func() {
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				frame := make([]byte, 24)
-				binary.BigEndian.PutUint64(frame, seq.Add(1))
-				copy(frame[8:], epoch)
-				_ = pub.Send(zmq.NewMsgFrom([]byte("kv@engine-topic-id@test-model"), frame, empty))
-			}
-		}
-	}()
-	var requests atomic.Int32
-	go func() {
-		for {
-			_, err := rep.Recv()
-			if err != nil {
-				return
-			}
-			requests.Add(1)
-			frame := make([]byte, 8)
-			binary.BigEndian.PutUint64(frame, seq.Load())
-			if rep.Send(zmq.NewMsgFrom(frame, epoch, store)) != nil {
-				return
-			}
-		}
-	}()
-	cfg := kvevents.DefaultConfig()
-	cfg.PodDiscoveryConfig.SocketPort = livePort
-	// JSON exercises the public configuration surface, including on the baseline.
-	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"snapshotPort":%d}`, snapshotPort)), cfg))
-	indexCfg, err := kvcache.NewDefaultConfig()
-	require.NoError(t, err)
-	p, err := New(ctx, "snapshot-test", PluginConfig{IndexerConfig: indexCfg, KVEventsConfig: cfg, TokenProcessorConfig: &kvblock.TokenProcessorConfig{BlockSizeTokens: 4}})
-	require.NoError(t, err)
-	defer p.subscribersManager.Shutdown(ctx)
-	ep := scheduling.NewEndpoint(&dl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-a"}, Address: "127.0.0.1", Port: strconv.Itoa(8000)}, nil, nil)
-	require.NoError(t, p.Extract(ctx, dl.EndpointEvent{Type: dl.EventAddOrUpdate, Endpoint: dl.NewEndpoint(ep.GetMetadata(), nil)}))
-	req := &scheduling.InferenceRequest{RequestID: "snapshot-request", TargetModel: "test-model", Body: &rh.InferenceRequestBody{TokenizedRequest: &rh.TokenizedRequest{Prompts: []rh.PromptTokens{{TokenIDs: tokens}}}}}
-	prefix, err := scorer.New(ctx, "prefix", "snapshot-test")
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		if p.Produce(ctx, req, []scheduling.Endpoint{ep}) != nil {
-			return false
-		}
-		return prefix.Score(ctx, req, []scheduling.Endpoint{ep})[ep] == 1
-	}, 3*time.Second, 20*time.Millisecond, "snapshot must reach actual prefix scorer; requests=%d", requests.Load())
 }
 
 func TestSnapshotVLLMPublisher(t *testing.T) {

@@ -19,6 +19,7 @@ package kvblock_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,6 +28,72 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	. "github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
+
+func TestInMemoryIndexClearDoesNotDetachConcurrentAdd(t *testing.T) {
+	ctx := context.Background()
+	for range 1000 {
+		index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 1, PodCacheSize: 2})
+		require.NoError(t, err)
+		key := BlockHash(1)
+		require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, []PodEntry{{PodIdentifier: "old"}}))
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- index.Clear(ctx, "old")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- index.Add(ctx, nil, []BlockHash{key}, []PodEntry{{PodIdentifier: "new"}})
+		}()
+		close(start)
+		wg.Wait()
+		require.NoError(t, <-errs)
+		require.NoError(t, <-errs)
+		entries, err := index.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		require.Contains(t, entries[key], PodEntry{PodIdentifier: "new"})
+	}
+}
+
+func TestInMemoryIndexConcurrentAddEvictKeepsMappingWithEntry(t *testing.T) {
+	ctx := context.Background()
+	for range 1000 {
+		index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 1, PodCacheSize: 1})
+		require.NoError(t, err)
+		engineKey, requestKey := BlockHash(1), BlockHash(2)
+		entry := PodEntry{PodIdentifier: "pod"}
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{entry})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- index.Evict(ctx, engineKey, EngineKey, []PodEntry{entry})
+		}()
+		close(start)
+		wg.Wait()
+		require.NoError(t, <-errs)
+		require.NoError(t, <-errs)
+		entries, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+		require.NoError(t, err)
+		if len(entries[requestKey]) > 0 {
+			mapped, err := index.GetRequestKey(ctx, engineKey)
+			require.NoError(t, err)
+			require.Equal(t, requestKey, mapped)
+		}
+	}
+}
 
 // createInMemoryIndexForTesting creates a new InMemoryIndex for testing.
 func createInMemoryIndexForTesting(t *testing.T) Index {

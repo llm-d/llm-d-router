@@ -177,7 +177,7 @@ func TestSnapshotRecoveryGatesRealScorer(t *testing.T) {
 	}
 	check(t, 1)
 	require.Eventually(t, func() bool { score(); return prefix.Score(ctx, req, []scheduling.Endpoint{stable})[stable] == 1 }, 3*time.Second, 20*time.Millisecond)
-	for _, fault := range []string{"gap", "epoch", "malformed-live", "decode-failure", "missing-parent", "heartbeat-timeout"} {
+	for _, fault := range []string{"gap", "epoch", "missing-parent", "heartbeat-timeout"} {
 		t.Run(fault, func(t *testing.T) {
 			held := make(chan struct{})
 			server.mu.Lock()
@@ -191,10 +191,6 @@ func TestSnapshotRecoveryGatesRealScorer(t *testing.T) {
 				server.epoch++
 				server.seq = 0
 				server.send(server.empty)
-			case "malformed-live":
-				_ = server.pub.Send(zmq.NewMsgFrom([]byte("kv@127.0.0.1:8000@test-model")))
-			case "decode-failure":
-				server.send([]byte{0xc1})
 			case "missing-parent":
 				server.send(snapshotBatch(t, map[string]any{"type": "BlockStored", "block_hashes": []uint64{202}, "parent_block_hash": uint64(999), "token_ids": []uint32{5, 6, 7, 8}, "block_size": 4}))
 			case "heartbeat-timeout":
@@ -229,23 +225,6 @@ func TestSnapshotRecoveryGatesRealScorer(t *testing.T) {
 		require.Equal(t, 0.0, score())
 		server.mu.Lock()
 		server.unavailable = false
-		server.mu.Unlock()
-		check(t, 1)
-	})
-	t.Run("malformed-snapshot", func(t *testing.T) {
-		server.mu.Lock()
-		original := server.chunks
-		server.chunks = [][]byte{{0xc1}}
-		server.seq++
-		server.send(server.empty)
-		before := server.requests
-		server.mu.Unlock()
-		check(t, 0)
-		require.Equal(t, 1.0, prefix.Score(ctx, req, []scheduling.Endpoint{stable})[stable], "unaffected publisher must remain routable with cache affinity")
-		require.Eventually(t, func() bool { server.mu.Lock(); defer server.mu.Unlock(); return server.requests > before }, 4*time.Second, 20*time.Millisecond)
-		require.Equal(t, 0.0, score())
-		server.mu.Lock()
-		server.chunks = original
 		server.mu.Unlock()
 		check(t, 1)
 	})

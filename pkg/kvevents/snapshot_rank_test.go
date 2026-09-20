@@ -18,6 +18,7 @@ package kvevents
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -78,6 +79,40 @@ func TestSnapshotManagerMatchesOnlyActiveGenerations(t *testing.T) {
 	require.Equal(t, SnapshotStatus{Registered: 3, Ready: 1, Recovering: 1, Stale: 1}, manager.Status())
 	ids, _ := manager.GetReadySubscribers()
 	require.Equal(t, []string{"ready"}, ids)
+}
+
+func TestSnapshotManagerRetainsAllPublishersPerKey(t *testing.T) {
+	ctx := context.Background()
+	tokens, err := kvblock.NewChunkedTokenDatabase(nil)
+	require.NoError(t, err)
+	indexCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	indexCfg.KVBlockIndexConfig.InMemoryConfig.PodCacheSize = 1
+	matcher, err := kvcache.NewKVCacheIndexer(ctx, indexCfg, tokens)
+	require.NoError(t, err)
+	cfg := DefaultConfig()
+	cfg.SnapshotPort = 6000
+	manager, err := NewSnapshotManager(cfg, indexCfg.KVBlockIndexConfig, tokens, snapshotRankAdapter{}, matcher)
+	require.NoError(t, err)
+
+	const publishers = 192
+	entries := make([]kvblock.PodEntry, publishers)
+	filter := sets.New[string]()
+	now := time.Now().UnixNano()
+	for i := range publishers {
+		pod := fmt.Sprintf("pod-%03d", i)
+		generation := pod + "#snapshot-1"
+		entries[i] = kvblock.PodEntry{PodIdentifier: generation, DeviceTier: "gpu"}
+		filter.Insert(pod)
+		subscriber := &snapshotSubscriber{sourceEndpoint: pod, activeID: generation}
+		subscriber.lastReceive.Store(now)
+		manager.subscribers[pod] = subscriber
+	}
+	key := kvblock.BlockHash(1)
+	require.NoError(t, manager.index.Add(ctx, nil, []kvblock.BlockHash{key}, entries))
+	matches, err := manager.MatchBlockKeys(ctx, []kvblock.BlockHash{key}, filter)
+	require.NoError(t, err)
+	require.Len(t, matches, publishers)
 }
 
 func (snapshotRankAdapter) ShardingKey(*RawMessage) string { return "" }

@@ -37,6 +37,7 @@ func BenchmarkSnapshotMatch192Publishers(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	cfg.KVBlockIndexConfig.InMemoryConfig.PodCacheSize = snapshotEntriesPerKey
 	matcher, err := kvcache.NewKVCacheIndexer(ctx, cfg, tokens)
 	if err != nil {
 		b.Fatal(err)
@@ -70,6 +71,16 @@ func BenchmarkSnapshotMatch192Publishers(b *testing.B) {
 	}
 	if err := matcher.KVBlockIndex().Add(ctx, nil, keys, entries); err != nil {
 		b.Fatal(err)
+	}
+	if matches, err := manager.MatchBlockKeys(ctx, keys, filter); err != nil {
+		b.Fatal(err)
+	} else if len(matches) != len(entries) {
+		b.Fatalf("snapshot matcher retained %d of %d publishers", len(matches), len(entries))
+	}
+	if matches, err := matcher.MatchBlockKeys(ctx, keys, filter); err != nil {
+		b.Fatal(err)
+	} else if len(matches) != len(entries) {
+		b.Fatalf("ordinary matcher retained %d of %d publishers", len(matches), len(entries))
 	}
 
 	b.Run("shared-index", func(b *testing.B) {
