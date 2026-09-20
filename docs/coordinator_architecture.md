@@ -729,8 +729,10 @@ always forward on the client's original OpenAI path and are unaffected by this s
   token-array endpoint, sending `token_ids` and `features` (including `kwargs_data`)
   directly in the body.
 
-A step can override the global with `use_openai_format:` in its own `params`. The
-exact bodies per format are in [communication.md](communication.md).
+`encode` and `prefill` can each override the global with `use_openai_format:` in
+their own `params`; `decode` and `conditional-decode` have no such override, since
+they are unaffected by the setting. The exact bodies per format are in
+[communication.md](communication.md).
 
 `false` requires a `render` step in the pipeline: render produces the token IDs the
 tokens-in format sends, so the coordinator fails to start when `false` is set without a

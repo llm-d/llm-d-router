@@ -243,12 +243,14 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		reqcommon.CapSingleToken(body, format)
 		return body, nil
 	default:
-		// resolveFormat can also return APITypeCompletions, but a completions
-		// request never carries images: render's executeCompletions never
-		// populates MultimodalEntries, so this fan-out never runs for one. That
-		// leaves APITypeCompletions and any future format value as cases that
-		// should not reach here; treat them as a programming error instead of
-		// silently sending a generate-shaped body to the wrong endpoint.
+		// resolveFormat can also return APITypeCompletions, APITypeResponses, or
+		// APITypeMessages, but a completions request never carries images
+		// (render's executeCompletions never populates MultimodalEntries), and no
+		// coordinator route serves Responses or Messages, so this fan-out never
+		// runs for any of them. That leaves those three types and any future
+		// format value as cases that should not reach here; treat them as a
+		// programming error instead of silently sending a generate-shaped body to
+		// the wrong endpoint.
 		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
 }
