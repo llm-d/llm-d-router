@@ -190,6 +190,48 @@ func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV verifies that for
+// the /v1/completions format the decode step rewrites prompt to the rendered
+// token IDs and places kv_transfer_params at the top level.
+func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) {
+	var parsed map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"text": "ok"}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-compl-rendered",
+		OriginalPath:     reqcommon.PathCompletions,
+		Model:            "test-model",
+		TokenIDs:         []int{1, 2345},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+		Body:             map[string]any{"model": "test-model", "prompt": "Hello"},
+		ResponseWriter:   recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tokenIDs, _ := parsed["prompt"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected prompt rewritten to rendered token_ids, got %v", parsed["prompt"])
+	}
+	if _, ok := parsed[reqcommon.FieldKVTransferParams]; !ok {
+		t.Fatal("expected top-level kv_transfer_params for /v1/completions")
+	}
+}
+
 // TestDecodeStep_GenerateFormat_ToplevelKV verifies that for the
 // /inference/v1/generate format the decode step places kv_transfer_params at the
 // top level of the request body, and preserves the client's sampling_params so

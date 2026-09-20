@@ -50,7 +50,7 @@ var errCacheMiss = errors.New("cache miss")
 // content-type, forwarded headers, request id, and decode phase header. step
 // names the caller for error wrapping; extraHeaders carries step-specific
 // headers (the conditional cache probe sets Prefer).
-func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, step string, gwClient *gateway.Client, body map[string]any, extraHeaders map[string]string) (*http.Request, error) {
+func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string, reqCtx *pipeline.RequestContext, gwClient *gateway.Client, body map[string]any, extraHeaders map[string]string) (*http.Request, error) {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("%s: marshal: %w", step, err)

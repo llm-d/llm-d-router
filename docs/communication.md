@@ -937,7 +937,7 @@ The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stag
 | Decode            | `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 | Conditional-Decode| `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 
-The request path matches the user's original endpoint when using OpenAI format, or `/inference/v1/generate` when using the internal format.
+For encode and prefill, the request path matches the user's original endpoint when using OpenAI format, or `/inference/v1/generate` when using the internal format. Decode and conditional-decode always forward on the client's original path regardless of `use_openai_format`.
 
 ---
 

@@ -152,6 +152,41 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 	}
 }
 
+// Completions rewrites prompt to the rendered token IDs when render supplied
+// them, mirroring decode's TestDecodeStep_GenerateFormat_NestsKVInExtraArgs
+// coverage for the analogous branch in conditional_decode.go's prepareBody.
+func TestConditionalDecodeStep_CompletionsFormat_RewritesPrompt(t *testing.T) {
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   reqcommon.PathCompletions,
+		Body:           map[string]any{"model": testModelName, "prompt": "Hello"},
+		TokenIDs:       []int{1, 2345},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if tokenIDs, _ := receivedBody["prompt"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected prompt rewritten to rendered token_ids, got %v", receivedBody["prompt"])
+	}
+}
+
 // TestConditionalDecodeStep_MessagesFormat_ReturnsError verifies that a request
 // path detecting as APITypeMessages fails through prepareBody's default case:
 // the coordinator registers no /v1/messages route, so reaching this case is a
