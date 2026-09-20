@@ -33,6 +33,11 @@ import (
 // aliases so existing scrapers keep working during the migration.
 const routerSubsystem = metricsutil.LLMDRouterEndpointPickerSubsystem
 
+// kvcacheDeprecationNotice is appended to the deprecated kvcache_* metric
+// Help texts. The aliases were introduced as dual-emitted in v0.10.0; per the
+// N+2 deprecation policy they are removed in v0.12.0.
+const kvcacheDeprecationNotice = "Deprecated since v0.10.0, to be removed in v0.12.0."
+
 // podIdentifierLabel is the label key carried by the per-pod kvevents metrics.
 // Keeping it as a constant localizes label-schema changes to this package.
 const podIdentifierLabel = "pod_identifier"
@@ -83,7 +88,7 @@ func newDualCounter(oldSubsystem, oldName, newName, help string) *dualCounter {
 	return &dualCounter{
 		deprecated: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "kvcache", Subsystem: oldSubsystem, Name: oldName,
-			Help: "Deprecated: use " + routerSubsystem + "_" + newName + ". " + help,
+			Help: "Deprecated: use " + routerSubsystem + "_" + newName + ". " + kvcacheDeprecationNotice + " " + help,
 		}),
 		current: prometheus.NewCounter(prometheus.CounterOpts{
 			Subsystem: routerSubsystem, Name: newName,
@@ -96,7 +101,7 @@ func newDualHistogram(oldSubsystem, oldName, newName, help string, buckets []flo
 	return &dualHistogram{
 		deprecated: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "kvcache", Subsystem: oldSubsystem, Name: oldName,
-			Help:    "Deprecated: use " + routerSubsystem + "_" + newName + ". " + help,
+			Help:    "Deprecated: use " + routerSubsystem + "_" + newName + ". " + kvcacheDeprecationNotice + " " + help,
 			Buckets: buckets,
 		}),
 		current: prometheus.NewHistogram(prometheus.HistogramOpts{
