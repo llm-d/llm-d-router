@@ -60,21 +60,20 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 }
 
 // unreachableFormatError builds an error for a request whose detected API
-// type is not one a step's format switch builds a body for. The coordinator
-// registers no route for such a type (see server.go) or, for encode, never
-// runs the multimodal fan-out for one (see buildEncodeBody), so reaching this
-// case indicates a routing or dispatch bug rather than a client error.
+// type has no registered coordinator route (see server.go), so reaching
+// decode, conditional-decode, or prefill with it indicates a routing bug
+// rather than a client error.
 func unreachableFormatError(format reqcommon.APIType) error {
-	return fmt.Errorf("request should not be here: no coordinator route serves APIType %v", format)
+	return fmt.Errorf("request should not be here: no coordinator route serves %v", format)
 }
 
 // resolveFormat maps a request path to the wire format encode and prefill
 // should send upstream. Only Chat Completions is gated by useOpenAIFormat,
-// collapsing to APITypeGenerate when the tokens-in setting is disabled (its
-// body carries the prompt as reqCtx.TokenIDs and does not depend on the
-// client's request shape); every other detected type passes through
-// unchanged, leaving it to each step's own switch to decide whether that type
-// is supported.
+// collapsing to APITypeGenerate when useOpenAIFormat is false (the tokens-in
+// format, whose body carries the prompt as reqCtx.TokenIDs and does not
+// depend on the client's request shape); every other detected type passes
+// through unchanged, leaving it to each step's own switch to decide whether
+// that type is supported.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	detected := reqcommon.DetectAPIType(path)
 	if detected == reqcommon.APITypeChatCompletions && !useOpenAIFormat {
