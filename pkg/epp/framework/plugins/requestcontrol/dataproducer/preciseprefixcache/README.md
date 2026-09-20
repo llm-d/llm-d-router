@@ -116,9 +116,10 @@ counts, and tokenless offload events preserve every router block covered by an
 engine block. The prefix scorer retains its configured device-tier weights.
 
 Snapshot requests time out after 10 seconds. A publisher is unavailable after
-5 seconds without a live message. Recovery retries after 1 second. Bootstrap
-buffering is bounded to 4,096 messages and 64 MiB; the receive queue is bounded to
-256 messages and 64 MiB. Snapshot replies are limited to 256 MiB. An unavailable
+5 seconds without a live message. Recovery retries start after 1 second and use
+jittered exponential backoff capped at 30 seconds. Bootstrap buffering is
+bounded to 4,096 messages and 64 MiB; the receive queue is bounded to 256
+messages and 64 MiB. Snapshot replies are limited to 256 MiB. An unavailable
 snapshot produces no cache affinity; if the engine recorder is invalid, the
 publisher must be restarted to restore snapshots.
 
