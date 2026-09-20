@@ -186,6 +186,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		return body, nil
 
 	default:
+		// resolveFormat above never returns anything but the formats handled
+		// here, so this case is unreachable unless resolveFormat's contract
+		// changes.
 		return nil, unreachableFormatError(format)
 	}
 }
