@@ -25,29 +25,37 @@ import (
 )
 
 const (
-	// Expected field counts for SGLang msgpack array structs.
-	// SGLang uses the same positional wire format as vLLM but may omit trailing optional fields
-	// via omit_defaults=True in msgspec.
+	// Minimum required fields, tag included (excluding trailing optional ones).
 	// See: sglang/srt/disaggregation/kv_events.py (BlockStored, BlockRemoved classes).
-	sglangBlockStoredFieldCount  = 9 // tag + block_hashes + parent + tokens + block_size + lora_id + medium + lora_name + extra_keys
-	sglangBlockRemovedFieldCount = 3 // tag + block_hashes + medium
-
-	// Minimum required fields (excluding trailing optional ones).
 	sglangBlockStoredMinFields  = 5 // tag + block_hashes + parent + tokens + block_size
 	sglangBlockRemovedMinFields = 2 // tag + block_hashes
 )
 
+// Field-name order of map-encoded SGLang events, mirroring the converters'
+// positional layouts below. "type" (the tag) is not listed here: it is read
+// separately by name and placed at position 0 by hand, then these names fill
+// the remaining positions in order.
+var (
+	sglangBlockStoredFieldOrder  = []string{"block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"}
+	sglangBlockRemovedFieldOrder = []string{"block_hashes", "medium"}
+)
+
 // SGLangAdapter implements the kvevents.EngineAdapter interface for SGLang engines.
-// SGLang uses the same msgpack wire format as vLLM but may omit trailing optional fields.
+//
+// SGLang emits events either as positional msgpack arrays with trailing
+// defaults omitted (msgspec array_like=True) or, since
+// sgl-project/sglang#37482, as field-name maps tagged under "type". Both
+// decode into the same positional []any layout, extracted with length guards
+// instead of fixed structs, so the converters stay encoding-agnostic.
 type SGLangAdapter struct {
-	eventConverters map[string]func([]byte) (kvevents.GenericEvent, error)
+	eventConverters map[string]func([]any) (kvevents.GenericEvent, error)
 }
 
 // NewSGLangAdapter creates a new SGLang adapter.
 func NewSGLangAdapter() *SGLangAdapter {
 	adapter := &SGLangAdapter{}
 
-	adapter.eventConverters = map[string]func([]byte) (kvevents.GenericEvent, error){
+	adapter.eventConverters = map[string]func([]any) (kvevents.GenericEvent, error){
 		eventTagBlockStored:      adapter.convertBlockStoredEvent,
 		eventTagBlockRemoved:     adapter.convertBlockRemovedEvent,
 		eventTagAllBlocksCleared: adapter.convertAllBlocksClearedEvent,
@@ -78,7 +86,7 @@ func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, 
 
 	genericEvents := make([]kvevents.GenericEvent, len(batch.Events))
 	for i, rawEventBytes := range batch.Events {
-		genericEvent, err := decodeEvent(rawEventBytes, s.eventConverters)
+		genericEvent, err := s.decodeSGLangEvent(rawEventBytes)
 		if err != nil {
 			return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode SGLang event: %w", err)
 		}
@@ -92,6 +100,79 @@ func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, 
 	}
 
 	return podID, modelName, eventBatch, nil
+}
+
+// decodeSGLangEvent decodes a single SGLang event from msgpack bytes and dispatches
+// it to the matching converter. Map-encoded events are first normalized to the
+// positional []any layout the converters consume; each converter enforces its
+// own minimum-field count.
+func (s *SGLangAdapter) decodeSGLangEvent(rawEventBytes []byte) (kvevents.GenericEvent, error) {
+	var decoded any
+	if err := msgpack.Unmarshal(rawEventBytes, &decoded); err != nil {
+		return nil, fmt.Errorf("unmarshal event payload: %w", err)
+	}
+
+	var fields []any
+	switch ev := decoded.(type) {
+	case []any:
+		fields = ev
+	case map[string]any:
+		var err error
+		if fields, err = sglangMapEventToFields(ev); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("event is neither an array nor a map: %T", decoded)
+	}
+
+	if len(fields) < 1 {
+		return nil, fmt.Errorf("malformed tagged union: no tag")
+	}
+
+	tag, ok := fields[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("event tag is not a string: %T", fields[0])
+	}
+
+	converter, exists := s.eventConverters[tag]
+	if !exists {
+		return nil, fmt.Errorf("unknown SGLang event tag: %s", tag)
+	}
+
+	return converter(fields)
+}
+
+// sglangMapEventToFields normalizes a map-encoded SGLang event to positional []any.
+// Absent fields become nil (same as an omitted trailing array field); unknown
+// tags pass through so converter lookup reports them uniformly.
+func sglangMapEventToFields(ev map[string]any) ([]any, error) {
+	rawTag, exists := ev["type"]
+	if !exists {
+		return nil, fmt.Errorf("map-encoded event is missing the %q tag", "type")
+	}
+	tag, ok := rawTag.(string)
+	if !ok {
+		return nil, fmt.Errorf("map-encoded event tag (%q) is not a string: %T", "type", rawTag)
+	}
+
+	var order []string
+	switch tag {
+	case eventTagBlockStored:
+		order = sglangBlockStoredFieldOrder
+	case eventTagBlockRemoved:
+		order = sglangBlockRemovedFieldOrder
+	case eventTagAllBlocksCleared:
+		// no payload fields
+	default:
+		return []any{tag}, nil
+	}
+
+	fields := make([]any, 0, len(order)+1)
+	fields = append(fields, tag)
+	for _, name := range order {
+		fields = append(fields, ev[name])
+	}
+	return fields, nil
 }
 
 type msgpackSGLangBlockStoredEvent struct {
