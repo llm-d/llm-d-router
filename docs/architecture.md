@@ -123,15 +123,14 @@ The first two lines of the configuration are constant and must appear as is.
 
 ### API versions
 
-The EPP accepts three configuration API versions:
+The EPP accepts two configuration API versions:
 
 | `apiVersion` | Status |
 |---|---|
 | `llm-d.ai/v1` | Current. |
 | `llm-d.ai/v1alpha1` | Deprecated, reported on startup. Support ends in a later release. |
-| `inference.networking.x-k8s.io/v1alpha1` | Deprecated, reported on startup. Same structure as `llm-d.ai/v1alpha1` under a different group name. |
 
-Both deprecated versions are read as `v1` and yield the same configuration as the equivalent `v1` document. The field placements that differ are all under `dataLayer`:
+The deprecated version is read as `v1` and yields the same configuration as the equivalent `v1` document. The field placements that differ are all under `dataLayer`:
 
 | `v1alpha1` | `v1` |
 |---|---|

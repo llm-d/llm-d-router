@@ -19,42 +19,9 @@ package loader
 
 // --- Valid Configurations ---
 
-// successDeprecatedXK8sText represents a fully populated, valid configuration
-// using the deprecated group name for the Pseudo CRD config structure.
+// successDeprecatedV1alpha1Text represents a fully populated, valid configuration
+// in the deprecated v1alpha1 version of the Pseudo CRD config structure.
 // It uses a mix of explicit names and type-derived names.
-const successDeprecatedXK8sText = `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
-kind: EndpointPickerConfig
-plugins:
-- name: test1
-  type: test-plugin
-  parameters:
-    threshold: 10
-- name: profileHandler
-  type: test-profile-handler
-- type: test-scorer
-  parameters:
-    blockSize: 32
-- name: testPicker
-  type: test-picker
-schedulingProfiles:
-- name: default
-  plugins:
-  - pluginRef: test1
-  - pluginRef: test-scorer
-    weight: 50
-  - pluginRef: testPicker
-featureGates:
-- test-feature-gate
-- flowControl
-flowControl:
-  saturationDetector:
-    pluginRef: utilization-detector
-`
-
-// successDeprecatedV1alpha1Text is successDeprecatedXK8sText in the deprecated
-// v1alpha1 version of the current group name. Both load to the same v1
-// configuration.
 const successDeprecatedV1alpha1Text = `
 apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
@@ -602,6 +569,38 @@ dataLayer:
 `
 
 // --- Invalid Configurations (Syntax/Structure) ---
+
+// errorRemovedGroupText is successDeprecatedV1alpha1Text under the removed
+// inference.networking.x-k8s.io group. The group alone makes it unloadable.
+const errorRemovedGroupText = `
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: test1
+  type: test-plugin
+  parameters:
+    threshold: 10
+- name: profileHandler
+  type: test-profile-handler
+- type: test-scorer
+  parameters:
+    blockSize: 32
+- name: testPicker
+  type: test-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: test1
+  - pluginRef: test-scorer
+    weight: 50
+  - pluginRef: testPicker
+featureGates:
+- test-feature-gate
+- flowControl
+flowControl:
+  saturationDetector:
+    pluginRef: utilization-detector
+`
 
 // errorBadYamlText contains invalid YAML syntax.
 const errorBadYamlText = `

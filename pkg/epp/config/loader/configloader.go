@@ -26,9 +26,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
@@ -56,18 +54,8 @@ var (
 
 func init() {
 	utilruntime.Must(configapiv1.Install(scheme))
-	installDeprecatedVersions(scheme)
-}
-
-// installDeprecatedVersions registers the apiVersions that decode to the v1alpha1
-// types and convert to v1.
-// TODO: remove together with the v1alpha1 types.
-func installDeprecatedVersions(scheme *runtime.Scheme) {
+	// TODO: remove together with the v1alpha1 types.
 	utilruntime.Must(configapiv1alpha1.Install(scheme))
-
-	supersededGroupVersion := schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"}
-	scheme.AddKnownTypes(supersededGroupVersion, &configapiv1alpha1.EndpointPickerConfig{})
-	v1.AddToGroupVersion(scheme, supersededGroupVersion)
 }
 
 // RegisterFeatureGate registers a feature gate name for validation purposes.
@@ -224,7 +212,7 @@ func decodeRawConfig(logger logr.Logger, configBytes []byte) (*configapiv1.Endpo
 	switch cfg := obj.(type) {
 	case *configapiv1.EndpointPickerConfig:
 		return cfg, nil
-	case *configapiv1alpha1.EndpointPickerConfig: // both v1alpha1 and x-k8s
+	case *configapiv1alpha1.EndpointPickerConfig:
 		logger.Info("DEPRECATION: apiVersion "+gvk.GroupVersion().String()+"/EndpointPickerConfig is deprecated and is removed in a later release",
 			"replacement", configapiv1.GroupVersion.String()+"/EndpointPickerConfig")
 		return convertV1alpha1ToV1(logger, cfg), nil

@@ -126,7 +126,7 @@ func TestLoadRawConfiguration(t *testing.T) {
 	kvCacheUtilizationScorerWeight := 2.0
 	prefixCacheScorerWeight := 3.0
 
-	// Both deprecated apiVersions carry the same document and must converge on this v1 configuration.
+	// The deprecated v1alpha1 document must converge on this v1 configuration.
 	wantDeprecated := &configapiv1.EndpointPickerConfig{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "EndpointPickerConfig",
@@ -210,11 +210,10 @@ func TestLoadRawConfiguration(t *testing.T) {
 			deprecated: false,
 		},
 		{
-			name:       "Success - using deprecated Groupname",
-			configText: successDeprecatedXK8sText,
-			want:       wantDeprecated,
-			wantErr:    false,
-			deprecated: true,
+			name:       "Error - already removed Groupname",
+			configText: errorRemovedGroupText,
+			wantErr:    true,
+			wantErrMsg: `no kind "EndpointPickerConfig" is registered for version "inference.networking.x-k8s.io/v1alpha1"`,
 		},
 		{
 			name:       "Success - using deprecated API version v1alpha1",
