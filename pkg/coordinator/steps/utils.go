@@ -60,9 +60,11 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 }
 
 // unreachableFormatError builds an error for a request whose detected API
-// type has no registered coordinator route (see server.go), so reaching
-// decode, conditional-decode, or prefill with it indicates a routing bug
-// rather than a client error.
+// type has no registered coordinator route (see server.go). Decode and
+// conditional-decode detect the format directly from reqCtx.OriginalPath, so
+// reaching it there indicates a routing bug rather than a client error.
+// Prefill's own default case (see buildPrefillBody) is unreachable through
+// resolveFormat today and only guards against a future change to it.
 func unreachableFormatError(format reqcommon.APIType) error {
 	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
 }
