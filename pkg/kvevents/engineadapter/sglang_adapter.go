@@ -175,130 +175,108 @@ func sglangMapEventToFields(ev map[string]any) ([]any, error) {
 	return fields, nil
 }
 
-type msgpackSGLangBlockStoredEvent struct {
-	_               struct{} `msgpack:",array"`
-	Tag             string
-	BlockHashes     []any
-	ParentBlockHash any
-	TokenIds        []uint32
-	BlockSize       int
-	LoraID          *int    `msgpack:",omitempty"`
-	Medium          *string `msgpack:",omitempty"`
-	LoraName        *string `msgpack:",omitempty"`
-	ExtraKeys       []any   `msgpack:",omitempty"`
-}
-
-type msgpackSGLangBlockRemovedEvent struct {
-	_           struct{} `msgpack:",array"`
-	Tag         string
-	BlockHashes []any
-	Medium      *string `msgpack:",omitempty"`
-}
-
-// padFields pads a msgpack array to the expected field count with nil values.
-// Returns the original bytes if already at the expected length, avoiding unnecessary re-marshal overhead.
-func padFields(rawEventBytes []byte, fields []any, expectedCount int) ([]byte, error) {
-	if len(fields) >= expectedCount {
-		return rawEventBytes, nil
-	}
-	for len(fields) < expectedCount {
-		fields = append(fields, nil)
-	}
-	paddedBytes, err := msgpack.Marshal(fields)
-	if err != nil {
-		return nil, fmt.Errorf("failed to re-marshal padded event: %w", err)
-	}
-	return paddedBytes, nil
-}
-
-// convertBlockStoredEvent decodes and converts a BlockStored event to a generic event.
-// Handles SGLang's shorter arrays by padding missing trailing optional fields with nil.
-func (s *SGLangAdapter) convertBlockStoredEvent(rawEventBytes []byte) (kvevents.GenericEvent, error) {
-	var fields []any
-	if err := msgpack.Unmarshal(rawEventBytes, &fields); err != nil {
-		return nil, fmt.Errorf("failed to decode BlockStored event: %w", err)
-	}
-
+// convertBlockStoredEvent converts a decoded []any into a BlockStoredEvent.
+// SGLang field positions (array_like=True, tag=True), also produced when
+// normalizing the tagged-map form:
+//
+//	[0] tag                string            (consumed by decodeSGLangEvent)
+//	[1] block_hashes       []hash
+//	[2] parent_block_hash  hash|nil
+//	[3] token_ids          []uint32
+//	[4] block_size         int
+//	[5] lora_id            int|nil    (optional, omit_defaults)
+//	[6] medium             string|nil (optional, omit_defaults)
+//
+// cache_salt and session_id (map-only, attribution fields) have no positional
+// slot and are not carried into kvevents.BlockStoredEvent.
+func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEvent, error) {
 	if len(fields) < sglangBlockStoredMinFields {
 		return nil, fmt.Errorf("BlockStored event has too few fields: %d (minimum %d)", len(fields), sglangBlockStoredMinFields)
 	}
 
-	eventBytes, err := padFields(rawEventBytes, fields, sglangBlockStoredFieldCount)
-	if err != nil {
-		return nil, err
+	rawHashes, ok := fields[1].([]any)
+	if !ok {
+		return nil, fmt.Errorf("BlockStored: block_hashes is not an array: %T", fields[1])
 	}
-
-	var event msgpackSGLangBlockStoredEvent
-	if err := msgpack.Unmarshal(eventBytes, &event); err != nil {
-		return nil, fmt.Errorf("failed to decode BlockStored event: %w", err)
-	}
-
-	deviceTier := ""
-	if event.Medium != nil {
-		deviceTier = *event.Medium
-	}
-
-	blockHashes, err := convertBlockHashes(event.BlockHashes)
+	blockHashes, err := convertBlockHashes(rawHashes)
 	if err != nil {
 		return nil, err
 	}
 
 	var parentHash uint64
-	if event.ParentBlockHash != nil {
-		hash, err := getHashAsUint64(event.ParentBlockHash)
+	if fields[2] != nil {
+		hash, err := getHashAsUint64(fields[2])
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse parent hash: %w", err)
 		}
 		parentHash = hash
 	}
 
-	extraKeys, err := convertExtraKeys(event.ExtraKeys)
+	tokens, err := toUint32Slice(fields[3])
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("BlockStored: %w", err)
+	}
+
+	blockSize, err := toInt(fields[4])
+	if err != nil {
+		return nil, fmt.Errorf("BlockStored: block_size: %w", err)
+	}
+
+	var loraID *int
+	if raw := fieldAt(fields, 5); raw != nil {
+		id, err := toInt(raw)
+		if err != nil {
+			return nil, fmt.Errorf("BlockStored: lora_id: %w", err)
+		}
+		loraID = &id
+	}
+
+	var deviceTier string
+	if raw := fieldAt(fields, 6); raw != nil {
+		mediumStr, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("BlockStored: medium is not a string: %T", raw)
+		}
+		deviceTier = mediumStr
 	}
 
 	return &kvevents.BlockStoredEvent{
 		BlockHashes: blockHashes,
-		Tokens:      event.TokenIds,
+		Tokens:      tokens,
 		ParentHash:  parentHash,
-		BlockSize:   event.BlockSize,
+		BlockSize:   blockSize,
 		DeviceTier:  deviceTier,
-		LoraID:      event.LoraID,
-		LoraName:    event.LoraName,
-		ExtraKeys:   extraKeys,
+		LoraID:      loraID,
 	}, nil
 }
 
-// convertBlockRemovedEvent decodes and converts a BlockRemoved event to a generic event.
-// Handles SGLang's shorter arrays by padding missing trailing optional fields with nil.
-func (s *SGLangAdapter) convertBlockRemovedEvent(rawEventBytes []byte) (kvevents.GenericEvent, error) {
-	var fields []any
-	if err := msgpack.Unmarshal(rawEventBytes, &fields); err != nil {
-		return nil, fmt.Errorf("failed to decode BlockRemoved event: %w", err)
-	}
-
+// convertBlockRemovedEvent converts a decoded []any into a BlockRemovedEvent.
+// SGLang field positions:
+//
+//	[0] tag           string
+//	[1] block_hashes  []hash
+//	[2] medium        string|nil (optional, omit_defaults)
+func (s *SGLangAdapter) convertBlockRemovedEvent(fields []any) (kvevents.GenericEvent, error) {
 	if len(fields) < sglangBlockRemovedMinFields {
 		return nil, fmt.Errorf("BlockRemoved event has too few fields: %d (minimum %d)", len(fields), sglangBlockRemovedMinFields)
 	}
 
-	eventBytes, err := padFields(rawEventBytes, fields, sglangBlockRemovedFieldCount)
+	rawHashes, ok := fields[1].([]any)
+	if !ok {
+		return nil, fmt.Errorf("BlockRemoved: block_hashes is not an array: %T", fields[1])
+	}
+	blockHashes, err := convertBlockHashes(rawHashes)
 	if err != nil {
 		return nil, err
 	}
 
-	var event msgpackSGLangBlockRemovedEvent
-	if err := msgpack.Unmarshal(eventBytes, &event); err != nil {
-		return nil, fmt.Errorf("failed to decode BlockRemoved event: %w", err)
-	}
-
-	deviceTier := ""
-	if event.Medium != nil {
-		deviceTier = *event.Medium
-	}
-
-	blockHashes, err := convertBlockHashes(event.BlockHashes)
-	if err != nil {
-		return nil, err
+	var deviceTier string
+	if raw := fieldAt(fields, 2); raw != nil {
+		mediumStr, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("BlockRemoved: medium is not a string: %T", raw)
+		}
+		deviceTier = mediumStr
 	}
 
 	return &kvevents.BlockRemovedEvent{
@@ -307,7 +285,7 @@ func (s *SGLangAdapter) convertBlockRemovedEvent(rawEventBytes []byte) (kvevents
 	}, nil
 }
 
-// convertAllBlocksClearedEvent converts an AllBlocksCleared event.
-func (s *SGLangAdapter) convertAllBlocksClearedEvent(_ []byte) (kvevents.GenericEvent, error) {
+// convertAllBlocksClearedEvent converts a decoded []any into an AllBlocksClearedEvent.
+func (s *SGLangAdapter) convertAllBlocksClearedEvent(_ []any) (kvevents.GenericEvent, error) {
 	return &kvevents.AllBlocksClearedEvent{}, nil
 }
