@@ -286,9 +286,10 @@ so client-provided values are not sent upstream.
 
 Every coordinator-to-worker call carries an `EPP-Profile` header (`encode`, `prefill`, or
 `decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
-[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). The request path is either the client's
-original OpenAI path or the internal `/inference/v1/generate` path, depending on
-`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other
+[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). For encode and prefill, the request
+path is either the client's original OpenAI path or the internal `/inference/v1/generate` path, depending on
+`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)); decode and conditional-decode
+always forward on the client's original path regardless of that setting. Other
 paths can be added later as new protocols are supported.
 
 ## EPP integration
@@ -730,9 +731,7 @@ always forward on the client's original OpenAI path and are unaffected by this s
   directly in the body.
 
 `encode` and `prefill` can each override the global with `use_openai_format:` in
-their own `params`; `decode` and `conditional-decode` have no such override, since
-they are unaffected by the setting. The exact bodies per format are in
-[communication.md](communication.md).
+their own `params`. The exact bodies per format are in [communication.md](communication.md).
 
 `false` requires a `render` step in the pipeline: render produces the token IDs the
 tokens-in format sends, so the coordinator fails to start when `false` is set without a

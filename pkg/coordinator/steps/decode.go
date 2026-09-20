@@ -70,7 +70,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, reqCtx, DecodeStepName, s.gwClient, reqCtx.Body, nil)
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
 	if err != nil {
 		return err
 	}
@@ -94,10 +94,11 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
-	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 	switch format {
 	case reqcommon.APITypeChatCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
@@ -118,6 +119,8 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		setGenerateTransferParams(sampling, kvParams, nil)
 	default:
+		// kvParams and injectUUIDs above already ran; both are harmless here
+		// since the request fails on this return and reqCtx.Body is never sent.
 		return unreachableFormatError(format)
 	}
 	return nil

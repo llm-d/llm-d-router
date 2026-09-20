@@ -64,22 +64,24 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 // decode, conditional-decode, or prefill with it indicates a routing bug
 // rather than a client error.
 func unreachableFormatError(format reqcommon.APIType) error {
-	return fmt.Errorf("request should not be here: no coordinator route serves %v", format)
+	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
 }
 
-// resolveFormat maps a request path to the wire format encode and prefill
-// should send upstream. Only Chat Completions is gated by useOpenAIFormat,
-// collapsing to APITypeGenerate when useOpenAIFormat is false (the tokens-in
-// format, whose body carries the prompt as reqCtx.TokenIDs and does not
-// depend on the client's request shape); every other detected type passes
-// through unchanged, leaving it to each step's own switch to decide whether
-// that type is supported.
+// resolveFormat maps a request path to the wire format a step emits. The steps
+// build only Completions, Chat Completions, and generate bodies, so any other
+// API collapses to APITypeGenerate; Chat Completions additionally requires
+// useOpenAIFormat. Generate is the fallback because its body carries the prompt
+// as reqCtx.TokenIDs and does not depend on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
-	detected := reqcommon.DetectAPIType(path)
-	if detected == reqcommon.APITypeChatCompletions && !useOpenAIFormat {
-		return reqcommon.APITypeGenerate
+	switch detected := reqcommon.DetectAPIType(path); detected {
+	case reqcommon.APITypeCompletions:
+		return detected
+	case reqcommon.APITypeChatCompletions:
+		if useOpenAIFormat {
+			return detected
+		}
 	}
-	return detected
+	return reqcommon.APITypeGenerate
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
