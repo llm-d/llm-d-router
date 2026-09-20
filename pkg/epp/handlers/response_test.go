@@ -19,9 +19,11 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"github.com/google/go-cmp/cmp"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -39,6 +42,19 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
+
+type fakeCapacityReader struct {
+	priority int
+	snapshot contracts.CapacitySnapshot
+	err      error
+	calls    int
+}
+
+func (r *fakeCapacityReader) CapacitySnapshot(priority int) (contracts.CapacitySnapshot, error) {
+	r.priority = priority
+	r.calls++
+	return r.snapshot, r.err
+}
 
 const (
 	body = `
@@ -564,6 +580,173 @@ func TestGenerateResponseHeaders_FlowQueueDuration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateResponseHeaders_FlowBandHeadroomRequests(t *testing.T) {
+	tests := []struct {
+		name              string
+		admitted          bool
+		priority          int
+		effectivePriority int
+		capacity          uint64
+		length            uint64
+		snapshotErr       error
+		nilReader         bool
+		responseHeaders   map[string]string
+		wantValue         string
+	}{
+		{
+			name:              "emits remaining capacity",
+			admitted:          true,
+			effectivePriority: 5,
+			capacity:          10,
+			length:            3,
+			wantValue:         "7",
+		},
+		{
+			name:      "full band emits zero",
+			admitted:  true,
+			capacity:  10,
+			length:    10,
+			wantValue: "0",
+		},
+		{
+			name:      "over capacity emits zero",
+			admitted:  true,
+			capacity:  10,
+			length:    12,
+			wantValue: "0",
+		},
+		{
+			name:     "unlimited capacity omits header",
+			admitted: true,
+			responseHeaders: map[string]string{
+				metadata.FlowBandHeadroomRequestsHeaderKey: "spoofed",
+			},
+		},
+		{
+			name:        "snapshot error omits header",
+			admitted:    true,
+			snapshotErr: errors.New("snapshot failed"),
+		},
+		{
+			name:        "missing band omits header",
+			admitted:    true,
+			snapshotErr: contracts.ErrPriorityBandNotFound,
+		},
+		{
+			name: "not admitted does not query capacity",
+		},
+		{
+			name:      "nil reader omits header",
+			admitted:  true,
+			nilReader: true,
+		},
+		{
+			name:              "uses effective priority after fallback",
+			admitted:          true,
+			priority:          5,
+			effectivePriority: 0,
+			capacity:          10,
+			length:            3,
+			wantValue:         "7",
+		},
+		{
+			name:     "backend header cannot spoof advisory value",
+			admitted: true,
+			capacity: 10,
+			length:   3,
+			responseHeaders: map[string]string{
+				metadata.FlowBandHeadroomRequestsHeaderKey: "spoofed",
+			},
+			wantValue: "7",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			reader := &fakeCapacityReader{
+				snapshot: contracts.CapacitySnapshot{
+					Band: contracts.CapacityDimension{
+						CapacityRequests: tc.capacity,
+						Len:              tc.length,
+						CapacityBytes:    1,
+						ByteSize:         100,
+					},
+					Global: contracts.CapacityDimension{CapacityRequests: 100, Len: 1},
+				},
+				err: tc.snapshotErr,
+			}
+			if !tc.nilReader {
+				server.SetCapacityReader(reader)
+			}
+			reqCtx := &RequestContext{
+				Priority:                     tc.priority,
+				FlowControlAdmitted:          tc.admitted,
+				FlowControlEffectivePriority: tc.effectivePriority,
+				Response:                     &Response{Headers: tc.responseHeaders},
+			}
+			mutation := server.generateResponseHeaderResponse(reqCtx).GetResponseHeaders().Response.HeaderMutation
+			gotHeaders := make(map[string]string)
+			headroomCount := 0
+			for _, h := range mutation.SetHeaders {
+				gotHeaders[h.Header.Key] = string(h.Header.RawValue)
+				if h.Header.Key == metadata.FlowBandHeadroomRequestsHeaderKey {
+					headroomCount++
+					assert.Equal(t, configPb.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD, h.AppendAction)
+				}
+			}
+
+			if tc.wantValue == "" {
+				assert.NotContains(t, gotHeaders, metadata.FlowBandHeadroomRequestsHeaderKey)
+				assert.Equal(t, []string{metadata.FlowBandHeadroomRequestsHeaderKey}, mutation.RemoveHeaders)
+			} else {
+				assert.Equal(t, tc.wantValue, gotHeaders[metadata.FlowBandHeadroomRequestsHeaderKey])
+				assert.Empty(t, mutation.RemoveHeaders)
+			}
+			if tc.wantValue == "" {
+				assert.Zero(t, headroomCount)
+			} else {
+				assert.Equal(t, 1, headroomCount)
+			}
+			wantCalls := 0
+			if tc.admitted && !tc.nilReader {
+				wantCalls = 1
+			}
+			assert.Equal(t, wantCalls, reader.calls)
+			if wantCalls != 0 {
+				assert.Equal(t, tc.effectivePriority, reader.priority)
+			}
+		})
+	}
+}
+
+func TestGenerateResponseHeaders_FlowBandHeadroomRequestsUsesCurrentSnapshot(t *testing.T) {
+	reader := &fakeCapacityReader{
+		snapshot: contracts.CapacitySnapshot{
+			Band: contracts.CapacityDimension{CapacityRequests: 10, Len: 3},
+		},
+	}
+	server := &StreamingServer{}
+	server.SetCapacityReader(reader)
+	reqCtx := &RequestContext{
+		FlowControlAdmitted:          true,
+		FlowControlEffectivePriority: 5,
+		Response:                     &Response{Headers: map[string]string{}},
+	}
+
+	reader.snapshot.Band.Len = 8
+
+	mutation := server.generateResponseHeaderResponse(reqCtx).GetResponseHeaders().Response.HeaderMutation
+	gotHeaders := make(map[string]string)
+	for _, header := range mutation.SetHeaders {
+		gotHeaders[header.Header.Key] = string(header.Header.RawValue)
+	}
+
+	assert.Equal(t, "2", gotHeaders[metadata.FlowBandHeadroomRequestsHeaderKey])
+	assert.Equal(t, 1, reader.calls)
+	assert.Equal(t, 5, reader.priority)
 }
 
 func TestRewriteModelName(t *testing.T) {

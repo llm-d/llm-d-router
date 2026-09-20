@@ -140,13 +140,23 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 }
 
 func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	headers := s.generateResponseHeaders(reqCtx)
+	mutation := &extProcPb.HeaderMutation{SetHeaders: headers}
+	headroomEmitted := false
+	for _, header := range headers {
+		if header.Header.Key == metadata.FlowBandHeadroomRequestsHeaderKey {
+			headroomEmitted = true
+			break
+		}
+	}
+	if !headroomEmitted {
+		mutation.RemoveHeaders = []string{metadata.FlowBandHeadroomRequestsHeaderKey}
+	}
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HeadersResponse{
 				Response: &extProcPb.CommonResponse{
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateResponseHeaders(reqCtx),
-					},
+					HeaderMutation: mutation,
 				},
 			},
 		},
@@ -196,6 +206,23 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 				RawValue: []byte(strconv.FormatInt(reqCtx.FlowControlQueueDuration.Milliseconds(), 10)),
 			},
 		})
+	}
+
+	if reqCtx.FlowControlAdmitted && s.capacityReader != nil {
+		snapshot, err := s.capacityReader.CapacitySnapshot(reqCtx.FlowControlEffectivePriority)
+		if err == nil && snapshot.Band.CapacityRequests != 0 {
+			headroom := uint64(0)
+			if snapshot.Band.Len < snapshot.Band.CapacityRequests {
+				headroom = snapshot.Band.CapacityRequests - snapshot.Band.Len
+			}
+			headers = append(headers, &configPb.HeaderValueOption{
+				Header: &configPb.HeaderValue{
+					Key:      metadata.FlowBandHeadroomRequestsHeaderKey,
+					RawValue: []byte(strconv.FormatUint(headroom, 10)),
+				},
+				AppendAction: configPb.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+			})
+		}
 	}
 
 	// Include any non-system-owned headers.
