@@ -242,3 +242,64 @@ func TestLogMetrics(t *testing.T) {
 		}
 	})
 }
+
+func TestKVCacheLegacyMetricNamesAreNotEmitted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	cacheMetrics := []prometheus.Collector{
+		Admissions, Evictions,
+		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
+		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
+	}
+	for _, c := range cacheMetrics {
+		reg.MustRegister(c)
+	}
+
+	Admissions.Inc()
+	Evictions.Inc()
+	LookupRequests.Inc()
+	LookupHits.Inc()
+	LookupLatency.Observe(0.1)
+	MaxPodHitCount.Inc()
+	DedupRemovedHashesSuppressed.Inc()
+	DedupRemovedHashesForwarded.Inc()
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() failed: %v", err)
+	}
+
+	got := make(map[string]bool, len(mfs))
+	for _, mf := range mfs {
+		got[mf.GetName()] = true
+	}
+
+	for _, name := range []string{
+		"llm_d_epp_kv_cache_index_admissions_total",
+		"llm_d_epp_kv_cache_index_evictions_total",
+		"llm_d_epp_kv_cache_index_lookup_requests_total",
+		"llm_d_epp_kv_cache_index_lookup_hits_total",
+		"llm_d_epp_kv_cache_index_lookup_latency_seconds",
+		"llm_d_epp_kv_cache_index_max_pod_hit_count_total",
+		"llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total",
+		"llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total",
+	} {
+		if !got[name] {
+			t.Errorf("expected metric %q to be registered, got names: %v", name, got)
+		}
+	}
+
+	for _, name := range []string{
+		"kvcache_index_admissions_total",
+		"kvcache_index_evictions_total",
+		"kvcache_index_lookup_requests_total",
+		"kvcache_index_lookup_hits_total",
+		"kvcache_index_lookup_latency_seconds",
+		"kvcache_index_max_pod_hit_count_total",
+		"kvcache_kvevents_dedup_removed_hashes_suppressed_total",
+		"kvcache_kvevents_dedup_removed_hashes_forwarded_total",
+	} {
+		if got[name] {
+			t.Errorf("deprecated metric %q is still registered", name)
+		}
+	}
+}
