@@ -70,7 +70,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, reqCtx, DecodeStepName, s.gwClient, reqCtx.Body, nil, logger)
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, reqCtx, DecodeStepName, s.gwClient, reqCtx.Body, nil)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 	switch format {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+	case reqcommon.APITypeChatCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams

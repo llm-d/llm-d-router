@@ -113,49 +113,42 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	}
 }
 
-// Generate forwards the body as-is because it already carries token_ids;
-// Responses forwards it as-is because it is an OpenAI-shaped body (grouped
-// with chat-completions in prepareBody). Both land on the same assertions
-// here even though they take different switch cases.
+// Generate forwards the body as-is because it already carries token_ids.
 func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
-	for _, path := range []string{reqcommon.PathGenerate, reqcommon.PathResponses} {
-		t.Run(path, func(t *testing.T) {
-			var receivedBody map[string]any
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				_ = json.Unmarshal(body, &receivedBody)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{}`))
-			}))
-			defer srv.Close()
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
 
-			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			reqCtx := &pipeline.RequestContext{
-				RequestID:      "req-1",
-				OriginalPath:   path,
-				Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
-				TokenIDs:       []int{1, 2345},
-				ResponseWriter: httptest.NewRecorder(),
-			}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   reqcommon.PathGenerate,
+		Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
+		TokenIDs:       []int{1, 2345},
+		ResponseWriter: httptest.NewRecorder(),
+	}
 
-			err = step.Execute(context.Background(), reqCtx)
-			if !errors.Is(err, pipeline.ErrPipelineDone) {
-				t.Fatalf("expected ErrPipelineDone, got %v", err)
-			}
-			if _, ok := receivedBody["tokens"]; ok {
-				t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
-			}
-			if _, ok := receivedBody["prompt"]; ok {
-				t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
-			}
-			if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
-				t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
-			}
-		})
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
+	}
+	if _, ok := receivedBody["prompt"]; ok {
+		t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
+	}
+	if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
 	}
 }
 
