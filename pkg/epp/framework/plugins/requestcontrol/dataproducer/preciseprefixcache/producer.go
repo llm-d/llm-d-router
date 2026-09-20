@@ -259,12 +259,17 @@ const (
 
 // precisePrefixState is the snapshot returned by DumpState. The KV-block index
 // is keyed by prompt-derived block hashes and is not enumerable, so it is not
-// reported; the active subscriber pod identities and the live speculative
-// request ids are enumerated (sorted and capped) for debugging.
+// reported. Snapshot mode reports only publishers with a complete current
+// index. Subscriber pod identities and live speculative request ids are
+// enumerated, sorted, and capped for debugging.
 type precisePrefixState struct {
 	Subscribers             []string `json:"subscribers"`
 	TotalSubscribers        int      `json:"totalSubscribers"`
 	MaxSubscribers          int      `json:"maxSubscribers"`
+	SnapshotRegistered      int      `json:"snapshotRegistered,omitempty"`
+	SnapshotReady           int      `json:"snapshotReady,omitempty"`
+	SnapshotRecovering      int      `json:"snapshotRecovering,omitempty"`
+	SnapshotStale           int      `json:"snapshotStale,omitempty"`
 	SpeculativeIndexing     bool     `json:"speculativeIndexing"`
 	SpeculativeEntries      []string `json:"speculativeEntries"`
 	TotalSpeculativeEntries int      `json:"totalSpeculativeEntries"`
@@ -281,6 +286,9 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 	var totalSubscribers int
 	if p.subscribersManager != nil {
 		ids, _ := p.subscribersManager.GetActiveSubscribers()
+		if p.snapshots != nil {
+			ids, _ = p.snapshots.GetReadySubscribers()
+		}
 		totalSubscribers = len(ids)
 		subscribers = sortedCapped(ids, maxDumpSubscribers)
 	}
@@ -291,10 +299,18 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 		totalSpeculativeEntries = len(keys)
 		speculativeEntries = sortedCapped(keys, maxDumpSpeculativeEntries)
 	}
+	snapshotStatus := kvevents.SnapshotStatus{}
+	if p.snapshots != nil {
+		snapshotStatus = p.snapshots.Status()
+	}
 	return json.Marshal(precisePrefixState{
 		Subscribers:             subscribers,
 		TotalSubscribers:        totalSubscribers,
 		MaxSubscribers:          maxDumpSubscribers,
+		SnapshotRegistered:      snapshotStatus.Registered,
+		SnapshotReady:           snapshotStatus.Ready,
+		SnapshotRecovering:      snapshotStatus.Recovering,
+		SnapshotStale:           snapshotStatus.Stale,
 		SpeculativeIndexing:     p.speculativeEnabled,
 		SpeculativeEntries:      speculativeEntries,
 		TotalSpeculativeEntries: totalSpeculativeEntries,

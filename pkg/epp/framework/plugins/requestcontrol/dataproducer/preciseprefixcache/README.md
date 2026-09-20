@@ -77,9 +77,10 @@ Set `kvEventsConfig.snapshotPort` to the vLLM snapshot service port. Zero disabl
 snapshot recovery. This requires the vLLM snapshot protocol with publisher UUIDs
 and idle heartbeats, per-pod discovery, and the in-memory index. Each DP rank
 uses `socketPort + RankIndex` for live events and `snapshotPort + RankIndex` for
-snapshots. Replay, shared subscriber sockets, speculative indexing, and non-vLLM engines are
-rejected. Events with locality or ownership scopes are rejected until the router
-can preserve those dimensions.
+snapshots. The two port ranges must not overlap and must remain at or below
+65535. Replay, shared subscriber sockets, speculative indexing, and non-vLLM
+engines are rejected. Events with locality or ownership scopes are rejected
+until the router can preserve those dimensions.
 
 ```yaml
 - type: precise-prefix-cache-producer
@@ -88,7 +89,7 @@ can preserve those dimensions.
     kvEventsConfig:
       discoverPods: true
       topicFilter: "kv@"
-      snapshotPort: 5559
+      snapshotPort: 6000
       podDiscoveryConfig:
         socketPort: 5557
 - type: prefix-cache-scorer
@@ -101,9 +102,10 @@ model name must match the model requested through the EPP. Endpoint attribution
 uses the discovered serving address. The live and snapshot ports must be
 reachable from the EPP.
 
-The producer subscribes before requesting a snapshot, builds a private index,
-and applies consecutive buffered live events after the snapshot cut. It exposes
-that index only after reconstruction succeeds. A sequence gap, publisher UUID
+The producer subscribes before requesting a snapshot and builds a hidden
+publisher generation in the shared index. It applies consecutive buffered live
+events after the snapshot cut and activates the generation only after
+reconstruction succeeds. A sequence gap, publisher UUID
 change, malformed event, missing reconstruction metadata, or heartbeat timeout
 removes that publisher's cache affinity and triggers another snapshot request.
 Other publishers remain independently available. Endpoint deletion removes its

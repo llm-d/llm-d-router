@@ -169,6 +169,25 @@ var (
 			"Number of ZMQ subscribers currently managed, including those retrying a failed connection",
 			compbasemetrics.ALPHA),
 	})
+	SnapshotReady = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_ready_publishers",
+		Help: metricsutil.HelpMsgWithStability(
+			"Number of snapshot publishers with a complete current index",
+			compbasemetrics.ALPHA),
+	})
+	SnapshotRecoveries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_recoveries_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of snapshot recovery outcomes",
+			compbasemetrics.ALPHA),
+	}, []string{"result", reasonLabel})
+	SnapshotBootstrapDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_bootstrap_duration_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of successful snapshot recovery bootstraps in seconds",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.DefBuckets,
+	})
 	// SubscriberReconnections counts ZMQ subscriber reconnection attempts,
 	// labeled by the pod identifier the subscriber is bound to.
 	SubscriberReconnections = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -213,7 +232,8 @@ func Collectors() []prometheus.Collector {
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
-		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
+		SubscriberActive, SnapshotReady, SnapshotRecoveries, SnapshotBootstrapDuration,
+		SubscriberReconnections, MessagesReceived, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
 	}
 }

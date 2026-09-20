@@ -19,15 +19,65 @@ package kvevents
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 type snapshotRankAdapter struct{}
 
 func (snapshotRankAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
 	return "", "", EventBatch{}, nil
+}
+
+func TestSnapshotManagerMatchesOnlyActiveGenerations(t *testing.T) {
+	ctx := context.Background()
+	tokens, err := kvblock.NewChunkedTokenDatabase(nil)
+	require.NoError(t, err)
+	cfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	matcher, err := kvcache.NewKVCacheIndexer(ctx, cfg, tokens)
+	require.NoError(t, err)
+	index, err := kvblock.NewInMemoryIndex(cfg.KVBlockIndexConfig.InMemoryConfig)
+	require.NoError(t, err)
+	key := kvblock.BlockHash(1)
+	require.NoError(t, index.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{
+		{PodIdentifier: "ready-generation", DeviceTier: "gpu"},
+		{PodIdentifier: "hidden-generation", DeviceTier: "gpu"},
+	}))
+	now := time.Now().UnixNano()
+	ready := &snapshotSubscriber{sourceEndpoint: "pod-ready", activeID: "ready-generation"}
+	ready.lastReceive.Store(now)
+	recovering := &snapshotSubscriber{sourceEndpoint: "pod-recovering"}
+	recovering.lastReceive.Store(now)
+	stale := &snapshotSubscriber{sourceEndpoint: "pod-stale", activeID: "stale-generation"}
+	stale.lastReceive.Store(time.Now().Add(-2 * heartbeatTimeout).UnixNano())
+	manager := &SnapshotManager{
+		matcher: matcher.WithIndex(index),
+		index:   index,
+		subscribers: map[string]*snapshotSubscriber{
+			"ready":      ready,
+			"recovering": recovering,
+			"stale":      stale,
+		},
+	}
+
+	matches, err := manager.MatchBlockKeys(ctx, []kvblock.BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Equal(t, map[string]kvcache.PodMatch{
+		"pod-ready": {
+			WeightedScore:   1,
+			MatchedBlocks:   1,
+			ConfirmedBlocks: 1,
+			BlocksByTier:    map[string]int{"gpu": 1},
+		},
+	}, matches)
+	require.Equal(t, SnapshotStatus{Registered: 3, Ready: 1, Recovering: 1, Stale: 1}, manager.Status())
+	ids, _ := manager.GetReadySubscribers()
+	require.Equal(t, []string{"ready"}, ids)
 }
 
 func (snapshotRankAdapter) ShardingKey(*RawMessage) string { return "" }

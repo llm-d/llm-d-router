@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -31,6 +33,7 @@ import (
 	zmq "github.com/go-zeromq/zmq4"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -40,19 +43,22 @@ const (
 	heartbeatTimeout    = 5 * time.Second
 	snapshotBufferBytes = 64 << 20
 	snapshotReplyBytes  = 256 << 20
+	retryInitial        = time.Second
+	retryMaximum        = 30 * time.Second
 )
 
-// SnapshotManager owns an independent, replaceable event index per publisher.
-// Only complete snapshots with a consecutive live suffix are visible to the matcher.
+// SnapshotManager owns a shared index with replaceable publisher generations.
+// Only complete generations with a consecutive live suffix are visible to the matcher.
 type SnapshotManager struct {
 	matcher      *kvcache.Indexer
+	index        kvblock.Index
 	mu           sync.RWMutex
 	subscribers  map[string]*snapshotSubscriber
 	livePort     int
 	snapshotPort int
-	indexConfig  kvblock.InMemoryIndexConfig
 	tokens       kvblock.TokenProcessor
 	adapter      EngineAdapter
+	nextGen      atomic.Uint64
 }
 
 type snapshotSubscriber struct {
@@ -62,8 +68,10 @@ type snapshotSubscriber struct {
 	cancel                                  context.CancelFunc
 	done                                    chan struct{}
 	mu                                      sync.RWMutex
-	index                                   kvblock.Index
+	generationID                            string
+	activeID                                string
 	lastReceive                             atomic.Int64
+	successes                               atomic.Uint64
 }
 
 func NewSnapshotManager(cfg *Config, indexCfg *kvblock.IndexConfig, tokens kvblock.TokenProcessor, adapter EngineAdapter, matcher *kvcache.Indexer) (*SnapshotManager, error) {
@@ -79,11 +87,19 @@ func NewSnapshotManager(cfg *Config, indexCfg *kvblock.IndexConfig, tokens kvblo
 	if indexCfg.InMemoryConfig == nil || indexCfg.RedisConfig != nil || indexCfg.CostAwareMemoryConfig != nil {
 		return nil, fmt.Errorf("snapshot recovery requires the in-memory index")
 	}
+	index, err := kvblock.NewInMemoryIndex(indexCfg.InMemoryConfig)
+	if err != nil {
+		return nil, err
+	}
+	if matcher != nil {
+		matcher = matcher.WithIndex(index)
+	}
+	metrics.Register()
 	return &SnapshotManager{
 		subscribers:  make(map[string]*snapshotSubscriber),
 		livePort:     cfg.PodDiscoveryConfig.SocketPort,
 		snapshotPort: cfg.SnapshotPort,
-		indexConfig:  *indexCfg.InMemoryConfig,
+		index:        index,
 		tokens:       tokens,
 		adapter:      adapter,
 		matcher:      matcher,
@@ -111,29 +127,37 @@ func (m *SnapshotManager) EnsureSubscriber(ctx context.Context, id, sourceEndpoi
 		return fmt.Errorf("live publisher port %d is outside the snapshot port range", livePort)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if old := m.subscribers[id]; old != nil {
 		if old.endpoint == endpoint && old.topicFilter == topic && old.sourceEndpoint == sourceEndpoint {
+			m.mu.Unlock()
 			return nil
 		}
 		old.cancel()
 		delete(m.subscribers, id)
 	}
 	subCtx, cancel := context.WithCancel(ctx)
-	s := &snapshotSubscriber{manager: m, endpoint: endpoint, sourceEndpoint: sourceEndpoint, snapshotEndpoint: "tcp://" + net.JoinHostPort(host, strconv.Itoa(snapshotPort)), topicFilter: topic, cancel: cancel, done: make(chan struct{})}
+	generationID := fmt.Sprintf("%s#snapshot-%d", sourceEndpoint, m.nextGen.Add(1))
+	s := &snapshotSubscriber{manager: m, endpoint: endpoint, sourceEndpoint: sourceEndpoint, snapshotEndpoint: "tcp://" + net.JoinHostPort(host, strconv.Itoa(snapshotPort)), topicFilter: topic, cancel: cancel, done: make(chan struct{}), generationID: generationID}
 	m.subscribers[id] = s
+	registered := len(m.subscribers)
+	m.mu.Unlock()
+	metrics.SubscriberActive.Set(float64(registered))
 	go s.run(subCtx)
 	return nil
 }
 
 func (m *SnapshotManager) RemoveSubscriber(_ context.Context, id string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if s := m.subscribers[id]; s != nil {
 		s.cancel()
 		delete(m.subscribers, id)
+		registered := len(m.subscribers)
+		m.mu.Unlock()
+		metrics.SubscriberActive.Set(float64(registered))
+		m.updateReadyMetric()
 		return true
 	}
+	m.mu.Unlock()
 	return false
 }
 
@@ -148,6 +172,42 @@ func (m *SnapshotManager) Shutdown(_ context.Context) {
 	for _, s := range old {
 		<-s.done
 	}
+	metrics.SubscriberActive.Set(0)
+	metrics.SnapshotReady.Set(0)
+}
+
+// SnapshotStatus reports publisher recovery states.
+type SnapshotStatus struct {
+	Registered int
+	Ready      int
+	Recovering int
+	Stale      int
+}
+
+// Status returns current publisher recovery counts.
+func (m *SnapshotManager) Status() SnapshotStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	status := SnapshotStatus{Registered: len(m.subscribers)}
+	for _, s := range m.subscribers {
+		s.mu.RLock()
+		active := s.activeID != ""
+		fresh := time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout
+		s.mu.RUnlock()
+		switch {
+		case active && fresh:
+			status.Ready++
+		case active:
+			status.Stale++
+		default:
+			status.Recovering++
+		}
+	}
+	return status
+}
+
+func (m *SnapshotManager) updateReadyMetric() {
+	metrics.SnapshotReady.Set(float64(m.Status().Ready))
 }
 
 func (m *SnapshotManager) GetActiveSubscribers() ([]string, []string) {
@@ -161,47 +221,107 @@ func (m *SnapshotManager) GetActiveSubscribers() ([]string, []string) {
 	return ids, endpoints
 }
 
-func (m *SnapshotManager) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash, pods sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+// GetReadySubscribers returns publishers with a complete current index.
+func (m *SnapshotManager) GetReadySubscribers() ([]string, []string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make(map[string]kvcache.PodMatch)
+	ids, endpoints := []string{}, []string{}
+	for id, s := range m.subscribers {
+		s.mu.RLock()
+		ready := s.activeID != "" && time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout
+		s.mu.RUnlock()
+		if !ready {
+			continue
+		}
+		ids = append(ids, id)
+		endpoints = append(endpoints, s.endpoint)
+	}
+	return ids, endpoints
+}
+
+func (m *SnapshotManager) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash, pods sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+	m.mu.RLock()
+	active := make(map[string]string, len(m.subscribers))
 	for _, s := range m.subscribers {
 		if pods.Len() > 0 && !pods.Has(s.sourceEndpoint) {
 			continue
 		}
 		s.mu.RLock()
-		if s.index == nil || time.Since(time.Unix(0, s.lastReceive.Load())) > heartbeatTimeout {
-			s.mu.RUnlock()
-			continue
+		if s.activeID != "" && time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout {
+			active[s.activeID] = s.sourceEndpoint
 		}
-		matches, err := m.matcher.WithIndex(s.index).MatchBlockKeys(ctx, keys, pods)
 		s.mu.RUnlock()
-		if err != nil {
-			return nil, err
-		}
-		for pod, match := range matches {
-			result[pod] = match
-		}
+	}
+	m.mu.RUnlock()
+	if len(active) == 0 {
+		return map[string]kvcache.PodMatch{}, nil
+	}
+	matches, err := m.matcher.MatchBlockKeys(ctx, keys, sets.KeySet(active))
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]kvcache.PodMatch, len(matches))
+	for generation, match := range matches {
+		result[active[generation]] = match
 	}
 	return result, nil
 }
 
-func (s *snapshotSubscriber) invalidate() { s.mu.Lock(); s.index = nil; s.mu.Unlock() }
+func (s *snapshotSubscriber) deactivate(generation string) {
+	s.mu.Lock()
+	changed := false
+	if s.activeID == generation {
+		s.activeID = ""
+		changed = true
+	}
+	s.mu.Unlock()
+	if changed {
+		s.manager.updateReadyMetric()
+	}
+}
+
 func (s *snapshotSubscriber) run(ctx context.Context) {
 	defer close(s.done)
-	defer s.invalidate()
+	backoff := retryInitial
 	for ctx.Err() == nil {
+		successes := s.successes.Load()
 		err := s.consume(ctx)
-		s.invalidate()
 		if ctx.Err() != nil {
 			return
 		}
+		metrics.SnapshotRecoveries.WithLabelValues("failure", snapshotFailureReason(err)).Inc()
 		log.FromContext(ctx).Error(err, "KV snapshot recovery failed", "endpoint", s.endpoint)
+		if s.successes.Load() != successes {
+			backoff = retryInitial
+		}
+		delay := backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)))
+		if s.successes.Load() == successes {
+			backoff = min(2*backoff, retryMaximum)
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(time.Second):
+		case <-timer.C:
 		}
+	}
+}
+
+func snapshotFailureReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timeout") {
+		return "timeout"
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "unavailable"):
+		return "unavailable"
+	case strings.Contains(message, "sequence gap"), strings.Contains(message, "identity changed"), strings.Contains(message, "publisher changed"):
+		return "stream"
+	case strings.Contains(message, "malformed"), strings.Contains(message, "parse"), strings.Contains(message, "decode"), strings.Contains(message, "engine key not found"):
+		return "invalid"
+	default:
+		return "transport"
 	}
 }
 
@@ -220,7 +340,15 @@ func decodeSnapshotLive(msg zmq.Msg) (snapshotLive, error) {
 }
 
 func (s *snapshotSubscriber) consume(parent context.Context) error {
+	bootstrapStarted := time.Now()
 	ctx, cancel := context.WithCancel(parent)
+	generation := s.generationID
+	defer func() {
+		s.deactivate(generation)
+		if err := s.manager.index.Clear(context.Background(), generation); err != nil {
+			log.FromContext(parent).Error(err, "Failed to clear KV snapshot generation", "endpoint", s.endpoint)
+		}
+	}()
 	sub := zmq.NewSub(ctx, zmq.WithDialerMaxRetries(0), zmq.WithDialerTimeout(time.Second))
 	defer sub.Close()
 	defer cancel()
@@ -238,7 +366,7 @@ func (s *snapshotSubscriber) consume(parent context.Context) error {
 	go func() {
 		defer close(receiverDone)
 		fail := func(err error) {
-			s.invalidate()
+			s.deactivate(generation)
 			select {
 			case failures <- err:
 			default:
@@ -349,11 +477,7 @@ waiting:
 	if size > snapshotReplyBytes {
 		return fmt.Errorf("snapshot reply limit exceeded")
 	}
-	idx, err := kvblock.NewInMemoryIndex(&s.manager.indexConfig)
-	if err != nil {
-		return err
-	}
-	pool, err := NewPool(&Config{Concurrency: 1}, idx, s.manager.tokens, s.manager.adapter)
+	pool, err := NewPool(&Config{Concurrency: 1}, s.manager.index, s.manager.tokens, s.manager.adapter)
 	if err != nil {
 		return err
 	}
@@ -364,7 +488,7 @@ waiting:
 		if err != nil {
 			return err
 		}
-		return pool.processEventBatch(ctx, &batch, s.sourceEndpoint, model)
+		return pool.processEventBatch(ctx, &batch, generation, model)
 	}
 	for _, chunk := range f[2:] {
 		if ctx.Err() != nil {
@@ -411,8 +535,12 @@ waiting:
 		s.mu.Unlock()
 		return ctx.Err()
 	}
-	s.index = idx
+	s.activeID = generation
+	s.successes.Add(1)
 	s.mu.Unlock()
+	s.manager.updateReadyMetric()
+	metrics.SnapshotRecoveries.WithLabelValues("success", "none").Inc()
+	metrics.SnapshotBootstrapDuration.Observe(time.Since(bootstrapStarted).Seconds())
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -421,12 +549,10 @@ waiting:
 		if err != nil {
 			return err
 		}
-		s.mu.Lock()
 		err = advance(msg)
 		if err != nil {
-			s.index = nil
+			s.deactivate(generation)
 		}
-		s.mu.Unlock()
 		if err != nil {
 			return err
 		}
