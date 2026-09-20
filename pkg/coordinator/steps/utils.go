@@ -60,9 +60,10 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 }
 
 // unreachableFormatError builds an error for a request whose detected API
-// type has no registered coordinator route (see server.go), so reaching
-// decode or conditional-decode with it indicates a routing bug rather than a
-// client error.
+// type is not one a step's format switch builds a body for. The coordinator
+// registers no route for such a type (see server.go) or, for encode, never
+// runs the multimodal fan-out for one (see buildEncodeBody), so reaching this
+// case indicates a routing or dispatch bug rather than a client error.
 func unreachableFormatError(format reqcommon.APIType) error {
 	return fmt.Errorf("request should not be here: no coordinator route serves APIType %v", format)
 }

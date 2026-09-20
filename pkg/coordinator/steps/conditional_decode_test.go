@@ -27,7 +27,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
@@ -160,16 +159,12 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 	}
 }
 
-// TestConditionalDecodeStep_MessagesFormat_PassesBodyThroughUnchanged verifies
-// that a request path detecting as APITypeMessages falls into prepareBody's
-// default case without mutating the body: the coordinator never registers a
-// /v1/messages route (see server.go), so this is a routing bug rather than a
-// client error, and prepareBody only logs it rather than failing the request.
-// format is derived from reqCtx.OriginalPath via reqcommon.DetectAPIType, which
-// only ever returns one of its five named constants, so APITypeMessages (via
-// reqcommon.PathMessages) is the only way to reach this default case; an
-// arbitrary unknown APIType value is no longer constructible from a path.
-func TestConditionalDecodeStep_MessagesFormat_PassesBodyThroughUnchanged(t *testing.T) {
+// TestConditionalDecodeStep_MessagesFormat_ReturnsError verifies that a request
+// path detecting as APITypeMessages fails through prepareBody's default case:
+// the coordinator registers no /v1/messages route, so reaching this case is a
+// routing bug, and prepareBody reports it as an error instead of forwarding an
+// unprepared body.
+func TestConditionalDecodeStep_MessagesFormat_ReturnsError(t *testing.T) {
 	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -179,9 +174,8 @@ func TestConditionalDecodeStep_MessagesFormat_PassesBodyThroughUnchanged(t *test
 		OriginalPath: reqcommon.PathMessages,
 		Body:         map[string]any{"model": testModelName},
 	}
-	body := step.(*ConditionalDecodeStep).prepareBody(reqCtx, logr.Discard())
-	if body["model"] != testModelName {
-		t.Fatalf("expected body to pass through unchanged, got %v", body)
+	if _, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx); err == nil {
+		t.Fatal("expected an error for an unreachable request format")
 	}
 }
 
