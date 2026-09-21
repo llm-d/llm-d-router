@@ -275,12 +275,10 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		}
 		return nil, nil, false
 	}
-	// Most connectors clone parsed (or marshal it directly for decode) after
-	// this point, so stripping here once covers every request body built
-	// that way. A few paths (e.g. the shared-storage decode-first attempt)
-	// instead forward raw verbatim to skip re-marshaling when nothing
-	// changed, so raw is only re-marshaled from parsed when something
-	// actually did change.
+	// Stripping parsed here covers every body a connector clones from it.
+	// raw needs the same strip: a few paths (e.g. the shared-storage
+	// decode-first attempt) forward raw verbatim instead of rebuilding the
+	// body from parsed.
 	if r.URL.Path == reqcommon.PathResponses {
 		if changed := reqcommon.DropStatefulResponsesFields(parsed); len(changed) > 0 {
 			s.logger.V(logging.DEBUG).Info("clearing unsupported responses fields", "fields", changed)
