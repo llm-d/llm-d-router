@@ -204,8 +204,8 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		// read the body at all, so without this they would forward a
 		// Responses request's stateful fields untouched; decodeWithP2PSource
 		// already reads it itself further down and simply finds nothing left
-		// to strip. runChunkedDecode is unreachable for Responses: both its
-		// call sites gate on the chat-completions path.
+		// to strip. runChunkedDecode is unreachable for Responses: its one
+		// call site gates on the chat-completions path.
 		if apiType == reqcommon.APITypeResponses {
 			raw, _, ok := s.readJSONBody(r, w)
 			if !ok {
