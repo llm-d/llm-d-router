@@ -232,6 +232,15 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
 		},
 		{
+			// The Responses API has no max_tokens field; vLLM's ResponsesRequest
+			// ignores it, so max_output_tokens is the only field that caps output
+			// length and must be set even when the client never sent it.
+			name:    "responses caps max_output_tokens even when the client omitted it",
+			apiType: APITypeResponses,
+			body:    map[string]any{"model": "m"},
+			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
+		},
+		{
 			// max_tokens and max_completion_tokens are not Responses fields, so
 			// tokenLimitFields does not name them and they are left as sent.
 			// min_tokens is stripped for every API; see CapSingleToken.
@@ -263,6 +272,58 @@ func TestCapSingleToken(t *testing.T) {
 			CapSingleToken(tt.body, tt.apiType)
 			if !reflect.DeepEqual(tt.body, tt.want) {
 				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			}
+		})
+	}
+}
+
+func TestDropStatefulResponsesFields(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        map[string]any
+		want        map[string]any
+		wantChanged []string
+	}{
+		{
+			name:        "all four present",
+			body:        map[string]any{"input": "hi", FieldPreviousResponseID: "resp-123", FieldConversation: "conv-123", FieldStore: true, FieldBackground: true},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldPreviousResponseID, FieldConversation, FieldStore, FieldBackground},
+		},
+		{
+			name:        "store already false is left alone and not reported as changed",
+			body:        map[string]any{"input": "hi", FieldStore: false},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: nil,
+		},
+		{
+			name:        "store absent is forced to false",
+			body:        map[string]any{"input": "hi"},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldStore},
+		},
+		{
+			name:        "store non-bool is forced to false",
+			body:        map[string]any{"input": "hi", FieldStore: "yes"},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldStore},
+		},
+		{
+			name:        "background false is still removed",
+			body:        map[string]any{"input": "hi", FieldBackground: false},
+			want:        map[string]any{"input": "hi", FieldStore: false},
+			wantChanged: []string{FieldStore, FieldBackground},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DropStatefulResponsesFields(tt.body)
+			if !reflect.DeepEqual(tt.body, tt.want) {
+				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			}
+			if !reflect.DeepEqual(got, tt.wantChanged) {
+				t.Fatalf("changed = %v, want %v", got, tt.wantChanged)
 			}
 		})
 	}

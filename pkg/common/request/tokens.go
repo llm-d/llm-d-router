@@ -50,3 +50,33 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	delete(body, FieldStreamOptions)
 	return limits
 }
+
+// DropStatefulResponsesFields removes previous_response_id, conversation,
+// and background, which the router cannot honor. store is forced to false
+// rather than removed, since vLLM defaults it to true when absent. It
+// returns the names of the fields it changed, so callers can log only when
+// something changed.
+//
+// body[FieldStore], if present, must already be decoded into a Go bool: an
+// undecoded value (e.g. json.RawMessage) never satisfies the type assertion
+// below, so store would always report as changed.
+func DropStatefulResponsesFields(body map[string]any) []string {
+	var changed []string
+	if _, ok := body[FieldPreviousResponseID]; ok {
+		delete(body, FieldPreviousResponseID)
+		changed = append(changed, FieldPreviousResponseID)
+	}
+	if _, ok := body[FieldConversation]; ok {
+		delete(body, FieldConversation)
+		changed = append(changed, FieldConversation)
+	}
+	if store, ok := body[FieldStore].(bool); !ok || store {
+		body[FieldStore] = false
+		changed = append(changed, FieldStore)
+	}
+	if _, ok := body[FieldBackground]; ok {
+		delete(body, FieldBackground)
+		changed = append(changed, FieldBackground)
+	}
+	return changed
+}
