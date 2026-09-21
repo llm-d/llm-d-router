@@ -65,6 +65,10 @@ const (
 	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
 	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
+	// requestFieldStore must stay inspected (decoded to a Go value, not left
+	// as raw JSON): see DropStatefulResponsesFields's doc comment for why an
+	// undecoded value would break its "changed" reporting.
+	requestFieldStore = reqcommon.FieldStore
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).

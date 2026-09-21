@@ -200,6 +200,19 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
+		// dataParallelHandler and the plain decoder passthrough below never
+		// read the body at all, so without this they would forward a
+		// Responses request's stateful fields untouched; decodeWithP2PSource
+		// already reads it itself further down and simply finds nothing left
+		// to strip. runChunkedDecode is unreachable for Responses: both its
+		// call sites gate on the chat-completions path.
+		if apiType == reqcommon.APITypeResponses {
+			raw, _, ok := s.readJSONBody(r, w)
+			if !ok {
+				return
+			}
+			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
