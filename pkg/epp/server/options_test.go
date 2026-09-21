@@ -582,3 +582,38 @@ func TestParseCipherSuites(t *testing.T) {
 	_, err = parseCipherSuites([]string{"BOGUS"})
 	require.Error(t, err)
 }
+
+func TestValidatePoolGroupFlag(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.PoolGroup = "inference.networking.k8s.io/v1"
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for PoolGroup %q recommended by the flag help text, but it succeeded", opts.PoolGroup)
+	} else if !strings.Contains(err.Error(), "pool-group") {
+		t.Errorf("Expected error to reference the flag, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.PoolGroup = ""
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for empty PoolGroup, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.PoolGroup = "inference.networking.x-k8s.io"
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to accept the deprecated PoolGroup, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to accept the default PoolGroup, got: %v", err)
+	}
+}
