@@ -177,6 +177,45 @@ func TestEnsureDataLayer(t *testing.T) {
 }
 
 func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
+	t.Run("profiles control automatic injection independently", func(t *testing.T) {
+		const detectorName = "my-detector"
+		cfg := &configapi.EndpointPickerConfig{
+			SchedulingProfiles: []configapi.SchedulingProfile{
+				{
+					Name:                   "prefill",
+					InjectSaturationFilter: ptr.To(false),
+					Plugins:                []configapi.SchedulingPlugin{{PluginRef: "picker"}},
+				},
+				{
+					Name:    "decode",
+					Plugins: []configapi.SchedulingPlugin{{PluginRef: "picker"}},
+				},
+				{
+					Name:                   "encode",
+					InjectSaturationFilter: ptr.To(true),
+					Plugins:                []configapi.SchedulingPlugin{{PluginRef: "picker"}},
+				},
+				{
+					Name:                   "explicit",
+					InjectSaturationFilter: ptr.To(false),
+					Plugins:                []configapi.SchedulingPlugin{{PluginRef: detectorName}, {PluginRef: "picker"}},
+				},
+			},
+		}
+		handle := testutils.NewTestHandle(context.Background())
+		handle.AddPlugin(detectorName, &mockFilterDetector{mockPlugin{t: fwkplugin.TypedName{Type: detectorName, Name: detectorName}}})
+		cfg.FlowControl = &configapi.FlowControlConfig{
+			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		}
+
+		require.NoError(t, ensureSaturationDetector(cfg, handle, handle.GetAllPluginsWithNames()))
+		require.Equal(t, []configapi.SchedulingPlugin{{PluginRef: "picker"}}, cfg.SchedulingProfiles[0].Plugins)
+		for _, profile := range cfg.SchedulingProfiles[1:3] {
+			require.Equal(t, []configapi.SchedulingPlugin{{PluginRef: "picker"}, {PluginRef: detectorName}}, profile.Plugins)
+		}
+		require.Equal(t, []configapi.SchedulingPlugin{{PluginRef: detectorName}, {PluginRef: "picker"}}, cfg.SchedulingProfiles[3].Plugins)
+	})
+
 	t.Run("detector implementing Filter is injected into profiles", func(t *testing.T) {
 		w := 2.0
 		cfg := &configapi.EndpointPickerConfig{
