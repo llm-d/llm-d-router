@@ -65,6 +65,7 @@ const (
 	enableP2PPull             = "enable-p2p-pull"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
+	enableSpeculativePrefill  = "enable-speculative-prefill"
 	enableTLS                 = "enable-tls"
 	tlsInsecureSkipVerify     = "tls-insecure-skip-verify"
 	tlsMinVersion             = "tls-min-version"
@@ -121,6 +122,7 @@ type yamlConfiguration struct {
 	ECConnector             string   `json:"ec-connector,omitempty"`
 	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableSpeculativePrefill *bool   `json:"enable-speculative-prefill,omitempty"`
 	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
 	SecureServing           *bool    `json:"secure-proxy,omitempty"`
 	CertPath                string   `json:"cert-path,omitempty"`
@@ -224,6 +226,7 @@ func NewOptions() *Options {
 			DataParallelSize:        defaultDataParallelSize,
 			SecureServing:           true,
 			EnablePrefillerSampling: enablePrefillerSampling,
+			EnableSpeculativePrefill: false,
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
@@ -286,6 +289,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "The path to the certificate for secure proxy. The certificate and private key files are assumed to be named tls.crt and tls.key, respectively. If not set, and secureProxy is enabled, then a self-signed certificate is used (for testing).")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
+	fs.BoolVar(&opts.EnableSpeculativePrefill, enableSpeculativePrefill, opts.EnableSpeculativePrefill, "if true, after a chat completion finishes the sidecar warms the KV cache by sending the predicted next-turn prefix (prior messages + assistant answer) as a max_tokens=1 request. Only requests carrying the x-speculative-prefill header are eligible.")
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
@@ -838,6 +842,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnablePrefillerSampling != nil && !opts.isFlagSet(enablePrefillerSampling) {
 		opts.EnablePrefillerSampling = *cfg.EnablePrefillerSampling
+	}
+	if cfg.EnableSpeculativePrefill != nil && !opts.isFlagSet(enableSpeculativePrefill) {
+		opts.EnableSpeculativePrefill = *cfg.EnableSpeculativePrefill
 	}
 	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull
