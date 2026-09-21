@@ -334,6 +334,63 @@ func TestBuildEncoderRequest_DropsResponsesInput(t *testing.T) {
 	assert.NotContains(t, encoderRequest, "input")
 }
 
+// TestBuildEncoderRequest_DropsResponsesMaxOutputTokens locks in that a
+// Responses request's max_output_tokens never rides along to the encoder:
+// CapSingleToken caps chat completions' max_tokens/max_completion_tokens,
+// not max_output_tokens, so leaving it in place would send an uncapped,
+// Responses-only field to an encoder addressed as chat completions.
+func TestBuildEncoderRequest_DropsResponsesMaxOutputTokens(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"input": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"},
+				},
+			},
+		},
+		"max_output_tokens": 500,
+	}
+
+	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.NotContains(t, encoderRequest, "max_output_tokens")
+}
+
+// TestBuildEncoderRequest_OnlyModelAndMessages locks in that buildEncoderRequest
+// builds the encoder request from scratch rather than copying the client's
+// request: tools/tool_choice have an incompatible schema between the
+// Responses and chat-completions APIs, so a Responses request with tools
+// configured must not carry them into an encoder request always sent as
+// chat completions.
+func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"input": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"},
+				},
+			},
+		},
+		"tools":       []any{map[string]any{"type": "function", "name": "f", "parameters": map[string]any{}}},
+		"tool_choice": map[string]any{"type": "function", "name": "f"},
+	}
+
+	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.Equal(t, "test-model", encoderRequest["model"])
+	assert.NotContains(t, encoderRequest, "tools")
+	assert.NotContains(t, encoderRequest, "tool_choice")
+	assert.NotContains(t, encoderRequest, "input")
+}
+
 // TestBuildEncoderRequest_MinTokens is a regression test for stripping a
 // client-supplied min_tokens from the encoder request; reqcommon.CapSingleToken
 // documents why.
