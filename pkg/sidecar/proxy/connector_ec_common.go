@@ -37,12 +37,49 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Multimodal content types that need encoder processing.
+// inputImageDetailField is the optional sibling field on a Responses
+// input_image part carrying the image detail hint (e.g. "high"/"low"),
+// nested under image_url instead once normalized to chat-completions shape.
+const inputImageDetailField = "detail"
+
+// Multimodal content types that need encoder processing. input_image is
+// the Responses API's equivalent of image_url; the other three chat-
+// completions types have no Responses counterpart in the current API.
 var mmTypes = map[string]bool{
 	"image_url":   true,
 	"audio_url":   true,
 	"video_url":   true,
 	"input_audio": true,
+	"input_image": true,
+}
+
+// requestFieldInput is the Responses API's top-level content field,
+// analogous to requestFieldMessages for chat completions.
+const requestFieldInput = "input"
+
+// requestInput returns the request's Responses input items, decoded the
+// same way requestMessages decodes messages. Responses' input may also be a
+// bare JSON string (a single text turn), which yields a nil slice and no
+// error, the same as an absent field.
+func requestInput(req map[string]any) ([]json.RawMessage, error) {
+	switch v := req[requestFieldInput].(type) {
+	case nil:
+		return nil, nil
+	case []json.RawMessage:
+		return v, nil
+	case json.RawMessage:
+		var items []json.RawMessage
+		if err := json.Unmarshal(v, &items); err != nil {
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return items, nil
+	default:
+		return nil, fmt.Errorf("input is %T, want a JSON array or string", v)
+	}
 }
 
 // truncateLongStrings recursively shortens long string values for logging.
@@ -70,41 +107,53 @@ func truncateLongStrings(v any, maxLen int) any {
 	}
 }
 
-// extractMMItems extracts all multimodal items from the request messages.
-func extractMMItems(logger logr.Logger, requestData map[string]any) []map[string]any {
+// extractMMItems extracts all multimodal content parts from the request:
+// chat-completions' messages array, or a Responses input array. Which
+// field to walk is gated on apiType rather than field presence, the same
+// precaution reqcommon.DetectAPIType's doc comment calls for: a client
+// could send a stray field the other format doesn't use, and presence-based
+// sniffing would process the wrong one.
+func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqcommon.APIType) []map[string]any {
 	var items []map[string]any
 
-	messages, err := requestMessages(requestData)
+	var wrapped []json.RawMessage
+	var err error
+	switch apiType {
+	case reqcommon.APITypeResponses:
+		wrapped, err = requestInput(requestData)
+	default:
+		wrapped, err = requestMessages(requestData)
+	}
 	if err != nil {
-		logger.V(logging.DEBUG).Info("cannot read request messages for multimodal extraction", "error", err)
+		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", err)
 		return items
 	}
 
-	for _, msg := range messages {
-		var msgMap map[string]any
-		if err := json.Unmarshal(msg, &msgMap); err != nil {
+	for _, raw := range wrapped {
+		var itemMap map[string]any
+		if err := json.Unmarshal(raw, &itemMap); err != nil {
 			continue
 		}
 
-		content := msgMap["content"]
+		content := itemMap[requestFieldContent]
 		contentList, ok := content.([]any)
 		if !ok {
 			continue
 		}
 
-		for _, item := range contentList {
-			itemMap, ok := item.(map[string]any)
+		for _, part := range contentList {
+			partMap, ok := part.(map[string]any)
 			if !ok {
 				continue
 			}
 
-			itemType, ok := itemMap["type"].(string)
+			partType, ok := partMap["type"].(string)
 			if !ok {
 				continue
 			}
 
-			if mmTypes[itemType] {
-				items = append(items, itemMap)
+			if mmTypes[partType] {
+				items = append(items, partMap)
 			}
 		}
 	}
@@ -122,7 +171,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 		{
 			"role": "user",
 			"content": []map[string]any{
-				mmItem,
+				normalizeMMItemForEncoder(mmItem),
 			},
 		},
 	}
@@ -136,8 +185,27 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	return encoderRequest
 }
 
+// normalizeMMItemForEncoder converts mmItem into the chat-completions
+// image_url shape buildEncoderRequest's messages array always carries,
+// since the encoder request is sent as chat completions regardless of the
+// client's own API (see buildEncoderRequest). A Responses input_image part
+// uses a different shape: the URL is a bare string on the part itself, and
+// detail is a sibling field, rather than both nested under image_url.
+func normalizeMMItemForEncoder(item map[string]any) map[string]any {
+	if item["type"] != "input_image" {
+		return item
+	}
+	imageURL := map[string]any{"url": item["image_url"]}
+	if detail, ok := item[inputImageDetailField]; ok {
+		imageURL[inputImageDetailField] = detail
+	}
+	return map[string]any{"type": "image_url", "image_url": imageURL}
+}
+
 // mmItemURL returns the URL string for a URL-based multimodal item, or
-// empty string when the item carries inline data instead.
+// empty string when the item carries inline data instead. A Responses
+// input_image item stores its URL as a bare string directly on the item,
+// unlike the other three types, which nest it under a same-named object.
 func mmItemURL(item map[string]any) string {
 	itemType, _ := item["type"].(string)
 	switch itemType {
@@ -147,17 +215,21 @@ func mmItemURL(item map[string]any) string {
 				return u
 			}
 		}
+	case "input_image":
+		if u, ok := item["image_url"].(string); ok {
+			return u
+		}
 	}
 	return ""
 }
 
 // mmItemsForFanout extracts the multimodal items from a request body and
-// deduplicates URL-based items (image_url / audio_url / video_url). Non-URL
-// items (e.g. inline input_audio) are kept verbatim. Returns nil when
-// there is no multimodal content. The caller should skip the encoder
-// stage in that case.
-func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
-	raw := extractMMItems(s.logger, originalRequest)
+// deduplicates URL-based items (image_url / audio_url / video_url /
+// input_image). Non-URL items (e.g. inline input_audio) are kept verbatim.
+// Returns nil when there is no multimodal content. The caller should skip
+// the encoder stage in that case.
+func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
+	raw := extractMMItems(s.logger, originalRequest, apiType)
 	if len(raw) == 0 {
 		return nil
 	}

@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -33,6 +34,7 @@ func TestExtractMMItems(t *testing.T) {
 	tests := []struct {
 		name     string
 		request  map[string]any
+		apiType  reqcommon.APIType
 		expected int
 	}{
 		{
@@ -138,6 +140,54 @@ func TestExtractMMItems(t *testing.T) {
 			},
 			expected: 1,
 		},
+		{
+			name: "responses single input_image item",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type": "input_text",
+								"text": "What's in this image?",
+							},
+							map[string]any{
+								"type":      "input_image",
+								"image_url": "https://example.com/image.jpg",
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 1,
+		},
+		{
+			name: "responses input as bare string has no items",
+			request: map[string]any{
+				"input": "hello",
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 0,
+		},
+		{
+			name: "chat completions request never reads a stray input field",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":      "input_image",
+								"image_url": "https://example.com/image.jpg",
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeChatCompletions,
+			expected: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -147,7 +197,7 @@ func TestExtractMMItems(t *testing.T) {
 			parsed, err := decodeRequestBody(body)
 			assert.NoError(t, err)
 
-			items := extractMMItems(log.Log, parsed)
+			items := extractMMItems(log.Log, parsed, tt.apiType)
 			assert.Equal(t, tt.expected, len(items), "unexpected number of MM items")
 		})
 	}
@@ -213,6 +263,22 @@ func TestMMItemURL(t *testing.T) {
 			},
 			expected: "",
 		},
+		{
+			name: "input_image with bare string url",
+			item: map[string]any{
+				"type":      "input_image",
+				"image_url": "https://example.com/image.jpg",
+			},
+			expected: "https://example.com/image.jpg",
+		},
+		{
+			name: "input_image with non-string url",
+			item: map[string]any{
+				"type":      "input_image",
+				"image_url": map[string]any{"file_id": "file-123"},
+			},
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -246,6 +312,12 @@ func inlineAudioItem(data string) map[string]any {
 	return map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": data, "format": "wav"}}
 }
 
+// inputImageItem builds a Responses input_image content item. Unlike
+// image_url, the URL is a bare string directly on the item.
+func inputImageItem(url string) map[string]any {
+	return map[string]any{"type": "input_image", "image_url": url}
+}
+
 // userMessageRequest wraps content items in a minimal chat-completions request,
 // with messages held as raw bytes the way decodeRequestBody leaves them.
 func userMessageRequest(items ...map[string]any) map[string]any {
@@ -253,6 +325,15 @@ func userMessageRequest(items ...map[string]any) map[string]any {
 		map[string]any{"role": "user", "content": items},
 	})
 	return map[string]any{"messages": json.RawMessage(messages)}
+}
+
+// responsesInputRequest wraps content items in a minimal Responses request,
+// with input held as raw bytes the way decodeRequestBody leaves them.
+func responsesInputRequest(items ...map[string]any) map[string]any {
+	input, _ := json.Marshal([]any{
+		map[string]any{"role": "user", "content": items},
+	})
+	return map[string]any{"input": json.RawMessage(input)}
 }
 
 func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
@@ -275,26 +356,43 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 	tests := []struct {
 		name          string
 		request       map[string]any
+		apiType       reqcommon.APIType
 		expectedCalls int32
 	}{
 		{
 			name:          "no duplicates — all items sent",
 			request:       userMessageRequest(imageURLItem("https://example.com/img1.jpg"), imageURLItem("https://example.com/img2.jpg")),
+			apiType:       reqcommon.APITypeChatCompletions,
 			expectedCalls: 2,
 		},
 		{
 			name:          "duplicate image URLs — second is skipped",
 			request:       userMessageRequest(imageURLItem("https://example.com/same.jpg"), imageURLItem("https://example.com/same.jpg")),
+			apiType:       reqcommon.APITypeChatCompletions,
 			expectedCalls: 1,
 		},
 		{
 			name:          "duplicate video URLs — second is skipped",
 			request:       userMessageRequest(videoURLItem("https://example.com/same.mp4"), videoURLItem("https://example.com/same.mp4")),
+			apiType:       reqcommon.APITypeChatCompletions,
 			expectedCalls: 1,
 		},
 		{
 			name:          "inline audio items are never deduplicated",
 			request:       userMessageRequest(inlineAudioItem("aaa"), inlineAudioItem("aaa")),
+			apiType:       reqcommon.APITypeChatCompletions,
+			expectedCalls: 2,
+		},
+		{
+			name:          "responses duplicate input_image URLs — second is skipped",
+			request:       responsesInputRequest(inputImageItem("https://example.com/same.jpg"), inputImageItem("https://example.com/same.jpg")),
+			apiType:       reqcommon.APITypeResponses,
+			expectedCalls: 1,
+		},
+		{
+			name:          "responses distinct input_image URLs — both sent",
+			request:       responsesInputRequest(inputImageItem("https://example.com/img1.jpg"), inputImageItem("https://example.com/img2.jpg")),
+			apiType:       reqcommon.APITypeResponses,
 			expectedCalls: 2,
 		},
 	}
@@ -302,7 +400,7 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requestCount.Store(0)
-			err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id")
+			err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id", tt.apiType)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCalls, requestCount.Load())
 		})
