@@ -127,7 +127,7 @@ func TestProduce_SkipsNonMatchingRequests(t *testing.T) {
 func TestProduce_SessionTypeEmptyMatchesAll(t *testing.T) {
 	t.Parallel()
 
-	p := newTestProducer(t, func(cfg *Config) { cfg.SessionType = "" })
+	p := newTestProducer(t, func(cfg *Config) { cfg.Queues = nil })
 	request := agenticRequest("s1")
 	delete(request.Headers, "x-session-type")
 
@@ -183,7 +183,7 @@ func TestGapObservation_DiscardsSubMinIntervals(t *testing.T) {
 	clock = base.Add(10 * time.Millisecond)
 	require.NoError(t, p.Produce(t.Context(), request, nil))
 
-	_, _, observed := p.estimator.snapshot()
+	_, _, observed := p.estimators["agentic"].snapshot()
 	assert.EqualValues(t, 0, observed)
 }
 
@@ -221,7 +221,51 @@ func TestDumpState(t *testing.T) {
 
 	var state debugState
 	require.NoError(t, json.Unmarshal(raw, &state))
-	assert.Equal(t, 2.28, state.LogMean)
-	assert.Equal(t, 1.34, state.LogStd)
+	require.Contains(t, state.Queues, "agentic")
+	assert.Equal(t, 2.28, state.Queues["agentic"].LogMean)
+	assert.Equal(t, 1.34, state.Queues["agentic"].LogStd)
 	assert.Equal(t, 1, state.TrackedSessions)
+}
+
+func TestProduce_QueuesLearnIndependently(t *testing.T) {
+	t.Parallel()
+
+	subagentSeedMean, subagentSeedStd := 0.69, 1.13
+	p := newTestProducer(t, func(cfg *Config) {
+		cfg.EMAFactor = 1.0
+		cfg.MinSamples = 2
+		cfg.Queues = []QueueConfig{
+			{SessionType: "agentic"},
+			{SessionType: "agentic-subagent", InitialLogMean: &subagentSeedMean, InitialLogStd: &subagentSeedStd},
+		}
+	})
+	base := time.Unix(1000, 0)
+	clock := base
+	p.now = func() time.Time { return clock }
+
+	main := agenticRequest("main")
+	subagent := agenticRequest("main/sub")
+	subagent.Headers["x-session-type"] = "agentic-subagent"
+
+	// Main turns arrive 60s apart, subagent turns 2s apart, interleaved.
+	for i := range 4 {
+		clock = base.Add(time.Duration(i) * 60 * time.Second)
+		require.NoError(t, p.Produce(t.Context(), main, nil))
+		for range 4 {
+			require.NoError(t, p.Produce(t.Context(), subagent, nil))
+			clock = clock.Add(2 * time.Second)
+		}
+	}
+
+	mainPrediction, ok := attrinterturn.ReadInterTurnPrediction(main)
+	require.True(t, ok)
+	subagentPrediction, ok := attrinterturn.ReadInterTurnPrediction(subagent)
+	require.True(t, ok)
+
+	assert.Greater(t, mainPrediction.LogMean, subagentPrediction.LogMean,
+		"queues must fit their own rhythm: main gaps are 30x subagent gaps")
+	_, _, mainObserved := p.estimators["agentic"].snapshot()
+	_, _, subagentObserved := p.estimators["agentic-subagent"].snapshot()
+	assert.Positive(t, mainObserved)
+	assert.Positive(t, subagentObserved)
 }

@@ -11,10 +11,13 @@ fixed.
 
 ## How it works
 
-1. **Session identity.** The producer consumes the `SessionID` attribute
-   published by the `session-id-producer` and reads the workload type from a
-   request header supplied by the orchestrator. It acts only on requests
-   whose type matches `sessionType`; everything else gets no prediction.
+1. **Session identity and queue routing.** The producer consumes the
+   `SessionID` attribute published by the `session-id-producer` and reads the
+   workload type from a request header supplied by the orchestrator. Each
+   configured queue owns one estimator for one workload type, so workloads
+   with different rhythms (a human-paced main session, a machine-paced
+   subagent session) do not pollute each other's fit. Requests whose type
+   matches no queue get no prediction.
 2. **Online estimation.** For each matching session, the producer measures
    the idle gap between one turn's response completion (ResponseBody hook)
    and the next turn's arrival (Produce hook). Gaps feed a log-normal fit: a
@@ -26,8 +29,7 @@ fixed.
 3. **Publication.** Each matching request gets an `InterTurnPrediction`
    attribute carrying the fitted parameters and the observation count.
    Consumers read it with `interturn.ReadInterTurnPrediction` and derive a
-   time horizon with its `Quantile` method; the `kv-cache-retention` plugin
-   turns it into a KV-cache retention directive.
+   time horizon with its `Quantile` method.
 
 The fitted parameters, observation count, and tracked-session count are
 visible at `/debug/plugins/state`.
@@ -37,9 +39,9 @@ visible at `/debug/plugins/state`.
 | Parameter | Default | Description |
 |---|---|---|
 | `sessionTypeHeader` | `x-session-type` | Header carrying the workload type. |
-| `sessionType` | `agentic` | Workload type to act on. Empty acts on every request with a session identifier. |
-| `initialLogMean` | `2.28` | Estimator seed, in log-seconds. The default is the CC-Bench agentic-trace fit from the SAECache paper. |
-| `initialLogStd` | `1.34` | Estimator seed, in log-seconds. Same source as `initialLogMean`. |
+| `queues` | one `agentic` queue | Per-workload-type estimator queues. Each entry sets `sessionType` and optionally overrides `initialLogMean`/`initialLogStd`. Empty configures a single catch-all queue fed by every request with a session identifier. |
+| `initialLogMean` | `2.28` | Seed for queues without their own, in log-seconds. The default is the CC-Bench agentic-trace fit from the SAECache paper. |
+| `initialLogStd` | `1.34` | Seed for queues without their own, in log-seconds. Same source as `initialLogMean`. |
 | `emaFactor` | `0.1` | Blend weight of each new sample estimate. |
 | `minSamples` | `20` | Observations required before the estimator updates. |
 | `windowSize` | `200` | Sliding-window capacity of the sample estimate. |
@@ -63,5 +65,15 @@ plugins:
       headerName: x-session-id
   - type: session-interturn-latency-producer
     parameters:
-      sessionType: agentic
+      sessionTypeHeader: x-session-type
+      queues:
+        - sessionType: agentic
+          initialLogMean: 2.28
+          initialLogStd: 1.34
+        - sessionType: agentic-subagent
+          initialLogMean: 0.69
+          initialLogStd: 1.13
+        - sessionType: chat
+          initialLogMean: 4.82
+          initialLogStd: 1.25
 ```

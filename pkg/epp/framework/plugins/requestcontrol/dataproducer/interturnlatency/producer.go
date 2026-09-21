@@ -24,8 +24,10 @@ limitations under the License.
 // response completion and the next turn's arrival. Gaps feed a log-normal
 // fit: a sliding window over ln(gap) provides the maximum-likelihood sample
 // estimate, blended into the running parameters with an exponential moving
-// average. Session identity comes from the SessionID attribute published by
-// the session-id-producer; the workload type comes from a request header
+// average. Fits are kept per workload type in configured queues, so
+// workloads with different rhythms do not pollute each other. Session
+// identity comes from the SessionID attribute published by the
+// session-id-producer; the workload type comes from a request header
 // supplied by the orchestrator.
 package interturnlatency
 
@@ -56,19 +58,33 @@ var (
 	_ fwkplugin.StateDumper                = &Producer{}
 )
 
+// QueueConfig declares one per-workload-type estimator queue. Requests whose
+// workload type matches SessionType feed and read this queue's estimator, so
+// workloads with different rhythms (a human-paced main session, a
+// machine-paced subagent session) do not pollute each other's fit.
+type QueueConfig struct {
+	// SessionType is the workload type routed to this queue.
+	SessionType string `json:"sessionType"`
+	// InitialLogMean and InitialLogStd seed this queue's estimator, in
+	// log-seconds. Unset values inherit the top-level seeds.
+	InitialLogMean *float64 `json:"initialLogMean,omitempty"`
+	InitialLogStd  *float64 `json:"initialLogStd,omitempty"`
+}
+
 // Config holds the producer parameters. Durations are time.ParseDuration
 // strings, e.g. "30s". See README.md for what each one does.
 type Config struct {
 	// SessionTypeHeader carries the orchestrator-assigned workload type.
 	SessionTypeHeader string `json:"sessionTypeHeader,omitempty"`
-	// SessionType is the workload type this producer acts on; requests with
-	// any other value pass through untouched. Empty matches every request
-	// that carries a session identifier.
-	SessionType string `json:"sessionType,omitempty"`
+	// Queues are the per-workload-type estimator queues; requests with any
+	// other type pass through untouched. Empty configures a single catch-all
+	// queue fed by every request that carries a session identifier.
+	Queues []QueueConfig `json:"queues,omitempty"`
 
-	// InitialLogMean and InitialLogStd seed the estimator, in log-seconds.
-	// The defaults are the CC-Bench agentic-trace fit reported in the
-	// SAECache paper (arXiv:2605.18825, mu=2.28, sigma=1.34).
+	// InitialLogMean and InitialLogStd seed the estimators of queues without
+	// their own seeds, in log-seconds. The defaults are the CC-Bench
+	// agentic-trace fit reported in the SAECache paper (arXiv:2605.18825,
+	// mu=2.28, sigma=1.34).
 	InitialLogMean float64 `json:"initialLogMean,omitempty"`
 	InitialLogStd  float64 `json:"initialLogStd,omitempty"`
 	// EMAFactor is the blend weight of each new sample estimate, in (0, 1].
@@ -91,7 +107,7 @@ type Config struct {
 // DefaultConfig is decoded over by the factory.
 var DefaultConfig = Config{
 	SessionTypeHeader: "x-session-type",
-	SessionType:       "agentic",
+	Queues:            []QueueConfig{{SessionType: "agentic"}},
 	InitialLogMean:    2.28,
 	InitialLogStd:     1.34,
 	EMAFactor:         0.1,
@@ -102,12 +118,21 @@ var DefaultConfig = Config{
 	MaxSessions:       100000,
 }
 
-// resolvedConfig is Config after parsing and validation.
+// catchAllQueue keys the single queue used when no queues are configured.
+const catchAllQueue = ""
+
+// queueSeed is one queue's resolved estimator seed.
+type queueSeed struct {
+	logMean float64
+	logStd  float64
+}
+
+// resolvedConfig is Config after parsing and validation. queues maps the
+// lowercased workload type to its seed; a single catchAllQueue entry matches
+// every type.
 type resolvedConfig struct {
 	sessionTypeHeader string
-	sessionType       string
-	initialLogMean    float64
-	initialLogStd     float64
+	queues            map[string]queueSeed
 	emaFactor         float64
 	minSamples        int
 	windowSize        int
@@ -127,10 +152,9 @@ func (c Config) resolve() (resolvedConfig, error) {
 		return out, err
 	}
 
-	sessionType := strings.TrimSpace(c.SessionType)
 	switch {
-	case sessionType != "" && strings.TrimSpace(c.SessionTypeHeader) == "":
-		return out, errors.New("sessionTypeHeader must not be empty when sessionType is set")
+	case len(c.Queues) > 0 && strings.TrimSpace(c.SessionTypeHeader) == "":
+		return out, errors.New("sessionTypeHeader must not be empty when queues are configured")
 	case c.InitialLogStd <= 0:
 		return out, fmt.Errorf("initialLogStd must be > 0, got %v", c.InitialLogStd)
 	case c.EMAFactor <= 0 || c.EMAFactor > 1:
@@ -143,12 +167,34 @@ func (c Config) resolve() (resolvedConfig, error) {
 		return out, fmt.Errorf("maxSessions must be > 0, got %d", c.MaxSessions)
 	}
 
+	out.queues = make(map[string]queueSeed, len(c.Queues))
+	if len(c.Queues) == 0 {
+		out.queues[catchAllQueue] = queueSeed{logMean: c.InitialLogMean, logStd: c.InitialLogStd}
+	}
+	for _, queue := range c.Queues {
+		sessionType := strings.ToLower(strings.TrimSpace(queue.SessionType))
+		if sessionType == "" {
+			return out, errors.New("queues entries must set sessionType")
+		}
+		if _, dup := out.queues[sessionType]; dup {
+			return out, fmt.Errorf("duplicate queue for sessionType %q", sessionType)
+		}
+		seed := queueSeed{logMean: c.InitialLogMean, logStd: c.InitialLogStd}
+		if queue.InitialLogMean != nil {
+			seed.logMean = *queue.InitialLogMean
+		}
+		if queue.InitialLogStd != nil {
+			seed.logStd = *queue.InitialLogStd
+		}
+		if seed.logStd <= 0 {
+			return out, fmt.Errorf("queue %q initialLogStd must be > 0, got %v", sessionType, seed.logStd)
+		}
+		out.queues[sessionType] = seed
+	}
+
 	// Request headers are stored with lowercased keys (see
 	// handlers.HandleRequestHeaders), so the configured name must match.
 	out.sessionTypeHeader = strings.ToLower(strings.TrimSpace(c.SessionTypeHeader))
-	out.sessionType = sessionType
-	out.initialLogMean = c.InitialLogMean
-	out.initialLogStd = c.InitialLogStd
 	out.emaFactor = c.EMAFactor
 	out.minSamples = c.MinSamples
 	out.windowSize = c.WindowSize
@@ -169,14 +215,15 @@ func positiveDuration(field, raw string) (time.Duration, error) {
 
 // Producer publishes an inter-turn prediction for session requests. It is a
 // process-lifetime singleton serving every request, so all shared state is
-// guarded.
+// guarded. estimators is keyed like resolvedConfig.queues and is built once
+// at construction, so the map itself is read-only.
 type Producer struct {
-	typedName fwkplugin.TypedName
-	dk        fwkplugin.DataKey
-	cfg       resolvedConfig
-	estimator *logNormalEstimator
-	tracker   *sessionTracker
-	now       func() time.Time
+	typedName  fwkplugin.TypedName
+	dk         fwkplugin.DataKey
+	cfg        resolvedConfig
+	estimators map[string]*logNormalEstimator
+	tracker    *sessionTracker
+	now        func() time.Time
 }
 
 // Factory builds a Producer from raw plugin parameters.
@@ -200,14 +247,18 @@ func NewProducer(name string, cfg Config) (*Producer, error) {
 	if err != nil {
 		return nil, err
 	}
+	estimators := make(map[string]*logNormalEstimator, len(resolved.queues))
+	for sessionType, seed := range resolved.queues {
+		estimators[sessionType] = newLogNormalEstimator(seed.logMean, seed.logStd,
+			resolved.emaFactor, resolved.minSamples, resolved.windowSize)
+	}
 	return &Producer{
-		typedName: fwkplugin.TypedName{Type: InterTurnLatencyProducerType, Name: name},
-		dk:        attrinterturn.InterTurnPredictionDataKey.WithNonEmptyProducerName(name),
-		cfg:       resolved,
-		estimator: newLogNormalEstimator(resolved.initialLogMean, resolved.initialLogStd,
-			resolved.emaFactor, resolved.minSamples, resolved.windowSize),
-		tracker: newSessionTracker(resolved.maxSessions, resolved.maxIdle),
-		now:     time.Now,
+		typedName:  fwkplugin.TypedName{Type: InterTurnLatencyProducerType, Name: name},
+		dk:         attrinterturn.InterTurnPredictionDataKey.WithNonEmptyProducerName(name),
+		cfg:        resolved,
+		estimators: estimators,
+		tracker:    newSessionTracker(resolved.maxSessions, resolved.maxIdle),
+		now:        time.Now,
 	}, nil
 }
 
@@ -228,21 +279,23 @@ func (p *Producer) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// Produce feeds the session's idle gap to the estimator and publishes the
-// current prediction on the request's attribute store. Requests without a
-// session identifier or with a non-matching workload type get no prediction;
-// consumers must handle absence as "not a tracked session".
+// Produce feeds the session's idle gap to its queue's estimator and
+// publishes that queue's current prediction on the request's attribute
+// store. Requests without a session identifier or with a workload type no
+// queue matches get no prediction; consumers must handle absence as "not a
+// tracked session".
 func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
-	sessionID := p.sessionID(request)
+	sessionID, queue, estimator := p.session(request)
 	if sessionID == "" {
 		return nil
 	}
 	if gap, ok := p.tracker.observe(sessionID, p.now()); ok && gap >= p.cfg.minInterval {
-		p.estimator.observe(gap.Seconds())
+		estimator.observe(gap.Seconds())
 	}
 
-	logMean, logStd, observed := p.estimator.snapshot()
+	logMean, logStd, observed := estimator.snapshot()
 	request.PutAttribute(p.dk, attrinterturn.InterTurnPrediction{
+		SessionType:  queue,
 		LogMean:      logMean,
 		LogStd:       logStd,
 		Observations: observed,
@@ -256,46 +309,61 @@ func (p *Producer) ResponseBody(_ context.Context, request *fwksched.InferenceRe
 	if response == nil || !response.EndOfStream {
 		return
 	}
-	sessionID := p.sessionID(request)
+	sessionID, _, _ := p.session(request)
 	if sessionID == "" {
 		return
 	}
 	p.tracker.touch(sessionID, p.now())
 }
 
-// sessionID returns the request's session identifier, or empty when the
-// request carries none or its workload type does not match.
-func (p *Producer) sessionID(request *fwksched.InferenceRequest) string {
+// session returns the request's session identifier plus the key and
+// estimator of the queue its workload type routes to. The identifier is
+// empty when the request carries none or no queue matches its type.
+func (p *Producer) session(request *fwksched.InferenceRequest) (string, string, *logNormalEstimator) {
 	if request == nil {
-		return ""
+		return "", "", nil
 	}
-	if p.cfg.sessionType != "" {
-		if request.Headers == nil ||
-			!strings.EqualFold(strings.TrimSpace(request.Headers[p.cfg.sessionTypeHeader]), p.cfg.sessionType) {
-			return ""
+	queue := catchAllQueue
+	estimator, ok := p.estimators[catchAllQueue]
+	if !ok {
+		if request.Headers != nil {
+			queue = strings.ToLower(strings.TrimSpace(request.Headers[p.cfg.sessionTypeHeader]))
+		}
+		if estimator, ok = p.estimators[queue]; !ok {
+			return "", "", nil
 		}
 	}
 	id, ok := attrsession.ReadSessionID(request)
 	if !ok {
-		return ""
+		return "", "", nil
 	}
-	return string(id)
+	return string(id), queue, estimator
+}
+
+type queueDebugState struct {
+	LogMean      float64 `json:"logMean"`
+	LogStd       float64 `json:"logStd"`
+	Observations int64   `json:"observations"`
 }
 
 type debugState struct {
-	LogMean         float64 `json:"logMean"`
-	LogStd          float64 `json:"logStd"`
-	Observations    int64   `json:"observations"`
-	TrackedSessions int     `json:"trackedSessions"`
+	// Queues is keyed by workload type; the catch-all queue reports as "*".
+	Queues          map[string]queueDebugState `json:"queues"`
+	TrackedSessions int                        `json:"trackedSessions"`
 }
 
 // DumpState implements [fwkplugin.StateDumper] for /debug/plugins/state.
 func (p *Producer) DumpState() (json.RawMessage, error) {
-	logMean, logStd, observed := p.estimator.snapshot()
+	queues := make(map[string]queueDebugState, len(p.estimators))
+	for sessionType, estimator := range p.estimators {
+		logMean, logStd, observed := estimator.snapshot()
+		if sessionType == catchAllQueue {
+			sessionType = "*"
+		}
+		queues[sessionType] = queueDebugState{LogMean: logMean, LogStd: logStd, Observations: observed}
+	}
 	return json.Marshal(debugState{
-		LogMean:         logMean,
-		LogStd:          logStd,
-		Observations:    observed,
+		Queues:          queues,
 		TrackedSessions: p.tracker.size(),
 	})
 }

@@ -38,6 +38,11 @@ var InterTurnPredictionDataKey = plugin.NewDataKey("InterTurnPredictionDataKey",
 // inter-turn intervals: the idle time between one turn's response completion
 // and the next turn's arrival.
 type InterTurnPrediction struct {
+	// SessionType is the workload type of the producer queue that fitted
+	// this prediction, lowercased; empty when the producer runs a single
+	// catch-all queue. Consumers key per-type policy on it rather than
+	// re-deriving the type from the request.
+	SessionType string
 	// LogMean and LogStd are the fitted parameters, in log-seconds.
 	LogMean float64
 	LogStd  float64
