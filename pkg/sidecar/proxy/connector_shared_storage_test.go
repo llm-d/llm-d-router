@@ -31,6 +31,11 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
+// statefulResponsesTestBody is a /v1/responses body carrying every field
+// reqcommon.DropStatefulResponsesFields removes, shared by the tests that
+// assert those fields are stripped before the request reaches an upstream.
+const statefulResponsesTestBody = `{"model":"m","input":"hi","previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
+
 // requireStatefulResponsesFieldsStripped asserts that body carries none of
 // the fields reqcommon.DropStatefulResponsesFields removes, and that store
 // was forced to false rather than left absent.
@@ -47,8 +52,7 @@ func requireStatefulResponsesFieldsStripped(t *testing.T, body map[string]any) {
 // TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode covers
 // handleSharedStorage's default path (no cache_hit_threshold): prefill, then
 // decode. Both requests are built from the same body readJSONBody already
-// stripped, so this guards that shared entry point against a regression that
-// would otherwise only be caught for the nixlv2 connector.
+// stripped.
 func TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode(t *testing.T) {
 	var prefillBody map[string]any
 	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,8 +73,7 @@ func TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode(t *test
 		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop"}]}`))
 	})
 
-	body := `{"model":"m","input":"hi","previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
-	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
 	req.Header.Set(routing.PrefillEndpointHeader, strings.TrimPrefix(prefill.URL, "http://"))
 	recorder := httptest.NewRecorder()
 	srv.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
@@ -83,9 +86,7 @@ func TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode(t *test
 // TestSharedStorage_DecodeFirstAttempt_StripsStatefulResponsesFields targets
 // the decode-first attempt handleSharedStorage takes when cache_hit_threshold
 // is present: that request is built via cloneRequestWithBody from
-// readJSONBody's raw bytes, not from the parsed body map, making it the one
-// path where a stateful field could leak back in if raw ever stopped being
-// re-marshaled after stripping.
+// readJSONBody's raw bytes, not from the parsed body map.
 func TestSharedStorage_DecodeFirstAttempt_StripsStatefulResponsesFields(t *testing.T) {
 	var decodeBody map[string]any
 	decodeURL, err := url.Parse("http://decoder:8000")

@@ -212,20 +212,12 @@ func TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields(t *testing.T
 		_ = json.Unmarshal(body, &capturedBody)
 	})
 
-	reqBody := `{"model":"m","input":"hi","previous_response_id":"resp-123","store":true,"background":true}`
-	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
 	recorder := httptest.NewRecorder()
 
 	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
-	for _, field := range []string{"previous_response_id", "background"} {
-		if _, ok := capturedBody[field]; ok {
-			t.Errorf("expected %q to be dropped from the body the decoder sees", field)
-		}
-	}
-	if capturedBody["store"] != false {
-		t.Errorf("expected store to be forced to false, got %v", capturedBody["store"])
-	}
+	requireStatefulResponsesFieldsStripped(t, capturedBody)
 	if capturedBody["input"] != "hi" {
 		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
 	}
@@ -250,21 +242,41 @@ func TestServer_ResponsesDataParallelPassthroughStripsStatefulFields(t *testing.
 		}),
 	}
 
-	reqBody := `{"model":"m","input":"hi","previous_response_id":"resp-123","store":true,"background":true}`
-	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
 	req.Header.Set(routing.DataParallelEndpointHeader, dpHostPort)
 	recorder := httptest.NewRecorder()
 
 	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
-	for _, field := range []string{"previous_response_id", "background"} {
-		if _, ok := capturedBody[field]; ok {
-			t.Errorf("expected %q to be dropped from the body the data-parallel decoder sees", field)
-		}
+	requireStatefulResponsesFieldsStripped(t, capturedBody)
+	if capturedBody["input"] != "hi" {
+		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
 	}
-	if capturedBody["store"] != false {
-		t.Errorf("expected store to be forced to false, got %v", capturedBody["store"])
-	}
+}
+
+// TestServer_ResponsesP2PSourcePassthroughStripsStatefulFields locks in that
+// a /v1/responses request carrying a KV cache source header, routed through
+// decodeWithP2PSource, still has its unsupported stateful fields stripped.
+// decodeWithP2PSource reads the body itself via readJSONBody, independently
+// of the strip disaggregatedPrefillHandler already applied on this path.
+func TestServer_ResponsesP2PSourcePassthroughStripsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var capturedBody map[string]any
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:9000")
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesFieldsStripped(t, capturedBody)
 	if capturedBody["input"] != "hi" {
 		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
 	}

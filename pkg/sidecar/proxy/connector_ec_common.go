@@ -37,15 +37,16 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Multimodal content types that need encoder processing. input_image is
-// the Responses API's equivalent of image_url; the other three chat-
-// completions types have no Responses counterpart in the current API.
+// mmTypeInputImage is the Responses API's equivalent of image_url.
+const mmTypeInputImage = "input_image"
+
+// Multimodal content types that need encoder processing.
 var mmTypes = map[string]bool{
-	"image_url":   true,
-	"audio_url":   true,
-	"video_url":   true,
-	"input_audio": true,
-	"input_image": true,
+	"image_url":      true,
+	"audio_url":      true,
+	"video_url":      true,
+	"input_audio":    true,
+	mmTypeInputImage: true,
 }
 
 // requestInput returns the request's Responses input items, decoded the
@@ -56,8 +57,6 @@ func requestInput(req map[string]any) ([]json.RawMessage, error) {
 	switch v := req[requestFieldInput].(type) {
 	case nil:
 		return nil, nil
-	case []json.RawMessage:
-		return v, nil
 	case json.RawMessage:
 		var items []json.RawMessage
 		if err := json.Unmarshal(v, &items); err != nil {
@@ -99,11 +98,10 @@ func truncateLongStrings(v any, maxLen int) any {
 }
 
 // extractMMItems extracts all multimodal content parts from the request:
-// chat-completions' messages array, or a Responses input array. Which
-// field to walk is gated on apiType rather than field presence, the same
-// precaution reqcommon.DetectAPIType's doc comment calls for: a client
-// could send a stray field the other format doesn't use, and presence-based
-// sniffing would process the wrong one.
+// chat-completions' messages array, or a Responses input array. Which field
+// to walk is gated on apiType, not field presence: a client could send a
+// stray field the other format doesn't use, and presence-based sniffing
+// would process the wrong one.
 func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqcommon.APIType) []map[string]any {
 	var items []map[string]any
 
@@ -140,6 +138,11 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 
 			partType, ok := partMap["type"].(string)
 			if !ok {
+				continue
+			}
+			if partType == mmTypeInputImage && mmItemURL(partMap) == "" {
+				// A file_id-referenced image (no image_url string) has no
+				// content the encoder can fetch or receive inline.
 				continue
 			}
 
@@ -187,7 +190,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 // uses a different shape: the URL is a bare string on the part itself, and
 // detail is a sibling field, rather than both nested under image_url.
 func normalizeMMItemForEncoder(item map[string]any) map[string]any {
-	if item["type"] != "input_image" {
+	if item["type"] != mmTypeInputImage {
 		return item
 	}
 	imageURL := map[string]any{"url": item["image_url"]}
@@ -210,7 +213,7 @@ func mmItemURL(item map[string]any) string {
 				return u
 			}
 		}
-	case "input_image":
+	case mmTypeInputImage:
 		if u, ok := item["image_url"].(string); ok {
 			return u
 		}

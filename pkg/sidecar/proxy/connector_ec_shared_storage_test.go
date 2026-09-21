@@ -163,6 +163,24 @@ func TestExtractMMItems(t *testing.T) {
 			expected: 1,
 		},
 		{
+			name: "responses input_image with no fetchable url is skipped",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":    "input_image",
+								"file_id": "file-123",
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 0,
+		},
+		{
 			name: "responses input as bare string has no items",
 			request: map[string]any{
 				"input": "hello",

@@ -370,11 +370,9 @@ func TestBuildEncoderRequest_MinTokens(t *testing.T) {
 	assert.NotContains(t, encoderRequest, "min_tokens")
 }
 
-// TestECPipelineResponsesImage is an end-to-end regression test for the gap
-// this fix closes: a /v1/responses request carrying an input_image part,
-// routed through the EC connector, must actually reach the encoder.
-// extractMMItems previously only read "messages", so it silently found
-// nothing for a Responses request and the encoder stage was skipped.
+// TestECPipelineResponsesImage is an end-to-end test asserting that a
+// /v1/responses request carrying an input_image part, routed through the
+// EC connector, reaches the encoder.
 func TestECPipelineResponsesImage(t *testing.T) {
 	for _, connector := range []string{ECExampleConnector, ECConnectorNIXL} {
 		t.Run(connector, func(t *testing.T) {
