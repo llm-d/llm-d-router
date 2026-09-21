@@ -308,6 +308,32 @@ func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
 	assert.Equal(t, "high", imageURL["detail"])
 }
 
+// TestBuildEncoderRequest_DropsResponsesInput locks in that a Responses
+// request's input field never rides along to the encoder: the encoder is
+// always sent as chat completions and never reads input, so leaving it in
+// place would send every other multimodal item in the original request
+// (base64 images included) on every per-item encoder call.
+func TestBuildEncoderRequest_DropsResponsesInput(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"input": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"},
+					map[string]any{"type": "input_image", "image_url": "https://example.com/img2.jpg"},
+				},
+			},
+		},
+	}
+
+	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+
+	assert.NotContains(t, encoderRequest, "input")
+}
+
 // TestBuildEncoderRequest_MinTokens is a regression test for stripping a
 // client-supplied min_tokens from the encoder request; reqcommon.CapSingleToken
 // documents why.
