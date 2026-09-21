@@ -98,7 +98,7 @@ func TestFanoutEncoderCollectAggregates(t *testing.T) {
 		imageURLItem("https://example.com/img2.jpg"),
 	)
 
-	params, contributed, total, err := srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id")
+	params, contributed, total, err := srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id", reqcommon.APITypeChatCompletions)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, total, "total item count")
 	assert.Equal(t, 2, contributed, "both encoder responses carried ec_transfer_params")
@@ -129,7 +129,7 @@ func TestFanoutEncoderCollectMissingField(t *testing.T) {
 	srv.logger = log.Log
 
 	req := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
-	params, contributed, total, err := srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id")
+	params, contributed, total, err := srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id", reqcommon.APITypeChatCompletions)
 	assert.NoError(t, err, "missing ec_transfer_params must not fail the request")
 	assert.Equal(t, 1, total, "one item processed")
 	assert.Equal(t, 0, contributed, "no encoder response carried ec_transfer_params")
@@ -151,7 +151,7 @@ func TestFanoutEncoderCollectEncoderError(t *testing.T) {
 	srv.logger = log.Log
 
 	req := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
-	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id")
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-req-id", reqcommon.APITypeChatCompletions)
 	assert.Error(t, err, "5xx from encoder must surface as an error")
 }
 
@@ -381,7 +381,7 @@ func TestFanoutEncoderFailFastCancellation(t *testing.T) {
 	)
 
 	start := time.Now()
-	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-cancel")
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-cancel", reqcommon.APITypeChatCompletions)
 	elapsed := time.Since(start)
 
 	assert.Error(t, err, "5xx from one encoder must surface as an error")
@@ -408,7 +408,7 @@ func TestFanoutEncoderAllFail(t *testing.T) {
 		imageURLItem("https://example.com/img2.jpg"),
 		imageURLItem("https://example.com/img3.jpg"),
 	)
-	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-all-fail")
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-all-fail", reqcommon.APITypeChatCompletions)
 	assert.Error(t, err, "all-fail must surface an error")
 }
 
@@ -447,7 +447,7 @@ func TestFanoutEncoderParentContextCancel(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, _, _, err = srv.fanoutEncoderCollect(ctx, req, []string{encoderURL.Host}, "test-ctx-cancel")
+	_, _, _, err = srv.fanoutEncoderCollect(ctx, req, []string{encoderURL.Host}, "test-ctx-cancel", reqcommon.APITypeChatCompletions)
 	elapsed := time.Since(start)
 
 	assert.Error(t, err, "canceled parent context must surface as an error")
@@ -494,7 +494,7 @@ func TestFanoutEncoderPerErrorVisibility(t *testing.T) {
 		imageURLItem("https://example.com/img2.jpg"),
 		imageURLItem("https://example.com/img3.jpg"),
 	)
-	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-visibility")
+	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-visibility", reqcommon.APITypeChatCompletions)
 	assert.Error(t, err, "all encoders return 5xx; an error must surface")
 
 	captured := sink.snapshot()
@@ -523,7 +523,7 @@ func TestFanoutEncoderCollectEmptyHostPorts(t *testing.T) {
 	srv.logger = log.Log
 
 	req := userMessageRequest(imageURLItem("https://example.com/img.jpg"))
-	_, _, _, err := srv.fanoutEncoderCollect(context.Background(), req, nil, "test-empty-hosts")
+	_, _, _, err := srv.fanoutEncoderCollect(context.Background(), req, nil, "test-empty-hosts", reqcommon.APITypeChatCompletions)
 	assert.Error(t, err, "empty encoderHostPorts must return an error, not panic")
 }
 
