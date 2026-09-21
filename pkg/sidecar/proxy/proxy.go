@@ -65,10 +65,17 @@ const (
 	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
 	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
-	// requestFieldStore must stay inspected (decoded to a Go value, not left
-	// as raw JSON): see DropStatefulResponsesFields's doc comment for why an
-	// undecoded value would break its "changed" reporting.
+	// requestFieldStore is decoded to a bool so a second DropStatefulResponsesFields
+	// pass over an already-stripped body reports no change and skips the re-marshal.
 	requestFieldStore = reqcommon.FieldStore
+
+	// requestFieldInput is an analogous to requestFieldMessages for chat completions.
+	requestFieldInput = "input"
+
+	// inputImageDetailField is the optional sibling field on a Responses
+	// input_image part carrying the image detail hint (e.g. "high"/"low"),
+	// nested under image_url instead once normalized to chat-completions shape.
+	inputImageDetailField = "detail"
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).

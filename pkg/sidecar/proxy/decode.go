@@ -51,14 +51,8 @@ const (
 	responseFieldDelta            = "delta"
 
 	requestFieldMessages = "messages"
-	requestFieldInput    = "input" // analogous to requestFieldMessages for chat completions.
 	requestFieldRole     = "role"
 	requestFieldContent  = "content"
-
-	// inputImageDetailField is the optional sibling field on a Responses
-	// input_image part carrying the image detail hint (e.g. "high"/"low"),
-	// nested under image_url instead once normalized to chat-completions shape.
-	inputImageDetailField = "detail"
 
 	roleAssistant = "assistant"
 )
