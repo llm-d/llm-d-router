@@ -37,11 +37,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// inputImageDetailField is the optional sibling field on a Responses
-// input_image part carrying the image detail hint (e.g. "high"/"low"),
-// nested under image_url instead once normalized to chat-completions shape.
-const inputImageDetailField = "detail"
-
 // Multimodal content types that need encoder processing. input_image is
 // the Responses API's equivalent of image_url; the other three chat-
 // completions types have no Responses counterpart in the current API.
@@ -52,10 +47,6 @@ var mmTypes = map[string]bool{
 	"input_audio": true,
 	"input_image": true,
 }
-
-// requestFieldInput is the Responses API's top-level content field,
-// analogous to requestFieldMessages for chat completions.
-const requestFieldInput = "input"
 
 // requestInput returns the request's Responses input items, decoded the
 // same way requestMessages decodes messages. Responses' input may also be a
