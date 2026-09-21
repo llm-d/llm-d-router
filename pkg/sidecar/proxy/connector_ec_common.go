@@ -170,7 +170,11 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	encoderRequest["messages"] = messages
 	// The encoder request carries the item in messages and is sent to
 	// reqcommon.PathChatCompletions whatever API the client used (#2742), so it
-	// is capped as chat completions.
+	// is capped as chat completions. A Responses request's input is the source
+	// of mmItem, not a field the encoder reads, and can carry every other
+	// multimodal item in the original request (base64 images included), so it
+	// must not ride along.
+	delete(encoderRequest, requestFieldInput)
 	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
 
 	return encoderRequest
