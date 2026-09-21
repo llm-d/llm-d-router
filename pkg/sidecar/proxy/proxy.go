@@ -69,8 +69,13 @@ const (
 	// pass over an already-stripped body reports no change and skips the re-marshal.
 	requestFieldStore = reqcommon.FieldStore
 
-	// requestFieldInput is an analogous to requestFieldMessages for chat completions.
+	// requestFieldInput is the Responses API's analog of requestFieldMessages
+	// for chat completions.
 	requestFieldInput = "input"
+
+	// requestFieldModel is the model field common to every inference API this
+	// sidecar supports.
+	requestFieldModel = "model"
 
 	// inputImageDetailField is the optional sibling field on a Responses
 	// input_image part carrying the image detail hint (e.g. "high"/"low"),

@@ -28,7 +28,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"net/http"
 
 	"github.com/go-logr/logr"
@@ -155,29 +154,26 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 	return items
 }
 
-// buildEncoderRequest creates a per-item encoder request: a one-level copy of
-// the client's request carrying only the multimodal item in messages[0].content
-// (text removed), capped to a single output token, and stream disabled.
+// buildEncoderRequest builds a per-item encoder request from scratch: model
+// plus a single synthetic chat-completions message wrapping mmItem, capped
+// to one output token with streaming disabled. It does not copy the
+// client's request: the encoder is always addressed as chat completions
+// regardless of the client's own API (#2742), and a client field with an
+// incompatible schema there (e.g. Responses' tools) would otherwise reach
+// a strict chat-completions encoder as-is.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := maps.Clone(originalRequest)
-
-	messages := []map[string]any{
-		{
-			"role": "user",
-			"content": []map[string]any{
-				normalizeMMItemForEncoder(mmItem),
+	encoderRequest := map[string]any{
+		requestFieldModel: originalRequest[requestFieldModel],
+		requestFieldMessages: []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					normalizeMMItemForEncoder(mmItem),
+				},
 			},
 		},
 	}
 
-	encoderRequest["messages"] = messages
-	// The encoder request carries the item in messages and is sent to
-	// reqcommon.PathChatCompletions whatever API the client used (#2742), so it
-	// is capped as chat completions. A Responses request's input is the source
-	// of mmItem, not a field the encoder reads, and can carry every other
-	// multimodal item in the original request (base64 images included), so it
-	// must not ride along.
-	delete(encoderRequest, requestFieldInput)
 	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
 
 	return encoderRequest
