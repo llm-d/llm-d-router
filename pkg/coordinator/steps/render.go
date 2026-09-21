@@ -125,7 +125,7 @@ func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
-	case reqcommon.APITypeGenerate:
+	case reqcommon.APITypeVLLMGenerate:
 		return s.executeGenerate(ctx, reqCtx)
 	case reqcommon.APITypeCompletions:
 		return s.executeCompletions(ctx, reqCtx)

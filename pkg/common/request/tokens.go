@@ -20,8 +20,8 @@ import "maps"
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token prefill or encode request. It returns the map
-// the caps were written into: sampling_params for the generate API, body itself
-// otherwise. The generate API also expects transfer params in that map, so a
+// the caps were written into: sampling_params for the vLLM generate API, body itself
+// otherwise. The vLLM generate API also expects transfer params in that map, so a
 // caller adding them needs no second lookup.
 //
 // The caps to rewrite come from APIType.tokenLimitFields, so each API's output
@@ -35,7 +35,7 @@ import "maps"
 // body owns, so the rewrite never reaches a nested map the body was cloned from.
 func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	limits := body
-	if apiType == APITypeGenerate {
+	if apiType == APITypeVLLMGenerate {
 		sp, _ := body[FieldSamplingParams].(map[string]any)
 		limits = make(map[string]any, len(sp)+1)
 		maps.Copy(limits, sp)

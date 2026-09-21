@@ -211,7 +211,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		}
 		// Mirrors resolveFormat: the pipeline sends generate for a native generate
 		// request and for a chat request with passthrough disabled, chat otherwise.
-		requestsSpeakChat := path != reqcommon.PathGenerate && cfg != coordinatorConfigNIXLGenerate
+		requestsSpeakChat := path != reqcommon.PathVLLMGenerate && cfg != coordinatorConfigNIXLGenerate
 		verifyTokenLimits(logs, limits, requestsSpeakChat, capSteps)
 	}
 }
