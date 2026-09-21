@@ -18,9 +18,11 @@ package proxy
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -308,12 +310,15 @@ func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
 	assert.Equal(t, "high", imageURL["detail"])
 }
 
-// TestBuildEncoderRequest_DropsResponsesInput locks in that a Responses
-// request's input field never rides along to the encoder: the encoder is
-// always sent as chat completions and never reads input, so leaving it in
-// place would send every other multimodal item in the original request
-// (base64 images included) on every per-item encoder call.
-func TestBuildEncoderRequest_DropsResponsesInput(t *testing.T) {
+// TestBuildEncoderRequest_OnlyModelAndMessages locks in that buildEncoderRequest
+// builds the encoder request from scratch rather than copying the client's
+// request: the encoder is always addressed as chat completions regardless
+// of the client's own API (#2742), so none of a Responses request's own
+// fields, stateful or not, must ride along. input and max_output_tokens
+// would each leak every other multimodal item or an uncapped output limit;
+// tools/tool_choice have an incompatible schema between the two APIs and a
+// strict chat-completions encoder rejects them outright.
+func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",
 		"input": []any{
@@ -325,60 +330,14 @@ func TestBuildEncoderRequest_DropsResponsesInput(t *testing.T) {
 				},
 			},
 		},
-	}
-
-	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
-
-	assert.NotContains(t, encoderRequest, "input")
-}
-
-// TestBuildEncoderRequest_DropsResponsesMaxOutputTokens locks in that a
-// Responses request's max_output_tokens never rides along to the encoder:
-// CapSingleToken caps chat completions' max_tokens/max_completion_tokens,
-// not max_output_tokens, so leaving it in place would send an uncapped,
-// Responses-only field to an encoder addressed as chat completions.
-func TestBuildEncoderRequest_DropsResponsesMaxOutputTokens(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"input": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"},
-				},
-			},
-		},
-		"max_output_tokens": 500,
-	}
-
-	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
-
-	assert.NotContains(t, encoderRequest, "max_output_tokens")
-}
-
-// TestBuildEncoderRequest_OnlyModelAndMessages locks in that buildEncoderRequest
-// builds the encoder request from scratch rather than copying the client's
-// request: tools/tool_choice have an incompatible schema between the
-// Responses and chat-completions APIs, so a Responses request with tools
-// configured must not carry them into an encoder request always sent as
-// chat completions.
-func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"input": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"},
-				},
-			},
-		},
-		"tools":       []any{map[string]any{"type": "function", "name": "f", "parameters": map[string]any{}}},
-		"tool_choice": map[string]any{"type": "function", "name": "f"},
+		"previous_response_id": "resp-123",
+		"conversation":         "conv-123",
+		"store":                true,
+		"background":           true,
+		"max_output_tokens":    500,
+		"instructions":         "be nice",
+		"tools":                []any{map[string]any{"type": "function", "name": "f", "parameters": map[string]any{}}},
+		"tool_choice":          map[string]any{"type": "function", "name": "f"},
 	}
 
 	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
@@ -386,9 +345,7 @@ func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
 	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
 
 	assert.Equal(t, "test-model", encoderRequest["model"])
-	assert.NotContains(t, encoderRequest, "tools")
-	assert.NotContains(t, encoderRequest, "tool_choice")
-	assert.NotContains(t, encoderRequest, "input")
+	assert.ElementsMatch(t, []string{"model", "messages", "max_tokens", "max_completion_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
 }
 
 // TestBuildEncoderRequest_MinTokens is a regression test for stripping a
