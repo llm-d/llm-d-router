@@ -142,6 +142,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			if partType == mmTypeInputImage && mmItemURL(partMap) == "" {
 				// A file_id-referenced image (no image_url string) has no
 				// content the encoder can fetch or receive inline.
+				logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL", "hasFileID", partMap["file_id"] != nil)
 				continue
 			}
 
@@ -163,16 +164,22 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 // Responses input_image part (bare-string URL, sibling detail field) is
 // forwarded unmodified rather than reshaped into chat completions'
 // image_url nesting, which vLLM's chat-completions engine ignores detail
-// on.
+// on. A Responses encoder request sets store to false: vLLM defaults an
+// absent store to true, and nothing ever reads or reaps the response object
+// that a stored per-item priming request would leave behind.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any, apiType reqcommon.APIType) map[string]any {
 	if apiType != reqcommon.APITypeResponses {
 		apiType = reqcommon.APITypeChatCompletions
 	}
 
-	encoderRequest := map[string]any{requestFieldModel: originalRequest[requestFieldModel]}
+	encoderRequest := map[string]any{}
+	if model, ok := originalRequest[requestFieldModel]; ok {
+		encoderRequest[requestFieldModel] = model
+	}
 	message := map[string]any{"role": "user", "content": []map[string]any{mmItem}}
 	if apiType == reqcommon.APITypeResponses {
 		encoderRequest[requestFieldInput] = []map[string]any{message}
+		encoderRequest[requestFieldStore] = false
 	} else {
 		encoderRequest[requestFieldMessages] = []map[string]any{message}
 	}
