@@ -19,6 +19,7 @@ package request
 import (
 	"maps"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -277,53 +278,69 @@ func TestCapSingleToken(t *testing.T) {
 	}
 }
 
-func TestDropStatefulResponsesFields(t *testing.T) {
+func TestRejectStatefulResponsesFields(t *testing.T) {
 	tests := []struct {
-		name        string
-		body        map[string]any
-		want        map[string]any
-		wantChanged []string
+		name      string
+		body      map[string]any
+		wantField string // empty means no error
 	}{
 		{
-			name:        "all four present",
-			body:        map[string]any{"input": "hi", FieldPreviousResponseID: "resp-123", FieldConversation: "conv-123", FieldStore: true, FieldBackground: true},
-			want:        map[string]any{"input": "hi", FieldStore: false},
-			wantChanged: []string{FieldPreviousResponseID, FieldConversation, FieldStore, FieldBackground},
+			name: "no stateful fields",
+			body: map[string]any{"input": "hi"},
 		},
 		{
-			name:        "store already false is left alone and not reported as changed",
-			body:        map[string]any{"input": "hi", FieldStore: false},
-			want:        map[string]any{"input": "hi", FieldStore: false},
-			wantChanged: nil,
+			name:      "previous_response_id present",
+			body:      map[string]any{"input": "hi", FieldPreviousResponseID: "resp-123"},
+			wantField: FieldPreviousResponseID,
 		},
 		{
-			name:        "store absent is forced to false",
-			body:        map[string]any{"input": "hi"},
-			want:        map[string]any{"input": "hi", FieldStore: false},
-			wantChanged: []string{FieldStore},
+			name:      "conversation present",
+			body:      map[string]any{"input": "hi", FieldConversation: "conv-123"},
+			wantField: FieldConversation,
 		},
 		{
-			name:        "store non-bool is forced to false",
-			body:        map[string]any{"input": "hi", FieldStore: "yes"},
-			want:        map[string]any{"input": "hi", FieldStore: false},
-			wantChanged: []string{FieldStore},
+			name:      "background present, even when false",
+			body:      map[string]any{"input": "hi", FieldBackground: false},
+			wantField: FieldBackground,
 		},
 		{
-			name:        "background false is still removed",
-			body:        map[string]any{"input": "hi", FieldBackground: false},
-			want:        map[string]any{"input": "hi", FieldStore: false},
-			wantChanged: []string{FieldStore, FieldBackground},
+			name: "input is a plain string, no content to walk",
+			body: map[string]any{"input": "hi"},
+		},
+		{
+			name: "input_text part has no file_id",
+			body: map[string]any{"input": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "input_text", "text": "hi"},
+				}},
+			}},
+		},
+		{
+			name: "input_image part references a file_id",
+			body: map[string]any{"input": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "input_image", FieldFileID: "file-123"},
+				}},
+			}},
+			wantField: FieldFileID,
+		},
+		{
+			name: "malformed input array does not panic",
+			body: map[string]any{"input": []any{"not a map", 42, map[string]any{"content": "not an array"}}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DropStatefulResponsesFields(tt.body)
-			if !reflect.DeepEqual(tt.body, tt.want) {
-				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			err := RejectStatefulResponsesFields(tt.body)
+			if tt.wantField == "" {
+				if err != nil {
+					t.Fatalf("got error %v, want nil", err)
+				}
+				return
 			}
-			if !reflect.DeepEqual(got, tt.wantChanged) {
-				t.Fatalf("changed = %v, want %v", got, tt.wantChanged)
+			if err == nil || !strings.Contains(err.Error(), tt.wantField) {
+				t.Fatalf("got error %v, want it to name field %q", err, tt.wantField)
 			}
 		})
 	}

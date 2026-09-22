@@ -16,7 +16,10 @@ limitations under the License.
 
 package request
 
-import "maps"
+import (
+	"fmt"
+	"maps"
+)
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token prefill or encode request. It returns the map
@@ -51,32 +54,47 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	return limits
 }
 
-// DropStatefulResponsesFields removes previous_response_id, conversation,
-// and background, which the router cannot honor. store is forced to false
-// rather than removed, since vLLM defaults it to true when absent. It
-// returns the names of the fields it changed, so callers can log only when
-// something changed.
+// RejectStatefulResponsesFields reports an error naming the first field it
+// finds that depends on state the router does not keep: previous_response_id
+// and conversation reference a prior turn, background asks for an async job
+// the router cannot poll, and a file_id inside an input content part refers
+// to a file the router never stored.
 //
-// body[FieldStore], if present, must already be decoded into a Go bool: an
-// undecoded value (e.g. json.RawMessage) never satisfies the type assertion
-// below, so store would always report as changed.
-func DropStatefulResponsesFields(body map[string]any) []string {
-	var changed []string
-	if _, ok := body[FieldPreviousResponseID]; ok {
-		delete(body, FieldPreviousResponseID)
-		changed = append(changed, FieldPreviousResponseID)
+// file_id is not a top-level field: OpenAI's Responses API nests it inside
+// an input_image, input_file, or input_audio content part, so finding it
+// takes a walk of the input array rather than a map lookup.
+func RejectStatefulResponsesFields(body map[string]any) error {
+	for _, field := range []string{FieldPreviousResponseID, FieldConversation, FieldBackground} {
+		if _, ok := body[field]; ok {
+			return fmt.Errorf("field %q is not supported by the router", field)
+		}
 	}
-	if _, ok := body[FieldConversation]; ok {
-		delete(body, FieldConversation)
-		changed = append(changed, FieldConversation)
+	if input, ok := body[FieldInput].([]any); ok && inputReferencesFile(input) {
+		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
 	}
-	if store, ok := body[FieldStore].(bool); !ok || store {
-		body[FieldStore] = false
-		changed = append(changed, FieldStore)
+	return nil
+}
+
+// inputReferencesFile reports whether a Responses input array contains a
+// content part with a file_id field.
+func inputReferencesFile(input []any) bool {
+	for _, item := range input {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := itemMap["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, part := range content {
+			partMap, ok := part.(map[string]any)
+			if ok {
+				if _, ok := partMap[FieldFileID]; ok {
+					return true
+				}
+			}
+		}
 	}
-	if _, ok := body[FieldBackground]; ok {
-		delete(body, FieldBackground)
-		changed = append(changed, FieldBackground)
-	}
-	return changed
+	return false
 }

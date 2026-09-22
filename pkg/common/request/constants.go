@@ -49,9 +49,14 @@ const (
 	FieldAddGenerationPrompt  = "add_generation_prompt"
 
 	// Responses API fields with no cross-pod story in a disaggregated
-	// deployment; see DropStatefulResponsesFields.
+	// deployment; see RejectStatefulResponsesFields.
 	FieldPreviousResponseID = "previous_response_id"
 	FieldConversation       = "conversation"
-	FieldStore              = "store"
 	FieldBackground         = "background"
+	FieldInput              = "input"
+	// FieldFileID names the field an input_image, input_file, or
+	// input_audio content part uses to reference a previously uploaded
+	// file instead of embedding it inline. Unlike the fields above, it is
+	// never a top-level request field.
+	FieldFileID = "file_id"
 )
