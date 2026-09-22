@@ -123,7 +123,7 @@ pipeline:
 
   # use_openai_format selects the wire format for the encode and prefill steps.
   #   true (default) - forward on the client's original OpenAI path
-  #                    (/v1/chat/completions, /v1/completions).
+  #                    (/v1/chat/completions, /v1/completions, /v1/responses).
   #   false          - rewrite to the internal /inference/v1/generate
   #                    token-array (tokens-in) format.
   # false requires a render step in the pipeline (render produces the token
@@ -272,11 +272,6 @@ pipeline:
     # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
-    #   params:
-    #     # use_openai_format mirrors gateway.use_openai_format but lets the
-    #     # step override per-pipeline if you want a different wire format
-    #     # for the text-only fast path.
-    #     use_openai_format: true
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -317,5 +312,4 @@ pipeline:
     # -------------------------------------------------------------------
     - type: decode
       # params:
-      #   use_openai_format: true   # see notes above
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector

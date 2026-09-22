@@ -193,6 +193,108 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 	}
 }
 
+func TestHandleInference_ResponsesDropsUnsupportedStatefulFields(t *testing.T) {
+	// Locks in that the handler strips previous_response_id/background and
+	// forces store to false before the pipeline sees the body; see
+	// reqcommon.DropStatefulResponsesFields for why.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","input":"hi","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	for _, field := range []string{"previous_response_id", "background"} {
+		if _, ok := seenBody[field]; ok {
+			t.Errorf("expected %q to be dropped from the body the pipeline sees", field)
+		}
+	}
+	if seenBody["store"] != false {
+		t.Errorf("expected store to be forced to false, got %v", seenBody["store"])
+	}
+	if seenBody["input"] != "hi" {
+		t.Errorf("expected unrelated fields to survive, got input=%v", seenBody["input"])
+	}
+}
+
+func TestHandleInference_ResponsesForcesStoreFalseRegardlessOfValue(t *testing.T) {
+	// store is forced to false regardless of its input value; see
+	// reqcommon.DropStatefulResponsesFields for why deleting the key
+	// instead wouldn't work.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "true", body: `{"model":"m","input":"hi","store":true}`},
+		{name: "false", body: `{"model":"m","input":"hi","store":false}`},
+		{name: "absent", body: `{"model":"m","input":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenBody map[string]any
+			p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+				seenBody = rc.Body
+				return nil
+			}}})
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			if seenBody["store"] != false {
+				t.Errorf("expected store forced to false, got %v", seenBody["store"])
+			}
+		})
+	}
+}
+
+func TestHandleInference_ResponsesFieldStrippingScopedToPath(t *testing.T) {
+	// The stripping in DropStatefulResponsesFields must not run for other
+	// paths: a chat-completions client is free to send its own store/
+	// previous_response_id/background fields (even if meaningless there)
+	// without the coordinator silently rewriting its request.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	for _, field := range []string{"previous_response_id", "store", "background"} {
+		if _, ok := seenBody[field]; !ok {
+			t.Errorf("expected %q to survive on a non-responses path", field)
+		}
+	}
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
@@ -334,6 +436,7 @@ func TestRoutesRegistered(t *testing.T) {
 	}{
 		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
 		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
+		{"responses", http.MethodPost, reqcommon.PathResponses, inferenceBody},
 		{"generate", http.MethodPost, reqcommon.PathVLLMGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},

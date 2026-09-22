@@ -3,7 +3,7 @@
 This document describes the request and response formats for each stage of the coordinator pipeline. The pipeline implements the vLLM disaggregated serving protocol for multimodal inference.
 
 > [!NOTE] 
-> The encode and prefill steps support two request protocols: `/inference/v1/generate` and `/v1/chat/completions`. 
+> The encode and prefill steps support two request protocols: `/inference/v1/generate` and `/v1/chat/completions` (the latter shared by `/v1/responses`, which uses the same wire format). 
 The `/inference/v1/generate` format is the preferred protocol as it naturally implements tokens-in protocol, and eliminates additional tokenization.
 However, it is relatively new and may contain bugs. The `/v1/chat/completions` format is available as a fallback option, reusing the existing well-tested chat completions endpoint. The active protocol is controlled by the `use_openai_format` configuration (see [Request Format Configuration](#request-format-configuration)).
 
@@ -26,7 +26,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 ## Pipeline Overview
 
 ```
-Client Request (/v1/chat/completions, /v1/completions, or /inference/v1/generate)
+Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /inference/v1/generate)
     |
     |--- /inference/v1/generate (tokens-in)?
     |        YES --> skip replace-media-urls; render parses token_ids and features
@@ -40,7 +40,8 @@ Client Request (/v1/chat/completions, /v1/completions, or /inference/v1/generate
     |
     v
 [replace-media-urls] - Fan-out downloads images, converts to base64 data URIs
-    |                    (skipped for /v1/completions and for /v1/chat/completions without media URLs)
+    |                    (skipped for /v1/completions and for /v1/chat/completions or
+    |                    /v1/responses without media URLs)
     v
 [render] - Tokenizes prompt, produces token_ids and per-image metadata
     |         (skipped for /v1/completions with token array prompt)
@@ -48,7 +49,7 @@ Client Request (/v1/chat/completions, /v1/completions, or /inference/v1/generate
 [conditional-decode] - Attempts decode with token_ids;
     |                     if 412, continues pipeline; otherwise returns response
     |
-    |--- /v1/completions or /v1/chat/completions without multi media content --> skip encode, go to [prefill]
+    |--- /v1/completions, or /v1/chat/completions or /v1/responses without multi media content --> skip encode, go to [prefill]
     |
     |--- /inference/v1/generate --> skip encode (prefill encodes inline from kwargs_data), go to [prefill]
     |
@@ -115,18 +116,19 @@ The original client request body (OpenAI-compatible chat completion format):
 
 ## Stage 2: render
 
-Sends the request body to the rendering/tokenization service. Returns the full tokenized prompt and (for chat completions with images) per-image metadata: hashes, placeholder positions, and kwargs.
+Sends the request body to the rendering/tokenization service. Returns the full tokenized prompt and (for chat completions or responses with images) per-image metadata: hashes, placeholder positions, and kwargs.
 
-The render step routes to one of two upstream paths depending on the original client request:
+The render step routes to one of three upstream paths depending on the original client request:
 
 | Original client path     | Render endpoint                              | Skipped when                                  |
 |--------------------------|----------------------------------------------|-----------------------------------------------|
 | `/v1/chat/completions`   | `POST <rendering_service_address>/v1/chat/completions/render` | never                                         |
+| `/v1/responses`          | `POST <rendering_service_address>/v1/responses/render` | never                                         |
 | `/v1/completions`        | `POST <rendering_service_address>/v1/completions/render`      | `prompt` is already a token array (`[]int`)   |
 
 Batched completions prompts (`[]string` and `[][]int`) are rejected by the coordinator before the upstream call.
 
-The two endpoints currently use **different response shapes**: chat-completions returns a single JSON object, while completions returns a one-element JSON array of that same object. The coordinator handles both; the asymmetry is documented per subsection below.
+The `/v1/responses/render` endpoint returns the same response shape as `/v1/chat/completions/render` (a single JSON object); `/v1/completions/render` returns a one-element JSON array of that same object. The coordinator handles both shapes; the asymmetry is documented per subsection below.
 
 ---
 
@@ -969,7 +971,7 @@ The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stag
 | Decode            | `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 | Conditional-Decode| `decode`             | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
 
-The request path matches the user's original endpoint when using OpenAI format, or `/inference/v1/generate` when using the internal format.
+For encode and prefill, the request path matches the user's original endpoint when using OpenAI format, or `/inference/v1/generate` when using the internal format. Decode and conditional-decode always forward on the client's original path regardless of `use_openai_format`.
 
 ---
 

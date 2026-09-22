@@ -373,6 +373,61 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
+func TestPrefillStep_ResponsesFormat(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-3"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 2345},
+		Body: map[string]any{
+			"model": "test-model",
+			"input": "hello",
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["model"] != "test-model" {
+		t.Fatalf("expected model from original body, got %v", prefillBody["model"])
+	}
+	if _, ok := prefillBody["input"]; !ok {
+		t.Fatal("expected input from original body in responses format")
+	}
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("prefill request should not have a tokens field")
+	}
+	if _, ok := prefillBody["kv_transfer_params"]; !ok {
+		t.Fatal("expected kv_transfer_params in responses format")
+	}
+}
+
 func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	var prefillBody map[string]any
 
@@ -688,7 +743,7 @@ func TestPrefillStep_UnsupportedFormat(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for unsupported format, got body %v", body)
 	}
-	if want := "unsupported request format APIType(99)"; err.Error() != want {
+	if want := "unsupported request format APIType(99): no coordinator route serves it"; err.Error() != want {
 		t.Fatalf("expected error %q, got %q", want, err.Error())
 	}
 }

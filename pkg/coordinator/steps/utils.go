@@ -59,16 +59,27 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
+// unreachableFormatError builds an error for a request whose detected API
+// type has no registered coordinator route (see server.go). Decode and
+// conditional-decode detect the format directly from reqCtx.OriginalPath, so
+// reaching it there indicates a routing bug rather than a client error.
+// Prefill's own default case (see buildPrefillBody) is unreachable through
+// resolveFormat today and only guards against a future change to it.
+func unreachableFormatError(format reqcommon.APIType) error {
+	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
+}
+
 // resolveFormat maps a request path to the wire format a step emits. The steps
-// build only Completions, Chat Completions, and generate bodies, so any other
-// API collapses to APITypeGenerate; Chat Completions additionally requires
-// useOpenAIFormat. Generate is the fallback because its body carries the prompt
-// as reqCtx.TokenIDs and does not depend on the client's request shape.
+// build only Completions, Chat Completions, Responses, and generate bodies, so
+// any other API collapses to APITypeVLLMGenerate; Chat Completions and
+// Responses additionally require useOpenAIFormat. Generate is the fallback
+// because its body carries the prompt as reqCtx.TokenIDs and does not depend
+// on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		if useOpenAIFormat {
 			return detected
 		}

@@ -40,18 +40,13 @@ func init() {
 }
 
 type DecodeStep struct {
-	useOpenAIFormat bool
-	gwClient        *gateway.Client
-	kv              kv.Connector
+	gwClient *gateway.Client
+	kv       kv.Connector
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("decode: gateway client is required")
-	}
-	useOpenAI, err := parseUseOpenAIFormat(params)
-	if err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
 	}
 	kvName, err := paramString(params, ParamKVConnector)
 	if err != nil {
@@ -61,7 +56,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn}, nil
+	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -69,7 +64,9 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	s.prepareDecodeBody(ctx, reqCtx)
+	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
+		return err
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
@@ -96,13 +93,14 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // would also be insufficient, since injectUUIDs mutates nested values that a shallow
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
-func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) {
+func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx)
 
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
@@ -120,22 +118,48 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 			reqCtx.Body[reqcommon.FieldSamplingParams] = sampling
 		}
 		setGenerateTransferParams(sampling, kvParams, nil)
+	default:
+		// kvParams and injectUUIDs above already ran; both are harmless here
+		// since the request fails on this return and reqCtx.Body is never sent.
+		return unreachableFormatError(format)
+	}
+	return nil
+}
+
+// injectUUIDs stamps image parts with their multimodal hash, walking whichever
+// body field reqcommon.DetectAPIType's result implies: a chat-completions
+// request never carries "input" and a Responses request never carries
+// "messages", so which field to walk is decided by path, not by which fields
+// happen to be present.
+//
+// The switch below keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
+// reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
+// the client sent. resolveFormat's answer instead reflects the encode/prefill
+// wire-format setting, which can differ from the client's own shape.
+func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+			injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body["input"].([]any); ok {
+			injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries)
+		}
 	}
 }
 
-func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return
-	}
-
+// injectImagePartUUIDs walks items (chat-completions messages or a Responses
+// input array) for content parts of partType and stamps each with the hash of
+// its corresponding multimodal entry, in order.
+func injectImagePartUUIDs(items []any, partType string, entries []pipeline.MultimodalEntry) {
 	hashIdx := 0
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
+		content, ok := itemMap["content"].([]any)
 		if !ok {
 			continue
 		}
@@ -144,11 +168,11 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != "image_url" {
+			if partMap["type"] != partType {
 				continue
 			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
+			if hashIdx < len(entries) {
+				partMap["uuid"] = entries[hashIdx].Hash
 				hashIdx++
 			}
 		}

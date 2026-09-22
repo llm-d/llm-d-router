@@ -142,7 +142,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
 		body[reqcommon.FieldKVTransferParams] = kvParams
@@ -186,9 +186,10 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		return body, nil
 
 	default:
-		// resolveFormat only ever yields the three formats above; a new value
-		// reaching here is a programming error, not a client fault.
-		return nil, fmt.Errorf("unsupported request format %v", format)
+		// resolveFormat above never returns anything but the formats handled
+		// here, so this case is unreachable unless resolveFormat's contract
+		// changes.
+		return nil, unreachableFormatError(format)
 	}
 }
 

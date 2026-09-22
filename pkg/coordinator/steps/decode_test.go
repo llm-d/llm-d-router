@@ -82,7 +82,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		msg := messages[0].(map[string]any)
 		content := msg["content"].([]any)
 		imgPart := content[0].(map[string]any)
-		if imgPart["uuid"] != "hash-a" {
+		if imgPart["uuid"] != testImageHash {
 			t.Fatalf("expected uuid=hash-a in image_url part, got %v", imgPart["uuid"])
 		}
 		// Verify image_url is preserved alongside the injected uuid
@@ -117,7 +117,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -151,6 +151,163 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 	respBody, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(respBody), "I see a cat.") {
 		t.Fatalf("expected response to contain 'I see a cat.', got: %s", string(respBody))
+	}
+}
+
+func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+		if !ok {
+			t.Fatal("expected kv_transfer_params in decode body")
+		}
+		if kvParams["block_id"] != "xyz" {
+			t.Errorf("kv_transfer_params.block_id = %v, want xyz", kvParams["block_id"])
+		}
+
+		// Verify no tokens field (dead field, never consumed downstream)
+		if _, ok := parsed["tokens"]; ok {
+			t.Fatal("decode request should not have a tokens field")
+		}
+
+		input := parsed["input"].([]any)
+		item := input[0].(map[string]any)
+		content := item["content"].([]any)
+		imgPart := content[0].(map[string]any)
+		if imgPart["uuid"] != testImageHash {
+			t.Fatalf("expected uuid=hash-a in input_image part, got %v", imgPart["uuid"])
+		}
+		if imgPart["image_url"] != "https://example.com/cat.jpg" {
+			t.Fatalf("expected image_url preserved, got %v", imgPart["image_url"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "llama-3",
+		Stream:       false,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		Body: map[string]any{
+			"model": "llama-3",
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "input_image",
+							"image_url": "https://example.com/cat.jpg",
+						},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+}
+
+// See gateway.DetectFormat's doc comment for why injectUUIDs gates on path
+// rather than field presence. A chat-completions request carrying a stray
+// top-level "input" array must not have that array's image part stamped
+// with a uuid.
+func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		messages := parsed["messages"].([]any)
+		msgPart := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if msgPart["uuid"] != testImageHash {
+			t.Fatalf("expected uuid=%s on the messages image part, got %v", testImageHash, msgPart["uuid"])
+		}
+
+		input := parsed["input"].([]any)
+		inputPart := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if _, ok := inputPart["uuid"]; ok {
+			t.Fatalf("expected no uuid stamped on the stray input array's part, got %v", inputPart["uuid"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-stray-input",
+		OriginalPath: testChatCompletionsPath,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz"},
+		Body: map[string]any{
+			"model": "llama-3",
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/cat.jpg"}},
+					},
+				},
+			},
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_image", "image_url": "https://example.com/dog.jpg"},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
 	}
 }
 
@@ -190,6 +347,54 @@ func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV verifies that for
+// the /v1/completions format the decode step rewrites prompt to the rendered
+// token IDs and places kv_transfer_params at the top level, the same shape the
+// chat-completions endpoint requires and the generate endpoint does not.
+func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) {
+	var parsed map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"text": "ok"}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-compl-rendered",
+		OriginalPath:     reqcommon.PathCompletions,
+		Model:            "test-model",
+		TokenIDs:         []int{1, 2345},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+		Body:             map[string]any{"model": "test-model", "prompt": "Hello"},
+		ResponseWriter:   recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tokenIDs, _ := parsed["prompt"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected prompt rewritten to rendered token_ids, got %v", parsed["prompt"])
+	}
+	if _, ok := parsed[reqcommon.FieldKVTransferParams]; !ok {
+		t.Fatal("expected top-level kv_transfer_params for /v1/completions")
+	}
+	if sp, ok := parsed[reqcommon.FieldSamplingParams].(map[string]any); ok {
+		if _, ok := sp[reqcommon.FieldExtraArgs]; ok {
+			t.Error("kv_transfer_params must not be nested under sampling_params.extra_args for completions")
+		}
+	}
+}
+
 // TestDecodeStep_GenerateFormat_NestsKVInExtraArgs verifies that for the
 // /inference/v1/generate format the decode step places kv_transfer_params
 // inside sampling_params.extra_args (the only place the engine reads them)
@@ -205,7 +410,7 @@ func TestDecodeStep_GenerateFormat_NestsKVInExtraArgs(t *testing.T) {
 	defer server.Close()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false, ParamKVConnector: kv.NIXL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,6 +461,27 @@ func TestDecodeStep_GenerateFormat_NestsKVInExtraArgs(t *testing.T) {
 	}
 	if kvParams["do_remote_prefill"] != true {
 		t.Errorf("kv_transfer_params.do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+	}
+}
+
+// TestDecodeStep_MessagesFormat_ReturnsError verifies that a request path
+// detecting as APITypeMessages fails through prepareDecodeBody's default
+// case: the coordinator registers no /v1/messages route, so reaching this
+// case is a routing bug, and prepareDecodeBody reports it as an error
+// instead of sending an unprepared body upstream.
+func TestDecodeStep_MessagesFormat_ReturnsError(t *testing.T) {
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{}), map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath:     reqcommon.PathMessages,
+		Body:             map[string]any{"model": testModelName},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+	}
+	if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err == nil {
+		t.Fatal("expected an error for an unreachable request format")
 	}
 }
 
