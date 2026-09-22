@@ -401,12 +401,16 @@ Configures metrics scraping via Prometheus (compatible with Google Managed Prome
 | `router.tracing.sampling.sampler` | Trace sampler type. | `parentbased_traceidratio` |
 | `router.tracing.sampling.samplerArg` | Sampler argument (e.g., sampling ratio `"0.1"`). | `"0.1"` |
 
-When tracing is enabled, EPP request-associated spans carry `llm_d.epp.tenant_id` and
-`llm_d.epp.tenant_id.source` together. Tenant identity comes only from the
-`x-llm-d-inference-fairness-id` header, with source `header`. If the header is absent,
-the pair is `default-flow` and `default`, even when an agent identity supplies the
-request's scheduling FairnessID. Source `header` identifies the resolution branch, not
-producer authentication. The pair is not propagated as request headers.
+When tracing is enabled, EPP request-associated spans carry `llm_d.epp.fairness.id` and
+`llm_d.epp.fairness.source` together. The value is the fairness identity the EPP resolved
+for the request, and the source records which branch resolved it: `header` for the
+`x-llm-d-inference-fairness-id` header or its deprecated alias
+`x-gateway-inference-fairness-id`, `agent_identity` when the agent-identity plugin supplies
+the client's session identifier, or `default` for the `default-flow` sentinel. Source
+`header` identifies the resolution branch, not producer authentication. Requests that fail
+before the identity resolves keep the header value on their spans, while their
+`fairness_id` metric label is `default-flow`. Span values are not subject to the
+`fairness_id` metric-label cardinality cap. The pair is not propagated as request headers.
 
 #### Complete Monitoring & Tracing Example
 

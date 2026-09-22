@@ -191,10 +191,6 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
-	if _, _, ok := tracing.RequestAttribution(ctx); !ok {
-		id, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
-		ctx = tracing.BeginRequestAttribution(ctx, id)
-	}
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	defer func() {
@@ -244,14 +240,19 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
+	// Derive FairnessID from agent identity when no explicit header supplied it.
+	source := tracing.AttributionSourceHeader
 	if reqCtx.SchedulingRequest.FairnessID == "" {
 		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
 			reqCtx.SchedulingRequest.FairnessID = agentID
+			source = tracing.AttributionSourceAgentIdentity
 		} else {
 			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+			source = tracing.AttributionSourceDefault
 		}
 	}
+	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
+	tracing.AttributeRequest(ctx, span)
 
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {

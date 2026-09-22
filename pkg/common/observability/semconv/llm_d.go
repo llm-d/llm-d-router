@@ -37,13 +37,13 @@ const (
 	LLMDEPPPickerTopEndpointsKey        = attribute.Key("llm_d.epp.picker.top_endpoints")
 	LLMDEPPPickerTopScoresKey           = attribute.Key("llm_d.epp.picker.top_scores")
 
-	// EPP Request attribution attributes
-	// LLMDRequestAttributionIDKey is the resolved request attribution identity.
-	// Always paired with LLMDRequestAttributionSourceKey.
-	LLMDRequestAttributionIDKey = attribute.Key("llm_d.epp.tenant_id")
-	// LLMDRequestAttributionSourceKey is which branch resolved the identity.
+	// EPP Fairness attribution attributes
+	// LLMDEPPFairnessIDKey is the resolved fairness identity.
+	// Always paired with LLMDEPPFairnessSourceKey.
+	LLMDEPPFairnessIDKey = attribute.Key("llm_d.epp.fairness.id")
+	// LLMDEPPFairnessSourceKey is the branch that resolved the fairness identity.
 	// "header" is never evidence that the producer was authenticated.
-	LLMDRequestAttributionSourceKey = attribute.Key("llm_d.epp.tenant_id.source")
+	LLMDEPPFairnessSourceKey = attribute.Key("llm_d.epp.fairness.source")
 
 	// EPP Scorer attributes
 	LLMDEPPScorerTypeKey               = attribute.Key("llm_d.epp.scorer.type")
@@ -164,16 +164,16 @@ const (
 
 // Typed helper functions for llm-d internal attributes.
 
-// EPP Request attribution helpers
+// EPP Fairness attribution helpers
 
-// LLMDRequestAttributionID returns an attribute for the resolved request attribution identity.
-func LLMDRequestAttributionID(id string) attribute.KeyValue {
-	return LLMDRequestAttributionIDKey.String(id)
+// LLMDEPPFairnessID returns an attribute for the resolved fairness identity.
+func LLMDEPPFairnessID(id string) attribute.KeyValue {
+	return LLMDEPPFairnessIDKey.String(id)
 }
 
-// LLMDRequestAttributionSource returns an attribute for how the attribution identity was resolved.
-func LLMDRequestAttributionSource(source string) attribute.KeyValue {
-	return LLMDRequestAttributionSourceKey.String(source)
+// LLMDEPPFairnessSource returns an attribute for how the fairness identity was resolved.
+func LLMDEPPFairnessSource(source string) attribute.KeyValue {
+	return LLMDEPPFairnessSourceKey.String(source)
 }
 
 // EPP Scheduling helpers

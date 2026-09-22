@@ -31,7 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 )
 
-const testTenantID = "tenant-a"
+const testFairnessID = "team-a"
 
 // installAttributionRecorder makes a recording SDK provider global, with the
 // same attribution span processor InitTracing registers, and returns the
@@ -66,9 +66,9 @@ func endedAttribution(t *testing.T, recorder *tracetest.SpanRecorder, name strin
 		var hasID, hasSource bool
 		for _, attr := range span.Attributes() {
 			switch attr.Key {
-			case semconv.LLMDRequestAttributionIDKey:
+			case semconv.LLMDEPPFairnessIDKey:
 				id, hasID = attr.Value.AsString(), true
-			case semconv.LLMDRequestAttributionSourceKey:
+			case semconv.LLMDEPPFairnessSourceKey:
 				source, hasSource = attr.Value.AsString(), true
 			}
 		}
@@ -92,9 +92,9 @@ func TestRequestAttributionResolution(t *testing.T) {
 			wantSource: AttributionSourceDefault,
 		},
 		{
-			name:       "header becomes tenant identity",
-			headerID:   testTenantID,
-			wantID:     testTenantID,
+			name:       "header becomes fairness identity",
+			headerID:   testFairnessID,
+			wantID:     testFairnessID,
 			wantSource: AttributionSourceHeader,
 		},
 		{
@@ -120,6 +120,48 @@ func TestRequestAttributionResolution(t *testing.T) {
 	}
 }
 
+func TestSetRequestAttributionNormalizes(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		source     string
+		wantID     string
+		wantSource string
+	}{
+		{
+			name:       "agent identity preserved",
+			id:         "agent-7",
+			source:     AttributionSourceAgentIdentity,
+			wantID:     "agent-7",
+			wantSource: AttributionSourceAgentIdentity,
+		},
+		{
+			name:       "empty identity defaults",
+			source:     AttributionSourceAgentIdentity,
+			wantID:     DefaultAttributionID,
+			wantSource: AttributionSourceDefault,
+		},
+		{
+			name:       "unknown source reported as default",
+			id:         testFairnessID,
+			source:     "unknown",
+			wantID:     testFairnessID,
+			wantSource: AttributionSourceDefault,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := BeginRequestAttribution(context.Background(), "")
+			SetRequestAttribution(ctx, tc.id, tc.source)
+
+			if id, source, _ := RequestAttribution(ctx); id != tc.wantID || source != tc.wantSource {
+				t.Errorf("RequestAttribution() = (%q, %q), want (%q, %q)", id, source, tc.wantID, tc.wantSource)
+			}
+		})
+	}
+}
+
 // An unattributed context has to be distinguishable from one that resolved to
 // default-flow: background spans must not look like unattributed requests.
 func TestRequestAttributionAbsent(t *testing.T) {
@@ -128,15 +170,17 @@ func TestRequestAttributionAbsent(t *testing.T) {
 	}
 }
 
-func TestRequestAttributionVisibleAcrossDerivedContexts(t *testing.T) {
-	root := BeginRequestAttribution(context.Background(), testTenantID)
+func TestSetRequestAttributionVisibleAcrossDerivedContexts(t *testing.T) {
+	root := BeginRequestAttribution(context.Background(), "")
 	derived, cancel := context.WithCancel(root)
 	defer cancel()
 
+	SetRequestAttribution(derived, testFairnessID, AttributionSourceAgentIdentity)
+
 	for name, ctx := range map[string]context.Context{"entry point": root, "derived": derived} {
 		id, source, ok := RequestAttribution(ctx)
-		if !ok || id != testTenantID || source != AttributionSourceHeader {
-			t.Errorf("%s: RequestAttribution() = (%q, %q, %v), want (tenant-a, header, true)", name, id, source, ok)
+		if !ok || id != testFairnessID || source != AttributionSourceAgentIdentity {
+			t.Errorf("%s: RequestAttribution() = (%q, %q, %v), want (%s, agent_identity, true)", name, id, source, ok, testFairnessID)
 		}
 	}
 }
@@ -145,7 +189,7 @@ func TestSpanProcessorAttributesRequestSpanTree(t *testing.T) {
 	recorder := installAttributionRecorder(t)
 	tracer := Tracer("attribution-test")
 
-	ctx := BeginRequestAttribution(context.Background(), testTenantID)
+	ctx := BeginRequestAttribution(context.Background(), testFairnessID)
 	ctx, root := tracer.Start(ctx, "request")
 	_, child := tracer.Start(ctx, "child")
 	child.End()
@@ -156,14 +200,31 @@ func TestSpanProcessorAttributesRequestSpanTree(t *testing.T) {
 		if !present {
 			t.Fatalf("span %q carries no paired attribution", name)
 		}
-		if id != testTenantID || source != AttributionSourceHeader {
-			t.Errorf("span %q attribution = (%q, %q), want (tenant-a, header)", name, id, source)
+		if id != testFairnessID || source != AttributionSourceHeader {
+			t.Errorf("span %q attribution = (%q, %q), want (team-a, header)", name, id, source)
 		}
 	}
 }
 
-// Spans of one concurrent request must never report another request's tenant.
-// Run under -race.
+func TestAttributeRequestRefreshesOpenSpan(t *testing.T) {
+	recorder := installAttributionRecorder(t)
+	tracer := Tracer("attribution-test")
+
+	ctx := BeginRequestAttribution(context.Background(), "")
+	ctx, span := tracer.Start(ctx, "request")
+
+	SetRequestAttribution(ctx, "agent-7", AttributionSourceAgentIdentity)
+	AttributeRequest(ctx, span)
+	span.End()
+
+	id, source, present := endedAttribution(t, recorder, "request")
+	if !present || id != "agent-7" || source != AttributionSourceAgentIdentity {
+		t.Errorf("request attribution = (%q, %q, %v), want (agent-7, agent_identity, true)", id, source, present)
+	}
+}
+
+// Spans of one concurrent request must never report another request's fairness
+// identity. Run under -race.
 func TestSpanAttributionIsolatedAcrossConcurrentRequests(t *testing.T) {
 	recorder := installAttributionRecorder(t)
 	tracer := Tracer("attribution-test")
@@ -176,18 +237,22 @@ func TestSpanAttributionIsolatedAcrossConcurrentRequests(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 
-			tenant := fmt.Sprintf("tenant-%02d", i)
-			ctx := BeginRequestAttribution(context.Background(), tenant)
-			ctx, root := tracer.Start(ctx, "request/"+tenant)
-			_, child := tracer.Start(ctx, "child/"+tenant)
+			team := fmt.Sprintf("team-%02d", i)
+			ctx := BeginRequestAttribution(context.Background(), team)
+			ctx, root := tracer.Start(ctx, "request/"+team)
+			_, child := tracer.Start(ctx, "child/"+team)
 			child.End()
 			root.End()
 		}(i)
 	}
 	wg.Wait()
 
+	if got := len(recorder.Ended()); got != 2*requests {
+		t.Fatalf("ended span count = %d, want %d", got, 2*requests)
+	}
+
 	for _, span := range recorder.Ended() {
-		_, tenant, found := strings.Cut(span.Name(), "/")
+		_, team, found := strings.Cut(span.Name(), "/")
 		if !found {
 			t.Fatalf("unexpected span %q", span.Name())
 		}
@@ -197,8 +262,44 @@ func TestSpanAttributionIsolatedAcrossConcurrentRequests(t *testing.T) {
 			t.Errorf("span %q carries no paired attribution", span.Name())
 			continue
 		}
-		if id != tenant || source != AttributionSourceHeader {
-			t.Errorf("span %q attribution = (%q, %q), want (%q, header)", span.Name(), id, source, tenant)
+		if id != team || source != AttributionSourceHeader {
+			t.Errorf("span %q attribution = (%q, %q), want (%q, header)", span.Name(), id, source, team)
+		}
+	}
+}
+
+// The Director resolves the fairness identity while other goroutines of the same
+// request start spans. Every span must carry a whole pair from before or after
+// resolution, never a torn mix. Run under -race.
+func TestSetRequestAttributionRacesSpanStart(t *testing.T) {
+	recorder := installAttributionRecorder(t)
+	tracer := Tracer("attribution-test")
+
+	const children = 16
+	ctx := BeginRequestAttribution(context.Background(), "")
+
+	var wg sync.WaitGroup
+	for i := range children {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, child := tracer.Start(ctx, fmt.Sprintf("child-%02d", i))
+			child.End()
+		}(i)
+	}
+	SetRequestAttribution(ctx, "agent-7", AttributionSourceAgentIdentity)
+	wg.Wait()
+
+	if got := len(recorder.Ended()); got != children {
+		t.Fatalf("ended span count = %d, want %d", got, children)
+	}
+
+	for _, span := range recorder.Ended() {
+		id, source, present := endedAttribution(t, recorder, span.Name())
+		before := id == DefaultAttributionID && source == AttributionSourceDefault
+		after := id == "agent-7" && source == AttributionSourceAgentIdentity
+		if !present || !(before || after) {
+			t.Errorf("span %q attribution = (%q, %q, %v), want a whole pair from before or after resolution", span.Name(), id, source, present)
 		}
 	}
 }
@@ -213,9 +314,13 @@ func TestBackgroundSpansCarryNoAttribution(t *testing.T) {
 	_, span := tracer.Start(context.Background(), "background")
 	span.End()
 
+	if got := len(recorder.Ended()); got != 1 {
+		t.Fatalf("ended span count = %d, want 1", got)
+	}
+
 	for _, ended := range recorder.Ended() {
 		for _, attr := range ended.Attributes() {
-			if attr.Key == semconv.LLMDRequestAttributionIDKey || attr.Key == semconv.LLMDRequestAttributionSourceKey {
+			if attr.Key == semconv.LLMDEPPFairnessIDKey || attr.Key == semconv.LLMDEPPFairnessSourceKey {
 				t.Errorf("background span carries %s = %q", attr.Key, attr.Value.AsString())
 			}
 		}
@@ -228,7 +333,7 @@ func TestBackgroundSpansCarryNoAttribution(t *testing.T) {
 func TestSpanProcessorAttributesRawProviderSpans(t *testing.T) {
 	recorder := installAttributionRecorder(t)
 
-	ctx := BeginRequestAttribution(context.Background(), testTenantID)
+	ctx := BeginRequestAttribution(context.Background(), testFairnessID)
 	_, span := otel.Tracer("raw-instrumentation").Start(ctx, "http-server")
 	span.End()
 
@@ -236,8 +341,8 @@ func TestSpanProcessorAttributesRawProviderSpans(t *testing.T) {
 	if !present {
 		t.Fatal("span started outside Tracer carries no paired attribution")
 	}
-	if id != testTenantID || source != AttributionSourceHeader {
-		t.Errorf("attribution = (%q, %q), want (tenant-a, header)", id, source)
+	if id != testFairnessID || source != AttributionSourceHeader {
+		t.Errorf("attribution = (%q, %q), want (team-a, header)", id, source)
 	}
 }
 
@@ -248,14 +353,14 @@ func TestAttributionWithTracingDisabled(t *testing.T) {
 	otel.SetTracerProvider(tracenoop.NewTracerProvider())
 	t.Cleanup(func() { otel.SetTracerProvider(original) })
 
-	ctx := BeginRequestAttribution(context.Background(), testTenantID)
+	ctx := BeginRequestAttribution(context.Background(), testFairnessID)
 	ctx, span := Tracer("attribution-test").Start(ctx, "request")
 	if span.IsRecording() {
 		t.Fatal("noop provider returned a recording span")
 	}
 	span.End()
 
-	if id, source, ok := RequestAttribution(ctx); !ok || id != testTenantID || source != AttributionSourceHeader {
-		t.Errorf("RequestAttribution() = (%q, %q, %v), want (tenant-a, header, true)", id, source, ok)
+	if id, source, ok := RequestAttribution(ctx); !ok || id != testFairnessID || source != AttributionSourceHeader {
+		t.Errorf("RequestAttribution() = (%q, %q, %v), want (team-a, header, true)", id, source, ok)
 	}
 }

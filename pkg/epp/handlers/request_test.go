@@ -402,6 +402,9 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 	otel.SetTracerProvider(provider)
 	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
 
+	// The ingress sentinel must match the one the Director resolves to.
+	require.Equal(t, metadata.DefaultFairnessID, tracing.DefaultAttributionID)
+
 	for _, tc := range []struct {
 		name               string
 		headers            []*configPb.HeaderValue
@@ -424,8 +427,8 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 
 			ended := recorder.Ended()
 			attrs := attribute.NewSet(ended[len(ended)-1].Attributes()...)
-			id, hasID := attrs.Value(semconv.LLMDRequestAttributionIDKey)
-			source, hasSource := attrs.Value(semconv.LLMDRequestAttributionSourceKey)
+			id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+			source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
 
 			require.True(t, hasID && hasSource, "identity and source are recorded together")
 			assert.Equal(t, tc.wantID, id.AsString())

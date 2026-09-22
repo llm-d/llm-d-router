@@ -522,6 +522,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
+				// The Director may resolve agent identity after this request span opened.
+				tracing.AttributeRequest(ctx, span)
 				if err != nil {
 					logger.Error(err, "Error handling request")
 					break

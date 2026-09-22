@@ -18,89 +18,141 @@ package tracing
 
 import (
 	"context"
+	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 )
 
 const (
-	// DefaultAttributionID marks requests for which no tenant header was provided.
+	// DefaultAttributionID matches the default fairness identity used by scheduling.
 	DefaultAttributionID = "default-flow"
 
-	// AttributionSourceHeader is the fairness-header resolution branch, not
-	// producer authentication.
+	// AttributionSourceHeader means the fairness identity came from the request header.
+	// It does not assert that the header producer was authenticated.
 	AttributionSourceHeader = "header"
-	// AttributionSourceDefault is used when no tenant header was provided.
+	// AttributionSourceAgentIdentity means the fairness identity came from agent identity.
+	AttributionSourceAgentIdentity = "agent_identity"
+	// AttributionSourceDefault means no fairness identity resolved.
 	AttributionSourceDefault = "default"
 )
 
-// requestAttribution is immutable per-request state shared by every span of
-// that request.
+// requestAttribution is request-local state shared by every span of one request.
 type requestAttribution struct {
+	mu     sync.RWMutex
 	id     string
 	source string
+}
+
+func (a *requestAttribution) load() (id, source string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	return a.id, a.source
+}
+
+func (a *requestAttribution) store(id, source string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.id, a.source = id, source
 }
 
 // attributionKey avoids colliding with other packages' context keys.
 type attributionKey struct{}
 
-// BeginRequestAttribution attaches fresh per-request tenant attribution. Only
-// the fairness header is a tenant identity; an empty value is unattributed.
-// Call once at the request entry point, before starting spans.
-func BeginRequestAttribution(ctx context.Context, id string) context.Context {
-	attribution := requestAttribution{
-		id:     id,
-		source: AttributionSourceHeader,
-	}
+// normalizeAttribution maps an empty identity to the default sentinel and reports
+// an unrecognised source as default, keeping the source attribute a closed set.
+func normalizeAttribution(id, source string) (string, string) {
 	if id == "" {
-		attribution.id = DefaultAttributionID
-		attribution.source = AttributionSourceDefault
+		return DefaultAttributionID, AttributionSourceDefault
 	}
 
-	return context.WithValue(ctx, attributionKey{}, attribution)
+	switch source {
+	case AttributionSourceHeader, AttributionSourceAgentIdentity, AttributionSourceDefault:
+		return id, source
+	default:
+		return id, AttributionSourceDefault
+	}
 }
 
-// RequestAttribution reports ok=false when ctx was never begun, which is
-// distinct from a request that resolved to default-flow.
+// BeginRequestAttribution attaches fresh per-request fairness attribution from
+// the fairness header value. An empty value resolves to the default sentinel.
+// Call once at the request entry point, before starting spans.
+func BeginRequestAttribution(ctx context.Context, id string) context.Context {
+	id, source := normalizeAttribution(id, AttributionSourceHeader)
+	return context.WithValue(ctx, attributionKey{}, &requestAttribution{id: id, source: source})
+}
+
+// SetRequestAttribution replaces the attribution attached to ctx once the
+// fairness identity resolves. Only the component that resolves it should call
+// this. It is a no-op when ctx was never begun. Spans started afterwards pick
+// up the new value; spans already open keep theirs until AttributeRequest.
+func SetRequestAttribution(ctx context.Context, id, source string) {
+	state := attributionFromContext(ctx)
+	if state == nil {
+		return
+	}
+
+	state.store(normalizeAttribution(id, source))
+}
+
+// RequestAttribution reports ok=false when ctx was never begun.
 func RequestAttribution(ctx context.Context) (id, source string, ok bool) {
+	state := attributionFromContext(ctx)
+	if state == nil {
+		return "", "", false
+	}
+
+	id, source = state.load()
+	return id, source, true
+}
+
+func attributionFromContext(ctx context.Context) *requestAttribution {
 	if ctx == nil {
-		return "", "", false
+		return nil
 	}
-
-	attribution, ok := ctx.Value(attributionKey{}).(requestAttribution)
-	if !ok {
-		return "", "", false
-	}
-
-	return attribution.id, attribution.source, true
+	state, _ := ctx.Value(attributionKey{}).(*requestAttribution)
+	return state
 }
 
 func attributionAttributes(id, source string) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		semconv.LLMDRequestAttributionID(id),
-		semconv.LLMDRequestAttributionSource(source),
+		semconv.LLMDEPPFairnessID(id),
+		semconv.LLMDEPPFairnessSource(source),
 	}
 }
 
-// attributionSpanProcessor attributes every span started within an EPP
-// request, including spans started outside Tracer.
+// AttributeRequest refreshes a span that was opened before fairness resolved.
+func AttributeRequest(ctx context.Context, span trace.Span) {
+	state := attributionFromContext(ctx)
+	if state == nil || span == nil || !span.IsRecording() {
+		return
+	}
+
+	id, source := state.load()
+	span.SetAttributes(attributionAttributes(id, source)...)
+}
+
+// attributionSpanProcessor attributes every span started within an EPP request.
 type attributionSpanProcessor struct{}
 
 var _ sdktrace.SpanProcessor = attributionSpanProcessor{}
 
-// NewRequestAttributionProcessor is installed by InitTracing and by tests that
-// build their own provider.
+// NewRequestAttributionProcessor is installed by InitTracing and tests.
 func NewRequestAttributionProcessor() sdktrace.SpanProcessor { return attributionSpanProcessor{} }
 
-func (attributionSpanProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) {
-	id, source, ok := RequestAttribution(parent)
-	if !ok || !s.IsRecording() {
+func (attributionSpanProcessor) OnStart(parent context.Context, span sdktrace.ReadWriteSpan) {
+	state := attributionFromContext(parent)
+	if state == nil || !span.IsRecording() {
 		return
 	}
 
-	s.SetAttributes(attributionAttributes(id, source)...)
+	id, source := state.load()
+	span.SetAttributes(attributionAttributes(id, source)...)
 }
 
 func (attributionSpanProcessor) OnEnd(sdktrace.ReadOnlySpan) {}

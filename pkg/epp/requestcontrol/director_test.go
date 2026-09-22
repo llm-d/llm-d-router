@@ -432,7 +432,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap (no rewrite occurred).
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
-		wantTenantID            string // If non-empty, asserted against request_orchestration span tenant ID.
+		wantSpanFairnessID      string // If non-empty, asserted against request_orchestration span fairness ID.
 		wantSource              string // If non-empty, asserted against request_orchestration span source.
 		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
@@ -508,7 +508,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 			fairnessIDHeader:       "user-123",
 			wantFairnessID:         "user-123",
-			wantTenantID:           "user-123",
+			wantSpanFairnessID:     "user-123",
 			wantSource:             tracing.AttributionSourceHeader,
 		},
 		{
@@ -527,7 +527,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantSource:             tracing.AttributionSourceDefault,
 		},
 		{
-			name: "agent identity remains scheduling fallback but tenant defaults",
+			name: "agent identity resolves fairness ID and span source",
 			reqBodyMap: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
@@ -543,9 +543,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
-			wantFairnessID: "session-abc",
-			wantTenantID:   metadata.DefaultFairnessID,
-			wantSource:     tracing.AttributionSourceDefault,
+			wantFairnessID:     "session-abc",
+			wantSpanFairnessID: "session-abc",
+			wantSource:         tracing.AttributionSourceAgentIdentity,
 		},
 		{
 			name: "explicit fairness header takes precedence over agent-identity attribute",
@@ -565,9 +565,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
-			wantFairnessID: "explicit-id",
-			wantTenantID:   "explicit-id",
-			wantSource:     tracing.AttributionSourceHeader,
+			wantFairnessID:     "explicit-id",
+			wantSpanFairnessID: "explicit-id",
+			wantSource:         tracing.AttributionSourceHeader,
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -1203,10 +1203,12 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 				} else {
-					returnedReqCtx, err = director.HandleRequest(ctx, reqCtx, parseResult.Body)
+					// Production begins attribution at ext_proc ingress before calling the Director.
+					reqTraceCtx := tracing.BeginRequestAttribution(ctx, test.fairnessIDHeader)
+					returnedReqCtx, err = director.HandleRequest(reqTraceCtx, reqCtx, parseResult.Body)
 				}
 				if parseErr == nil && test.wantSource != "" {
-					wantID := test.wantTenantID
+					wantID := test.wantSpanFairnessID
 					if wantID == "" {
 						wantID = metadata.DefaultFairnessID
 					}
@@ -1217,8 +1219,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 						}
 						found = true
 						attrs := attribute.NewSet(span.Attributes()...)
-						id, hasID := attrs.Value(semconv.LLMDRequestAttributionIDKey)
-						source, hasSource := attrs.Value(semconv.LLMDRequestAttributionSourceKey)
+						id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+						source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
 						require.True(t, hasID && hasSource, "attribution must be paired")
 						assert.Equal(t, wantID, id.AsString())
 						assert.Equal(t, test.wantSource, source.AsString())
