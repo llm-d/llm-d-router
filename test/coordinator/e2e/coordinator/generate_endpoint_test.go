@@ -56,7 +56,7 @@ var generateSteps = []string{"render", "prefill", "decode"}
 var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
 	ginkgo.When("the generate request is text-only", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("routes a text-only generate end-to-end", func() {
-			runCoordinatorPipeline(reqcommon.PathGenerate,
+			runCoordinatorPipeline(reqcommon.PathVLLMGenerate,
 				generateBody(modelName, nil), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
 		})
 	}))
@@ -66,7 +66,7 @@ var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
 			images := []genImage{
 				{Hash: "e2e-gen-hash-0", Offset: 1, Length: 3},
 			}
-			logs := runCoordinatorPipeline(reqcommon.PathGenerate,
+			logs := runCoordinatorPipeline(reqcommon.PathVLLMGenerate,
 				generateBody(modelName, images), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
 			verifyEncodeSkipped(logs)
 		})

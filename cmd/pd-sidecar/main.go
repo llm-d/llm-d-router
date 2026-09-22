@@ -53,6 +53,8 @@ func main() {
 		return
 	}
 
+	tracing.InitTextMapPropagator()
+
 	// Initialize tracing conditionally using config
 	if opts.Tracing {
 		shutdown, err := tracing.InitTracing(ctx, logger, "llm-d-disagg-sidecar")
