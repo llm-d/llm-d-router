@@ -57,12 +57,8 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // RejectStatefulResponsesFields reports an error naming the first field it
 // finds that depends on state the router does not keep: previous_response_id
 // and conversation reference a prior turn, background asks for an async job
-// the router cannot poll, and a file_id inside an input content part refers
-// to a file the router never stored.
-//
-// file_id is not a top-level field: OpenAI's Responses API nests it inside
-// an input_image, input_file, or input_audio content part, so finding it
-// takes a walk of the input array rather than a map lookup.
+// the router cannot poll, and file_id is part of the Responses file
+// hydration API, referring to a file the router never stored.
 func RejectStatefulResponsesFields(body map[string]any) error {
 	for _, field := range []string{FieldPreviousResponseID, FieldConversation, FieldBackground} {
 		if _, ok := body[field]; ok {
@@ -76,7 +72,10 @@ func RejectStatefulResponsesFields(body map[string]any) error {
 }
 
 // inputReferencesFile reports whether a Responses input array contains a
-// content part with a file_id field.
+// content part with a file_id field. file_id is not a top-level field:
+// OpenAI's Responses API nests it inside an input_image, input_file, or
+// input_audio content part, so finding it takes a walk of the input array
+// rather than a map lookup.
 func inputReferencesFile(input []any) bool {
 	for _, item := range input {
 		itemMap, ok := item.(map[string]any)

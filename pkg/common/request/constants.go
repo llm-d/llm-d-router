@@ -47,16 +47,9 @@ const (
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
-
-	// Responses API fields with no cross-pod story in a disaggregated
-	// deployment; see RejectStatefulResponsesFields.
-	FieldPreviousResponseID = "previous_response_id"
-	FieldConversation       = "conversation"
-	FieldBackground         = "background"
-	FieldInput              = "input"
-	// FieldFileID names the field an input_image, input_file, or
-	// input_audio content part uses to reference a previously uploaded
-	// file instead of embedding it inline. Unlike the fields above, it is
-	// never a top-level request field.
-	FieldFileID = "file_id"
+	FieldPreviousResponseID   = "previous_response_id"
+	FieldConversation         = "conversation"
+	FieldBackground           = "background"
+	FieldInput                = "input"
+	FieldFileID               = "file_id"
 )
