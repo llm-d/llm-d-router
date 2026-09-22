@@ -82,7 +82,7 @@ func inputReferencesFile(input []any) bool {
 		if !ok {
 			continue
 		}
-		content, ok := itemMap["content"].([]any)
+		content, ok := itemMap[FieldContent].([]any)
 		if !ok {
 			continue
 		}

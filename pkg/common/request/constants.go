@@ -51,5 +51,6 @@ const (
 	FieldConversation         = "conversation"
 	FieldBackground           = "background"
 	FieldInput                = "input"
+	FieldContent              = "content"
 	FieldFileID               = "file_id"
 )
