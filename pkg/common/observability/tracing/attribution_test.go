@@ -298,7 +298,7 @@ func TestSetRequestAttributionRacesSpanStart(t *testing.T) {
 		id, source, present := endedAttribution(t, recorder, span.Name())
 		before := id == DefaultAttributionID && source == AttributionSourceDefault
 		after := id == "agent-7" && source == AttributionSourceAgentIdentity
-		if !present || !(before || after) {
+		if !present || (!before && !after) {
 			t.Errorf("span %q attribution = (%q, %q, %v), want a whole pair from before or after resolution", span.Name(), id, source, present)
 		}
 	}
