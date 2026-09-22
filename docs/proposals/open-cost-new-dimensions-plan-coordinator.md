@@ -17,20 +17,24 @@ See the following related documents:
 Add three new types to support per-attribution-dimension token sums:
 
 ```go
-// InferenceDimensionKey identifies a (user_id, tenant_id, workload_id, serving_model, namespace)
-// combination. UserID is "unknown" when the x-llm-d-user-id header was absent from the request;
-// it is never empty because the coordinator always emits a label value.
+// InferenceDimensionKey identifies a (tenant_id, workload_id, target_model_name, namespace)
+// combination, and optionally a user_id dimension. UserID is the value of the x-llm-d-user-id
+// header when present; it is empty when the coordinator's prometheus_user_id_label gate is false
+// (the default), because in that configuration the metric Vec is registered without the user_id
+// label, so attributed counter series have no user_id label at all and the PromQL sum by omits
+// it — the decoded key's UserID field is left as the zero value "". When the gate is true and
+// the header was absent, the coordinator emits "unknown" and UserID is that value.
 type InferenceDimensionKey struct {
-    UserID       string
-    TenantID     string
-    WorkloadID   string
-    ServingModel string
-    Namespace    string
+    UserID          string
+    TenantID        string
+    WorkloadID      string
+    TargetModelName string
+    Namespace       string
 }
 
 // InferenceDimensionTokens holds the prompt and completion token counts for one
-// dimension key, sourced from llm_d_coordinator_request_input_tokens_attributed_sum and
-// llm_d_coordinator_request_output_tokens_attributed_sum respectively.
+// dimension key, sourced from llm_d_coordinator_request_input_tokens_attributed_total and
+// llm_d_coordinator_request_output_tokens_attributed_total respectively.
 type InferenceDimensionTokens struct {
     PromptTokens     float64
     CompletionTokens float64
@@ -50,9 +54,9 @@ One new query method and its constant:
 QueryInferenceDimensionTokens = "QueryInferenceDimensionTokens"
 
 // QueryInferenceDimensionTokens returns prompt and completion token sums from
-// llm_d_coordinator_request_input_tokens_attributed_sum and
-// llm_d_coordinator_request_output_tokens_attributed_sum,
-// broken down by user_id, tenant_id, workload_id, serving_model, and namespace.
+// llm_d_coordinator_request_input_tokens_attributed_total and
+// llm_d_coordinator_request_output_tokens_attributed_total,
+// broken down by user_id, tenant_id, workload_id, target_model_name, and namespace.
 QueryInferenceDimensionTokens(start, end time.Time) *Future[InferenceDimensionResult]
 ```
 
@@ -61,34 +65,49 @@ Decoder required in: `core/pkg/source/decoders.go` (`DecodeInferenceDimensionRes
 
 ### 1.3 Prometheus queries (`modules/prometheus-source/pkg/prom/inference_queries.go`)
 
-#### 1.3.1 `QueryInferenceDimensionTokens` — histogram `_sum` delta strategy
+#### 1.3.1 `QueryInferenceDimensionTokens` — counter delta strategy
 
-`llm_d_coordinator_request_input_tokens_attributed` and
-`llm_d_coordinator_request_output_tokens_attributed` are **histograms**. Their `_sum`
-series accumulates the total tokens observed across all requests and behaves as a
-monotonically increasing counter. OpenCost queries the `_sum` series using the same
-`last_over_time` delta pattern as `queryCounterDelta` — no separate `_total` counter
-metrics are needed.
+`llm_d_coordinator_request_input_tokens_attributed_total` and
+`llm_d_coordinator_request_output_tokens_attributed_total` are **counters**. They
+accumulate the total tokens observed across all requests and increase monotonically.
+OpenCost queries them using the same `increase`-based delta pattern as
+`queryCounterDelta`.
 
-`user_id` is **always present** as a label on these series (the coordinator emits
-`"unknown"` when the header is absent, never an empty or missing label). The PromQL
-`sum by (…)` always includes `user_id`; the resulting `InferenceDimensionKey` is built
-with `UserID = "unknown"` for unauthenticated requests. There is no need for a
-separate query path to handle an absent `user_id` label.
+Whether `user_id` is present as a label on these series depends on the coordinator's
+`prometheus_user_id_label` configuration gate (default: `false`):
+
+- **Gate off (default):** the metric is registered without the `user_id` label at all.
+  The PromQL `sum by` omits `user_id`; the resulting `InferenceDimensionKey.UserID` is
+  `""` (empty). The `"unknown"` sentinel is **not** emitted in this configuration.
+- **Gate on:** the metric is registered with the `user_id` label. The coordinator emits
+  `"unknown"` when the `x-llm-d-user-id` header is absent, so `UserID` is never empty
+  for series produced in this configuration.
 
 `QueryInferenceDimensionTokens` issues **two queries per token type** (four total:
-input + output, each at start + end of window):
+input + output, each at start + end of window). When `prometheus_user_id_label` is true
+the `sum by` includes `user_id`; when false it is omitted:
 
-- **End-of-window query** (input tokens):
+- **End-of-window query** (input tokens, gate **on**):
   ```promql
-  sum by (user_id, tenant_id, workload_id, serving_model, namespace) (
-    last_over_time(llm_d_coordinator_request_input_tokens_attributed_sum[<window>m] @ <end_unix>)
+  sum by (user_id, tenant_id, workload_id, target_model_name, namespace) (
+    increase(llm_d_coordinator_request_input_tokens_attributed_total[<window>m] @ <end_unix>)
   )
   ```
-- **Start-of-window query** (narrow lookback to anchor the delta):
+- **End-of-window query** (input tokens, gate **off**):
   ```promql
-  sum by (user_id, tenant_id, workload_id, serving_model, namespace) (
-    last_over_time(llm_d_coordinator_request_input_tokens_attributed_sum[2m] @ <start_unix>)
+  sum by (tenant_id, workload_id, target_model_name, namespace) (
+    increase(llm_d_coordinator_request_input_tokens_attributed_total[<window>m] @ <end_unix>)
+  )
+  ```
+- **Start-of-window query** (narrow lookback to anchor the delta, same conditional grouping):
+  ```promql
+  -- gate on:
+  sum by (user_id, tenant_id, workload_id, target_model_name, namespace) (
+    increase(llm_d_coordinator_request_input_tokens_attributed_total[2m] @ <start_unix>)
+  )
+  -- gate off:
+  sum by (tenant_id, workload_id, target_model_name, namespace) (
+    increase(llm_d_coordinator_request_input_tokens_attributed_total[2m] @ <start_unix>)
   )
   ```
   Delta = end value − start value per key. Negative delta (counter reset) → use end value.
@@ -97,7 +116,7 @@ Where `<window>m` = `windowDuration.Minutes()` (minimum 2), matching the
 `queryCounterDelta` convention. Both queries are issued at `effectiveEnd`
 (clamped to `time.Now()`) to avoid future-timestamp errors.
 
-The same pattern applies to `llm_d_coordinator_request_output_tokens_attributed_sum`.
+The same pattern applies to `llm_d_coordinator_request_output_tokens_attributed_total`.
 The helper `queryDimensionCounterDelta` encapsulates the start/end pair and is called
 twice (once per metric). Results are merged into a single `InferenceDimensionResult`.
 
@@ -112,7 +131,12 @@ Add three fields to each struct, and update `newInferenceCostResponse()` to copy
 ```go
 // pkg/inferencecost/types.go — InferenceCostProperties
 // Empty when not broken down by dimension.
-// UserID is "unknown" (not empty) when the x-llm-d-user-id header was absent.
+// UserID is "" when prometheus_user_id_label is false (the default) because the
+// attributed counter Vec is registered without the user_id label; the PromQL sum by
+// omits it, and the decoded InferenceDimensionKey.UserID is the zero-value "".
+// UserID is "unknown" only when the gate is true and the x-llm-d-user-id header
+// was absent from the request (the coordinator's attributionHeader() helper always
+// returns "unknown" rather than "" for absent headers).
 UserID     string
 TenantID   string
 WorkloadID string
@@ -146,8 +170,8 @@ existing separation.
 **`buildDimensionCosts()` join formula**:
 
 ```go
-// For each (user_id, tenant_id, workload_id, serving_model, namespace) in dimensionTokens:
-//   look up model cost by serving_model:namespace
+// For each (user_id, tenant_id, workload_id, target_model_name, namespace) in dimensionTokens:
+//   look up model cost by target_model_name:namespace
 //   apply join formula independently per cost basis:
 
 AllocationTotalCost = promptTokens × (InputCostPerMillionTokens[allocation] / 1_000_000)
@@ -175,7 +199,7 @@ token sums against the coordinator's un-attributed prompt token totals per
 count against which attribution coverage is measured:
 
 ```go
-// sum(llm_d_coordinator_request_input_tokens_attributed_sum[model:ns])
+// sum(llm_d_coordinator_request_input_tokens_attributed_total[model:ns])
 //   / llm_d_coordinator_request_input_tokens_sum[model:ns] < 0.9
 // → log.Warnf("InferenceCost: attribution coverage low for model=%s ns=%s (%.0f%% of coordinator tokens attributed)")
 ```
@@ -185,7 +209,7 @@ count against which attribution coverage is measured:
 > requests), `llm_d_coordinator_request_input_tokens` is zero for those requests. In
 > that case the coverage ratio will undercount. The warning threshold is configurable;
 > operators in render-less deployments should lower it or disable it to avoid false
-> alerts. The attributed histogram always captures prompt tokens from the decode response
+> alerts. The attributed counter always captures prompt tokens from the decode response
 > body regardless of whether render ran, so attribution coverage is unaffected — only
 > the denominator of the check is smaller.
 
@@ -204,8 +228,11 @@ dimensionCost = prometheus.NewGaugeVec(
 )
 ```
 
-`user_id` is always a non-empty string (`"unknown"` for unauthenticated requests), so
-the gauge is always emitted with a meaningful label value — no empty-label edge case.
+`user_id` is included in the gauge label set regardless of the coordinator's
+`prometheus_user_id_label` gate. When the gate is on, it carries the actual user value
+or `"unknown"` (for requests with no `x-llm-d-user-id` header). When the gate is off,
+it carries `""` — the empty string that results when `InferenceDimensionKey.UserID` is
+unpopulated because the attributed counter series had no `user_id` label.
 
 ### 1.7 Aggregation & API
 
@@ -233,7 +260,7 @@ list the three new supported dimensions: `user_id`, `tenant_id`, `workload_id`.
 | `core/pkg/source/noop.go` | Add | No-op impl for `QueryInferenceDimensionTokens` |
 | `core/pkg/source/record.go` | Add | Recording impl for `QueryInferenceDimensionTokens` |
 | `core/pkg/source/mock.go` | Add | Mock impl with override injection for `QueryInferenceDimensionTokens` |
-| `modules/prometheus-source/pkg/prom/inference_queries.go` | Add | `QueryInferenceDimensionTokens` (histogram `_sum` delta strategy), `queryDimensionCounterDelta`, decoder, `mergeDimensionDeltas` |
+| `modules/prometheus-source/pkg/prom/inference_queries.go` | Add | `QueryInferenceDimensionTokens` (counter `increase` delta strategy), `queryDimensionCounterDelta`, decoder, `mergeDimensionDeltas` |
 | `modules/collector-source/pkg/collector/metricsquerier.go` | Add | Stub impl (returns empty) for `QueryInferenceDimensionTokens` |
 | `pkg/inferencecost/types.go` | Extend | `UserID/TenantID/WorkloadID` on `InferenceCostProperties`; `AttributionEnabled` on `Config` |
 | `pkg/inferencecost/env.go` | Extend | Reader for `COORDINATOR_REQUESTATTRIBUTION_ENABLED` |
@@ -249,11 +276,11 @@ list the three new supported dimensions: `user_id`, `tenant_id`, `workload_id`.
 
 | Test file | What to add |
 |---|---|
-| `core/pkg/source/decoders_test.go` | `TestDecodeInferenceDimensionResult` — including the `user_id = "unknown"` case (header absent, coordinator always emits the label) |
-| `pkg/inferencecost/collector_test.go` | `buildDimensionCosts` unit tests: basic join formula, zero model cost (no panic), empty attribution result, `user_id = "unknown"` label, coverage warning when attributed token sums diverge from coordinator un-attributed total |
-| `pkg/inferencecost/aggregate_test.go` | Aggregation by `user_id`/`tenant_id`/`workload_id`; filter by `tenant_id:"acme-corp"`; aggregation with `user_id = "unknown"` |
-| `pkg/inferencecost/exporter_test.go` | `llm_dimension_hourly_cost` emitted correctly; `user_id = "unknown"` emitted with that string value (never empty) |
-| `modules/prometheus-source/pkg/prom/inference_queries_test.go` | `queryDimensionCounterDelta` unit tests: both token types present; one absent (graceful degradation); `user_id = "unknown"` present in result |
+| `core/pkg/source/decoders_test.go` | `TestDecodeInferenceDimensionResult` — gate-on case: `user_id = "unknown"` (header absent, label present); gate-off case: `user_id` label absent from series, `UserID = ""` in decoded key |
+| `pkg/inferencecost/collector_test.go` | `buildDimensionCosts` unit tests: basic join formula, zero model cost (no panic), empty attribution result; gate-on with `user_id = "unknown"`; gate-off with `user_id = ""` (label absent); coverage warning when attributed token sums diverge from coordinator un-attributed total |
+| `pkg/inferencecost/aggregate_test.go` | Aggregation by `user_id`/`tenant_id`/`workload_id`; filter by `tenant_id:"acme-corp"`; gate-on aggregation with `user_id = "unknown"`; gate-off aggregation with `user_id = ""` |
+| `pkg/inferencecost/exporter_test.go` | `llm_dimension_hourly_cost` emitted correctly; gate-on: `user_id = "unknown"` emitted with that string value; gate-off: `user_id` label absent from emitted series |
+| `modules/prometheus-source/pkg/prom/inference_queries_test.go` | `queryDimensionCounterDelta` unit tests: both token types present; one absent (graceful degradation); gate-on: `user_id = "unknown"` in result; gate-off: `user_id = ""` in result (label not in `sum by`) |
 
 ---
 
@@ -353,7 +380,10 @@ GET /inferenceCost/total?window=1d&aggregate=workload_id
 
 #### B.3 Cost broken down by user
 
-Returns one entry per `user_id`. Users who sent requests without the
+Returns one entry per `user_id`. Requires `prometheus_user_id_label: true` on the
+coordinator; when the gate is off the attributed counter series carry no `user_id`
+label, so all results collapse into a single `""` bucket and per-user breakdown is
+not meaningful. When the gate is on, users who sent requests without the
 `x-llm-d-user-id` header appear with `user_id: "unknown"`.
 
 ```
@@ -525,13 +555,13 @@ carry all three.
 
 | Decision | Chosen approach | Rationale |
 |---|---|---|
-| **Source metrics** | `llm_d_coordinator_request_input_tokens_attributed_sum` + `llm_d_coordinator_request_output_tokens_attributed_sum` | The coordinator emits dedicated attributed histograms distinct from the un-attributed `request_input_tokens` histogram (render-step only). The `_sum` series accumulate total tokens and behave as monotonically increasing counters — the `queryCounterDelta` pattern applies directly. |
+| **Source metrics** | `llm_d_coordinator_request_input_tokens_attributed_total` + `llm_d_coordinator_request_output_tokens_attributed_total` | The coordinator emits dedicated attributed counters distinct from the un-attributed `request_input_tokens` histogram (render-step only). Being true counters they accumulate total tokens directly — the `queryCounterDelta` (`increase`) pattern applies. |
 | **Cost join formula** | `promptTokens × (inputCostPerM / 1M) + completionTokens × (outputCostPerM / 1M)` | Token sums are the cost drivers. Request count is not used — per-token rates differ between input and output. |
 | **Calculator call order** | Calculator runs on model entries first; `buildDimensionCosts` uses the resulting rates | No need to re-run cost split logic per dimension entry. |
-| **`user_id` label semantics** | Always present; value is `"unknown"` when the header was absent | The coordinator always emits a label value. OpenCost never needs to handle a missing `user_id` label. This simplifies PromQL (single query, no absent-label fallback path) and ensures `InferenceDimensionKey.UserID` is never an empty string. |
+| **`user_id` label semantics** | Conditional on `prometheus_user_id_label` gate (default: off). Gate on: label present, value is `"unknown"` when the header was absent. Gate off: metric registered without the label; `InferenceDimensionKey.UserID` is `""` and per-user breakdown via Prometheus is not meaningful. | The coordinator's Vec label set is fixed at registration time; the gate is the only clean way to omit the label in cardinality-sensitive deployments. Per-user attribution remains available via the structured log regardless of this setting. |
 | **`CollectMetrics` signature** | Unchanged `([]*InferenceCost, error)`; `InferenceDimensionResult` stored as `Collector` field; `BuildDimensionCosts` is a separate public method | Calculator must run between collect and dimension-cost build; keeping `CollectMetrics` signature stable avoids breaking `runner.go`, `queryservice.go`, and test code that mocks the interface. |
-| **`serving_model` join key** | Label on attributed histograms, populated by the coordinator from the vLLM decode response body; joined on `serving_model:namespace` in OpenCost | The coordinator intercepts the decode response and extracts the `model` field — the same authoritative value vLLM returns and that `vllm:prompt_tokens_total{model_name}` carries. Falls back to `model_name` (requested model) on error paths. |
-| **`requested_model` excluded from group-by** | Omitted from `InferenceDimensionKey` and PromQL `sum by (…)` | Cost rate is driven by `serving_model`; including `requested_model` inflates cardinality without adding cost signal. Attribution by what was *served*, not what was *requested*, is the correct billing model. |
+| **`target_model_name` join key** | Label on attributed counters, populated by the coordinator from the vLLM decode response body; joined on `target_model_name:namespace` in OpenCost; matches the EPP label name exactly | The coordinator intercepts the decode response and extracts the `model` field — the same authoritative value vLLM returns. Falls back to `model_name` (requested model) on error paths. Using `target_model_name` (not `serving_model`) keeps coordinator and EPP metric label sets aligned so the two can be joined. |
+| **`requested_model` excluded from group-by** | Omitted from `InferenceDimensionKey` and PromQL `sum by (…)` | Cost rate is driven by `target_model_name`; including `requested_model` inflates cardinality without adding cost signal. Attribution by what was *served*, not what was *requested*, is the correct billing model. |
 | **Coverage warning denominator** | `llm_d_coordinator_request_input_tokens_sum` (coordinator's un-attributed histogram) | The coordinator owns prompt token counts. In the coordinator model, `vllm:prompt_tokens_total` is not the right denominator because it counts tokens at the vLLM level, not the coordinator entry point. The coordinator's un-attributed histogram is the ground truth for the number of requests that passed through the attribution path. |
 | **Backward compatibility** | New fields are empty-string by default; feature is opt-in via `COORDINATOR_REQUESTATTRIBUTION_ENABLED=true` | Deployments without attribution configured are completely unaffected. |
 
@@ -542,8 +572,8 @@ carry all three.
 A cluster may contain multiple independent llm-d coordinator deployments, each in its
 own namespace with its own coordinator, vLLM pods, and InferencePool. OpenCost is
 deployed once per cluster. Multi-deployment concerns are handled naturally: the attributed
-histograms carry a `namespace` label (populated from `COORDINATOR_NAMESPACE` on the
-coordinator pod), and the `serving_model:namespace` composite key partitions dimension
+counters carry a `namespace` label (populated from `COORDINATOR_NAMESPACE` on the
+coordinator pod), and the `target_model_name:namespace` composite key partitions dimension
 token data per deployment automatically — no manual per-namespace configuration is
 required.
 
@@ -568,6 +598,6 @@ in a single cluster-wide pass — a more invasive change deferred to a future it
 #### What works correctly without changes
 
 - **Model-level cost collection** — vLLM and allocation queries key by `(model_name, namespace)`, naturally partitioning deployments.
-- **`buildDimensionCosts()` join** — keys on `serving_model:namespace`, costs attributed to the correct deployment.
+- **`buildDimensionCosts()` join** — keys on `target_model_name:namespace`, costs attributed to the correct deployment.
 - **Coverage warning** — compares attributed token sums vs coordinator un-attributed totals per `model_name:namespace`, each deployment checked independently.
 - **API filtering** — `?filter=namespace:"llm-d-prod"` isolates one deployment's costs from another.
