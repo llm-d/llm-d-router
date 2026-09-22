@@ -70,12 +70,9 @@ func rejectUseOpenAIFormatOverride(step string, params map[string]any) error {
 	return nil
 }
 
-// unreachableFormatError builds an error for a request whose detected API
-// type has no registered coordinator route (see server.go). Decode and
-// conditional-decode detect the format directly from reqCtx.OriginalPath, so
-// reaching it there indicates a routing bug rather than a client error.
-// Prefill's own default case (see buildPrefillBody) is unreachable through
-// resolveFormat today and only guards against a future change to it.
+// unreachableFormatError builds an error for a request format with no
+// registered coordinator route (see server.go), signaling a routing bug
+// rather than a client error.
 func unreachableFormatError(format reqcommon.APIType) error {
 	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
 }
