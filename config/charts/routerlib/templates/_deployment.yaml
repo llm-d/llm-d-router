@@ -172,12 +172,14 @@
               service: inference-extension
           {{- end }}
             periodSeconds: 2
-          # Allow in-flight gRPC streams to drain and give Envoy health checks
-          # time to detect termination and shift traffic to standby endpoints before SIGTERM.
+          {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+          # Give endpoint removal time to propagate before SIGTERM.
+          # Kubelet performs the delay without a shell in the distroless EPP image.
           lifecycle:
             preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 5"]
+              sleep:
+                seconds: 5
+          {{- end }}
           env:
             - name: NAMESPACE
               valueFrom:
