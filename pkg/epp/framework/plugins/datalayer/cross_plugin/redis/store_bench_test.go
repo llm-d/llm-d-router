@@ -35,7 +35,7 @@ import (
 // The cached Get benchmarks never reach the server after warm-up. They measure
 // the store lookup performed once per scored endpoint per request.
 
-func newBenchStore(b *testing.B, replicas int) (*RedisStateStore, *miniredis.Miniredis) {
+func newBenchStore(b *testing.B, replicas int) *RedisStateStore {
 	b.Helper()
 	server, err := miniredis.Run()
 	if err != nil {
@@ -60,7 +60,7 @@ func newBenchStore(b *testing.B, replicas int) (*RedisStateStore, *miniredis.Min
 		}
 		server.HSet(string(testStateKey)+":"+testEndpointID, fmt.Sprintf("epp-%d", i), string(data))
 	}
-	return store, server
+	return store
 }
 
 func warm(b *testing.B, store *RedisStateStore) {
@@ -76,7 +76,7 @@ func warm(b *testing.B, store *RedisStateStore) {
 func BenchmarkGetCached(b *testing.B) {
 	for _, replicas := range []int{1, 3, 8, 16} {
 		b.Run(fmt.Sprintf("replicas=%d", replicas), func(b *testing.B) {
-			store, _ := newBenchStore(b, replicas)
+			store := newBenchStore(b, replicas)
 			warm(b, store)
 			ctx := context.Background()
 
@@ -99,7 +99,7 @@ func BenchmarkGetCached(b *testing.B) {
 }
 
 func BenchmarkGetCachedParallel(b *testing.B) {
-	store, _ := newBenchStore(b, 3)
+	store := newBenchStore(b, 3)
 	warm(b, store)
 
 	b.ReportAllocs()
@@ -126,7 +126,7 @@ func BenchmarkGetCachedParallel(b *testing.B) {
 func BenchmarkSet(b *testing.B) {
 	for _, replicas := range []int{1, 3, 8, 16} {
 		b.Run(fmt.Sprintf("replicas=%d", replicas), func(b *testing.B) {
-			store, _ := newBenchStore(b, replicas)
+			store := newBenchStore(b, replicas)
 			ctx := context.Background()
 
 			b.ReportAllocs()
@@ -142,7 +142,7 @@ func BenchmarkSet(b *testing.B) {
 
 func BenchmarkGetOrSet(b *testing.B) {
 	b.Run("contended", func(b *testing.B) {
-		store, _ := newBenchStore(b, 0)
+		store := newBenchStore(b, 0)
 		ctx := context.Background()
 		if _, existed, err := store.GetOrSet(ctx, testStateKey, "req", "winner"); err != nil {
 			b.Fatal(err)
@@ -167,7 +167,7 @@ func BenchmarkGetOrSet(b *testing.B) {
 	})
 
 	b.Run("uncontended", func(b *testing.B) {
-		store, _ := newBenchStore(b, 0)
+		store := newBenchStore(b, 0)
 		ctx := context.Background()
 
 		b.ReportAllocs()

@@ -109,11 +109,11 @@ func newTestStore(t testing.TB, server *miniredis.Miniredis, replicaID string) (
 	}, counter
 }
 
-func seedReplica(t testing.TB, server *miniredis.Miniredis, key fwkdl.StateKey, endpointID, replicaID string, value any, writtenAt time.Time) {
+func seedReplica(t testing.TB, server *miniredis.Miniredis, key fwkdl.StateKey, replicaID string, value any, writtenAt time.Time) {
 	t.Helper()
 	data, err := encodeStamped(value, writtenAt)
 	require.NoError(t, err)
-	server.HSet(string(key)+":"+endpointID, replicaID, string(data))
+	server.HSet(string(key)+":"+testEndpointID, replicaID, string(data))
 }
 
 func sumInts(values []any) any {
@@ -137,7 +137,7 @@ func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID
 func TestSetPreparesAggregateAndGetReadsMemory(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, testEndpointID, "epp-b", 7, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
 
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	require.Equal(t, int64(1), counter.count.Load())
@@ -153,10 +153,10 @@ func TestSetPreparesAggregateAndGetReadsMemory(t *testing.T) {
 func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, testEndpointID, "epp-b", 7, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
-	seedReplica(t, server, testStateKey, testEndpointID, "epp-b", 9, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 9, time.Now())
 	total, ok := getSum(t, store, testStateKey, testEndpointID)
 	require.True(t, ok)
 	require.Equal(t, 11, total)
@@ -202,8 +202,8 @@ func TestGetMissesBeforeSet(t *testing.T) {
 func TestSetSkipsStaleAndUndecodableFields(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, testEndpointID, "stale", 100, time.Now().Add(-2*testTTL))
-	seedReplica(t, server, testStateKey, testEndpointID, "fresh", 7, time.Now())
+	seedReplica(t, server, testStateKey, "stale", 100, time.Now().Add(-2*testTTL))
+	seedReplica(t, server, testStateKey, "fresh", 7, time.Now())
 	server.HSet(store.hashKey(testStateKey, testEndpointID), "corrupt", "not-gob")
 
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
