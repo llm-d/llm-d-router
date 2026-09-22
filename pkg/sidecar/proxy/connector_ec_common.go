@@ -155,45 +155,31 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 }
 
 // buildEncoderRequest builds a per-item encoder request from scratch: model
-// plus a single synthetic chat-completions message wrapping mmItem, capped
-// to one output token with streaming disabled. It does not copy the
-// client's request: the encoder is always addressed as chat completions
-// regardless of the client's own API (#2742), and a client field with an
-// incompatible schema there (e.g. Responses' tools) would otherwise reach
-// a strict chat-completions encoder as-is.
-func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := map[string]any{
-		requestFieldModel: originalRequest[requestFieldModel],
-		requestFieldMessages: []map[string]any{
-			{
-				"role": "user",
-				"content": []map[string]any{
-					normalizeMMItemForEncoder(mmItem),
-				},
-			},
-		},
+// plus a single synthetic message wrapping mmItem, capped to one output
+// token with streaming disabled. It does not copy the client's request: a
+// client field with an incompatible schema on the encoder's own API (e.g.
+// chat completions' tools) would otherwise reach it as-is. The encoder is
+// addressed as Responses when the original request is Responses, so a
+// Responses input_image part (bare-string URL, sibling detail field) is
+// forwarded unmodified rather than reshaped into chat completions'
+// image_url nesting, which vLLM's chat-completions engine ignores detail
+// on.
+func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any, apiType reqcommon.APIType) map[string]any {
+	if apiType != reqcommon.APITypeResponses {
+		apiType = reqcommon.APITypeChatCompletions
 	}
 
-	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
+	encoderRequest := map[string]any{requestFieldModel: originalRequest[requestFieldModel]}
+	message := map[string]any{"role": "user", "content": []map[string]any{mmItem}}
+	if apiType == reqcommon.APITypeResponses {
+		encoderRequest[requestFieldInput] = []map[string]any{message}
+	} else {
+		encoderRequest[requestFieldMessages] = []map[string]any{message}
+	}
+
+	reqcommon.CapSingleToken(encoderRequest, apiType)
 
 	return encoderRequest
-}
-
-// normalizeMMItemForEncoder converts mmItem into the chat-completions
-// image_url shape buildEncoderRequest's messages array always carries,
-// since the encoder request is sent as chat completions regardless of the
-// client's own API (see buildEncoderRequest). A Responses input_image part
-// uses a different shape: the URL is a bare string on the part itself, and
-// detail is a sibling field, rather than both nested under image_url.
-func normalizeMMItemForEncoder(item map[string]any) map[string]any {
-	if item["type"] != mmTypeInputImage {
-		return item
-	}
-	imageURL := map[string]any{"url": item["image_url"]}
-	if detail, ok := item[inputImageDetailField]; ok {
-		imageURL[inputImageDetailField] = detail
-	}
-	return map[string]any{"type": "image_url", "image_url": imageURL}
 }
 
 // mmItemURL returns the URL string for a URL-based multimodal item, or
@@ -258,10 +244,16 @@ func (s *Server) fanoutEncoder(
 	items []map[string]any,
 	encoderHostPorts []string,
 	requestID string,
+	apiType reqcommon.APIType,
 	perItem func(idx int, pw *bufferedResponseWriter) error,
 ) error {
 	if len(encoderHostPorts) == 0 {
 		return fmt.Errorf("fanoutEncoder: no encoder hostPorts provided (requestID=%s)", requestID)
+	}
+
+	encoderPath := reqcommon.PathChatCompletions
+	if apiType == reqcommon.APITypeResponses {
+		encoderPath = reqcommon.PathResponses
 	}
 
 	s.logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
@@ -270,7 +262,7 @@ func (s *Server) fanoutEncoder(
 	for idx, mmItem := range items {
 		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
 		grp.Go(func() error {
-			encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+			encoderRequest := buildEncoderRequest(originalRequest, mmItem, apiType)
 
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {
@@ -286,7 +278,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 
-			req, err := http.NewRequestWithContext(gctx, "POST", reqcommon.PathChatCompletions, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(gctx, "POST", encoderPath, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)

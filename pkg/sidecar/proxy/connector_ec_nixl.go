@@ -53,7 +53,7 @@ func (s *Server) fanoutEncoderCollect(
 		paramsMu    sync.Mutex
 		contributed int
 	)
-	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, func(idx int, pw *bufferedResponseWriter) error {
+	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, func(idx int, pw *bufferedResponseWriter) error {
 		var encoderResponse map[string]any
 		if err := json.Unmarshal(pw.bodyBytes(), &encoderResponse); err != nil {
 			return fmt.Errorf("failed to parse encoder response for item %d: %w", idx, err)
