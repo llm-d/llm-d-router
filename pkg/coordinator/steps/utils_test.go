@@ -55,10 +55,10 @@ func TestResolveFormat(t *testing.T) {
 		want            reqcommon.APIType
 	}{
 		{name: "chat completions with openai format", useOpenAIFormat: true, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
-		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeGenerate},
+		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeVLLMGenerate},
 		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
-		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathGenerate, want: reqcommon.APITypeGenerate},
-		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeGenerate},
+		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
+		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

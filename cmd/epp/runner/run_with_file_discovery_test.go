@@ -62,7 +62,7 @@ func TestRunWithFileDiscovery_Smoke(t *testing.T) {
 			"    address: 127.0.0.1\n"+
 			"    port: \"19999\"\n"), 0o644))
 
-	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: file-discovery
@@ -88,10 +88,12 @@ schedulingProfiles:
       - pluginRef: random-picker
 dataLayer:
   injectDefaults: false
-  crossReplicaSyncerPluginRef: local-syncer
-  crossReplicaSyncInterval: 5ms
+  crossReplica:
+    syncerPluginRef: local-syncer
+    syncInterval: 5ms
   discovery:
-    pluginRef: file-discovery
+    endpoints:
+      pluginRef: file-discovery
   sources:
     - pluginRef: metrics-source
       extractors:
@@ -104,12 +106,12 @@ dataLayer:
 	grpcListener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = grpcListener.Close() })
-	grpcPort := grpcListener.Addr().(*net.TCPAddr).Port
+	grpcPort := uint16(grpcListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	healthListener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = healthListener.Close() })
-	healthPort := healthListener.Addr().(*net.TCPAddr).Port
+	healthPort := uint16(healthListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	opts := runserver.NewOptions()
 	opts.GRPCPort = grpcPort
@@ -291,7 +293,7 @@ dataLayer:
 	decoyListener, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
 	defer decoyListener.Close()
-	decoyPort := decoyListener.Addr().(*net.TCPAddr).Port
+	decoyPort := uint16(decoyListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	opts := runserver.NewOptions()
 	opts.GRPCPort = decoyPort
@@ -390,7 +392,7 @@ func TestRunWithFileDiscovery_AlphaPluginBlockedByDefault(t *testing.T) {
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
 	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
 
-	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: file-discovery
@@ -403,7 +405,8 @@ plugins:
 dataLayer:
   injectDefaults: false
   discovery:
-    pluginRef: file-discovery
+    endpoints:
+      pluginRef: file-discovery
 `, endpointsPath, alphaType)
 
 	opts := runserver.NewOptions()
@@ -432,7 +435,7 @@ func TestRunWithFileDiscovery_AlphaPluginAllowedWithFlag(t *testing.T) {
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
 	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
 
-	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: file-discovery
@@ -449,7 +452,8 @@ plugins:
 dataLayer:
   injectDefaults: false
   discovery:
-    pluginRef: file-discovery
+    endpoints:
+      pluginRef: file-discovery
   sources:
     - pluginRef: metrics-source
       extractors:

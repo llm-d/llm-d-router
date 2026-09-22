@@ -24,7 +24,7 @@ The primary purpose of this plugin is to provide visibility into resource consum
 The plugin is configured within the EPP server's configuration file (provided via `--config-file` or `--config-text`). It uses the `request-attribute-reporter` type.
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: total-tokens-cost-reporter

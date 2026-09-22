@@ -27,7 +27,7 @@ data:
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
-    apiVersion: llm-d.ai/v1alpha1
+    apiVersion: llm-d.ai/v1
     kind: EndpointPickerConfig
     plugins:
     - type: queue-scorer
@@ -106,7 +106,7 @@ data:
     #   - active-request-scorer  : prefers the least busy endpoint
     #   - session-affinity-scorer: keeps a session pinned to the same endpoint
     # Select it by setting router.epp.pluginsConfigFile: payload-agnostic.yaml
-    apiVersion: llm-d.ai/v1alpha1
+    apiVersion: llm-d.ai/v1
     kind: EndpointPickerConfig
     plugins:
     - type: passthrough-parser

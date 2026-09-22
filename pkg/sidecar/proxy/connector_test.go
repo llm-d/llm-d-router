@@ -78,7 +78,7 @@ func expectGenerateRequestTokenLimits(testInfo *sidecarTestInfo) {
 
 	proxyBaseAddr := testInfo.startProxy()
 
-	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathGenerate,
+	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathVLLMGenerate,
 		bytes.NewReader([]byte(generateRequestBodyWithTokenLimits)))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])

@@ -1217,6 +1217,26 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	require.Equal(t, 0.7, val)
 }
 
+func TestFlowControlDetectorSaturationMetric(t *testing.T) {
+	Reset()
+
+	RecordFlowControlDetectorSaturation("concurrency", "prefill", 0.4)
+	RecordFlowControlDetectorSaturation("concurrency", "decode", 0.9)
+	RecordFlowControlDetectorSaturation("queue", "decode", 0.1)
+
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlDetectorSaturation.WithLabelValues("concurrency", "prefill"))
+	require.NoError(t, err)
+	require.Equal(t, 0.4, val)
+
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlDetectorSaturation.WithLabelValues("concurrency", "decode"))
+	require.NoError(t, err)
+	require.Equal(t, 0.9, val)
+
+	DeleteFlowControlDetectorSaturationStage("decode")
+	require.Equal(t, 1, promtestutil.CollectAndCount(llmdFlowControlDetectorSaturation),
+		"only the prefill series should remain")
+}
+
 func TestFlowControlRequestsTotalMetric(t *testing.T) {
 	Reset()
 

@@ -45,7 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/internal/runnable"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -89,6 +89,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
@@ -184,12 +185,12 @@ type Runner struct {
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
-	rawConfig *configapi.EndpointPickerConfig
+	rawConfig *configapiv1.EndpointPickerConfig
 
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
 	healthGRPCServer *grpc.Server
-	healthGRPCPort   int
+	healthGRPCPort   uint16
 	draining         *atomic.Bool
 
 	// grpcListener and healthListener are optional pre-bound listeners for the
@@ -252,6 +253,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	setupLog.Info("Flags processed", "flags", flags)
 
 	logutil.InitLogging(&opts.ZapOptions)
+	tracing.InitTextMapPropagator()
 
 	if opts.Tracing {
 		shutdown, err := tracing.InitTracing(ctx, setupLog, "llm-d-epp")
@@ -713,6 +715,8 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(concurrency.ConcurrencyDetectorType, fwkplugin.StabilityBeta, concurrency.ConcurrencyDetectorFactory)
 	fwkplugin.Register(utilization.UtilizationDetectorType, fwkplugin.StabilityBeta, utilization.UtilizationDetectorFactory)
+	fwkplugin.RegisterWithPluginDependencies(composite.MaxSaturationDetectorType, fwkplugin.StabilityBeta,
+		composite.MaxSaturationDetectorFactory, composite.MaxSaturationDetectorConfigParser)
 
 	// register discovery plugins
 	// Beta
@@ -726,7 +730,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
 }
 
-func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
+func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapiv1.EndpointPickerConfig, error) {
 	// parseConfigurationPhaseOne is idempotent: Run() calls it to decide
 	// between the K8s and file-discovery paths, and the K8s path's setup()
 	// then calls it a second time. Cache the parsed config so we don't
@@ -780,7 +784,7 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 	}
 }
 
-func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
+func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapiv1.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
@@ -827,6 +831,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	datalayer.RegisterScopeSpecs(handle.GetAllPlugins())
 
 	r.parserRegistry = cfg.ParserRegistry
+	r.requestControlConfig.WithPropagatePriority(cfg.PropagatePriority)
 	logger.Info("loaded configuration from file/text successfully")
 
 	return cfg, nil
@@ -933,7 +938,7 @@ func resolvePoolNamespace(poolNamespace string) string {
 // parseConfigurationPhaseTwo; this function only looks it up and verifies its
 // type, so the loader-created instance (with its real Handle wired in) is the
 // one the runner drives.
-func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
+func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
 	ref := rawConfig.DataLayer.Discovery.Endpoints.PluginRef
 	p := r.PluginHandle.Plugin(ref)
 	if p == nil {
@@ -1044,7 +1049,7 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
-func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapi.EndpointPickerConfig) error {
+func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
 	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
@@ -1214,7 +1219,7 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
@@ -1235,7 +1240,7 @@ func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 	return nil
 }
 
-func toRawMap(cfg *configapi.EndpointPickerConfig) map[string]any {
+func toRawMap(cfg *configapiv1.EndpointPickerConfig) map[string]any {
 	if cfg == nil {
 		return nil
 	}

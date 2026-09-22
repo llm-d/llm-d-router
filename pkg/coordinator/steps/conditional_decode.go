@@ -115,7 +115,7 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, bod
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
 		}
-	case reqcommon.APITypeGenerate:
+	case reqcommon.APITypeVLLMGenerate:
 		// The client's generate body already carries token_ids.
 	default:
 		// resolveFormat only ever yields the three formats above.

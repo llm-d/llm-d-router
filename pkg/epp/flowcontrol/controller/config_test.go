@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 )
 
 func TestNewConfig(t *testing.T) {
@@ -218,7 +218,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		apiConfig   *configapi.FlowControlConfig
+		apiConfig   *configapiv1.FlowControlConfig
 		assertion   func(*testing.T, *Config)
 		expectedErr string
 	}{
@@ -237,7 +237,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 		},
 		{
 			name: "ValidConfig_ShouldTranslateFields",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Minute},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
@@ -248,7 +248,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 		},
 		{
 			name: "ValidConfig_ShouldTranslateAllExposedFields",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 1 * time.Minute},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
@@ -259,7 +259,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 			// Splitting the regimes is opt-in: a configuration that names only DefaultRequestTTL states one bound on
 			// queue wait, and it governs both regimes rather than picking up an unrequested cold-start budget.
 			name: "DefaultRequestTTLAlone_ShouldGovernBothRegimes",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 10 * time.Second},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
@@ -270,7 +270,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 		},
 		{
 			name: "NoEndpointRequestTTL_ShouldOverrideInheritance",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL:    &metav1.Duration{Duration: 10 * time.Second},
 				NoEndpointRequestTTL: &metav1.Duration{Duration: 5 * time.Minute},
 			},
@@ -283,7 +283,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 			// "0s" is the documented way to disable eviction. Inheriting it keeps that meaning whole: a deployment that
 			// disabled the TTL is not opted into shedding the moment its pool scales to zero.
 			name: "ExplicitZeroRequestTTL_ShouldBeRespected",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 0},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
@@ -294,7 +294,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 		},
 		{
 			name: "ExplicitZeroNoEndpointRequestTTL_ShouldNotInherit",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL:    &metav1.Duration{Duration: 10 * time.Second},
 				NoEndpointRequestTTL: &metav1.Duration{Duration: 0},
 			},
@@ -305,14 +305,14 @@ func TestNewConfigFromAPI(t *testing.T) {
 		},
 		{
 			name: "InvalidConfig_NegativeRequestTTL_ShouldError",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: -1 * time.Minute},
 			},
 			expectedErr: "DefaultRequestTTL cannot be negative",
 		},
 		{
 			name: "EnableEviction_ShouldTranslate_WithInternalDefaults",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				EnableEviction: true,
 			},
 			assertion: func(t *testing.T, cfg *Config) {

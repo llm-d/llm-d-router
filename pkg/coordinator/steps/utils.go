@@ -73,7 +73,7 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 			return detected
 		}
 	}
-	return reqcommon.APITypeGenerate
+	return reqcommon.APITypeVLLMGenerate
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,

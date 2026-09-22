@@ -30,14 +30,14 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestParseRawExtraKeys_Nil(t *testing.T) {
-	result, err := kvblock.ParseRawExtraKeys(nil)
+	result, err := kvblock.ParseRawExtraKeys(nil, "")
 	require.NoError(t, err)
 	assert.Nil(t, result)
 }
 
 func TestParseRawExtraKeys_NilInnerEntries(t *testing.T) {
 	raw := [][]any{nil, nil, nil}
-	result, err := kvblock.ParseRawExtraKeys(raw)
+	result, err := kvblock.ParseRawExtraKeys(raw, "")
 	require.NoError(t, err)
 	require.Len(t, result, 3)
 	for _, r := range result {
@@ -55,7 +55,7 @@ func TestParseRawExtraKeys_BareStringIdentifiers(t *testing.T) {
 		{"hash_B", "hash_C"}, // two overlapping images
 	}
 
-	result, err := kvblock.ParseRawExtraKeys(raw)
+	result, err := kvblock.ParseRawExtraKeys(raw, "")
 	require.NoError(t, err)
 	require.Len(t, result, 5)
 
@@ -86,7 +86,7 @@ func TestParseRawExtraKeys_LegacyTuples(t *testing.T) {
 		{[]any{"hash_B", int64(-14)}, []any{"hash_C", int64(5)}},
 	}
 
-	result, err := kvblock.ParseRawExtraKeys(raw)
+	result, err := kvblock.ParseRawExtraKeys(raw, "")
 	require.NoError(t, err)
 	require.Len(t, result, 5)
 
@@ -113,11 +113,69 @@ func TestParseRawExtraKeys_SkipsUnknownEntryTypes(t *testing.T) {
 		{int64(42), "valid_hash"},
 	}
 
-	result, err := kvblock.ParseRawExtraKeys(raw)
+	result, err := kvblock.ParseRawExtraKeys(raw, "")
 	require.NoError(t, err)
 	require.NotNil(t, result[0])
 	require.Len(t, result[0].MMHashes, 1)
 	assert.Equal(t, "valid_hash", result[0].MMHashes[0].Hash)
+}
+
+func TestParseRawExtraKeys_LoRAName(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		raw      [][]any
+		loraName string
+		want     [][]string
+	}{
+		{
+			name:     "adapter-only block has no features",
+			raw:      [][]any{{"adapter-1"}, {"adapter-1"}},
+			loraName: "adapter-1",
+			want:     [][]string{nil, nil},
+		},
+		{
+			name:     "entries after the adapter are kept",
+			raw:      [][]any{{"adapter-1", "img-1", "salt-1"}, {"adapter-1", "img-1"}},
+			loraName: "adapter-1",
+			want:     [][]string{{"img-1", "salt-1"}, {"img-1"}},
+		},
+		{
+			name:     "adapter name outside the first position is kept",
+			raw:      [][]any{{"img-1", "adapter-1"}},
+			loraName: "adapter-1",
+			want:     [][]string{{"img-1", "adapter-1"}},
+		},
+		{
+			name:     "no adapter strips nothing",
+			raw:      [][]any{{"adapter-1"}},
+			loraName: "",
+			want:     [][]string{{"adapter-1"}},
+		},
+		{
+			name:     "another adapter's name is kept",
+			raw:      [][]any{{"adapter-2", "img-1"}},
+			loraName: "adapter-1",
+			want:     [][]string{{"adapter-2", "img-1"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := kvblock.ParseRawExtraKeys(tt.raw, tt.loraName)
+			require.NoError(t, err)
+			require.Len(t, result, len(tt.want))
+			for i, want := range tt.want {
+				if want == nil {
+					assert.Nil(t, result[i], "block %d", i)
+					continue
+				}
+				require.NotNil(t, result[i], "block %d", i)
+				got := make([]string, len(result[i].MMHashes))
+				for j, h := range result[i].MMHashes {
+					got[j] = h.Hash
+				}
+				assert.Equal(t, want, got, "block %d", i)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +358,7 @@ func TestParseAndComputeProduceSameFeatures(t *testing.T) {
 		nil,          // block 3: text only
 	}
 
-	parsed, err := kvblock.ParseRawExtraKeys(raw)
+	parsed, err := kvblock.ParseRawExtraKeys(raw, "")
 	require.NoError(t, err)
 
 	mmHashes := map[string][]string{"image": {"img_hash"}}

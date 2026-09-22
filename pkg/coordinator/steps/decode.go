@@ -109,7 +109,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
-	case reqcommon.APITypeGenerate:
+	case reqcommon.APITypeVLLMGenerate:
 		// The /inference/v1/generate engine reads transfer params only from
 		// sampling_params.extra_args; a top-level kv_transfer_params is ignored,
 		// so the decode worker never pulls the prefill KV over NIXL. Merge into

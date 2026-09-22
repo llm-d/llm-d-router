@@ -37,6 +37,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/version"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -110,6 +111,7 @@ func main() {
 		os.Exit(1)
 	}
 	logutil.InitLogging(&logOpts.ZapOptions)
+	tracing.InitTextMapPropagator()
 	log.Info("log level set", "level", logOpts.LogVerbosity)
 	log.Info("pipeline connectors",
 		"kv_connector", cfg.Pipeline.KVConnector,

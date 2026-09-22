@@ -20,6 +20,8 @@ package metrics
 import (
 	"errors"
 	"fmt"
+
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
 
 const (
@@ -27,7 +29,7 @@ const (
 	DefaultEngineType = "default"
 
 	// DefaultEngineTypeLabelKey is the default label on Pods that indicates the inference engine type.
-	DefaultEngineTypeLabelKey = "llm-d.ai/engine-type"
+	DefaultEngineTypeLabelKey = fwkplugins.EngineTypeLabelKey
 
 	// legacyGAIEEngineTypeLabelKey is the legacy GAIE label key, kept for backward compatibility.
 	//

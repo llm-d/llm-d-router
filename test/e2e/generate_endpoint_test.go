@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	generatePath = "/inference/v1/generate"
+	vLLMGeneratePath = "/inference/v1/generate"
 
 	requestTimeout = 60 * time.Second
 )
@@ -221,7 +221,7 @@ func doRequest(path string, body []byte) (*http.Response, []byte) {
 
 // doGenerate is a thin wrapper over doRequest targeting /inference/v1/generate.
 func doGenerate(body []byte) (*http.Response, []byte) {
-	return doRequest(generatePath, body)
+	return doRequest(vLLMGeneratePath, body)
 }
 
 // expectGenerateOK asserts a 2xx status and that the response body parses
