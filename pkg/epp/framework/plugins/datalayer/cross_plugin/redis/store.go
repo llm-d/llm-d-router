@@ -42,6 +42,7 @@ func init() {
 
 const (
 	RedisStateStoreType = "redis-state-store"
+	defaultAddress      = "localhost:6379"
 	defaultTTL          = 180 * time.Second
 )
 
@@ -78,7 +79,7 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 		}
 	}
 	if cfg.Address == "" {
-		cfg.Address = "localhost:6379"
+		cfg.Address = defaultAddress
 	}
 
 	ttl := defaultTTL
