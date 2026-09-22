@@ -111,6 +111,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
+		nonTextTokenTracker:       newConcurrencyTracker(),
 		tokenEstimator:            NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens:  cfg.AddEstimatedOutputTokens,
 		dk:                        attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
@@ -137,6 +138,7 @@ type InFlightLoadProducer struct {
 	typedName                fwkplugin.TypedName
 	requestTracker           *concurrencyTracker
 	tokenTracker             *concurrencyTracker
+	nonTextTokenTracker      *concurrencyTracker // multimodal share of tokenTracker
 	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
@@ -176,6 +178,11 @@ type addedTokensEntry struct {
 	producerName   string
 	fairnessID     string
 	priority       string
+
+	// nonTextTokens is the multimodal share of tokens, released with it. It has
+	// no Prometheus series of its own.
+	nonTextTokens       atomic.Int64
+	nonTextTokenCounter *atomic.Int64
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -199,17 +206,28 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
+	clone.nonTextTokenCounter = e.nonTextTokenCounter
+	clone.nonTextTokens.Store(e.nonTextTokens.Load())
 	return clone
 }
 
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
+	e.releaseTokens()
+	if e.requests.Swap(0) != 0 {
+		decrementClamped(e.requestCounter, 1)
+		inflightRequests.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Dec()
+	}
+}
+
+// releaseTokens rolls back the entry's token contribution, total and non-text
+// share together, exactly once: whichever caller swaps first does the decrement.
+func (e *addedTokensEntry) releaseTokens() {
 	if t := e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
 		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
 	}
-	if e.requests.Swap(0) != 0 {
-		decrementClamped(e.requestCounter, 1)
-		inflightRequests.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Dec()
+	if n := e.nonTextTokens.Swap(0); n != 0 {
+		decrementClamped(e.nonTextTokenCounter, n)
 	}
 }
 
@@ -321,8 +339,9 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		Supply: func(endpointID string) func() datalayer.Cloneable {
 			return func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
-					Requests: p.requestTracker.get(endpointID),
-					Tokens:   p.tokenTracker.get(endpointID),
+					Requests:      p.requestTracker.get(endpointID),
+					Tokens:        p.tokenTracker.get(endpointID),
+					NonTextTokens: p.nonTextTokenTracker.get(endpointID),
 				}
 			}
 		},
@@ -332,6 +351,7 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 				if ifl, ok := v.(*attrconcurrency.InFlightLoad); ok {
 					total.Requests += ifl.Requests
 					total.Tokens += ifl.Tokens
+					total.NonTextTokens += ifl.NonTextTokens
 				}
 			}
 			return total
@@ -373,8 +393,9 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
-					Tokens:   p.GetTokens(id),
-					Requests: p.GetRequests(id),
+					Tokens:        p.GetTokens(id),
+					Requests:      p.GetRequests(id),
+					NonTextTokens: p.nonTextTokenTracker.get(id),
 				}
 			},
 		})
@@ -396,7 +417,8 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 		if request != nil {
 			tokens := p.estimateRequestTokens(e, request, inputTokens)
 			p.uncachedRequestTokensSlot.Put(e, &attrconcurrency.UncachedRequestTokens{
-				Tokens: tokens,
+				Tokens:        tokens,
+				NonTextTokens: min(p.estimateRequestNonTextTokens(e, request), tokens),
 			})
 		}
 	}
@@ -470,8 +492,10 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
 		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
+		nonTextTokens := min(p.estimateRequestNonTextTokens(endpoint, request), tokens)
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
+		nonTextTokenCounter := p.nonTextTokenTracker.add(eid, nonTextTokens)
 
 		inflightRequests.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Inc()
 		inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Add(float64(tokens))
@@ -486,6 +510,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			priority:       priority,
 		}
 		entry.tokens.Store(tokens)
+		entry.nonTextTokenCounter = nonTextTokenCounter
+		entry.nonTextTokens.Store(nonTextTokens)
 		entry.requests.Store(1)
 		p.PluginState.Write(
 			request.RequestID,
@@ -533,6 +559,17 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 		return adjustedInput + p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return adjustedInput
+}
+
+// estimateRequestNonTextTokens returns the multimodal share of what
+// estimateRequestTokens charges the endpoint. Estimated output is text, so a
+// decode-only endpoint charged only for output carries none; every other
+// endpoint is charged the prompt, and with it the uncached placeholder tokens.
+func (p *InFlightLoadProducer) estimateRequestNonTextTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest) int64 {
+	if p.addEstimatedOutputTokens && endpointHasDecodeOnlyRole(endpoint) {
+		return 0
+	}
+	return uncachedNonTextTokens(endpoint, request, p.prefixMatchInfoDK)
 }
 
 // endpointHasPrefillOnlyRole reports whether the endpoint is labeled as a
@@ -676,10 +713,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
-		if t := entry.tokens.Swap(0); t != 0 {
-			decrementClamped(entry.tokenCounter, t)
-			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
-		}
+		entry.releaseTokens()
 	}
 }
 
@@ -700,15 +734,8 @@ func addedTokensKey(endpointID, profileName string) string {
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
 func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey fwkplugin.DataKey) int64 {
-	if endpoint == nil {
-		return nonNeg(inputTokens)
-	}
-	raw, ok := endpoint.Get(prefixMatchInfoKey)
-	if !ok {
-		return nonNeg(inputTokens)
-	}
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok || info == nil || info.BlockSizeTokens() <= 0 {
+	info := prefixMatchInfo(endpoint, prefixMatchInfoKey)
+	if info == nil {
 		return nonNeg(inputTokens)
 	}
 
@@ -728,6 +755,59 @@ func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMa
 	}
 
 	return uncachedIndexed + tail
+}
+
+// uncachedNonTextTokens returns the multimodal placeholder tokens this endpoint
+// must actually compute: the part of each item's placeholder span that lies past
+// the cached prefix. MultiModalFeature.Offset places the item in its prompt's
+// token IDs, the same positions the prefix match counts blocks over.
+//
+// Only a single-prompt request can be attributed exactly. With several prompts
+// the match info sums each prompt's matched blocks, which no longer says where
+// the cached tokens are, so every placeholder counts as uncached; callers cap the
+// result at the uncached total. Multimodal content arrives through chat, which
+// always has one prompt.
+func uncachedNonTextTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, prefixMatchInfoKey fwkplugin.DataKey) int64 {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+		return 0
+	}
+	prompts := request.Body.TokenizedRequest.Prompts
+
+	var matched int64
+	if len(prompts) == 1 {
+		if info := prefixMatchInfo(endpoint, prefixMatchInfoKey); info != nil {
+			matched = int64(info.MatchBlocks()) * int64(info.BlockSizeTokens())
+		}
+	}
+
+	var uncached int64
+	for _, prompt := range prompts {
+		for _, feature := range prompt.MultiModalFeatures {
+			start := int64(feature.Offset)
+			end := start + int64(feature.Length)
+			if end > matched {
+				uncached += end - max(start, matched)
+			}
+		}
+	}
+	return uncached
+}
+
+// prefixMatchInfo returns the endpoint's prefix-cache match info, or nil when the
+// prefix producer has not populated a usable one.
+func prefixMatchInfo(endpoint fwksched.Endpoint, prefixMatchInfoKey fwkplugin.DataKey) *attrprefix.PrefixCacheMatchInfo {
+	if endpoint == nil {
+		return nil
+	}
+	raw, ok := endpoint.Get(prefixMatchInfoKey)
+	if !ok {
+		return nil
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok || info == nil || info.BlockSizeTokens() <= 0 {
+		return nil
+	}
+	return info
 }
 
 func nonNeg(v int64) int64 {
@@ -767,6 +847,7 @@ func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 	p.requestTracker.delete(endpointID)
 	p.tokenTracker.delete(endpointID)
+	p.nonTextTokenTracker.delete(endpointID)
 }
 
 func (p *InFlightLoadProducer) GetTokens(eid string) int64 {

@@ -11,6 +11,7 @@ Tracks real-time in-flight request and token counts per endpoint by hooking into
 ## Behavior
 
 - **Prefix Cache Discounting**: Automatically detects if an endpoint has a prefix cache hit (via `PrefixCacheMatchInfo`). Only the **uncached** portion of the prompt is added to the in-flight token counter, providing a more accurate estimate of the actual compute load.
+- **Multimodal Tokens**: The multimodal placeholder tokens (image, audio, video) are tracked as `NonTextTokens` alongside the total, with the same prefix-cache discount: each item's `Offset` says whether its placeholders fall inside the cached prefix. Estimated output is text, so a decode-only endpoint charged only for output carries none. Scorers can weigh them differently from text; see `token-load-scorer`.
 - **Token Release Timing**: 
     - If `addEstimatedOutputTokens` is `false` (default): For streaming requests, all tokens are released as soon as the first chunk of the response is received (`StartOfStream`), as the prefill compute is complete. For non-streaming requests (or as a safety net), tokens are released when the response completes (`EndOfStream`).
     - If `addEstimatedOutputTokens` is `true`: The prompt portion is released at `StartOfStream` (for streaming) or `EndOfStream`, and the estimated output portion is released only when the response completes (`EndOfStream`).
