@@ -282,6 +282,33 @@ func TestServer_ResponsesP2PSourcePassthroughStripsStatefulFields(t *testing.T) 
 	}
 }
 
+// TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody locks in
+// that the decoder-only passthrough's read of the body to strip stateful
+// fields fails closed: a client that drops the connection mid-body is
+// refused before dataParallelHandler or the decoder proxy ever runs.
+func TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, errReader{})
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	if dispatched {
+		t.Errorf("expected decoder proxy not to be invoked on an unreadable body")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d", http.StatusBadRequest, recorder.Code)
+	}
+}
+
 func TestServer_encoderEndpointRouting(t *testing.T) {
 	encoderHeader := http.CanonicalHeaderKey(routing.EncoderEndpointsHeader)
 	prefillHeader := http.CanonicalHeaderKey(routing.PrefillEndpointHeader)

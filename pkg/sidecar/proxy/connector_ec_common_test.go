@@ -315,7 +315,9 @@ func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
 // would leak every other multimodal item or an uncapped output limit, and
 // stateful fields (previous_response_id, conversation, store, background)
 // and tools/tool_choice/instructions have no place on a per-item encoder
-// request.
+// request. store is the one stateful field that does appear, forced to
+// false regardless of the client's own value, so the priming request
+// leaves no stored response object on the encoder pod.
 func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",
@@ -343,7 +345,30 @@ func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
 	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
 
 	assert.Equal(t, "test-model", encoderRequest["model"])
-	assert.ElementsMatch(t, []string{"model", "input", "max_output_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
+	assert.Equal(t, false, encoderRequest["store"])
+	assert.ElementsMatch(t, []string{"model", "input", "store", "max_output_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
+}
+
+// TestBuildEncoderRequest_NoModel locks in that an absent client model stays
+// absent on the encoder request rather than becoming an explicit JSON null,
+// which vLLM's request validation would reject differently than a missing
+// field.
+func TestBuildEncoderRequest_NoModel(t *testing.T) {
+	originalRequest := map[string]any{
+		"input": []any{
+			map[string]any{
+				"role":    "user",
+				"content": []any{map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"}},
+			},
+		},
+	}
+
+	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
+
+	_, hasModel := encoderRequest["model"]
+	assert.False(t, hasModel)
 }
 
 // TestBuildEncoderRequest_MinTokens is a regression test for stripping a

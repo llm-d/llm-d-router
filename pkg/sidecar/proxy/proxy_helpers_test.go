@@ -189,6 +189,34 @@ var _ = Describe("readJSONBody", func() {
 		Expect(ok).To(BeFalse())
 		Expect(*logged).ToNot(ContainElement(ContainSubstring("invalid request body")))
 	})
+
+	// The stateful-fields strip is gated on the request path, not on which
+	// fields happen to be present, so this proves the gate itself: the same
+	// body is stripped on the Responses path and left untouched elsewhere.
+	statefulBody := `{"model":"m","previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
+
+	It("strips unsupported Responses fields on the Responses path", func() {
+		w := httptest.NewRecorder()
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).ToNot(HaveKey(reqcommon.FieldPreviousResponseID))
+		Expect(parsed).ToNot(HaveKey(reqcommon.FieldConversation))
+		Expect(parsed).ToNot(HaveKey(reqcommon.FieldBackground))
+		Expect(parsed).To(HaveKeyWithValue(reqcommon.FieldStore, false))
+	})
+
+	It("leaves those fields untouched on the chat-completions path", func() {
+		w := httptest.NewRecorder()
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader([]byte(statefulBody))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldPreviousResponseID))
+		Expect(parsed).To(HaveKey(reqcommon.FieldConversation))
+		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
+	})
 })
 
 // captureLogs points the proxy logger at the returned slice, keeping entries up
