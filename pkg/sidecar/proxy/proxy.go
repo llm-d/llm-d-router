@@ -67,7 +67,7 @@ const (
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
-	// data-parallel rank, set on both legs of a disagg pair (see pickDPRank).
+	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
 	requestHeaderDataParallelRank = "x-data-parallel-rank"
 
 	// MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
@@ -94,7 +94,7 @@ const (
 
 	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
 	// nesting key, named for the remote party it describes: "remote_decoder" on
-	// the prefiller leg, "remote_prefiller" on the decoder leg, "remote_kv_source"
+	// the prefill request, "remote_prefiller" on the decode request, "remote_kv_source"
 	// for a symmetric cached-prefix pull.
 	requestFieldRemoteDecoder   = "remote_decoder"
 	requestFieldRemotePrefiller = "remote_prefiller"
@@ -179,7 +179,7 @@ type Config struct {
 	MooncakeBootstrapPort int
 
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
-	// injected as remote_port on the decode leg so the decoder can pull KV from it.
+	// injected as remote_port on the decode request so the decoder can pull KV from it.
 	// With data parallelism it is the rank-0 port: rank r's tier listens on
 	// P2PConnectorPort+r and the injected port is offset by the target's rank.
 	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
@@ -207,21 +207,21 @@ type Config struct {
 	// Tracing enables OpenTelemetry tracing.
 	Tracing bool
 	// MoRIIOWriteMode enables MoRI-IO WRITE-mode: the sidecar populates the
-	// prefill leg's kv_transfer_params so the prefill engine pushes KV to decode
+	// prefill request's kv_transfer_params so the prefill engine pushes KV to decode
 	// via RDMA Write. Only meaningful with --kv-connector=nixlv2.
 	MoRIIOWriteMode bool
 	// MoRIIODecodeNotifyPort is the decode pod's base MoRI-IO notify port.
 	MoRIIODecodeNotifyPort int
 	// MoRIIODecodeHandshakePort is the decode pod's base MoRI-IO handshake port.
 	MoRIIODecodeHandshakePort int
-	// MoRIIODecodePodIP is decode's routable address, used as the prefill leg's
+	// MoRIIODecodePodIP is decode's routable address, used as the prefill request's
 	// remote_host so prefill handshakes with decode (not itself). Must not be
 	// localhost; typically the POD_IP downward-API value. May be set to a
 	// Kubernetes DNS name (e.g., an LWS pod name), which is resolved to an IP at
 	// startup in Complete(); raw IPs are passed through unchanged.
 	MoRIIODecodePodIP string
 
-	// MoRIIOParallelDispatch fires the prefill and decode legs concurrently,
+	// MoRIIOParallelDispatch fires the prefill and decode requests concurrently,
 	// synthesising decode's kv_transfer_params from config instead of reading
 	// them from the prefill response. Requires MoRIIOWriteMode.
 	MoRIIOParallelDispatch bool
@@ -238,12 +238,12 @@ type Config struct {
 	// kv_transfer_params[tp_size] in parallel-dispatch mode.
 	MoRIIOTPSize int
 	// MoRIIODPSize is the data-parallel world size, emitted as remote_dp_size on
-	// both legs. Wide-EP (TP=1, DP>1) must set this so the decode connector
+	// both requests. Wide-EP (TP=1, DP>1) must set this so the decode connector
 	// registers RDMA notifies against every DP rank; 1 leaves the wire unchanged.
 	MoRIIODPSize int
 
 	// MoRIIORemoteHosts is the ordered list of prefill-side pod IPs across which
-	// vLLM fans out its per-DP-rank handshake, emitted as the decode leg's
+	// vLLM fans out its per-DP-rank handshake, emitted as the decode request's
 	// remote_hosts. host[i] serves DP ranks [i*MoRIIODPSizeLocal, (i+1)*...).
 	// Empty disables fan-out (single-host fallback).
 	MoRIIORemoteHosts []string
@@ -251,7 +251,7 @@ type Config struct {
 	// via pod_idx = dp_rank / MoRIIODPSizeLocal. 0 means single-pod.
 	MoRIIODPSizeLocal int
 	// MoRIIODecodeHosts is the decode-side counterpart of MoRIIORemoteHosts,
-	// emitted as the prefill leg's remote_hosts. A multi-pod deployment sets
+	// emitted as the prefill request's remote_hosts. A multi-pod deployment sets
 	// both; the lists must use opposite sides or every cross-pod handshake hangs.
 	// DNS names (e.g., LWS pod names) are automatically resolved to IPs at startup.
 	MoRIIODecodeHosts []string
@@ -333,6 +333,24 @@ type Server struct {
 	hostResolver *hostResolver
 
 	config Config
+
+	// HTTPListener is an optional pre-bound listener for the data-plane HTTP
+	// server. When set, startHTTP serves on it and does not call net.Listen.
+	// Reserving the port in advance of Start closes the window in which another
+	// process can take a port that was selected but not yet bound. config.Port
+	// is still used for data-parallel rank math.
+	HTTPListener net.Listener
+
+	// MetricsListener is an optional pre-bound listener for the /metrics
+	// server. When set, serveMetrics serves on it and does not call net.Listen.
+	MetricsListener net.Listener
+
+	// DataParallelListeners holds pre-bound listeners for data-parallel rank
+	// clones 1..N-1 (index 0 is rank 1). When non-empty, startDataParallel
+	// assigns each to the corresponding clone's HTTPListener instead of
+	// calling net.Listen. Production leaves this nil and clones bind from
+	// config.Port + rank.
+	DataParallelListeners []net.Listener
 }
 
 // resolver lazily initializes and returns the request-path host resolver.
@@ -472,6 +490,7 @@ func (s *Server) Start(ctx context.Context) error {
 // Clone returns a clone of the current Server struct.
 // Note: decoderURL and decoderProxy are intentionally not copied — callers (e.g. startDataParallel)
 // always set them explicitly after cloning.
+// HTTPListener is not copied; each instance owns its listener.
 func (s *Server) Clone() *Server {
 	return &Server{
 		addr:                s.addr,
@@ -588,7 +607,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 	})
 	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
 	// served routes from drifting away from it.
-	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathGenerate} {
+	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
 		mux.HandleFunc("POST "+path, s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path)))
 	}
 

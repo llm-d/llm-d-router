@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -75,7 +76,7 @@ type subscriberManager interface {
 		podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter string,
 		remoteSocket bool,
 	) error
-	RemoveSubscriber(ctx context.Context, podIdentifier string)
+	RemoveSubscriber(ctx context.Context, podIdentifier string) bool
 	GetActiveSubscribers() ([]string, []string)
 	Shutdown(ctx context.Context)
 }
@@ -94,6 +95,7 @@ type Producer struct {
 
 	subscribersManager subscriberManager
 	kvEventsConfig     *kvevents.Config
+	podSelector        labels.Selector // nil matches every endpoint.
 
 	dk plugin.DataKey
 
@@ -149,6 +151,19 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if config.TokenProcessorConfig == nil {
 		config.TokenProcessorConfig = kvblock.DefaultTokenProcessorConfig()
 	}
+	if config.KVEventsConfig == nil {
+		config.KVEventsConfig = kvevents.DefaultConfig()
+	}
+
+	var podSelector labels.Selector
+	if kc := config.KVEventsConfig; kc.DiscoverPods && kc.PodDiscoveryConfig != nil && kc.PodDiscoveryConfig.PodLabelSelector != "" {
+		sel, err := labels.Parse(kc.PodDiscoveryConfig.PodLabelSelector)
+		if err != nil {
+			return nil, fmt.Errorf("invalid kvEventsConfig.podDiscoveryConfig.podLabelSelector %q: %w",
+				kc.PodDiscoveryConfig.PodLabelSelector, err)
+		}
+		podSelector = sel
+	}
 
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)
 	if err != nil {
@@ -165,7 +180,10 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
 	}
-	pool := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+	pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
+	}
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
@@ -186,6 +204,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		kvCacheIndexer:     indexer,
 		subscribersManager: subscribersManager,
 		kvEventsConfig:     config.KVEventsConfig,
+		podSelector:        podSelector,
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		pluginState:        plugin.NewPluginState(ctx),
 		speculativeCache:   speculativeCache,
@@ -363,6 +382,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
 			WithCachedBlockCount(match.MatchedBlocks).
+			WithConfirmedCachedBlockCount(match.ConfirmedBlocks).
 			WithCachedBlocksByTier(match.BlocksByTier)
 		if len(mmBlockIndices) > 0 {
 			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, match.MatchedBlocks)})
@@ -397,6 +417,7 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 	}
 	a.WeightedScore += b.WeightedScore
 	a.MatchedBlocks += b.MatchedBlocks
+	a.ConfirmedBlocks += b.ConfirmedBlocks
 	for tier, count := range b.BlocksByTier {
 		a.BlocksByTier[tier] += count
 	}

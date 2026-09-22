@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,6 +46,17 @@ type Config struct {
 	preRequestPlugins        []fwkrc.PreRequest
 	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
 	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+
+	// propagatePriority gates whether the director injects the resolved priority
+	// into the outbound request body. Off by default so the body is untouched.
+	propagatePriority bool
+}
+
+// WithPropagatePriority enables or disables injecting the resolved request
+// priority into the outbound request body.
+func (c *Config) WithPropagatePriority(propagatePriority bool) *Config {
+	c.propagatePriority = propagatePriority
+	return c
 }
 
 // WithRequestHeaderPlugins sets the given plugins as the RequestHeaderProcessor plugins.

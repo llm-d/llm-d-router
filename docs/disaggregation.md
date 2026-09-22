@@ -245,9 +245,6 @@ role: decode
 
 To accommodate this **without code changes**, you can configure the **EndpointPickerConfig** to use the generic `label-selector-filter` plugin instead of the hardcoded `encode-filter` / `prefill-filter` / `decode-filter`.
 
-> [!NOTE]
-> The previous filter type `by-label` is deprecated. Use `label-selector-filter` with standard Kubernetes label selector syntax instead.
-
 ### Configuration Examples
 
 #### P/D Configuration
@@ -255,7 +252,7 @@ To accommodate this **without code changes**, you can configure the **EndpointPi
 Below is a minimal `EndpointPickerConfig` for P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   # Prefill selection: match Pods with label role=prefill
@@ -311,7 +308,7 @@ schedulingProfiles:
 Below is an `EndpointPickerConfig` for full E/P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   # Encoding selection: match Pods with label role=encode
@@ -434,7 +431,7 @@ Deployments that do not declare any conditional-decode gate plugin still reject 
 A minimal coordinator-topology configuration:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: token-producer
@@ -599,7 +596,7 @@ When the request also carries the `x-kv-cache-source-host-port` header (set by
 the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod
 computing the prefix), the sidecar injects an additional `remote_kv_source` key
 so vLLM pulls that cached prefix over the P2P tier instead of recomputing it.
-Under disaggregation the prefiller leg carries `{"remote_decoder": {...},
+Under disaggregation the prefill request carries `{"remote_decoder": {...},
 "remote_kv_source": {"kv_request_id": <own id>, "remote_host": <source host>,
 "remote_port": <p2p-connector-port>}}` (the only supported multi-key
 combination); without a prefiller the decoder-only request carries
@@ -696,7 +693,7 @@ batches are unchanged.
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
-| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---

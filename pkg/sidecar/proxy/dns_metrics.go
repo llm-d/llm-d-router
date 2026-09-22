@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -104,40 +105,40 @@ func (s *Server) metricsAddr() string {
 }
 
 // maybeStartMetrics starts an opt-in Prometheus /metrics HTTP server when a
-// metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR),
-// registering the goroutine on grp so it shares the server lifecycle and shuts
-// down with ctx. When neither is set (the default) it is a no-op and the
-// counters simply go unscraped. A metrics server failure propagates to grp and
-// stops the sidecar: the failures reachable here (an unusable
-// --metrics-cert-dir, an address already in use) are startup misconfigurations,
-// so failing immediately surfaces them during rollout instead of leaving the
-// sidecar serving traffic with no /metrics endpoint.
+// metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR) or
+// a MetricsListener is injected, registering the goroutine on grp so it shares
+// the server lifecycle and shuts down with ctx. When neither is set (the
+// default) it is a no-op and the counters simply go unscraped. A metrics
+// server failure propagates to grp and stops the sidecar: the failures
+// reachable here (an unusable --metrics-cert-dir, an address already in use)
+// are startup misconfigurations, so failing immediately surfaces them during
+// rollout instead of leaving the sidecar serving traffic with no /metrics
+// endpoint.
 func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
-	addr := s.metricsAddr()
-	if addr == "" {
+	if s.MetricsListener == nil && s.metricsAddr() == "" {
 		return
 	}
 	grp.Go(func() error {
-		return s.serveMetrics(ctx, addr)
+		return s.serveMetrics(ctx)
 	})
 }
 
 // serveMetrics serves the shared controller-runtime metrics registry at
-// /metrics on addr until ctx is cancelled, then shuts the server down
-// gracefully. Registration of the moriio_dns_* counters is ensured here so they
-// are present even if no resolver has been constructed yet. The metrics server
-// uses HTTP by default. When --metrics-cert-dir is set, or metrics-cert-dir
-// is set in the sidecar YAML, it serves /metrics over HTTPS using tls.crt and
-// tls.key from that directory, with no fallback to HTTP. Startup and serving
-// errors are returned to maybeStartMetrics. The shutdown goroutine logs
-// shutdown errors.
-func (s *Server) serveMetrics(ctx context.Context, addr string) error {
+// /metrics until ctx is cancelled, then shuts the server down gracefully.
+// When MetricsListener is set, that listener is used; otherwise the address
+// from metricsAddr() is bound with net.Listen. Registration of the
+// moriio_dns_* counters is ensured here so they are present even if no
+// resolver has been constructed yet. The metrics server uses HTTP by default.
+// When --metrics-cert-dir is set, or metrics-cert-dir is set in the sidecar
+// YAML, it serves /metrics over HTTPS using tls.crt and tls.key from that
+// directory, with no fallback to HTTP. Startup and serving errors are
+// returned to maybeStartMetrics. The shutdown goroutine logs shutdown errors.
+func (s *Server) serveMetrics(ctx context.Context) error {
 	registerDNSMetrics()
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(crmetrics.Registry, promhttp.HandlerOpts{}))
 	server := &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -151,6 +152,15 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		server.TLSConfig = tlsConfig
 	}
 
+	ln := s.MetricsListener
+	if ln == nil {
+		var err error
+		ln, err = net.Listen("tcp", s.metricsAddr())
+		if err != nil {
+			return err
+		}
+	}
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -160,12 +170,12 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		}
 	}()
 
-	s.logger.Info("starting MoRI-IO metrics server", "addr", addr, "tls", serveTLS)
+	s.logger.Info("starting MoRI-IO metrics server", "addr", ln.Addr().String(), "tls", serveTLS)
 	var err error
 	if serveTLS {
-		err = server.ListenAndServeTLS("", "")
+		err = server.ServeTLS(ln, "", "")
 	} else {
-		err = server.ListenAndServe()
+		err = server.Serve(ln)
 	}
 	if err != nil && err != http.ErrServerClosed {
 		return err

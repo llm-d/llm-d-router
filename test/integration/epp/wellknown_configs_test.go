@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package epp
 import (
 	"testing"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 )
 
 // wellKnownConfigs are configs in the llm-d well-lit path guides.
@@ -27,11 +27,11 @@ import (
 // Failed tests indicate EPP regression, or that the config needs to be updated.
 var wellKnownConfigs = map[string]struct {
 	yaml            string
-	expectedPlugins []configapi.PluginSpec
+	expectedPlugins []configapiv1.PluginSpec
 }{
 	"optimized-baseline": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: queue-scorer
@@ -50,7 +50,7 @@ schedulingProfiles:
   - pluginRef: no-hit-lru-scorer
     weight: 2
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "no-hit-lru-scorer", Type: "no-hit-lru-scorer"},
@@ -63,7 +63,7 @@ schedulingProfiles:
 	},
 	"tiered-prefix-cache-cpu": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
@@ -92,7 +92,7 @@ schedulingProfiles:
   - pluginRef: cpu-prefix-cache-scorer
     weight: 1.0
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "token-producer", Type: "token-producer"},
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"}, // this one is auto configured.
 			{Name: "cpu-prefix-cache-producer", Type: "approx-prefix-cache-producer"},    // this one is configured manually.
@@ -104,7 +104,7 @@ schedulingProfiles:
 	},
 	"pd-disaggregation": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: disagg-profile-handler
@@ -139,11 +139,11 @@ schedulingProfiles:
     weight: 3
   - pluginRef: max-score-picker
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "always-disagg-pd-decider", Type: "always-disagg-pd-decider"},
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
-			{Name: "prefill-filter", Type: "by-label"},
-			{Name: "decode-filter", Type: "by-label"},
+			{Name: "prefill-filter", Type: "prefill-filter"},
+			{Name: "decode-filter", Type: "decode-filter"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
@@ -157,7 +157,7 @@ schedulingProfiles:
 	},
 	"wide-ep-lws": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: disagg-profile-handler
@@ -191,11 +191,11 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
   - pluginRef: max-score-picker
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "always-disagg-pd-decider", Type: "always-disagg-pd-decider"},
 			{Name: "disagg-profile-handler", Type: "disagg-profile-handler"},
-			{Name: "prefill-filter", Type: "by-label"},
-			{Name: "decode-filter", Type: "by-label"},
+			{Name: "prefill-filter", Type: "prefill-filter"},
+			{Name: "decode-filter", Type: "decode-filter"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
@@ -209,7 +209,7 @@ schedulingProfiles:
 	},
 	"wide-ep-lws-experimental-dp-aware": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
@@ -241,10 +241,10 @@ schedulingProfiles:
   - pluginRef: queue-scorer
     weight: 1
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "token-producer", Type: "token-producer"},
-			{Name: "prefill-filter", Type: "by-label"},
-			{Name: "decode-filter", Type: "by-label"},
+			{Name: "prefill-filter", Type: "prefill-filter"},
+			{Name: "decode-filter", Type: "decode-filter"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
 			// The producer is auto created because the prefix-cache-scorer consumes its data.
 			{Name: "approx-prefix-cache-producer", Type: "approx-prefix-cache-producer"},
@@ -255,7 +255,7 @@ schedulingProfiles:
 	},
 	"flow-control": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl
@@ -299,7 +299,7 @@ flowControl:
     fairnessPolicyRef: round-robin-fairness-policy
     orderingPolicyRef: fcfs-ordering-policy
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
@@ -314,7 +314,7 @@ flowControl:
 	},
 	"predicted-latency-slo": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: queue-scorer
@@ -351,7 +351,7 @@ schedulingProfiles:
   - pluginRef: latency-scorer
   - pluginRef: weighted-random-picker
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "queue-scorer", Type: "queue-scorer"},
 			{Name: "kv-cache-utilization-scorer", Type: "kv-cache-utilization-scorer"},
 			{Name: "prefix-cache-scorer", Type: "prefix-cache-scorer"},
@@ -372,7 +372,7 @@ schedulingProfiles:
 	},
 	"payload-agnostic": {
 		yaml: `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: passthrough-parser
@@ -389,7 +389,7 @@ schedulingProfiles:
   - pluginRef: session-affinity-scorer
     weight: 1
 `,
-		expectedPlugins: []configapi.PluginSpec{
+		expectedPlugins: []configapiv1.PluginSpec{
 			{Name: "passthrough-parser", Type: "passthrough-parser"},
 			{Name: "active-request-scorer", Type: "active-request-scorer"},
 			{Name: "session-affinity-scorer", Type: "session-affinity-scorer"},

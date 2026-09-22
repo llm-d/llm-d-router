@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,28 +42,17 @@ func TestRecordPrefixCacheMetrics(t *testing.T) {
 	recordPrefixCacheMatch("test-plugin", "test-type", 10, 20)
 	recordPrefixCacheMatch("test-plugin", "test-type", 0, 0)
 
-	require.Equal(t, float64(4096), testutil.ToFloat64(prefixCacheSize.WithLabelValues()))
 	require.Equal(t, float64(4096), testutil.ToFloat64(llmdPrefixCacheSize.WithLabelValues("test-plugin", "test-type")))
 
-	hitRatio, err := getHistogram(prefixCacheHitRatio)
+	hitRatio, err := getHistogram(llmdPrefixCacheHitRatio, "test-plugin", "test-type")
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), hitRatio.GetSampleCount())
 	require.Equal(t, 0.5, hitRatio.GetSampleSum())
 
-	llmdHitRatio, err := getHistogram(llmdPrefixCacheHitRatio, "test-plugin", "test-type")
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), llmdHitRatio.GetSampleCount())
-	require.Equal(t, 0.5, llmdHitRatio.GetSampleSum())
-
-	hitLength, err := getHistogram(prefixCacheHitLength)
+	hitLength, err := getHistogram(llmdPrefixCacheHitLength, "test-plugin", "test-type")
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), hitLength.GetSampleCount())
 	require.Equal(t, float64(10), hitLength.GetSampleSum())
-
-	llmdHitLength, err := getHistogram(llmdPrefixCacheHitLength, "test-plugin", "test-type")
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), llmdHitLength.GetSampleCount())
-	require.Equal(t, float64(10), llmdHitLength.GetSampleSum())
 }
 
 func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {
@@ -79,10 +68,7 @@ func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*d
 }
 
 func resetMetrics() {
-	prefixCacheSize.Reset()
 	llmdPrefixCacheSize.Reset()
-	prefixCacheHitRatio.Reset()
 	llmdPrefixCacheHitRatio.Reset()
-	prefixCacheHitLength.Reset()
 	llmdPrefixCacheHitLength.Reset()
 }

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,7 +51,7 @@ import (
 
 // ExtProcServerRunner provides methods to manage an external process server.
 type ExtProcServerRunner struct {
-	GrpcPort int
+	GrpcPort uint16
 	// GrpcListener is an optional pre-bound listener for the ext_proc server.
 	// When set, GrpcPort is ignored. Reserving the port in advance of this
 	// runnable starting closes the window in which another process can take a

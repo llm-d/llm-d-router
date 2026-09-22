@@ -97,14 +97,9 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		t.Fatalf("expected Prefer: if-available header, got %q", receivedPreferHeader)
 	}
 
-	// Verify tokens field is present for chat completions format
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions conditional-decode request")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 3 {
-		t.Fatalf("expected 3 token_ids in tokens field, got %v", tokenIDs)
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions conditional-decode request should not have a tokens field")
 	}
 
 	result := recorder.Result()
@@ -121,7 +116,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 // Generate and Responses both resolve to the generate format, whose body is
 // forwarded without a tokens or prompt rewrite.
 func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
-	for _, path := range []string{reqcommon.PathGenerate, reqcommon.PathResponses} {
+	for _, path := range []string{reqcommon.PathVLLMGenerate, reqcommon.PathResponses} {
 		t.Run(path, func(t *testing.T) {
 			var receivedBody map[string]any
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

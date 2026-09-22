@@ -74,7 +74,12 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	return &PrefillStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn, ec: ecConn}, nil
+	return &PrefillStep{
+		useOpenAIFormat: useOpenAI,
+		gwClient:        gwClient,
+		kv:              kvConn,
+		ec:              ecConn,
+	}, nil
 }
 
 func (s *PrefillStep) Name() string { return PrefillStepName }
@@ -82,10 +87,8 @@ func (s *PrefillStep) Name() string { return PrefillStepName }
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
-	features := buildMMFeatures(reqCtx.MultimodalEntries, true)
-
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	body, err := s.buildPrefillBody(ctx, reqCtx, features, format)
+	body, err := s.buildPrefillBody(ctx, reqCtx, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)
 	}
@@ -125,12 +128,21 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
+	if len(reqCtx.KVTransferParams) == 0 && s.kv.Name() == kv.NIXL {
+		// kv-nixl always requests a remote-decode handoff, so missing
+		// kv_transfer_params means decode will recompute the whole prompt.
+		// Older engines (< v0.29.0) silently drop top-level transfer params
+		// on this route, which is the most common cause.
+		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
+			"kvConnector", s.kv.Name(), "path", path)
+	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
 }
 
-func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, features map[string]any, format reqcommon.APIType) (map[string]any, error) {
+func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
 	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err
@@ -141,17 +153,6 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeChatCompletions:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
-		tokens := map[string]any{
-			"token_ids": reqCtx.TokenIDs,
-		}
-		if features != nil {
-			tokensFeatures := map[string]any{
-				"mm_hashes":       features["mm_hashes"],
-				"mm_placeholders": features["mm_placeholders"],
-			}
-			tokens["features"] = tokensFeatures
-		}
-		body["tokens"] = tokens
 		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
@@ -170,7 +171,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		if features != nil {
+		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features
 		}
 		if len(ecParams) > 0 {
@@ -178,17 +179,19 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		return body, nil
 
-	case reqcommon.APITypeGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
+	case reqcommon.APITypeVLLMGenerate:
 		body := map[string]any{
-			"request_id": reqCtx.RequestID,
-			"token_ids":  reqCtx.TokenIDs,
-			"model":      reqCtx.Model,
+			"request_id":                    reqCtx.RequestID,
+			"token_ids":                     reqCtx.TokenIDs,
+			"model":                         reqCtx.Model,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
-		setGenerateTransferParams(reqcommon.CapSingleToken(body, format), kvParams, ecParams)
-		if features != nil {
+		reqcommon.CapSingleToken(body, format)
+		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features
+		}
+		if len(ecParams) > 0 {
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 

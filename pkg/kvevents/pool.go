@@ -37,7 +37,7 @@ import (
 
 const (
 	defaultEventSourceDeviceTier = "gpu"
-	defaultPodSelector           = "llm-d.ai/inference-serving=true"
+	defaultPodSelector           = ""
 )
 
 // normalizeDeviceTier lowercases an event's device tier and defaults an empty
@@ -116,6 +116,7 @@ type Config struct {
 // PodDiscoveryConfig holds configuration for the Kubernetes pod reconciler.
 type PodDiscoveryConfig struct {
 	// PodLabelSelector is a label selector string for filtering which pods to watch.
+	// Empty matches every pod.
 	// Example: "app=vllm" or "app=vllm,tier=gpu"
 	PodLabelSelector string `json:"podLabelSelector"`
 	// PodNamespace limits the reconciler to watch pods in a specific namespace.
@@ -194,9 +195,12 @@ type Pool struct {
 // Registration is idempotent (guarded by a sync.Once).
 func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProcessor,
 	adapter EngineAdapter,
-) *Pool {
+) (*Pool, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
+	}
+	if cfg.Concurrency <= 0 {
+		return nil, fmt.Errorf("kvEventsConfig.concurrency must be positive, got %d", cfg.Concurrency)
 	}
 
 	p := &Pool{
@@ -216,7 +220,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 
 	metrics.Register()
 
-	return p
+	return p, nil
 }
 
 // Span start options are built once. Passing them variadically at each call
@@ -619,8 +623,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			var extraFeatures []*kvblock.BlockExtraFeatures
 			if ev.ExtraKeys != nil {
+				var loraName string
+				if ev.LoraName != nil {
+					loraName = *ev.LoraName
+				}
 				var err error
-				extraFeatures, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys)
+				extraFeatures, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys, loraName)
 				if err != nil {
 					debugLogger.Error(err, "Failed to parse extra keys",
 						"podIdentifier", podIdentifier)

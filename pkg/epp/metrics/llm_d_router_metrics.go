@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -410,6 +410,21 @@ var (
 				compbasemetrics.ALPHA),
 		},
 		[]string{"detector"},
+	)
+
+	llmdFlowControlDetectorSaturation = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_detector_saturation",
+			Help: metricsutil.HelpMsgWithStability(
+				"Saturation signal reported by an individual saturation detector, labeled by the detector reference "+
+					"name and by the pipeline stage ('prefill' or 'decode') whose endpoints were evaluated. Recorded by "+
+					"the max composite saturation detector for each of its children in scope on every evaluation, so operators "+
+					"can tell which signal (e.g. concurrency vs queue depth) is driving flow_control_pool_saturation "+
+					"in each stage. The stage label is empty when the detector is evaluated without stage partitioning.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"detector", "stage"},
 	)
 
 	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(

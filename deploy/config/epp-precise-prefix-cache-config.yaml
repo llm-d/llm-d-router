@@ -1,6 +1,6 @@
 # Sample EPP config: split precise-prefix-cache pipeline
 #   token-producer -> precise-prefix-cache-producer -> prefix-cache-scorer
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: token-producer

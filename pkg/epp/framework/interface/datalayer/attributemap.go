@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -69,10 +70,12 @@ func NewAttributes() AttributeMap {
 	return &Attributes{}
 }
 
-// Put adds or updates an attribute in the map.
+// Put adds or updates an attribute in the map. The value is cloned before
+// storage so that a caller mutating what it passed in after Put returns
+// cannot affect the stored copy.
 func (a *Attributes) Put(key fwkplugin.DataKey, value Cloneable) {
 	if value != nil {
-		a.data.Store(key, value) // TODO: Clone into map to ensure isolation
+		a.data.Store(key, value.Clone())
 	}
 }
 

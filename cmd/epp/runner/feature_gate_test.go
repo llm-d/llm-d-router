@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ func TestHAPopulateNonLeaderDatastoreFeatureGate(t *testing.T) {
 
 	t.Run("disabled via config", func(t *testing.T) {
 		opts := runserver.NewOptions()
-		opts.ConfigText = `apiVersion: llm-d.ai/v1alpha1
+		opts.ConfigText = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - haPopulateNonLeaderDatastore=false
@@ -76,14 +76,14 @@ func TestFlowControlFeatureGateAdmissionControlWiring(t *testing.T) {
 	}{
 		{
 			name: "no featureGates stanza follows the registered default",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 `,
 			wantEnabled: nil,
 		},
 		{
 			name: "flowControl gate enabled wires the flow control admission controller",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl
@@ -92,7 +92,7 @@ featureGates:
 		},
 		{
 			name: "flowControl=false restores the legacy admission controller",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl=false
@@ -101,7 +101,7 @@ featureGates:
 		},
 		{
 			name: "flowControl gate enabled via flag without a featureGates stanza",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 `,
 			extraGates:  []string{flowcontrol.FeatureGate},
@@ -109,7 +109,7 @@ kind: EndpointPickerConfig
 		},
 		{
 			name: "flag overrides the config's featureGates stanza",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl=false
@@ -127,7 +127,7 @@ featureGates:
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
 			opts.FeatureGates = tc.extraGates
-			opts.PoolName = "test-pool"
+			opts.PoolName = testPoolName
 
 			r := NewRunner()
 			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)

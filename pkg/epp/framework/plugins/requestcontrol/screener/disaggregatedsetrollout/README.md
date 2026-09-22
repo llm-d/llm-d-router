@@ -145,10 +145,11 @@ authentication, and TLS can change this measurement.
 ### Separate Prefill and Decode EPPs (P/D)
 
 Prefill first chooses a covered revision and stamps it into the
-`x-llm-d-disagg-revision` response header. The coordinator must copy that header into
-the decode request. Decode treats it as a strict constraint and never calls
-`GetOrSet`, so the prefill and decode EPPs do not need to share a
-`CrossReplicaSyncer`:
+`x-llm-d-disagg-revision` response header. The coordinator forwards that default
+header into the decode request. If `revisionHeaderName` is customized, add the
+custom name to the coordinator's `forward_response_headers`. Decode treats the
+header as a strict constraint and never calls `GetOrSet`, so the prefill and
+decode EPPs do not need to share a `CrossReplicaSyncer`:
 
 ```text
 prefill request -> choose revision B -> x-llm-d-disagg-revision: B
@@ -280,7 +281,7 @@ header. Other label affinities, such as slice affinity, belong in a
 ## Configuration
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: disaggregatedset-rollout-screener

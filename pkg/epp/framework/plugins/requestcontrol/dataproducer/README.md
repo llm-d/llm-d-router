@@ -10,6 +10,29 @@ Producers may also implement additional lifecycle hooks:
 - `PreRequest` — called after a routing decision is made; used to persist bookkeeping state (e.g., update a cache index, increment an in-flight counter).
 - `ResponseHeader` / `ResponseBody` — called as response data arrives; used to collect training data or release in-flight counters.
 
+## Choosing between ProducerPlugin and DataProducer
+
+[`plugin.ProducerPlugin`](../../../interface/plugin/plugins.go) declares the data keys a plugin writes, through `Produces()`. [`requestcontrol.DataProducer`](../../../interface/requestcontrol/plugins.go) embeds it and adds `Produce()`, which the director calls on every request.
+
+The framework reads `Produces()` and `Consumes()` at startup ([`data_graph.go`](../../../../datalayer/data_graph.go)). Startup fails when a producer and a consumer of the same key declare different types, or when the producer belongs to a later layer (flow control, request control, scheduling) than its consumer. A `Required` key that no configured plugin produces gets the default producer registered for that key; with no registered default, startup fails with `ErrNoDefaultProducer`.
+
+The same declarations limit the endpoint attributes a plugin reaches at request time ([`endpoint_scope.go`](../../../../datalayer/endpoint_scope.go)). A plugin writes only the keys in its `Produces()` and reads only the keys in its `Consumes()` or `Produces()`. A write to an undeclared key is dropped and returned as that producer's error, which the director logs. A read of an undeclared key finds nothing. A `DataProducer` with an empty `Produces()` writes no endpoint attributes and adds no DAG edges as a producer; it still reads the keys in its `Consumes()`.
+
+A plugin that only extracts data from model servers, such as the [models extractor](../../datalayer/extractor/models/extractor.go), implements `ProducerPlugin` and a datalayer extractor interface, without `DataProducer`. Extractors write to the datastore endpoint directly, outside the request-time scope. The [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc describes extractors.
+
+`Produce()` runs after `Screener` plugins and before `Admitter` plugins. Each request gets its own copy of every candidate endpoint's attribute map, so a value a producer puts on an endpoint is visible to that request only. The copy is of the map entries: a `DynamicAttribute` entry keeps its getter and resolves the current value on every `Get` ([`attributemap.go`](../../../interface/datalayer/attributemap.go)). A value about the request as a whole goes in `InferenceRequest.PutAttribute`, with its key still declared in `Produces()` so that consumers are ordered after the producer, as in [`sessionid`](sessionid/producer.go).
+
+Per-endpoint state shared across requests lives in the plugin. In [`inflightload`](inflightload/producer.go), `Extract` (an `EndpointExtractor`) puts a `DynamicAttribute` over the plugin's counters on each datastore endpoint, `PreRequest` and `ResponseBody` update the counters, and `Produce` writes only the per-request `UncachedRequestTokens`.
+
+The DAG order applies to every request-control hook (`PreRequest`, `ResponseBody` and the rest). Plugins outside the DAG run after the ordered ones, sorted by name ([`request_control_config.go`](../../../../requestcontrol/request_control_config.go)).
+
+| What the data is | What to implement |
+|---|---|
+| Data scraped from model servers | `ProducerPlugin` with a datalayer extractor, as in the models extractor |
+| A value per candidate endpoint for this request | `DataProducer` that puts the value on the endpoints, as in `approx-prefix-cache-producer` |
+| A value for the request as a whole | `DataProducer` that calls `PutAttribute`, as in `session-id-producer` |
+| Per-endpoint state shared across requests | `EndpointExtractor` with a `DynamicAttribute` over state updated in `PreRequest` and `ResponseBody`, as in `inflight-load-producer` |
+
 ## Available Producers
 
 | Plugin type | Package | Produces | Summary |
@@ -23,7 +46,7 @@ Producers may also implement additional lifecycle hooks:
 | `latency-observer-producer-hub` | [`latencyobserver`](latencyobserver/) | `TTFTPercentiles` | Measures each request's actual time-to-first-token and publishes per-endpoint percentile anchors for `latency-observation-scorer-hub`. Needs nothing from the endpoint but its response. |
 | `session-id-producer` | [`sessionid`](sessionid/) | `SessionID` | Extracts a session identifier from a request header or cookie and publishes it for affinity-aware plugins. |
 | `mm-embeddings-cache-producer` | [`multimodal`](multimodal/) | `EncoderCacheMatchInfo` | Tracks which pods recently processed each multimodal input hash and scores encoder-cache affinity. |
-| `p2p-source-producer` | [`p2psource`](p2psource/) | request attribute only | Sets the `x-kv-cache-source-host-port` header to the candidate holding the most cached prefix tokens when it out-caches the pod computing the prefix, for P2P KV pulls. |
+| `p2p-source-producer` | [`p2psource`](p2psource/) | `ReusablePrefixTokens` | Samples a P2P source, publishes a reusable-prefix floor for scheduling, and sets the source header after the computing pod is selected. |
 
 ## Plugin ordering and dependencies
 
@@ -33,7 +56,8 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 - `burst-prefix-cache-producer` **requires** `token-producer` upstream (it consumes `TokenizedPrompt`).
 - `mm-embeddings-cache-producer` **optionally** consumes `TokenizedPrompt`; configure `token-producer` first when multimodal features need tokenizer-derived hashes.
 - `inflight-load-producer` **optionally** consumes `PrefixCacheMatchInfo` from an approx or precise prefix producer; prefix-discounting is applied automatically when the attribute is present.
-- `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error) — set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
+- `p2p-source-producer` **requires** `PrefixCacheMatchInfo` from a prefix producer; set `prefixMatchInfoProducerName` to select a non-default producer instance. Omitting it binds the default key, which auto-wires the approximate producer (no error). Set it explicitly for precise-only deployments. Set `prefillProfileName` to match a renamed `disagg-profile-handler` prefill profile.
+- `context-length-aware` can require the name-bound `ReusablePrefixTokens` output by setting `reusableTokensProducerName` to the `p2p-source-producer` instance name. See [P2P cache-aware prefill work](../../scheduling/scorer/contextlengthaware/README.md#p2p-cache-aware-prefill-work) for the profile and label requirements.
 - `predicted-latency-producer` **optionally** consumes `PrefixCacheMatchInfo`; set `prefixMatchInfoProducerName` in its config to the name of the prefix producer instance.
 - `latency-observer-producer-hub` **requires** `InFlightLoad`, so `inflight-load-producer` is ordered ahead of it and auto-created when absent. It must itself be listed under `dataLayer.sources`; auto-creation from `latency-observation-scorer-hub`'s required data key only wires the attribute, not the periodic tick that publishes it. See the [producer README](latencyobserver/README.md#configuration).
 

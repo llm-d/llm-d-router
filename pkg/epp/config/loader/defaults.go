@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -44,17 +45,17 @@ const DefaultScorerWeight = 1.0
 
 var defaultScorerWeight = DefaultScorerWeight
 
-func loadDefaultConfig() *configapi.EndpointPickerConfig {
+func loadDefaultConfig() *configapiv1.EndpointPickerConfig {
 	queueScorerWeight := 2.0
 	kvCacheUtilizationScorerWeight := 2.0
 	prefixCacheScorerWeight := 3.0
-	return &configapi.EndpointPickerConfig{
+	return &configapiv1.EndpointPickerConfig{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: configapi.GroupVersion.String(),
+			APIVersion: configapiv1.GroupVersion.String(),
 			Kind:       "EndpointPickerConfig",
 		},
 		FeatureGates: []string{}, // Data layer is now enabled by default (no feature gate needed)
-		Plugins: []configapi.PluginSpec{
+		Plugins: []configapiv1.PluginSpec{
 			{
 				Type: queuedepth.QueueScorerType,
 			},
@@ -71,10 +72,10 @@ func loadDefaultConfig() *configapi.EndpointPickerConfig {
 				Type: extractormetrics.MetricsExtractorType,
 			},
 		},
-		SchedulingProfiles: []configapi.SchedulingProfile{
+		SchedulingProfiles: []configapiv1.SchedulingProfile{
 			{
 				Name: "default",
-				Plugins: []configapi.SchedulingPlugin{
+				Plugins: []configapiv1.SchedulingPlugin{
 					{
 						PluginRef: queuedepth.QueueScorerType,
 						Weight:    &queueScorerWeight,
@@ -90,11 +91,11 @@ func loadDefaultConfig() *configapi.EndpointPickerConfig {
 				},
 			},
 		},
-		DataLayer: &configapi.DataLayerConfig{
-			Sources: []configapi.DataLayerSource{
+		DataLayer: &configapiv1.DataLayerConfig{
+			Sources: []configapiv1.DataLayerSource{
 				{
 					PluginRef: sourcemetrics.MetricsDataSourceType,
-					Extractors: []configapi.DataLayerExtractor{
+					Extractors: []configapiv1.DataLayerExtractor{
 						{PluginRef: extractormetrics.MetricsExtractorType},
 					},
 				},
@@ -106,7 +107,7 @@ func loadDefaultConfig() *configapi.EndpointPickerConfig {
 // applyStaticDefaults sanitizes the configuration object before plugin instantiation.
 // It handles "Static" defaults: simple structural changes to the API object that do not require access to the plugin
 // registry.
-func applyStaticDefaults(cfg *configapi.EndpointPickerConfig) {
+func applyStaticDefaults(cfg *configapiv1.EndpointPickerConfig) {
 	for idx, pluginConfig := range cfg.Plugins {
 		if pluginConfig.Name == "" {
 			cfg.Plugins[idx].Name = pluginConfig.Type
@@ -114,14 +115,14 @@ func applyStaticDefaults(cfg *configapi.EndpointPickerConfig) {
 	}
 
 	if cfg.FeatureGates == nil {
-		cfg.FeatureGates = configapi.FeatureGates{}
+		cfg.FeatureGates = configapiv1.FeatureGates{}
 	}
 }
 
 // applySystemDefaults injects required components that were omitted from the config.
 // It handles "System" defaults: logic that requires inspecting instantiated plugins (via the handle) to ensure the
 // system graph is complete.
-func applySystemDefaults(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle) error {
+func applySystemDefaults(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle) error {
 	allPlugins := handle.GetAllPluginsWithNames()
 	if err := ensureSchedulingLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply scheduling system defaults: %w", err)
@@ -145,20 +146,20 @@ func applySystemDefaults(cfg *configapi.EndpointPickerConfig, handle fwkplugin.H
 // It ensures a valid profile exists and injects missing architectural components (like Pickers and ProfileHandlers) if
 // they are not explicitly configured.
 func ensureSchedulingLayer(
-	cfg *configapi.EndpointPickerConfig,
+	cfg *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
 	if len(cfg.SchedulingProfiles) == 0 {
-		defaultProfile := configapi.SchedulingProfile{Name: "default"}
+		defaultProfile := configapiv1.SchedulingProfile{Name: "default"}
 		// Auto-populate the default profile with all Filter, Scorer, and Picker plugins found.
 		for name, p := range allPlugins {
 			switch p.(type) {
 			case fwksched.Filter, fwksched.Scorer, fwksched.Picker:
-				defaultProfile.Plugins = append(defaultProfile.Plugins, configapi.SchedulingPlugin{PluginRef: name})
+				defaultProfile.Plugins = append(defaultProfile.Plugins, configapiv1.SchedulingPlugin{PluginRef: name})
 			}
 		}
-		cfg.SchedulingProfiles = []configapi.SchedulingProfile{defaultProfile}
+		cfg.SchedulingProfiles = []configapiv1.SchedulingProfile{defaultProfile}
 	}
 
 	// If there is only 1 profile and no handler is explicitly configured, use the SingleProfileHandler.
@@ -210,7 +211,7 @@ func ensureSchedulingLayer(
 		if !hasPicker {
 			cfg.SchedulingProfiles[i].Plugins = append(
 				cfg.SchedulingProfiles[i].Plugins,
-				configapi.SchedulingPlugin{PluginRef: maxScorePickerName},
+				configapiv1.SchedulingPlugin{PluginRef: maxScorePickerName},
 			)
 		}
 	}
@@ -219,7 +220,7 @@ func ensureSchedulingLayer(
 }
 
 // ensureFlowControlLayer guarantees that the flow control subsystem is structurally complete.
-func ensureFlowControlLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
+func ensureFlowControlLayer(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
 	if _, ok := allPlugins[registry.DefaultOrderingPolicyRef]; !ok {
 		if err := registerDefaultPlugin(cfg, handle, registry.DefaultOrderingPolicyRef); err != nil {
 			return err
@@ -245,15 +246,15 @@ func ensureFlowControlLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugi
 // passthrough parser is last because the registry stops at the first parser
 // claiming no paths.
 func ensureParsers(
-	cfg *configapi.EndpointPickerConfig,
+	cfg *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
 	if cfg.RequestHandler == nil {
-		cfg.RequestHandler = &configapi.RequestHandlerConfig{}
+		cfg.RequestHandler = &configapiv1.RequestHandlerConfig{}
 	}
 	if len(cfg.RequestHandler.Parsers) == 0 {
-		cfg.RequestHandler.Parsers = []configapi.ParserConfig{
+		cfg.RequestHandler.Parsers = []configapiv1.ParserConfig{
 			{PluginRef: openai.OpenAIParserType},
 			{PluginRef: anthropic.AnthropicParserType},
 			{PluginRef: vllmhttp.VllmHTTPParserType},
@@ -273,16 +274,16 @@ func ensureParsers(
 // ensureSaturationDetector guarantees that saturation detector is configured.
 // If the saturation detector is not set, the utilization detector is configured by default.
 func ensureSaturationDetector(
-	cfg *configapi.EndpointPickerConfig,
+	cfg *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
 	if cfg.FlowControl == nil {
-		cfg.FlowControl = &configapi.FlowControlConfig{}
+		cfg.FlowControl = &configapiv1.FlowControlConfig{}
 	}
 	sdConfig := cfg.FlowControl.SaturationDetector
 	if sdConfig == nil {
-		sdConfig = &configapi.SaturationDetectorConfig{
+		sdConfig = &configapiv1.SaturationDetectorConfig{
 			PluginRef: utilization.UtilizationDetectorType,
 		}
 		cfg.FlowControl.SaturationDetector = sdConfig
@@ -307,7 +308,7 @@ func ensureSaturationDetector(
 	return nil
 }
 
-func injectFilterIntoProfiles(profiles []configapi.SchedulingProfile, pluginRef string) {
+func injectFilterIntoProfiles(profiles []configapiv1.SchedulingProfile, pluginRef string) {
 	for i := range profiles {
 		found := false
 		for _, p := range profiles[i].Plugins {
@@ -317,7 +318,7 @@ func injectFilterIntoProfiles(profiles []configapi.SchedulingProfile, pluginRef 
 			}
 		}
 		if !found {
-			profiles[i].Plugins = append(profiles[i].Plugins, configapi.SchedulingPlugin{PluginRef: pluginRef})
+			profiles[i].Plugins = append(profiles[i].Plugins, configapiv1.SchedulingPlugin{PluginRef: pluginRef})
 		}
 	}
 }
@@ -325,7 +326,7 @@ func injectFilterIntoProfiles(profiles []configapi.SchedulingProfile, pluginRef 
 // ensureDataLayer additively injects the default metrics source and extractor unless opted out.
 // Unlike other ensureXxx functions, it checks for explicit opt-out via InjectDefaults and avoids
 // double-injection when the metrics source is already present in a user-supplied config.
-func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
+func ensureDataLayer(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil
 	}
@@ -345,11 +346,11 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	}
 
 	if cfg.DataLayer == nil {
-		cfg.DataLayer = &configapi.DataLayerConfig{}
+		cfg.DataLayer = &configapiv1.DataLayerConfig{}
 	}
-	cfg.DataLayer.Sources = append(cfg.DataLayer.Sources, configapi.DataLayerSource{
+	cfg.DataLayer.Sources = append(cfg.DataLayer.Sources, configapiv1.DataLayerSource{
 		PluginRef: sourcemetrics.MetricsDataSourceType,
-		Extractors: []configapi.DataLayerExtractor{{
+		Extractors: []configapiv1.DataLayerExtractor{{
 			PluginRef: extractormetrics.MetricsExtractorType,
 		}},
 	})
@@ -357,7 +358,7 @@ func ensureDataLayer(cfg *configapi.EndpointPickerConfig, handle fwkplugin.Handl
 	return nil
 }
 
-func hasSourceOfType(dl *configapi.DataLayerConfig, handle fwkplugin.Handle, pluginType string) bool {
+func hasSourceOfType(dl *configapiv1.DataLayerConfig, handle fwkplugin.Handle, pluginType string) bool {
 	for _, s := range dl.Sources {
 		if p := handle.Plugin(s.PluginRef); p != nil && p.TypedName().Type == pluginType {
 			return true
@@ -369,7 +370,7 @@ func hasSourceOfType(dl *configapi.DataLayerConfig, handle fwkplugin.Handle, plu
 // registerDefaultPlugin instantiates a plugin with empty configuration (defaults) and adds it to both the handle and
 // the config spec.
 func registerDefaultPlugin(
-	cfg *configapi.EndpointPickerConfig,
+	cfg *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	pluginType string,
 ) error {
@@ -385,7 +386,7 @@ func registerDefaultPlugin(
 	}
 
 	handle.AddPlugin(name, plugin)
-	cfg.Plugins = append(cfg.Plugins, configapi.PluginSpec{
+	cfg.Plugins = append(cfg.Plugins, configapiv1.PluginSpec{
 		Name: name,
 		Type: pluginType,
 	})

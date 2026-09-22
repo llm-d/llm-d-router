@@ -2,7 +2,7 @@
 # affinity to the prefill profile: the prefill pick is filtered and scored by
 # proximity to the decode pod already selected, so KV-cache transfer prefers
 # NVLink (same host) over the network (same rack, zone, or region).
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer

@@ -33,7 +33,9 @@ The goals the design serves:
   phase at a time, or let a worker serve a request directly when it already holds the
   needed state.
 - Tokenize the prompt once (in the render step) and reuse the token IDs across encode,
-  prefill, and decode, so workers never re-tokenize.
+  prefill, and decode in the tokens-in (`/inference/v1/generate`) format, so workers
+  never re-tokenize; the OpenAI-format (`/v1/chat/completions`) fallback re-tokenizes
+  on each worker instead.
 - Tokens-in / tokens-out operation: steps can exchange token IDs directly instead of
   raw text, cutting per-step tokenization to a single render pass. This is also
   beneficial for reinforcement learning (RL), where the training loop works in token
@@ -219,7 +221,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi HTTP server. Accepts `/v1/chat/completions` and `/v1/completions`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_coordinator` is false. Accepts `/v1/chat/completions`, `/v1/completions` and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
@@ -261,15 +263,24 @@ steps read and mutate. The load-bearing fields:
 | `Body` | server (parsed JSON) | every step; mutated in place as the request is enriched |
 | `OriginalPath`, `OriginalHeaders`, `OriginalBody` | server | format detection, header forwarding |
 | `Model`, `Stream` | server | request construction, response handling |
+| `RevisionDecisionID` | pipeline | EPP revision coordination across parallel and sequential phase requests |
 | `TokenIDs` | `render` | `conditional-decode`, `encode`, `prefill`, `decode` |
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`.
+it as the base header set, then stamp the request ID and `EPP-Profile`. The
+pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
+request. Any client-provided value under that name is discarded.
+The pipeline can allowlist response headers with `forward_response_headers`;
+values returned by any response-producing step are stored on the request context
+for later requests. A fan-out step selects the most frequent value for each
+configured header independently. Configured names are reserved for this relay,
+so client-provided values are not sent upstream.
 
 ### EPP-Profile routing
 
@@ -301,7 +312,7 @@ each EPP call is single-phase scheduling.
 | `prefill` | `prefill` | Selects a prefill pod. |
 | `encode` | `encode` | Load-balances across encoder pods. |
 
-Each profile filters the shared pod pool down to its own role with a `by-label` role
+Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
 [deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
@@ -312,6 +323,42 @@ selection swaps in `header-profile-handler` for that one plugin.
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
+
+### Cross-phase scheduling headers
+
+An EPP plugin can stamp scheduling metadata from a selected endpoint onto its
+response. The coordinator forwards `x-llm-d-disagg-revision` by default. Set
+`forward_response_headers` to replace that default and carry selected headers
+through every later phase:
+
+```yaml
+pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
+```
+
+Only listed response headers are carried, and client-provided values for those
+names are discarded. Encode requests run in parallel. After the fan-out completes,
+each response contributes its first value for each configured header. The most
+frequent value is forwarded to later phases; missing values are ignored, and ties
+use the value from the lowest encode index. This lets prefill prefer the slice that
+handled the largest number of encoded items. A later single-response phase can
+replace the carried value, so decode can prefer the prefill slice.
+
+Aggregation happens after the fan-out and cannot constrain sibling encode requests.
+Strict constraints shared by those requests, such as revision selection, require
+coordination before the fan-out begins.
+
+### Revision coordination
+
+The coordinator sends the same revision decision ID to every phase. A
+revision-aware EPP plugin can use an atomic cross-replica operation to choose
+one revision for parallel encode requests and reuse it for prefill and decode.
+The decision ID is independent of `x-request-id`, so a client cannot pin a
+revision by supplying a request ID. The default response-header forwarding then
+carries the selected `x-llm-d-disagg-revision` to later phases as a strict
+constraint.
 
 ### Decode disaggregation deciders
 
@@ -625,7 +672,7 @@ commented with their defaults. The loader is [pkg/coordinator/config/config.go](
 ```yaml
 log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v overrides
 
-server:               # inbound HTTP listener
+server:               # inbound listener; TLS unless secure_coordinator is false
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
@@ -698,9 +745,12 @@ addressed.
 
 #### Format tradeoff
 
-The choice trades request size against worker recompute, and matters only for
-multimodal requests. In both formats the added `tokens` / `token_ids` field prevents
-re-tokenization on the worker; the difference is how the image is carried.
+The choice trades request size against worker recompute. The recompute half applies
+to every request, multimodal or not: in the generate format, the added `token_ids`
+field prevents re-tokenization on the worker; the chat-completions format carries no
+equivalent field, so the worker re-tokenizes there regardless. The request-size half
+matters only for multimodal requests, where the two formats differ in how the image
+is carried.
 
 - `/v1/chat/completions` carries the image as a raw `data:` URL. The body stays small,
   but the worker re-runs the vision preprocessor from the image bytes.

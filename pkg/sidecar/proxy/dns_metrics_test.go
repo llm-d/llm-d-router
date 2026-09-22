@@ -33,6 +33,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
+
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
 func writeSelfSignedCert(t *testing.T, dir string) {
@@ -50,26 +52,26 @@ func writeSelfSignedCert(t *testing.T, dir string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"), keyPEM, 0o600))
 }
 
-func freeAddr(t *testing.T) string {
+func reserveListener(t *testing.T) net.Listener {
 	t.Helper()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln
 }
 
 func TestServeMetrics_PlainHTTP(t *testing.T) {
-	s := &Server{logger: logr.Discard()}
-	addr := freeAddr(t)
+	ln := reserveListener(t)
+	s := &Server{logger: logr.Discard(), MetricsListener: ln}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.serveMetrics(ctx, addr) }()
+	go func() { errCh <- s.serveMetrics(ctx) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
+	addr := ln.Addr().String()
 	require.Eventually(t, func() bool {
 		resp, err := client.Get("http://" + addr + "/metrics")
 		if err != nil {
@@ -77,27 +79,72 @@ func TestServeMetrics_PlainHTTP(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
-	}, 2*time.Second, 20*time.Millisecond, "expected plaintext /metrics to become reachable")
+	}, 2*time.Second, 20*time.Millisecond, "expected plaintext /metrics on the reserved listener")
 
 	cancel()
 	require.NoError(t, <-errCh)
+}
+
+// TestServeMetrics_BindsMetricsPort covers the nil MetricsListener path.
+// serveMetrics calls net.Listen on Config.MetricsPort, so the reserved
+// listener is closed first. That free-then-bind window is required to
+// exercise the fallback.
+func TestServeMetrics_BindsMetricsPort(t *testing.T) {
+	held, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	port := held.Addr().(*net.TCPAddr).Port
+	require.NoError(t, held.Close())
+
+	s := &Server{logger: logr.Discard(), config: Config{MetricsPort: port}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.serveMetrics(ctx) }()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	require.Eventually(t, func() bool {
+		resp, err := client.Get("http://" + addr + "/metrics")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 2*time.Second, 20*time.Millisecond, "expected plaintext /metrics on Config.MetricsPort")
+
+	cancel()
+	require.NoError(t, <-errCh)
+}
+
+func TestServeMetrics_ListenError(t *testing.T) {
+	held, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+
+	s := &Server{
+		logger: logr.Discard(),
+		config: Config{MetricsPort: held.Addr().(*net.TCPAddr).Port},
+	}
+	require.Error(t, s.serveMetrics(context.Background()))
 }
 
 func TestServeMetrics_TLS(t *testing.T) {
 	certDir := t.TempDir()
 	writeSelfSignedCert(t, certDir)
 
+	ln := reserveListener(t)
 	s := &Server{
-		logger: logr.Discard(),
-		config: Config{MetricsCertDir: certDir},
+		logger:          logr.Discard(),
+		config:          Config{MetricsCertDir: certDir},
+		MetricsListener: ln,
 	}
-	addr := freeAddr(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.serveMetrics(ctx, addr) }()
+	go func() { errCh <- s.serveMetrics(ctx) }()
 
+	addr := ln.Addr().String()
 	client := &http.Client{
 		Timeout:   2 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // self-signed test cert
@@ -109,7 +156,7 @@ func TestServeMetrics_TLS(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
-	}, 2*time.Second, 20*time.Millisecond, "expected TLS /metrics to become reachable")
+	}, 2*time.Second, 20*time.Millisecond, "expected TLS /metrics on the reserved listener")
 
 	// A plaintext request to the same address must not be served as /metrics
 	plainClient := &http.Client{Timeout: 500 * time.Millisecond}
@@ -155,12 +202,13 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 			}
 
 			s := &Server{
-				logger: logr.Discard(),
-				config: Config{MetricsPort: mustFreePort(t), MetricsCertDir: certDir},
+				logger:          logr.Discard(),
+				config:          Config{MetricsCertDir: certDir},
+				MetricsListener: reserveListener(t),
 			}
 
 			// serveMetrics itself must detect this specific broken input.
-			err := s.serveMetrics(context.Background(), freeAddr(t))
+			err := s.serveMetrics(context.Background())
 			require.Error(t, err)
 
 			// The same error must reach the caller, so the sidecar
@@ -172,17 +220,6 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 	}
 }
 
-// mustFreePort returns an ephemeral port number for Config.MetricsPort.
-func mustFreePort(t *testing.T) int {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	require.NoError(t, ln.Close())
-	return port
-}
-
 // TestStart_MetricsTLSFailureStopsDataPlane runs the full Start path with a
 // --metrics-cert-dir missing tls.crt and tls.key: Start returns the error and
 // the data-plane listener is closed.
@@ -190,12 +227,16 @@ func TestStart_MetricsTLSFailureStopsDataPlane(t *testing.T) {
 	decoderURL, err := url.Parse("http://decoder.invalid:8000")
 	require.NoError(t, err)
 
+	httpLn := reserveListener(t)
+	metricsLn := reserveListener(t)
+
 	s := NewProxy(Config{
-		Port:           strconv.Itoa(mustFreePort(t)),
+		Port:           strconv.Itoa(httpLn.Addr().(*net.TCPAddr).Port),
 		DecoderURL:     decoderURL,
-		MetricsPort:    mustFreePort(t),
 		MetricsCertDir: t.TempDir(), // no tls.crt or tls.key
 	})
+	s.HTTPListener = httpLn
+	s.MetricsListener = metricsLn
 	s.allowlistValidator = &AllowlistValidator{enabled: false}
 
 	errCh := make(chan error, 1)
@@ -209,6 +250,7 @@ func TestStart_MetricsTLSFailureStopsDataPlane(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("data-plane listener never came up")
 	}
+	require.Equal(t, httpLn.Addr().String(), s.addr.String())
 	dataPlaneAddr := s.addr.String()
 
 	select {

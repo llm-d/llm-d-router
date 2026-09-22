@@ -1,6 +1,6 @@
 # Matrix jobs (e2e-image-common, e2e-image-router) are each
 # followed by a *-status job that aggregates their result, since GitHub
-# required status checks cannot reference individual matrix legs.
+# required status checks cannot reference individual matrix jobs.
 name: CI - Test
 
 on:

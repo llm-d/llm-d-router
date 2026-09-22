@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -15,6 +31,7 @@ import (
 	"github.com/openai/openai-go/packages/param"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/test/e2e/utils"
 )
 
 func newOpenAIClient() *openai.Client {
@@ -31,7 +48,7 @@ func extractInferenceHeaders(httpResp *http.Response) (string, string, string) {
 func generateAndCheckLoad(count int) {
 	nsName := getNamespace()
 	for range count {
-		prefillPods, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, nsName)
+		prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 		gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
@@ -355,7 +372,7 @@ func runCompletionWithCacheThreshold(prompt string, cacheHitThreshold float64, f
 	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10,"cache_hit_threshold":%v}`, simModelName, prompt, cacheHitThreshold)
 	extraHeaders := cacheThresholdHeaders(forceCacheThresholdFinishReason)
 	ns, pod, respBody := doPost("/v1/completions", body, extraHeaders)
-	finishReason := extractFinishReason(string(respBody))
+	finishReason := utils.ExtractFinishReason(string(respBody))
 	ginkgo.By(fmt.Sprintf("Completion Response: ns=%s, pod=%s, finish_reason=%s", ns, pod, finishReason))
 	return ns, pod, finishReason
 }
@@ -366,7 +383,7 @@ func runStreamingCompletionWithCacheThreshold(prompt string, cacheHitThreshold f
 	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10,"stream":true,"cache_hit_threshold":%v}`, simModelName, prompt, cacheHitThreshold)
 	extraHeaders := cacheThresholdHeaders(forceCacheThresholdFinishReason)
 	ns, pod, respBody := doPost("/v1/completions", body, extraHeaders)
-	finishReason := extractFinishReasonFromStreaming(string(respBody))
+	finishReason := utils.ExtractFinishReasonFromStreaming(string(respBody))
 	ginkgo.By(fmt.Sprintf("Streaming Completion Response: ns=%s, pod=%s, finish_reason=%s", ns, pod, finishReason))
 	return ns, pod, finishReason
 }
@@ -390,18 +407,10 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-	startEPPMetricsPortForward()
-
-	theMetrics := getMetrics(metricsURL)
-	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
-	metricsAsString := strings.Join(theMetrics, "\n")
-
-	_, decodePods := getModelServerPods(podSelector, prefillSelector, decodeSelector, getNamespace())
+	_, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, getNamespace())
 
 	// Define the metrics we expect to see
 	preset := []string{ //nolint:prealloc
-		"inference_extension_info",
-
 		// llm_d metrics
 		"llm_d_epp_request_total",
 		"llm_d_epp_request_error_total",
@@ -435,8 +444,12 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 		}
 	}
 
-	// Check if all expected metrics are present in the metrics output.
-	for _, metric := range expectedMetrics {
-		gomega.Expect(metricsAsString).Should(gomega.ContainSubstring(metric))
-	}
+	gomega.Eventually(func(g gomega.Gomega) {
+		theMetrics := utils.GetMetrics(metricsURL)
+		g.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
+		metricsAsString := strings.Join(theMetrics, "\n")
+		for _, metric := range expectedMetrics {
+			g.Expect(metricsAsString).Should(gomega.ContainSubstring(metric))
+		}
+	}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.Succeed())
 }

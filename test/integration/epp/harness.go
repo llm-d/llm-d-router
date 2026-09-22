@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,6 +50,7 @@ import (
 
 	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -224,6 +226,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 			sdktrace.WithSyncer(exporter),
 		)
 		otel.SetTracerProvider(tp)
+		tracing.InitTextMapPropagator()
 	}
 
 	// Reserve the ext_proc port once, up front: the server serves on this listener, so

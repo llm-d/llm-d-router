@@ -30,7 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
-// runConcurrentPD fires the prefill and decode legs of a concurrent-dispatch
+// runConcurrentPD fires the prefill and decode requests of a concurrent-dispatch
 // P/D protocol (Mooncake, SGLang) in parallel: prefill runs in a goroutine
 // and its response is discarded (only status and duration are recorded on
 // its span), while decode runs on the calling goroutine and streams its

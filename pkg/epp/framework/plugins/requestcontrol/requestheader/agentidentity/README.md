@@ -51,7 +51,7 @@ The plugin is stateless and safe under concurrent use.
 Default configuration — no parameters, only the built-in headers are checked:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: agent-identity
@@ -60,7 +60,7 @@ plugins:
 With additional headers — checked before the built-in defaults (header names are arbitrary; substitute whatever the agent actually emits):
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: agent-identity

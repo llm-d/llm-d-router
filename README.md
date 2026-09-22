@@ -45,7 +45,7 @@ See the [Helm chart documentation] for configuration examples.
 ### 2. Gateway Mode (Inference Gateway)
 The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
 
-For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide].
+For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide]. The [OpenTelemetry JSON stdout logs] document describes the log record format used by the EPP and routing sidecar.
 
 ---
 
@@ -68,6 +68,7 @@ To ensure clarity across the project, we use the following standard terminology:
 [Architecture Documentation]:docs/architecture.md
 [Disaggregation Documentation]:docs/disaggregation.md
 [EPP Container Sizing Guide]:docs/operations.md
+[OpenTelemetry JSON stdout logs]:docs/otel-json-stdout.md
 [InferencePool]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Gateway API Inference Extension (GIE)]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Kubernetes Gateway API Inference Extensions]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
@@ -98,6 +99,8 @@ Contributions are welcome!
 [Meeting Notes]:https://docs.google.com/document/d/1Pf3x7ZM8nNpU56nt6CzePAOmFZ24NXDeXyaYb565Wq4
 [#sig-router]:https://llm-d.slack.com/?redir=%2Fmessages%2Fsig-router
 
+## Security
+See [SECURITY.md](SECURITY.md) for vulnerability reporting. Published container images carry a signed provenance attestation and an SBOM (software bill of materials). See [Verifying Published Artifacts](docs/verifying-releases.md) for how to check them.
 
 ## License
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_large)
