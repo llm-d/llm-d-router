@@ -52,6 +52,14 @@ func validatePipeline(p config.PipelineConfig) error {
 	return fmt.Errorf("pipeline.use_openai_format=false requires a %q step (the tokens-in format sends token IDs that render produces)", steps.RenderStepName)
 }
 
+// usesOpenAIFormatParam reports whether stepType reads the use_openai_format
+// parameter. Only encode and prefill resolve their body format from it; decode
+// and conditional-decode derive it directly from the request's original path
+// and reject the key instead of silently ignoring it.
+func usesOpenAIFormatParam(stepType string) bool {
+	return stepType == steps.EncodeStepName || stepType == steps.PrefillStepName
+}
+
 func mergePipelineDefaults(params map[string]any, cfg config.PipelineConfig) map[string]any {
 	out := make(map[string]any, len(params))
 	for k, v := range params {
@@ -75,8 +83,10 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 	var pipelineSteps []pipeline.Step
 	for _, stepCfg := range cfg.Pipeline.Steps {
 		params := mergePipelineDefaults(stepCfg.Params, cfg.Pipeline)
-		if _, ok := params["use_openai_format"]; !ok {
-			params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
+		if usesOpenAIFormatParam(stepCfg.Type) {
+			if _, ok := params["use_openai_format"]; !ok {
+				params["use_openai_format"] = cfg.Pipeline.UseOpenAIFormat
+			}
 		}
 		step, err := pipeline.Build(stepCfg.Type, gwClient, params)
 		if err != nil {

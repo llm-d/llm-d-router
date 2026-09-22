@@ -113,7 +113,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 				{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
 				{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: tc.ecConnector}},
 				{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector, steps.ParamECConnector: tc.ecConnector}},
-				{Type: "decode", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector}},
+				{Type: "decode", Params: map[string]any{steps.ParamKVConnector: tc.kvConnector}},
 			}
 
 			pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
@@ -255,7 +255,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 		{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
 		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
 		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
-		{Type: "decode", Params: map[string]any{"use_openai_format": false}},
+		{Type: "decode"},
 	}
 
 	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))

@@ -42,9 +42,12 @@ type ConditionalDecodeStep struct {
 	gwClient *gateway.Client
 }
 
-func NewConditionalDecodeStep(gwClient *gateway.Client, _ map[string]any) (pipeline.Step, error) {
+func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("conditional-decode: gateway client is required")
+	}
+	if err := rejectUseOpenAIFormatOverride(ConditionalDecodeStepName, params); err != nil {
+		return nil, err
 	}
 	return &ConditionalDecodeStep{gwClient: gwClient}, nil
 }

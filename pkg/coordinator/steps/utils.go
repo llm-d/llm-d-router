@@ -59,6 +59,17 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
+// rejectUseOpenAIFormatOverride returns an error if params sets use_openai_format.
+// decode and conditional-decode derive their body format directly from the
+// request's original path, so a step-level override has no effect; rejecting
+// the key surfaces stale config instead of silently ignoring it.
+func rejectUseOpenAIFormatOverride(step string, params map[string]any) error {
+	if _, ok := params["use_openai_format"]; ok {
+		return fmt.Errorf("%s: use_openai_format cannot be overridden for this step; overriding it was supported in the past but is not supported now", step)
+	}
+	return nil
+}
+
 // unreachableFormatError builds an error for a request whose detected API
 // type has no registered coordinator route (see server.go). Decode and
 // conditional-decode detect the format directly from reqCtx.OriginalPath, so

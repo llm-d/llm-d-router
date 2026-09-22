@@ -202,7 +202,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 	recorder := httptest.NewRecorder()
 	reqCtx.ResponseWriter = recorder
 
-	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false})
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{})
 	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
