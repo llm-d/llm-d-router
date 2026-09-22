@@ -191,13 +191,29 @@ type audioModelCase struct {
 	cfg   *estimateConfig
 }
 
-// qwen3OmniAudioCase configures estimation for a Qwen3-Omni server with the
-// zero-value (default) audio estimator: 25 placeholder tokens per second of
-// audio, file-size duration inference at 8000 compressed bytes/sec.
+// qwen3OmniAudioCase configures estimation for a Qwen3-Omni server. Its AuT
+// encoder downsamples 8x to a token per 80ms, so 12.5 tokens per second, and it
+// wraps a clip in begin/end markers, the per-clip overhead of 2.
 var qwen3OmniAudioCase = audioModelCase{
 	name:  "qwen3omni",
 	model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
-	cfg:   nil,
+	cfg: &estimateConfig{Audio: &audioEstimateConfig{
+		Mode:    audioModeDynamic,
+		Dynamic: &dynamicAudioConfig{TokensPerSecond: 12.5, OverheadTokens: 2},
+	}},
+}
+
+// gemma4AudioCase configures estimation for a gemma4 server. Its mel front end
+// takes 20ms frames at a 10ms hop through two stride-2 convolutions, a token per
+// 40ms, so 25 tokens per second with the same begin/end markers. Qwen3-VL has no
+// audio tower, which is why Qwen3-Omni stands in for that family above.
+var gemma4AudioCase = audioModelCase{
+	name:  "gemma4",
+	model: "google/gemma-4-31B-it",
+	cfg: &estimateConfig{Audio: &audioEstimateConfig{
+		Mode:    audioModeDynamic,
+		Dynamic: &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
+	}},
 }
 
 // TestEstimateBackend_QWEN3OMNI_ProduceTokenCount_Live compares the
@@ -216,6 +232,12 @@ func TestEstimateBackend_QWEN3OMNI_ProduceTokenCount_Live(t *testing.T) {
 	runEstimateBackendProduceAudioLive(t, qwen3OmniAudioCase)
 }
 
+// TestEstimateBackend_GEMMA4_ProduceAudioTokenCount_Live is the same comparison
+// against a gemma4 server, whose audio tower runs at twice the token rate.
+func TestEstimateBackend_GEMMA4_ProduceAudioTokenCount_Live(t *testing.T) {
+	runEstimateBackendProduceAudioLive(t, gemma4AudioCase)
+}
+
 // runEstimateBackendProduceAudioLive runs the duration matrix for one model:
 // for each clip it estimates the whole-prompt token count via
 // estimateBackend.produce and logs it against the server-reported
@@ -230,7 +252,7 @@ func runEstimateBackendProduceAudioLive(t *testing.T, c audioModelCase) {
 	durations := []int{1, 5, 10, 30}
 	client := &http.Client{Timeout: 120 * time.Second}
 
-	t.Logf("%-6s %10s %10s %8s", "dur", "estimate", "actual", "err%")
+	t.Logf("%-6s %10s %10s %10s %8s", "dur", "header", "payload", "actual", "err%")
 	for _, dur := range durations {
 		raw := sineWaveWAV(liveAudioSampleRate, dur)
 		payload := base64.StdEncoding.EncodeToString(raw)
@@ -251,6 +273,14 @@ func runEstimateBackendProduceAudioLive(t *testing.T, c audioModelCase) {
 			}
 			estimate := tp.TokenCount()
 
+			// The same request with no duration header, so the estimator reads
+			// the length out of the WAV payload itself.
+			fromPayload, err := b.produce(context.Background(), body)
+			if err != nil {
+				t.Fatalf("produce without duration metadata: %v", err)
+			}
+			payloadEstimate := fromPayload.TokenCount()
+
 			actual, err := liveAudioPromptTokens(context.Background(), client, endpoint, c.model, payload)
 			if err != nil {
 				t.Skipf("query server: %v", err)
@@ -260,7 +290,7 @@ func runEstimateBackendProduceAudioLive(t *testing.T, c audioModelCase) {
 			if actual != 0 {
 				errPct = float64(estimate-actual) / float64(actual) * 100
 			}
-			t.Logf("%-5ds %10d %10d %7.1f%%", dur, estimate, actual, errPct)
+			t.Logf("%-5ds %10d %10d %10d %7.1f%%", dur, estimate, payloadEstimate, actual, errPct)
 		})
 	}
 }

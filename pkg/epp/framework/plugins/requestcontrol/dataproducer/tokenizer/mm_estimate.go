@@ -541,7 +541,9 @@ func audioBase64Payload(data string) string {
 }
 
 // base64DecodedLen returns the decoded byte length of a standard base64 payload
-// without decoding it.
+// without decoding it. Line-wrapped payloads count their newlines, which reads
+// about 1% long; that only reaches the byte-rate estimate for non-WAV clips,
+// where the byte rate is itself an approximation.
 func base64DecodedLen(rawB64 string) int {
 	n := len(rawB64)
 	for n > 0 && rawB64[n-1] == '=' {

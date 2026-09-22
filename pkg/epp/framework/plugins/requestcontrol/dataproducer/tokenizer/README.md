@@ -178,6 +178,10 @@ payload size. Duration is resolved per clip: the `x-llm-d-audio-duration-seconds
 header wins, then the payload itself — exact for PCM WAV, whose header declares a
 byte rate, and payload bytes ÷ `bytesPerSecond` for anything else — then
 `defaultDuration`, which is what a clip carried by reference falls back to.
+The rate is the one knob a new tower needs: gemma4's mel front end emits a token
+per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's AuT encoder one per 80ms
+(`tokensPerSecond: 12.5`), and both wrap a clip in begin/end markers
+(`overheadTokens: 2`).
 
 | Request header                   | Format        | Description                                               |
 | -------------------------------- | ------------- | --------------------------------------------------------- |

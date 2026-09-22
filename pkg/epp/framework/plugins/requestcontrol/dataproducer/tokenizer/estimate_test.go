@@ -696,6 +696,20 @@ func TestAudioEstimator_WAVDuration(t *testing.T) {
 	assert.Equal(t, audioTokens(1.5), tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
+// TestAudioEstimator_WAVDataURL asserts a payload sent as a data URL rather than
+// bare base64 resolves to the same duration, so both client shapes agree.
+func TestAudioEstimator_WAVDataURL(t *testing.T) {
+	clip := wavBase64(16000, 1, 48000) // 1.5s
+
+	bare, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(clip, "wav"))
+	require.NoError(t, err)
+	dataURL, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody("data:audio/wav;base64,"+clip, "wav"))
+	require.NoError(t, err)
+
+	assert.Equal(t, audioTokens(1.5), bare.Prompts[0].MultiModalFeatures[0].Length)
+	assert.Equal(t, bare.Prompts[0].MultiModalFeatures[0].Length, dataURL.Prompts[0].MultiModalFeatures[0].Length)
+}
+
 // TestAudioEstimator_WAVByteRateFromHeader asserts the duration comes from the
 // byte rate the payload declares, not from an assumed one: the same 176400-byte
 // clip is 5.5125s as 16kHz mono and 1s as 44.1kHz 16-bit stereo.
@@ -780,29 +794,33 @@ func TestAudioEstimator_MalformedPayloadStillCounts(t *testing.T) {
 	}
 }
 
-// TestAudioEstimator_ModelShapes asserts the two towers the issue calls out are
-// reachable by configuration alone: Qwen3-Omni at 12.5 tokens/s and a
-// Whisper-style 25 tokens/s tower, both on the same 3-second clip.
-func TestAudioEstimator_ModelShapes(t *testing.T) {
+// TestAudioEstimator_Qwen3OmniAndGemma4 asserts the two model shapes the issue
+// calls out are reachable by configuration alone. Both are dynamic mode and
+// differ only in rate: gemma4's mel front end takes 20ms frames at a 10ms hop
+// through two stride-2 convolutions, a token per 40ms, while Qwen3-Omni's AuT
+// encoder downsamples 8x to a token per 80ms. Qwen3-VL has no audio tower, so
+// Qwen3-Omni is the audio member of that family. Both wrap a clip in begin/end
+// markers, which is the per-clip overhead of 2.
+func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	clip := wavBase64(16000, 1, 96000) // 96000 bytes at 32000 B/s is 3s
 
-	omni := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+	gemma4 := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
 		Mode:           audioModeDynamic,
-		Dynamic:        &dynamicAudioConfig{TokensPerSecond: 12.5, OverheadTokens: 2},
+		Dynamic:        &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
 		MaxAudioTokens: 100000,
 	}})}
-	tp, err := omni.produce(context.Background(), chatInputAudioBody(clip, "wav"))
+	tp, err := gemma4.produce(context.Background(), chatInputAudioBody(clip, "wav"))
 	require.NoError(t, err)
-	// 3s at 12.5 tokens/s is 37.5, truncating to 37, plus the 2-token overhead.
-	assert.Equal(t, 2+37, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3-omni-shaped audio length")
+	assert.Equal(t, 3*25+2, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped audio length")
 
-	whisper := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+	qwen3omni := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
 		Mode:    audioModeDynamic,
-		Dynamic: &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 4},
+		Dynamic: &dynamicAudioConfig{TokensPerSecond: 12.5, OverheadTokens: 2},
 	}})}
-	tp, err = whisper.produce(context.Background(), chatInputAudioBody(clip, "wav"))
+	tp, err = qwen3omni.produce(context.Background(), chatInputAudioBody(clip, "wav"))
 	require.NoError(t, err)
-	assert.Equal(t, 4+3*25, tp.Prompts[0].MultiModalFeatures[0].Length, "whisper-shaped audio length")
+	// 3s at 12.5 tokens/s is 37.5, truncated to 37, plus the two markers.
+	assert.Equal(t, 39, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
 }
 
 // TestEstimateBackend_ChatAudioWeightingDistinct asserts two clips of different
