@@ -85,6 +85,7 @@ const (
 	LLMDKVCacheIndexAddPodEntryCountKey     = attribute.Key("llm_d.kv_cache.index.add.pod_entry_count")
 	LLMDKVCacheIndexAddDeviceTierCountKey   = attribute.Key("llm_d.kv_cache.index.add.device_tier_count")
 	LLMDKVCacheIndexEvictKeyTypeKey         = attribute.Key("llm_d.kv_cache.index.evict.key_type")
+	LLMDKVCacheIndexEvictKeyCountKey        = attribute.Key("llm_d.kv_cache.index.evict.key_count")
 	LLMDKVCacheIndexEvictPodEntryCountKey   = attribute.Key("llm_d.kv_cache.index.evict.pod_entry_count")
 	LLMDKVCacheIndexEvictDeviceTierCountKey = attribute.Key("llm_d.kv_cache.index.evict.device_tier_count")
 	LLMDKVCacheIndexLookupBlockCountKey     = attribute.Key("llm_d.kv_cache.index.lookup.block_count")
@@ -423,6 +424,11 @@ func LLMDKVCacheIndexAddDeviceTierCount(count int) attribute.KeyValue {
 // LLMDKVCacheIndexEvictKeyType returns an attribute for KV cache index evicted key type.
 func LLMDKVCacheIndexEvictKeyType(keyType string) attribute.KeyValue {
 	return LLMDKVCacheIndexEvictKeyTypeKey.String(keyType)
+}
+
+// LLMDKVCacheIndexEvictKeyCount returns an attribute for KV cache index evicted keys count.
+func LLMDKVCacheIndexEvictKeyCount(count int) attribute.KeyValue {
+	return LLMDKVCacheIndexEvictKeyCountKey.Int(count)
 }
 
 // LLMDKVCacheIndexEvictPodEntryCount returns an attribute for KV cache index evicted pod entries count.

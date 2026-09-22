@@ -349,6 +349,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantType: attribute.STRING,
 		},
 		{
+			name:     "LLMDKVCacheIndexEvictKeyCount",
+			got:      LLMDKVCacheIndexEvictKeyCount(2),
+			wantKey:  "llm_d.kv_cache.index.evict.key_count",
+			wantType: attribute.INT64,
+		},
+		{
 			name:     "LLMDKVCacheIndexEvictPodEntryCount",
 			got:      LLMDKVCacheIndexEvictPodEntryCount(1),
 			wantKey:  "llm_d.kv_cache.index.evict.pod_entry_count",
