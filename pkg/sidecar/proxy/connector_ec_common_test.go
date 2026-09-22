@@ -208,7 +208,7 @@ func TestBuildEncoderRequest(t *testing.T) {
 		},
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
 
 	// Verify encoder request modifications
 	assert.Equal(t, 1, encoderRequest["max_tokens"])
@@ -258,18 +258,18 @@ func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
 		},
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
 
 	assert.Equal(t, 1, encoderRequest["max_tokens"])
 	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
 }
 
 // TestBuildEncoderRequest_ResponsesInputImage locks in that a Responses
-// input_image item is reshaped into chat-completions' image_url shape
-// before it reaches the encoder request: the encoder is always addressed
-// as chat completions (see buildEncoderRequest), and a Responses part's
-// bare-string image_url plus sibling detail field would otherwise reach
-// the encoder in a shape it does not parse as an image.
+// input_image item is forwarded to the encoder unmodified, under a native
+// Responses-shaped request (input, not messages), rather than reshaped into
+// chat completions' image_url nesting: vLLM's chat-completions engine
+// ignores a detail hint nested there, so only a native Responses request
+// carries it through to the encoder.
 func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",
@@ -293,32 +293,30 @@ func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
 		"detail":    "high",
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
 
-	messages, ok := encoderRequest["messages"].([]map[string]any)
+	input, ok := encoderRequest["input"].([]map[string]any)
 	require.True(t, ok)
-	require.Len(t, messages, 1)
+	require.Len(t, input, 1)
 
-	content, ok := messages[0]["content"].([]map[string]any)
+	content, ok := input[0]["content"].([]map[string]any)
 	require.True(t, ok)
 	require.Len(t, content, 1)
 
-	assert.Equal(t, "image_url", content[0]["type"])
-	imageURL, ok := content[0]["image_url"].(map[string]any)
-	require.True(t, ok, "image_url must be a nested object in the chat-completions shape sent to the encoder")
-	assert.Equal(t, "https://example.com/image.jpg", imageURL["url"])
-	assert.Equal(t, "high", imageURL["detail"])
+	assert.Equal(t, "input_image", content[0]["type"])
+	assert.Equal(t, "https://example.com/image.jpg", content[0]["image_url"])
+	assert.Equal(t, "high", content[0]["detail"])
 }
 
-// TestBuildEncoderRequest_OnlyModelAndMessages locks in that buildEncoderRequest
+// TestBuildEncoderRequest_OnlyModelAndInput locks in that buildEncoderRequest
 // builds the encoder request from scratch rather than copying the client's
-// request: the encoder is always addressed as chat completions regardless
-// of the client's own API (#2742), so none of a Responses request's own
-// fields, stateful or not, must ride along. input and max_output_tokens
-// would each leak every other multimodal item or an uncapped output limit;
-// tools/tool_choice have an incompatible schema between the two APIs and a
-// strict chat-completions encoder rejects them outright.
-func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
+// request, even when the encoder is addressed with the client's own API
+// (Responses here): copying the client's own input or max_output_tokens
+// would leak every other multimodal item or an uncapped output limit, and
+// stateful fields (previous_response_id, conversation, store, background)
+// and tools/tool_choice/instructions have no place on a per-item encoder
+// request.
+func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",
 		"input": []any{
@@ -342,10 +340,10 @@ func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
 
 	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
 
 	assert.Equal(t, "test-model", encoderRequest["model"])
-	assert.ElementsMatch(t, []string{"model", "messages", "max_tokens", "max_completion_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
+	assert.ElementsMatch(t, []string{"model", "input", "max_output_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
 }
 
 // TestBuildEncoderRequest_MinTokens is a regression test for stripping a
@@ -378,7 +376,7 @@ func TestBuildEncoderRequest_MinTokens(t *testing.T) {
 		},
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
 
 	assert.Equal(t, 1, encoderRequest["max_tokens"])
 	assert.NotContains(t, encoderRequest, "min_tokens")
@@ -396,23 +394,22 @@ func TestECPipelineResponsesImage(t *testing.T) {
 				var body map[string]any
 				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 
-				// The encoder is always addressed as chat completions
-				// (see buildEncoderRequest), regardless of the client's API,
-				// so the Responses input_image part must arrive reshaped.
-				messages, ok := body["messages"].([]any)
-				require.True(t, ok, "encoder request must carry messages")
-				require.Len(t, messages, 1)
-				msg, ok := messages[0].(map[string]any)
+				// The encoder is addressed with the client's own API, so a
+				// Responses request's input_image part arrives unmodified
+				// under input, not reshaped into chat completions' messages.
+				assert.Equal(t, reqcommon.PathResponses, r.URL.Path)
+				input, ok := body["input"].([]any)
+				require.True(t, ok, "encoder request must carry input")
+				require.Len(t, input, 1)
+				msg, ok := input[0].(map[string]any)
 				require.True(t, ok)
 				content, ok := msg["content"].([]any)
 				require.True(t, ok)
 				require.Len(t, content, 1)
 				part, ok := content[0].(map[string]any)
 				require.True(t, ok)
-				assert.Equal(t, "image_url", part["type"])
-				imageURL, ok := part["image_url"].(map[string]any)
-				require.True(t, ok, "image_url must be a nested object in the shape the encoder expects")
-				assert.Equal(t, "https://example.com/image.jpg", imageURL["url"])
+				assert.Equal(t, "input_image", part["type"])
+				assert.Equal(t, "https://example.com/image.jpg", part["image_url"])
 
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)

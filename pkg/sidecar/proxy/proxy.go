@@ -77,11 +77,6 @@ const (
 	// sidecar supports.
 	requestFieldModel = "model"
 
-	// inputImageDetailField is the optional sibling field on a Responses
-	// input_image part carrying the image detail hint (e.g. "high"/"low"),
-	// nested under image_url instead once normalized to chat-completions shape.
-	inputImageDetailField = "detail"
-
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
 	requestHeaderDataParallelRank = "x-data-parallel-rank"
