@@ -432,6 +432,8 @@ func TestExecute_ExecutionPathTable(t *testing.T) {
 		{"decode-only via cache hit", []string{"conditional-decode"}, coordmetrics.PathDecodeOnly},
 		{"prefill-decode without encode", []string{"prefill", "decode"}, coordmetrics.PathPrefillDecode},
 		{"encode-prefill-decode full path", []string{"encode", "prefill", "decode"}, coordmetrics.PathEncodePrefillDecode},
+		{"concurrent prefill-decode step", []string{"prefill-decode"}, coordmetrics.PathPrefillDecode},
+		{"encode then concurrent prefill-decode step", []string{"encode", "prefill-decode"}, coordmetrics.PathEncodePrefillDecode},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

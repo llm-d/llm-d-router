@@ -53,11 +53,16 @@ func validatePipeline(p config.PipelineConfig) error {
 }
 
 // usesOpenAIFormatParam reports whether stepType reads the use_openai_format
-// parameter. Only encode and prefill resolve their body format from it; decode
-// and conditional-decode derive it directly from the request's original path
-// and reject the key instead of silently ignoring it.
+// parameter. Only encode, prefill and prefill-decode (for its prefill body)
+// resolve their body format from it; decode and conditional-decode derive it
+// directly from the request's original path and reject the key instead of
+// silently ignoring it.
 func usesOpenAIFormatParam(stepType string) bool {
-	return stepType == steps.EncodeStepName || stepType == steps.PrefillStepName
+	switch stepType {
+	case steps.EncodeStepName, steps.PrefillStepName, steps.PrefillDecodeStepName:
+		return true
+	}
+	return false
 }
 
 func mergePipelineDefaults(params map[string]any, cfg config.PipelineConfig) map[string]any {

@@ -27,6 +27,8 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -44,6 +46,49 @@ func readErrorBody(r io.Reader) []byte {
 // server can map an upstream 4xx to a client error and a 5xx to a gateway fault.
 func upstreamError(step string, statusCode int, body []byte) error {
 	return &pipeline.UpstreamError{Step: step, StatusCode: statusCode, Body: string(body)}
+}
+
+// buildKVConnector builds the KV connector named by the kv_connector step
+// parameter; an absent parameter selects the default connector.
+func buildKVConnector(params map[string]any) (kv.Connector, error) {
+	name, err := paramString(params, ParamKVConnector)
+	if err != nil {
+		return nil, err
+	}
+	return kv.Build(name)
+}
+
+// buildSerialKVConnector builds the KV connector for a step that sends prefill
+// and decode one after the other. A connector that needs both requests in
+// flight together cannot complete on that path, so it fails at startup.
+func buildSerialKVConnector(params map[string]any) (kv.Connector, error) {
+	conn, err := buildKVConnector(params)
+	if err != nil {
+		return nil, err
+	}
+	if _, concurrent := conn.(kv.ConcurrentConnector); concurrent {
+		return nil, fmt.Errorf("kv_connector %q sends prefill and decode together; use the %q step instead of the %q and %q steps",
+			conn.Name(), PrefillDecodeStepName, PrefillStepName, DecodeStepName)
+	}
+	return conn, nil
+}
+
+// buildECConnector builds the EC connector named by the ec_connector step
+// parameter; an absent parameter selects the default connector.
+func buildECConnector(params map[string]any) (ec.Connector, error) {
+	name, err := paramString(params, ParamECConnector)
+	if err != nil {
+		return nil, err
+	}
+	return ec.Build(name)
+}
+
+// setKVParams writes kvParams as the body's kv_transfer_params. A nil map is
+// not written: the connector carries its fields elsewhere.
+func setKVParams(body map[string]any, kvParams map[string]any) {
+	if kvParams != nil {
+		body[reqcommon.FieldKVTransferParams] = kvParams
+	}
 }
 
 // parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to

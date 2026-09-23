@@ -95,16 +95,27 @@ func TestForwardedHeaders_ExcludesHopByHopAndContentHeaders(t *testing.T) {
 func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 	rc := &RequestContext{
 		OriginalHeaders: http.Header{
-			"EPP-Profile":   {"decode"},
-			"X-Request-Id":  {"abc-123"},
-			"Authorization": {"Bearer token"},
+			"EPP-Profile":          {"decode"},
+			"Prefer":               {"reserve-endpoint"},
+			"X-Prefill-Pin":        {"10.0.3.7:8000"},
+			"X-Data-Parallel-Rank": {"1"},
+			"X-Request-Id":         {"abc-123"},
+			"Authorization":        {"Bearer token"},
 		},
 	}
 
 	out := rc.ForwardedHeaders()
 
-	if _, ok := out["epp-profile"]; ok {
-		t.Fatalf("epp-profile should not be forwarded: %v", out)
+	for _, name := range []string{"epp-profile", "x-prefill-pin"} {
+		if _, ok := out[name]; ok {
+			t.Fatalf("%s should not be forwarded: %v", name, out)
+		}
+	}
+	// Only the prefill-decode step drops these, on its own requests.
+	for _, name := range []string{"prefer", "x-data-parallel-rank"} {
+		if _, ok := out[name]; !ok {
+			t.Errorf("%s should be forwarded: %v", name, out)
+		}
 	}
 	if got := out["x-request-id"]; got != "abc-123" {
 		t.Errorf("x-request-id = %q, want %q", got, "abc-123")
