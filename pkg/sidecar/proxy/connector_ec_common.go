@@ -36,16 +36,15 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// mmTypeInputImage is the Responses API's equivalent of image_url.
-const mmTypeInputImage = "input_image"
-
-// Multimodal content types that need encoder processing.
+// Multimodal content types that need encoder processing. input_image is the
+// Responses API's equivalent of image_url; the other three chat-completions
+// types have no Responses counterpart in the current API.
 var mmTypes = map[string]bool{
-	"image_url":      true,
-	"audio_url":      true,
-	"video_url":      true,
-	"input_audio":    true,
-	mmTypeInputImage: true,
+	"image_url":   true,
+	"audio_url":   true,
+	"video_url":   true,
+	"input_audio": true,
+	"input_image": true,
 }
 
 // requestInput returns the request's Responses input items, decoded the
@@ -139,7 +138,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			if !ok {
 				continue
 			}
-			if partType == mmTypeInputImage && mmItemURL(partMap) == "" {
+			if partType == "input_image" && mmItemURL(partMap) == "" {
 				// A file_id-referenced image (no image_url string) has no
 				// content the encoder can fetch or receive inline.
 				logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL", "hasFileID", partMap["file_id"] != nil)
@@ -202,7 +201,7 @@ func mmItemURL(item map[string]any) string {
 				return u
 			}
 		}
-	case mmTypeInputImage:
+	case "input_image":
 		if u, ok := item["image_url"].(string); ok {
 			return u
 		}
