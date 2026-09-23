@@ -230,6 +230,31 @@ var _ = Describe("readJSONBody", func() {
 		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldFileID))
 	})
 
+	// background is the only stateful field here on purpose: the helper returns
+	// on the first field it finds, so a body that also carries
+	// previous_response_id would pass this gate on a presence check alone and
+	// never exercise the bool decode.
+	It("rejects background when it is the only stateful field", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":"hi","background":true}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldBackground))
+	})
+
+	It("forwards background false, which is the default", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":"hi","background":false}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
+	})
+
 	It("forwards an input array with no file_id", func() {
 		w := httptest.NewRecorder()
 		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`

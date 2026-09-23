@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -219,7 +218,6 @@ var inspectedRequestFields = map[string]struct{}{
 	requestFieldCacheHitThreshold:    {},
 	requestFieldContinueFinalMessage: {},
 	requestFieldAddGenerationPrompt:  {},
-	requestFieldBackground:           {},
 }
 
 // requestMessages returns the request's messages, decoding the array on first
@@ -277,7 +275,7 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		return nil, nil, false
 	}
 	if r.URL.Path == reqcommon.PathResponses {
-		if err := rejectStatefulResponses(parsed); err != nil {
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
 			s.logger.V(logging.DEBUG).Info("rejecting unsupported responses field", "error", err)
 			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 				s.logger.Error(writeErr, "failed to send error response to client")
@@ -286,25 +284,6 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		}
 	}
 	return raw, parsed, true
-}
-
-// rejectStatefulResponses applies reqcommon.RejectStatefulResponsesFields to
-// the client's request. input is decoded into a shallow copy first: it stays a
-// json.RawMessage in parsed so that re-marshaling preserves the key order of
-// every input item (see inspectedRequestFields), but the helper walks it as a
-// []any to find a nested file_id. An input that does not decode leaves the
-// copy unmade, which costs only the file_id walk; the other fields are read
-// off parsed either way.
-func rejectStatefulResponses(parsed map[string]any) error {
-	checked := parsed
-	if raw, ok := parsed[requestFieldInput].(json.RawMessage); ok {
-		var decoded any
-		if err := json.Unmarshal(raw, &decoded); err == nil {
-			checked = maps.Clone(parsed)
-			checked[requestFieldInput] = decoded
-		}
-	}
-	return reqcommon.RejectStatefulResponsesFields(checked)
 }
 
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
