@@ -18,9 +18,13 @@ package kvevents_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
+
+	zmq "github.com/go-zeromq/zmq4"
+	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -98,4 +102,39 @@ func TestSnapshotRetriesStalledHandshake(t *testing.T) {
 			t.Fatalf("connection %d not attempted; a stalled greeting must not block the subscriber", i+1)
 		}
 	}
+}
+
+func TestSilentPublishersDoNotHoldRecoverySlots(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := kvevents.DefaultConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 1024
+	cfg.SnapshotPort = 1
+	tokens, err := kvblock.NewChunkedTokenDatabase(nil)
+	require.NoError(t, err)
+	manager, err := kvevents.NewSnapshotManager(cfg, nil, tokens, engineadapter.NewVLLMAdapter(), nil)
+	require.NoError(t, err)
+	defer manager.Shutdown(ctx)
+	listen := func() (zmq.Socket, string) {
+		pub := zmq.NewPub(ctx)
+		require.NoError(t, pub.Listen("tcp://127.0.0.1:0"))
+		t.Cleanup(func() { pub.Close() })
+		return pub, "tcp://" + pub.Addr().String()
+	}
+	// Engines without a snapshot endpoint send nothing while idle; more of them
+	// than recovery slots must not keep an active publisher from connecting.
+	for i := range 4 {
+		_, endpoint := listen()
+		require.NoError(t, manager.EnsureSubscriber(ctx, fmt.Sprintf("idle-%d", i), fmt.Sprintf("idle-%d:8000", i), endpoint, "", "kv@", true))
+	}
+	time.Sleep(200 * time.Millisecond)
+	active, endpoint := listen()
+	require.NoError(t, manager.EnsureSubscriber(ctx, "active", "active:8000", endpoint, "", "kv@", true))
+	batch, err := msgpack.Marshal([]any{1.0, []any{}, nil})
+	require.NoError(t, err)
+	seq := make([]byte, 8)
+	require.Eventually(t, func() bool {
+		_ = active.Send(zmq.NewMsgFrom([]byte("kv@127.0.0.1:8000@test-model"), seq, batch))
+		return manager.Status().LiveOnly == 1
+	}, 10*time.Second, 50*time.Millisecond)
 }

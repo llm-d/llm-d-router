@@ -399,6 +399,11 @@ func snapshotFailureReason(err error) string {
 	}
 }
 
+var (
+	errHeartbeatTimeout         = errors.New("publisher heartbeat timeout")
+	errPublisherSnapshotEnabled = errors.New("publisher changed to snapshot-enabled frames")
+)
+
 type snapshotLive struct {
 	topic    string
 	sequence uint64
@@ -520,12 +525,19 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 		case <-ctx.Done():
 			return snapshotLive{}, ctx.Err()
 		case <-expired:
-			return snapshotLive{}, fmt.Errorf("publisher heartbeat timeout")
+			return snapshotLive{}, errHeartbeatTimeout
 		}
 	}
 	// The first frame shows whether the engine serves snapshots. Only
-	// snapshot-enabled engines heartbeat, so it has no deadline.
-	first, err := take(0)
+	// snapshot-enabled engines heartbeat, so a publisher silent for a heartbeat
+	// interval waits for its first frame without holding a recovery slot.
+	first, err := take(heartbeatTimeout)
+	if errors.Is(err, errHeartbeatTimeout) {
+		recoveryComplete()
+		if first, err = take(0); err == nil && first.snapshotEnabled() {
+			return errPublisherSnapshotEnabled
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -556,7 +568,7 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 		recoveryComplete()
 		index := func(msg snapshotLive) error {
 			if msg.snapshotEnabled() {
-				return fmt.Errorf("publisher changed to snapshot-enabled frames")
+				return errPublisherSnapshotEnabled
 			}
 			if err := apply(msg); err != nil {
 				log.FromContext(ctx).Error(err, "Failed to apply KV event batch", "endpoint", s.endpoint)
