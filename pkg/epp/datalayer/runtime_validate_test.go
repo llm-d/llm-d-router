@@ -233,3 +233,22 @@ func TestRuntimeConfigure_LowersBaseTickToSmallestInterval(t *testing.T) {
 	require.True(t, ok, "slow source should be wrapped")
 	assert.Equal(t, 5, id.period) // 5s / 1s base = 5 ticks
 }
+
+func TestRuntimeConfigure_ConflictingMetricsSources_Rejected(t *testing.T) {
+	logger := newTestLogger(t)
+	r := NewRuntime(1)
+
+	httpSrc := mocks.NewDataSource(fwkplugin.TypedName{Type: "metrics-data-source", Name: "metrics-data-source"})
+	zmqSrc := &mockStreamingDispatcher{kind: "zmq-metrics-data-source"}
+
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{Plugin: httpSrc},
+			{Plugin: zmqSrc},
+		},
+	}
+
+	err := r.Configure(cfg, logger)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConflictingMetricsSources)
+}
