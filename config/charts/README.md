@@ -198,6 +198,8 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
+| `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and latency predictor containers. | `{}` |
+| `router.epp.securityContext` | Container-level `securityContext` for the EPP container. | `{}` |
 | `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
 | `router.epp.pluginsConfig` | Structured EPP configuration rendered into `pluginsConfigFile`. | `{}` |
@@ -506,6 +508,8 @@ Enables latency predictor containers inside the EPP deployment to feed metrics t
 | `router.latencyPredictor.enabled` | Enable latency-based routing (requires extra Borg/training setup). | `false` |
 | `router.latencyPredictor.trainingServer.image` | Latency training server image configuration. | |
 | `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration. | |
+| `router.latencyPredictor.trainingServer.securityContext` | Container-level `securityContext` for the training server container. | `{}` |
+| `router.latencyPredictor.predictionServers.securityContext` | Container-level `securityContext` for each prediction server container. | `{}` |
 | `router.latencyPredictor.eppEnv` | EPP tuning variables for Latency Predictor. | |
 
 #### Complete Latency Predictor Example

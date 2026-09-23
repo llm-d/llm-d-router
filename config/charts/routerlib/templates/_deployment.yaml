@@ -11,6 +11,10 @@
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
+      {{- with .Values.router.epp.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.router.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
@@ -134,6 +138,10 @@
           {{- end }}
           {{- if not .Values.router.monitoring.prometheus.auth.enabled }}
               - --metrics-endpoint-auth=false
+          {{- end }}
+          {{- with .Values.router.epp.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.router.epp.resources }}
           resources:
