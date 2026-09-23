@@ -69,11 +69,11 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // decodes only the fields it reads passes its body as-is.
 func RejectStatefulResponsesFields(body map[string]any) error {
 	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
-		if _, ok := body[field]; ok {
+		if _, set := fieldValue(body, field); set {
 			return fmt.Errorf("field %q is not supported by the router", field)
 		}
 	}
-	if boolFromAny(body[FieldBackground]) {
+	if backgroundRequested(body) {
 		return fmt.Errorf("field %q is not supported by the router", FieldBackground)
 	}
 	if inputReferencesFile(arrayFromAny(body[FieldInput])) {
@@ -82,26 +82,42 @@ func RejectStatefulResponsesFields(body map[string]any) error {
 	return nil
 }
 
-// boolFromAny coerces a JSON-decoded value into a bool. A caller that decodes a
-// body selectively, as the sidecar proxy does to keep free-form content
-// byte-exact, leaves the fields it does not read as raw JSON bytes, so that form
-// is accepted too: a check that silently skipped it would report a request as
-// supported without having inspected it. Any other value yields false.
-func boolFromAny(v any) bool {
-	switch t := v.(type) {
-	case bool:
-		return t
-	case json.RawMessage:
-		var decoded bool
-		return json.Unmarshal(t, &decoded) == nil && decoded
+// fieldValue resolves body[field], reporting whether the client set it. A
+// field the caller left as raw JSON bytes is decoded here. An explicit null is
+// not set, since SDKs serialize an unset optional that way and refusing it
+// would name a field the client believes it omitted. Bytes that do not decode
+// report set with a nil value, so a field that cannot be read is refused
+// rather than passed on.
+func fieldValue(body map[string]any, field string) (any, bool) {
+	v, ok := body[field]
+	if !ok {
+		return nil, false
 	}
-	return false
+	if raw, isRaw := v.(json.RawMessage); isRaw {
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, true
+		}
+	}
+	return v, v != nil
+}
+
+// backgroundRequested reports whether body asks for a background response.
+// Only an unset field or a value reading as false counts as not asking: vLLM
+// validates background with pydantic, which coerces 1, "true" and "yes" to
+// true, so a value this package cannot read as false is refused.
+func backgroundRequested(body map[string]any) bool {
+	v, set := fieldValue(body, FieldBackground)
+	if !set {
+		return false
+	}
+	background, isBool := v.(bool)
+	return !isBool || background
 }
 
 // arrayFromAny coerces a JSON-decoded value into a []any, accepting the raw-bytes
-// form for the reason given on boolFromAny. A value that is absent, not an array
-// (a Responses input is a string or an array), or bytes that do not decode all
-// yield nil, which a caller walks as empty.
+// form the sidecar proxy leaves behind for the fields it does not decode. A value
+// that is absent, not an array (a Responses input is a string or an array), or
+// bytes that do not decode all yield nil, which a caller walks as empty.
 func arrayFromAny(v any) []any {
 	switch t := v.(type) {
 	case []any:
