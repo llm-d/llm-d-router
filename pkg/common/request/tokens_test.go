@@ -299,6 +299,30 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 			body:      map[string]any{"input": "hi", FieldConversation: "conv-123"},
 			wantField: FieldConversation,
 		},
+		// An SDK that serializes an unset optional as null sends the key with a
+		// null value, which leaves the turn as stateless as omitting it.
+		{
+			name: "previous_response_id null as raw bytes is unset",
+			body: map[string]any{"input": "hi", FieldPreviousResponseID: json.RawMessage(`null`)},
+		},
+		{
+			name: "previous_response_id null decoded is unset",
+			body: map[string]any{"input": "hi", FieldPreviousResponseID: nil},
+		},
+		{
+			name: "conversation null as raw bytes is unset",
+			body: map[string]any{"input": "hi", FieldConversation: json.RawMessage(`null`)},
+		},
+		{
+			name:      "previous_response_id as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldPreviousResponseID: json.RawMessage(`"resp-123"`)},
+			wantField: FieldPreviousResponseID,
+		},
+		{
+			name:      "undecodable previous_response_id bytes are rejected",
+			body:      map[string]any{"input": "hi", FieldPreviousResponseID: json.RawMessage(`"resp`)},
+			wantField: FieldPreviousResponseID,
+		},
 		{
 			name: "background false is the default, not rejected",
 			body: map[string]any{"input": "hi", FieldBackground: false},
@@ -344,6 +368,46 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 		{
 			name: "background false as raw bytes is the default",
 			body: map[string]any{"input": "hi", FieldBackground: json.RawMessage(`false`)},
+		},
+		{
+			name: "background null as raw bytes is the default",
+			body: map[string]any{"input": "hi", FieldBackground: json.RawMessage(`null`)},
+		},
+		{
+			name: "background null decoded is the default",
+			body: map[string]any{"input": "hi", FieldBackground: nil},
+		},
+		// vLLM's request model coerces these to true, so a value this package
+		// cannot read as false asks for the unsupported behavior.
+		{
+			name:      "background 1 as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`1`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "background 1.0 as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`1.0`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      `background "true" as raw bytes is rejected`,
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`"true"`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      `background "yes" as raw bytes is rejected`,
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`"yes"`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "background decoded as a number is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: float64(1)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "undecodable background bytes are rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`tru`)},
+			wantField: FieldBackground,
 		},
 		{
 			name:      "file_id in an input array of raw bytes is rejected",

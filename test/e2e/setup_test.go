@@ -144,8 +144,8 @@ func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 }
 
 // createModelServersEPDDisagg creates model server resources for E/P/D (encode/prefill/decode) testing.
-func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas int) []string {
-	return createModelServersFromKustomize(ePDDisaggDir, map[string]string{
+func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas int) {
+	createModelServersFromKustomize(ePDDisaggDir, map[string]string{
 		"${KV_CONNECTOR_TYPE}":    proxy.KVConnectorSharedStorage,
 		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
