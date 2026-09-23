@@ -263,8 +263,6 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)
 }
 
-// terminationCause classifies a stream that ended without completing. ctxErr is the request
-// context's error, which is non-nil once Envoy has torn the stream down under the EPP.
 // sendImmediate sends an ImmediateResponse, which ends the request.
 func sendImmediate(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger, resp *extProcPb.ProcessingResponse) error {
 	if err := srv.Send(resp); err != nil {
@@ -274,6 +272,8 @@ func sendImmediate(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Lo
 	return nil
 }
 
+// terminationCause classifies a stream that ended without completing. ctxErr is the request
+// context's error, which is non-nil once Envoy has torn the stream down under the EPP.
 func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
 	switch {
 	case reqCtx.requestState == requestEvicted:
