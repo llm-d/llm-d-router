@@ -42,6 +42,9 @@ const promptTokensDetailsField = "prompt_tokens_details"
 // usageKey is the JSON key that must be present before a frame can carry usage.
 // Streamed responses send one frame per token and only the final frame has usage,
 // so scanning for this is much cheaper than unmarshalling every frame to find out.
+// The openai and anthropic stream parsers scan for the same word without the
+// quotes; a JSON serializer always writes the key quoted, so keeping them here
+// skips more content frames.
 var usageKey = []byte(`"usage"`)
 
 func newCachedTokensResponseWriter(
