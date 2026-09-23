@@ -236,14 +236,12 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	prefixCacheServers := make(map[ServerID]int)
 	predictedCachedTokens := make(map[ServerID]int)
 	totalBlocks := 0
-	promptTokens := 0
 	for i, hashes := range perPromptHashes {
 		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
 			prefixCacheServers[server] += matchLen
 			predictedCachedTokens[server] += min(matchLen*blockSize, perPromptTokens[i])
 		}
 		totalBlocks += len(hashes)
-		promptTokens += perPromptTokens[i]
 	}
 
 	for _, pod := range pods {
@@ -255,7 +253,6 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		PerPromptHashes:       perPromptHashes,
 		PrefixCacheServers:    prefixCacheServers,
 		PredictedCachedTokens: predictedCachedTokens,
-		PromptTokens:          promptTokens,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -306,8 +303,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
-	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
-		state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)], state.PromptTokens)
+	if request.Body != nil {
+		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
+			state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)],
+			request.Body.TokenizedRequest.TokenCount())
+	}
 	return nil
 }
 

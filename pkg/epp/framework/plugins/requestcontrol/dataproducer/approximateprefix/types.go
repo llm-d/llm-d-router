@@ -69,9 +69,6 @@ type SchedulingContextState struct {
 	// size the hashes were derived at and each prompt's length; the conversion
 	// is bounded per prompt because a prompt's final block may be partial.
 	PredictedCachedTokens map[ServerID]int
-	// Total prompt tokens across the prompts that produced block hashes. It is
-	// the denominator PredictedCachedTokens is read against.
-	PromptTokens int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -94,7 +91,6 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 		PerPromptHashes:       perPromptHashes,
 		PrefixCacheServers:    prefixCacheServers,
 		PredictedCachedTokens: predictedCachedTokens,
-		PromptTokens:          s.PromptTokens,
 	}
 }
 

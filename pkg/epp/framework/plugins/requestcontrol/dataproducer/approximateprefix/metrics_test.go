@@ -146,6 +146,29 @@ func TestPreRequestPredictionBoundsEachPromptSeparately(t *testing.T) {
 	assert.Equal(t, float64(26), metricSum(t, promptTokensMetric, name))
 }
 
+// A token cap below the block size hashes nothing, so no endpoint can be
+// predicted to hold any of the prompt. The prompt still has to reach the
+// denominator, or the misconfiguration leaves the metric empty instead of
+// reporting a zero hit rate.
+func TestPreRequestPredictionCountsUnhashedPrompts(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-predicted-no-hashes"
+	p, err := newDataProducer(context.Background(), name, config{
+		BlockSizeTokens:        4,
+		MaxPrefixTokensToMatch: 2,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}, testHandle())
+	require.NoError(t, err)
+	endpoints, result := endpointAndResult()
+
+	tokens := []uint32{1, 2, 3, 4, 5}
+	runPrediction(t, p, "unhashed", tokens, endpoints, result)
+
+	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name))
+	assert.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name))
+}
+
 func producerForPrediction(t *testing.T, name string, blockSize int) *dataProducer {
 	t.Helper()
 	p, err := newDataProducer(context.Background(), name, config{
