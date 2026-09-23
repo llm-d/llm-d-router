@@ -52,6 +52,23 @@ const (
 	// only if its KV cache already covers the prompt (at least partially); otherwise EPP surfaces
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
+
+	// PreferReserveEndpoint is the preference token the coordinator sets to ask
+	// which endpoint EPP would pick for a request without sending the request
+	// there. EPP answers 200 with the picked <ip:port> on ReservedEndpointHeader
+	// and forwards nothing.
+	PreferReserveEndpoint = "reserve-endpoint"
+
+	// ReservedEndpointHeader is the response header that carries the <ip:port>
+	// EPP picked on a "Prefer: reserve-endpoint" request. The name is fixed, not
+	// derived from the scheduling profile, because a per-phase EPP runs its only
+	// profile under another name.
+	ReservedEndpointHeader = "x-prefill-host-port"
+
+	// PrefillPinHeader carries the prefill worker <ip:port> a request must be
+	// scheduled on. The coordinator copies it from the reserve-endpoint answer
+	// so that the prefill request lands on the pod its peer request names.
+	PrefillPinHeader = "x-prefill-pin"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
@@ -64,19 +81,29 @@ func StripScheme(endpoint string) string {
 	return u.Host
 }
 
-// IsConditionalDecode reports whether the request headers carry the
-// "Prefer: if-available" preference (see PreferIfAvailable for semantics).
+// HasPreference reports whether the request headers carry the given Prefer
+// token.
 //
 // Per RFC 7240 the Prefer header value is a comma-separated list of preference
 // tokens, each with optional ";"-delimited parameters. This function matches
-// the bare "if-available" token case-insensitively, ignoring surrounding
-// whitespace, parameters, and any other tokens that may appear alongside it.
-func IsConditionalDecode(headers map[string]string) bool {
-	for _, pref := range strings.Split(headers[PreferHeader], ",") {
+// the bare token case-insensitively, ignoring surrounding whitespace,
+// parameters, and any other tokens that may appear alongside it.
+func HasPreference(headers map[string]string, want string) bool {
+	prefer := headers[PreferHeader]
+	if prefer == "" {
+		return false
+	}
+	for _, pref := range strings.Split(prefer, ",") {
 		token, _, _ := strings.Cut(pref, ";")
-		if strings.EqualFold(strings.TrimSpace(token), PreferIfAvailable) {
+		if strings.EqualFold(strings.TrimSpace(token), want) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsConditionalDecode reports whether the request headers carry the
+// "Prefer: if-available" preference (see PreferIfAvailable for semantics).
+func IsConditionalDecode(headers map[string]string) bool {
+	return HasPreference(headers, PreferIfAvailable)
 }

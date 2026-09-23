@@ -112,7 +112,8 @@ pipeline:
   # between prefill and decode pods.
   #   kv-nixl           - NIXL P2P RDMA
   #   kv-shared-storage - shared filesystem / object store (default)
-  #   kv-sglang         - SGLang-style KV bootstrap
+  #   kv-sglang         - SGLang-style KV bootstrap; needs the prefill-decode
+  #                       step in place of the prefill and decode steps
   kv_connector: kv-shared-storage
 
   # ec_connector picks the protocol used to ship encoded multimodal embedding
@@ -319,3 +320,17 @@ pipeline:
       # params:
       #   use_openai_format: true   # see notes above
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+
+    # -------------------------------------------------------------------
+    # prefill-decode: replaces the prefill and decode steps for kv-sglang,
+    # whose prefill pod waits for the decode pod to join it. Asks EPP which
+    # prefill pod it would pick (Prefer: reserve-endpoint), writes that pod
+    # into both bodies, pins the prefill request to it (x-prefill-pin), and
+    # sends both requests at once. Decode streams back to the client. The
+    # prefill EPP needs the reserve-endpoint and prefill-pin-screener
+    # plugins. Last step.
+    # -------------------------------------------------------------------
+    # - type: prefill-decode
+    #   params:
+    #     use_openai_format: true   # see notes above
+    #     kv_connector: kv-sglang   # overrides pipeline.kv_connector

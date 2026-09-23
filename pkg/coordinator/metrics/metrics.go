@@ -52,11 +52,14 @@ const (
 
 // Upstream label values for the upstream_request_* metrics. Step names come
 // from each step file's own StepName constant (pkg/coordinator/steps/*.go).
+// reserve-endpoint is the prefill-decode step's call that asks EPP for the
+// prefill endpoint; its prefill and decode requests use prefill and decode.
 const (
 	UpstreamRender            = "render"
 	UpstreamReplaceMediaURLs  = "replace-media-urls"
 	UpstreamEncode            = "encode"
 	UpstreamPrefill           = "prefill"
+	UpstreamReserveEndpoint   = "reserve-endpoint"
 	UpstreamConditionalDecode = "conditional-decode"
 	UpstreamDecode            = "decode"
 )
