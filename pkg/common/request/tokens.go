@@ -64,10 +64,13 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // (the agentic-api layer strips it before the request reaches the router),
 // and forwarding it is harmless regardless since it defaults to true.
 func RejectStatefulResponsesFields(body map[string]any) error {
-	for _, field := range []string{FieldPreviousResponseID, FieldConversation, FieldBackground} {
+	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
 		if _, ok := body[field]; ok {
 			return fmt.Errorf("field %q is not supported by the router", field)
 		}
+	}
+	if background, ok := body[FieldBackground].(bool); ok && background {
+		return fmt.Errorf("field %q is not supported by the router", FieldBackground)
 	}
 	if input, ok := body[FieldInput].([]any); ok && inputReferencesFile(input) {
 		return fmt.Errorf("field %q is not supported by the router", FieldFileID)

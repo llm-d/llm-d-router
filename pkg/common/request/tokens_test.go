@@ -299,8 +299,12 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 			wantField: FieldConversation,
 		},
 		{
-			name:      "background present, even when false",
-			body:      map[string]any{"input": "hi", FieldBackground: false},
+			name: "background false is the default, not rejected",
+			body: map[string]any{"input": "hi", FieldBackground: false},
+		},
+		{
+			name:      "background true is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: true},
 			wantField: FieldBackground,
 		},
 		{
