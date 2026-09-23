@@ -187,7 +187,7 @@ func sglangMapEventToFields(ev map[string]any) ([]any, error) {
 //	[5] lora_id            int|nil    (optional, omit_defaults)
 //	[6] medium             string|nil (optional, omit_defaults)
 //
-// cache_salt and session_id (map-only, attribution fields) have no positional
+// cache_salt and session_id are map-only fields and have no positional representation.
 // slot and are not carried into kvevents.BlockStoredEvent.
 func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEvent, error) {
 	if len(fields) < sglangBlockStoredMinFields {
