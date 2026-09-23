@@ -24,7 +24,7 @@ Set `topology.kubernetes.io/region` and `nvidia.com/gpu.product` on serving Pods
 Configure one producer and two scorers:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: label-producer

@@ -174,7 +174,7 @@ Priority Routing is only available in standalone service mode (`router.proxy.mod
 1. **Deterministic Endpoint Discovery**: EPP pods run as a StatefulSet with a headless Service (`publishNotReadyAddresses: true`). Envoy targets individual pod DNS entries (`<release>-epp-0`, `<release>-epp-1`, etc.) mapped to distinct priority levels.
 2. **Active Health Probing**: Envoy actively probes EPP Port 9002 via gRPC health check (`grpc.health.v1.Health`).
 3. **Outlier Detection Failover**: When priority routing is enabled, if a primary pod fails or crashes, Envoy's Outlier Detection detects TCP connection failure and ejects the primary host, shifting traffic to Priority 1 standbys in sub-second time without lease expiration delays.
-4. **Graceful Pod Termination**: EPP pods include a `lifecycle.preStop` hook (`sleep 5`) during planned deletion or rollout. This gives Envoy active health checks time to detect pod shutdown and redirect new traffic to standby endpoints before SIGTERM, allowing in-flight gRPC streams to drain.
+4. **Graceful Pod Termination**: EPP pods include a native `lifecycle.preStop.sleep` hook (5 seconds) during planned deletion or rollout on Kubernetes 1.30+ with `PodLifecycleSleepAction` enabled. This gives Envoy active health checks time to detect pod shutdown and redirect new traffic to standby endpoints before SIGTERM, allowing in-flight gRPC streams to drain.
 5. **Safe Failback**: When a replacement primary pod is rescheduled, the health check `healthy_threshold` requires consecutive passing health probes before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
 
 #### Helm Configuration

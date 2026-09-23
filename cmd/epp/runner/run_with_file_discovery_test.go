@@ -34,11 +34,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
+
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	localsyncer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/local"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
+
+const testPoolName = "test-pool"
 
 // TestRunWithFileDiscovery_Smoke is a wiring test for the file-discovery path.
 // It does not exercise ext_proc routing; that lives in the integration test.
@@ -58,7 +62,7 @@ func TestRunWithFileDiscovery_Smoke(t *testing.T) {
 			"    address: 127.0.0.1\n"+
 			"    port: \"19999\"\n"), 0o644))
 
-	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: file-discovery
@@ -84,34 +88,47 @@ schedulingProfiles:
       - pluginRef: random-picker
 dataLayer:
   injectDefaults: false
-  crossReplicaSyncerPluginRef: local-syncer
-  crossReplicaSyncInterval: 5ms
+  crossReplica:
+    syncerPluginRef: local-syncer
+    syncInterval: 5ms
   discovery:
-    pluginRef: file-discovery
+    endpoints:
+      pluginRef: file-discovery
   sources:
     - pluginRef: metrics-source
       extractors:
         - pluginRef: metrics-extractor
 `, endpointsPath)
 
-	grpcPort := freeTCPPort(t)
-	healthPort := freeTCPPort(t)
-	metricsPort := freeTCPPort(t)
+	// Reserve live listeners so the runner binds directly with no gap between
+	// port selection and use; metrics isn't dialed here so it can still use an
+	// OS-assigned port.
+	grpcListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = grpcListener.Close() })
+	grpcPort := uint16(grpcListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
+
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = healthListener.Close() })
+	healthPort := uint16(healthListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	opts := runserver.NewOptions()
 	opts.GRPCPort = grpcPort
 	opts.GRPCHealthPort = healthPort
-	opts.MetricsPort = metricsPort
+	opts.MetricsPort = 0
 	opts.SecureServing = false
 	opts.HealthChecking = true
 	opts.EnablePprof = false
-	opts.PoolName = "test-pool"
+	opts.PoolName = testPoolName
 	opts.PoolNamespace = "test-ns"
 	opts.ConfigText = configText
 	opts.GRPCMaxRecvMsgSize = 6 * 1024 * 1024
 	opts.GRPCMaxSendMsgSize = 6 * 1024 * 1024
 
 	r := NewRunner()
+	r.grpcListener = grpcListener
+	r.healthListener = healthListener
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -213,13 +230,135 @@ dataLayer:
 	}
 }
 
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+// TestRunWithFileDiscovery_ListenerTakesPrecedenceOverPort is a regression test
+// for the port bind race in
+// https://github.com/llm-d/llm-d-router/issues/2858: picking a free port,
+// closing the listener, and later binding that bare port number leaves a
+// window in which another process can take it, producing "address already in
+// use". Reserving a live listener and handing it to the server removes the
+// window because the port is never released between selection and use.
+//
+// This test proves the runner actually takes that path: opts.GRPCPort and
+// opts.GRPCHealthPort are set to a port a decoy listener already holds, so
+// binding by number would fail immediately. runWithFileDiscovery must ignore
+// those numbers and serve on r.grpcListener / r.healthListener instead.
+func TestRunWithFileDiscovery_ListenerTakesPrecedenceOverPort(t *testing.T) {
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+  - name: metrics-source
+    type: metrics-data-source
+  - name: metrics-extractor
+    type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    pluginRef: file-discovery
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+`, endpointsPath)
+
+	grpcListener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close())
-	return port
+	defer grpcListener.Close()
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	defer healthListener.Close()
+
+	// decoyListener occupies a port that opts.GRPCPort/opts.GRPCHealthPort will
+	// name. If runWithFileDiscovery bound by number instead of using the
+	// injected listeners, net.Listen on that port would fail here. Bind the
+	// wildcard address, the same one runnable.GRPCServer binds, so the
+	// collision is guaranteed on macOS as well as Linux: fwknet.ReserveListener
+	// binds only 127.0.0.1, which does not shadow [::]:<port> on macOS.
+	decoyListener, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	defer decoyListener.Close()
+	decoyPort := uint16(decoyListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
+
+	opts := runserver.NewOptions()
+	opts.GRPCPort = decoyPort
+	opts.GRPCHealthPort = decoyPort
+	opts.MetricsPort = 0
+	opts.SecureServing = false
+	opts.HealthChecking = true
+	opts.PoolName = testPoolName
+	opts.PoolNamespace = "test-ns"
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	r.grpcListener = grpcListener
+	r.healthListener = healthListener
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+
+	healthAddr := healthListener.Addr().String()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case err := <-runErr:
+			t.Fatalf("runWithFileDiscovery exited before health came up: %v", err)
+		case <-deadline:
+			t.Fatal("timeout waiting for health gRPC to reach SERVING")
+		default:
+		}
+		if checkHealthServing(healthAddr) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cc, err := grpc.NewClient(grpcListener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	defer cc.Close()
+	processCtx, processCancel := context.WithTimeout(ctx, time.Second)
+	defer processCancel()
+	process, err := pb.NewExternalProcessorClient(cc).Process(processCtx)
+	require.NoError(t, err)
+	err = process.Send(&pb.ProcessingRequest{
+		Request: &pb.ProcessingRequest_RequestBody{
+			RequestBody: &pb.HttpBody{EndOfStream: true},
+		},
+	})
+	if err == nil {
+		_, err = process.Recv()
+	}
+	require.NoError(t, err, "ext_proc should be serving on the injected listener, not the decoy port")
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("runWithFileDiscovery returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runWithFileDiscovery did not return after context cancel")
+	}
 }
 
 func checkHealthServing(addr string) bool {
@@ -253,7 +392,7 @@ func TestRunWithFileDiscovery_AlphaPluginBlockedByDefault(t *testing.T) {
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
 	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
 
-	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: file-discovery
@@ -266,7 +405,8 @@ plugins:
 dataLayer:
   injectDefaults: false
   discovery:
-    pluginRef: file-discovery
+    endpoints:
+      pluginRef: file-discovery
 `, endpointsPath, alphaType)
 
 	opts := runserver.NewOptions()
@@ -295,7 +435,7 @@ func TestRunWithFileDiscovery_AlphaPluginAllowedWithFlag(t *testing.T) {
 	endpointsPath := filepath.Join(dir, "endpoints.yaml")
 	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
 
-	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - name: file-discovery
@@ -312,7 +452,8 @@ plugins:
 dataLayer:
   injectDefaults: false
   discovery:
-    pluginRef: file-discovery
+    endpoints:
+      pluginRef: file-discovery
   sources:
     - pluginRef: metrics-source
       extractors:

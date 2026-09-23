@@ -47,10 +47,14 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		return err
 	}
 
-	ln, err := net.Listen("tcp", ":"+s.config.Port)
-	if err != nil {
-		s.logger.Error(err, "Failed to start")
-		return err
+	ln := s.HTTPListener
+	var err error
+	if ln == nil {
+		ln, err = net.Listen("tcp", ":"+s.config.Port)
+		if err != nil {
+			s.logger.Error(err, "Failed to start")
+			return err
+		}
 	}
 	s.addr = ln.Addr()
 	close(s.readyCh)

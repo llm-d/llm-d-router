@@ -407,10 +407,6 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 
 	metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 
-	theMetrics := utils.GetMetrics(metricsURL)
-	gomega.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
-	metricsAsString := strings.Join(theMetrics, "\n")
-
 	_, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, getNamespace())
 
 	// Define the metrics we expect to see
@@ -448,8 +444,12 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 		}
 	}
 
-	// Check if all expected metrics are present in the metrics output.
-	for _, metric := range expectedMetrics {
-		gomega.Expect(metricsAsString).Should(gomega.ContainSubstring(metric))
-	}
+	gomega.Eventually(func(g gomega.Gomega) {
+		theMetrics := utils.GetMetrics(metricsURL)
+		g.Expect(theMetrics).ShouldNot(gomega.BeEmpty())
+		metricsAsString := strings.Join(theMetrics, "\n")
+		for _, metric := range expectedMetrics {
+			g.Expect(metricsAsString).Should(gomega.ContainSubstring(metric))
+		}
+	}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.Succeed())
 }

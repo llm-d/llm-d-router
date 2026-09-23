@@ -144,6 +144,9 @@ func (p *PrefixCacheMatchInfo) CachedBlocksByTier() map[string]int {
 }
 
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
+	if p == nil {
+		return nil
+	}
 	clone := &PrefixCacheMatchInfo{
 		matchBlocks:               p.matchBlocks,
 		totalBlocks:               p.totalBlocks,

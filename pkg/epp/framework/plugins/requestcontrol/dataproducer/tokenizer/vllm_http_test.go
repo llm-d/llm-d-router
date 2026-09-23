@@ -47,6 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -644,6 +645,88 @@ func generateTestCert(t *testing.T, dir string) (certPath, keyPath string) {
 	keyPath = filepath.Join(dir, "client.key")
 	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
 	return certPath, keyPath
+}
+
+// TestBuildChatRenderRequest_MessageFields asserts the wire shape of rebuilt
+// messages: tool_calls and reasoning ride along, tool messages carry
+// tool_call_id, and content is omitted when absent.
+func TestBuildChatRenderRequest_MessageFields(t *testing.T) {
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "assistant", Content: nil, Reasoning: "hmm", ToolCalls: []any{map[string]any{
+				"id":   "t1",
+				"type": "function",
+				"function": map[string]any{
+					"name":      "run",
+					"arguments": `{"cmd": "ls"}`,
+				},
+			}}},
+			{Role: "tool", ToolCallID: "t1", Content: &tokenizerTypes.Content{Raw: "out"}},
+		},
+	}
+
+	data, err := json.Marshal(buildChatRenderRequest(req))
+	require.NoError(t, err)
+
+	var msgs []map[string]any
+	require.NoError(t, json.Unmarshal(data, &struct {
+		Messages *[]map[string]any `json:"messages"`
+	}{&msgs}))
+	require.Len(t, msgs, 2)
+
+	assert.NotContains(t, msgs[0], "content", "assistant with only tool_calls omits content")
+	assert.Equal(t, "hmm", msgs[0]["reasoning"])
+	assert.Equal(t, []any{map[string]any{
+		"id":   "t1",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "run",
+			"arguments": `{"cmd": "ls"}`,
+		},
+	}}, msgs[0]["tool_calls"])
+
+	assert.Equal(t, "tool", msgs[1]["role"])
+	assert.Equal(t, "t1", msgs[1]["tool_call_id"])
+	assert.Equal(t, "out", msgs[1]["content"])
+}
+
+// TestBuildChatRenderRequest_AudioBlocks asserts the render fallback path
+// preserves audio_url and input_audio parts so non-PayloadMap callers
+// (e.g. Vertex AI gRPC) still reach vLLM with audio intact.
+func TestBuildChatRenderRequest_AudioBlocks(t *testing.T) {
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "user", Content: &tokenizerTypes.Content{Structured: []tokenizerTypes.ContentBlock{
+				{Type: "text", Text: "transcribe this"},
+				{Type: "audio_url", AudioURL: tokenizerTypes.AudioURLBlock{URL: "https://example.test/speech.wav"}},
+				{Type: "input_audio", InputAudio: tokenizerTypes.AudioBlock{Data: "AAAA", Format: "wav"}},
+			}}},
+		},
+	}
+
+	data, err := json.Marshal(buildChatRenderRequest(req))
+	require.NoError(t, err)
+
+	var msgs []map[string]any
+	require.NoError(t, json.Unmarshal(data, &struct {
+		Messages *[]map[string]any `json:"messages"`
+	}{&msgs}))
+	require.Len(t, msgs, 1)
+	parts, ok := msgs[0]["content"].([]any)
+	require.True(t, ok, "structured content must be forwarded as an array of parts")
+	require.Len(t, parts, 3)
+
+	assert.Equal(t, "text", parts[0].(map[string]any)["type"])
+
+	audioURL, ok := parts[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "audio_url", audioURL["type"])
+	require.Equal(t, map[string]any{"url": "https://example.test/speech.wav"}, audioURL["audio_url"])
+
+	inputAudio, ok := parts[2].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "input_audio", inputAudio["type"])
+	require.Equal(t, map[string]any{"data": "AAAA", "format": "wav"}, inputAudio["input_audio"])
 }
 
 // Route-specific span names make render calls identifiable in traces.

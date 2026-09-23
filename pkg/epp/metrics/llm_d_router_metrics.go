@@ -419,7 +419,7 @@ var (
 			Help: metricsutil.HelpMsgWithStability(
 				"Saturation signal reported by an individual saturation detector, labeled by the detector reference "+
 					"name and by the pipeline stage ('prefill' or 'decode') whose endpoints were evaluated. Recorded by "+
-					"the max composite saturation detector for each of its children on every evaluation, so operators "+
+					"the max composite saturation detector for each of its children in scope on every evaluation, so operators "+
 					"can tell which signal (e.g. concurrency vs queue depth) is driving flow_control_pool_saturation "+
 					"in each stage. The stage label is empty when the detector is evaluated without stage partitioning.",
 				compbasemetrics.ALPHA),

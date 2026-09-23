@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -140,7 +141,8 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 
 	r.Post(reqcommon.PathChatCompletions, s.handleInference)
 	r.Post(reqcommon.PathCompletions, s.handleInference)
-	r.Post(reqcommon.PathGenerate, s.handleInference)
+	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
+	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
@@ -174,6 +176,21 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	s.httpServer.TLSConfig = tlsConfig
 	return s.httpServer.ListenAndServeTLS("", "")
+}
+
+// Serve accepts on the already bound listener l instead of binding
+// cfg.ListenAddr itself. With secure serving enabled the listener speaks
+// TLS; ctx bounds the certificate reloader.
+func (s *Server) Serve(ctx context.Context, l net.Listener) error {
+	if !s.secureServing {
+		return s.httpServer.Serve(l)
+	}
+	tlsConfig, err := s.listenerTLSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	s.httpServer.TLSConfig = tlsConfig
+	return s.httpServer.ServeTLS(l, "", "")
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

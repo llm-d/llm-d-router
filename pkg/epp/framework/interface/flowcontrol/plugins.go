@@ -127,10 +127,16 @@ type SaturationDetector interface {
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
 }
 
+// Pipeline stages named by WithSaturationStage.
+const (
+	SaturationStagePrefill = "prefill"
+	SaturationStageDecode  = "decode"
+)
+
 type saturationStageKey struct{}
 
-// WithSaturationStage returns a context naming the pipeline stage ("prefill" or "decode") whose
-// endpoints a SaturationDetector.Saturation call evaluates.
+// WithSaturationStage returns a context naming the pipeline stage (SaturationStagePrefill or
+// SaturationStageDecode) whose endpoints a SaturationDetector.Saturation call evaluates.
 func WithSaturationStage(ctx context.Context, stage string) context.Context {
 	return context.WithValue(ctx, saturationStageKey{}, stage)
 }

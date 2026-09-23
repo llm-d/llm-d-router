@@ -81,14 +81,22 @@ func (s *QueueScorer) WithName(name string) *QueueScorer {
 	return s
 }
 
-// Score returns the scoring result for the given list of endpoints based on context.
+// Score scores each endpoint by waiting-queue depth, min-max normalized across
+// endpoints that have written metrics: the shortest queue scores 1, the longest
+// 0, and equal queues score a neutral 1. Endpoints with no written metrics are
+// left unscored and do not participate in the range.
 func (s *QueueScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	queues := make(map[fwksched.Endpoint]int, len(endpoints))
 	minQueueSize := math.MaxInt
 	maxQueueSize := math.MinInt
 
-	// Iterate through the remaining endpoints to find min and max
 	for _, endpoint := range endpoints {
-		queueSize := endpoint.GetMetrics().WaitingQueueSize
+		podMetrics := endpoint.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		queueSize := podMetrics.WaitingQueueSize
+		queues[endpoint] = queueSize
 		if queueSize < minQueueSize {
 			minQueueSize = queueSize
 		}
@@ -97,19 +105,13 @@ func (s *QueueScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, end
 		}
 	}
 
-	// endpointScoreFunc calculates the score based on the queue size of each endpoint. Longer queue gets a lower score.
-	endpointScoreFunc := func(endpoint fwksched.Endpoint) float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(queues))
+	for endpoint, queueSize := range queues {
 		if maxQueueSize == minQueueSize {
-			// If all pods have the same queue size, return a neutral score
-			return 1.0
+			scores[endpoint] = 1.0
+			continue
 		}
-		return float64(maxQueueSize-endpoint.GetMetrics().WaitingQueueSize) / float64(maxQueueSize-minQueueSize)
-	}
-
-	// Create a map to hold the scores for each endpoint
-	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	for _, endpoint := range endpoints {
-		scores[endpoint] = endpointScoreFunc(endpoint)
+		scores[endpoint] = float64(maxQueueSize-queueSize) / float64(maxQueueSize-minQueueSize)
 	}
 	return scores
 }

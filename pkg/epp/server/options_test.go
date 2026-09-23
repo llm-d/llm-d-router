@@ -245,6 +245,77 @@ func TestGRPCFlags(t *testing.T) {
 	}
 }
 
+// TestPortFlags exercises --grpc-port, --metrics-port, and --grpc-health-port
+// as uint16-backed flags: defaults, valid values including the boundary
+// 65535, and rejection of values outside the uint16 range at parse time.
+func TestPortFlags(t *testing.T) {
+	tests := []struct {
+		name               string
+		args               []string
+		expectParseError   bool
+		expectedGRPCPort   uint16
+		expectedMetricsPrt uint16
+		expectedHealthPort uint16
+	}{
+		{
+			name:               "defaults",
+			args:               []string{},
+			expectedGRPCPort:   DefaultGrpcPort,
+			expectedMetricsPrt: 9090,
+			expectedHealthPort: 9003,
+		},
+		{
+			name: "valid explicit values",
+			args: []string{
+				"--grpc-port", "8080",
+				"--metrics-port", "8081",
+				"--grpc-health-port", "8082",
+			},
+			expectedGRPCPort:   8080,
+			expectedMetricsPrt: 8081,
+			expectedHealthPort: 8082,
+		},
+		{
+			name:               "max uint16 boundary",
+			args:               []string{"--grpc-port", "65535"},
+			expectedGRPCPort:   65535,
+			expectedMetricsPrt: 9090,
+			expectedHealthPort: 9003,
+		},
+		{
+			name:             "value over uint16 range is rejected at parse time",
+			args:             []string{"--grpc-port", "65536"},
+			expectParseError: true,
+		},
+		{
+			name:             "negative value is rejected at parse time",
+			args:             []string{"--metrics-port", "-1"},
+			expectParseError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := append([]string{"--pool-name", testPoolName, "--config-file", testConfigFile}, tt.args...)
+			err := fs.Parse(argv)
+
+			if tt.expectParseError {
+				require.Error(t, err, "expected flag parsing to fail")
+				return
+			}
+			require.NoError(t, err, "flag parsing failed unexpectedly")
+
+			require.Equal(t, tt.expectedGRPCPort, opts.GRPCPort)
+			require.Equal(t, tt.expectedMetricsPrt, opts.MetricsPort)
+			require.Equal(t, tt.expectedHealthPort, opts.GRPCHealthPort)
+		})
+	}
+}
+
 func TestValidateDirectValues(t *testing.T) {
 	opts := NewOptions()
 	opts.PoolName = testPoolName // bypass other validations

@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
@@ -32,7 +32,7 @@ import (
 // buildFlowControlConfig resolves all flow-control policy plugins
 // and returns the Config.
 func buildFlowControlConfig(
-	apiConfig *configapi.FlowControlConfig,
+	apiConfig *configapiv1.FlowControlConfig,
 	handle fwkplugin.Handle,
 ) (*flowcontrol.Config, error) {
 	defaults, err := buildPriorityBandPolicyDefaults(handle)
@@ -81,7 +81,7 @@ func buildPriorityBandPolicyDefaults(handle fwkplugin.Handle) (registry.Priority
 // buildRegistryConfig translates the API flow-control configuration into a
 // registry.Config, resolving per-band policy overrides via the handle.
 func buildRegistryConfig(
-	apiConfig *configapi.FlowControlConfig,
+	apiConfig *configapiv1.FlowControlConfig,
 	defaults registry.PriorityBandPolicyDefaults,
 	handle fwkplugin.Handle,
 ) (*registry.Config, error) {
@@ -142,7 +142,7 @@ func buildRegistryConfig(
 func buildPriorityBand(
 	defaults registry.PriorityBandPolicyDefaults,
 	handle fwkplugin.Handle,
-	band *configapi.PriorityBandConfig,
+	band *configapiv1.PriorityBandConfig,
 	label string,
 ) (*registry.PriorityBandConfig, error) {
 	bandOpts := make([]registry.PriorityBandConfigOption, 0, 5)

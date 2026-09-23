@@ -55,10 +55,10 @@ func TestResolveFormat(t *testing.T) {
 		want            reqcommon.APIType
 	}{
 		{name: "chat completions with openai format", useOpenAIFormat: true, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
-		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeGenerate},
+		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeVLLMGenerate},
 		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
-		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathGenerate, want: reqcommon.APITypeGenerate},
-		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeGenerate},
+		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
+		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -400,41 +400,6 @@ func TestExtractMultimodalEntries(t *testing.T) {
 			_, err := extractMultimodalEntries(features)
 			if !errors.Is(err, pipeline.ErrBadRequest) {
 				t.Errorf("expected ErrBadRequest, got %v", err)
-			}
-		})
-	}
-}
-
-func TestValidateSamplingParams(t *testing.T) {
-	obj := func(m map[string]any) map[string]any { return m }
-	tests := []struct {
-		name    string
-		body    map[string]any
-		wantErr bool
-	}{
-		{name: "absent", body: map[string]any{}},
-		{name: "null", body: map[string]any{"sampling_params": nil}},
-		{name: "valid_object", body: map[string]any{"sampling_params": obj(map[string]any{"max_tokens": float64(16)})}},
-		{name: "valid_with_extra_args", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": obj(map[string]any{})})}},
-		{name: "extra_args_null", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": nil})}},
-		{name: "sampling_params_array", body: map[string]any{"sampling_params": []any{float64(1), float64(2)}}, wantErr: true},
-		{name: "sampling_params_string", body: map[string]any{"sampling_params": "greedy"}, wantErr: true},
-		{name: "extra_args_array", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": []any{float64(1)}})}, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateSamplingParams(tc.body)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if !errors.Is(err, pipeline.ErrBadRequest) {
-					t.Errorf("expected ErrBadRequest, got %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

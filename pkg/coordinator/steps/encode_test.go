@@ -542,8 +542,8 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 // inline, so the encode fan-out and EC handoff are skipped.
 func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 	for name, path := range map[string]string{
-		"exact path":    reqcommon.PathGenerate,
-		"prefixed path": "/prefix" + reqcommon.PathGenerate,
+		"exact path":    reqcommon.PathVLLMGenerate,
+		"prefixed path": "/prefix" + reqcommon.PathVLLMGenerate,
 	} {
 		t.Run(name, func(t *testing.T) {
 			gatewayCallCount := 0

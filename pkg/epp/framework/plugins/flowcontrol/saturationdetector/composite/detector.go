@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -51,6 +52,10 @@ type parameters struct {
 	// reference a plugin that implements flowcontrol.SaturationDetector. The pluginRef tag
 	// makes the config loader instantiate the children before this plugin.
 	Detectors []string `json:"detectors" pluginRef:""`
+	// Stages optionally restricts children to pipeline stages, keyed by the child's entry in
+	// Detectors. A child without an entry is evaluated for every stage, and every child is
+	// evaluated when the endpoints are not partitioned by stage.
+	Stages map[string][]string `json:"stages,omitempty"`
 }
 
 // MaxSaturationDetectorConfigParser parses the detector parameters. It is registered with
@@ -65,6 +70,19 @@ func MaxSaturationDetectorConfigParser(rawParameters *json.Decoder, _ fwkplugin.
 	}
 	if len(cfg.Detectors) == 0 {
 		return nil, errors.New("max saturation detector requires at least one entry in detectors")
+	}
+	for childName, stages := range cfg.Stages {
+		if !slices.Contains(cfg.Detectors, childName) {
+			return nil, fmt.Errorf("stages entry %s is not listed in detectors", childName)
+		}
+		if len(stages) == 0 {
+			return nil, fmt.Errorf("stages entry %s must name at least one stage", childName)
+		}
+		for _, stage := range stages {
+			if stage != flowcontrol.SaturationStagePrefill && stage != flowcontrol.SaturationStageDecode {
+				return nil, fmt.Errorf("stages entry %s has unsupported stage %q", childName, stage)
+			}
+		}
 	}
 	return cfg, nil
 }
@@ -85,6 +103,7 @@ func MaxSaturationDetectorFactory(
 	cfg := rawCfg.(parameters)
 
 	children := make([]flowcontrol.SaturationDetector, 0, len(cfg.Detectors))
+	childStages := make([][]string, 0, len(cfg.Detectors))
 	seen := make(map[string]struct{}, len(cfg.Detectors))
 	for _, childName := range cfg.Detectors {
 		if _, dup := seen[childName]; dup {
@@ -101,9 +120,10 @@ func MaxSaturationDetectorFactory(
 			return nil, fmt.Errorf("plugin %s does not implement flowcontrol.SaturationDetector", childName)
 		}
 		children = append(children, child)
+		childStages = append(childStages, cfg.Stages[childName])
 	}
 
-	return newDetector(name, cfg.Detectors, children, log.FromContext(handle.Context())), nil
+	return newDetector(name, cfg.Detectors, children, childStages, log.FromContext(handle.Context())), nil
 }
 
 // The composite deliberately does not implement fwkplugin.ConsumerPlugin. Its children are
@@ -120,14 +140,18 @@ type detector struct {
 	// childLabels are the metric label values for the per-child saturation gauge,
 	// index-aligned with children: the reference name from the configuration.
 	childLabels []string
+	// childStages are the stages each child is evaluated for, index-aligned with children;
+	// nil means every stage.
+	childStages [][]string
 }
 
 // newDetector creates a new instance of the composite max saturation detector.
-// childNames must be index-aligned with children.
+// childNames and childStages must be index-aligned with children.
 func newDetector(
 	name string,
 	childNames []string,
 	children []flowcontrol.SaturationDetector,
+	childStages [][]string,
 	logger logr.Logger,
 ) *detector {
 	typedName := fwkplugin.TypedName{
@@ -136,12 +160,13 @@ func newDetector(
 	}
 
 	logger.WithName(typedName.String()).V(logutil.DEFAULT).Info("Creating new MaxSaturationDetector",
-		"detectors", childNames)
+		"detectors", childNames, "stages", childStages)
 
 	return &detector{
 		typedName:   typedName,
 		children:    children,
 		childLabels: childNames,
+		childStages: childStages,
 	}
 }
 
@@ -154,15 +179,22 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 // candidate endpoints, so the pool gates as saturated when any single signal is exhausted.
 // Each child's value is also exported through the per-detector saturation gauge, labeled by
 // the stage named in ctx, letting operators tell which signal is driving the combined value.
+// Children scoped to other stages are skipped; a stage with no child in scope reports 0 and
+// does not gate dispatch.
 func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
 	stage := flowcontrol.SaturationStageFromContext(ctx)
 	var maxSat float64
+	evaluated := false
 	for i, child := range d.children {
+		if stage != "" && d.childStages[i] != nil && !slices.Contains(d.childStages[i], stage) {
+			continue
+		}
 		sat := child.Saturation(ctx, endpoints)
 		metrics.RecordFlowControlDetectorSaturation(d.childLabels[i], stage, sat)
-		if i == 0 || sat > maxSat {
+		if !evaluated || sat > maxSat {
 			maxSat = sat
 		}
+		evaluated = true
 	}
 	return maxSat
 }

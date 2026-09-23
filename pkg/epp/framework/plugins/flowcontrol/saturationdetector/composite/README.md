@@ -20,6 +20,7 @@ The plugin implements only the `SaturationDetector` interface:
 The plugin accepts JSON parameters decoding to the following fields:
 
 - `detectors` (`[]string`): Names of the child saturation detector plugins to combine. Each entry must reference a plugin that implements `SaturationDetector`. The config loader instantiates the referenced plugins before the composite, so their position in the plugins list does not matter. Missing, duplicate, or wrong-type references are rejected at startup. At least one entry is required.
+- `stages` (`map[string][]string`, optional): Restricts children to pipeline stages (`prefill`, `decode`), keyed by the child's entry in `detectors`. A child without an entry is evaluated for every stage. When flow control evaluates a stage, children scoped to other stages are skipped, and a stage with no child in scope reports 0, so it does not gate dispatch. Every child is evaluated when the endpoints are not partitioned by stage. Entries that are not listed in `detectors`, name no stage, or name an unsupported stage are rejected at startup. Stage scoping applies to pool-level `Saturation` only. Per-endpoint `Filter` behavior is unchanged wherever the child is listed in scheduling profiles
 
 ## Example
 

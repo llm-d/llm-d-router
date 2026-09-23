@@ -26,13 +26,12 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	configapiv1alpha1 "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
@@ -48,27 +47,15 @@ import (
 )
 
 var (
-	scheme                       = runtime.NewScheme()
-	registeredFeatureGatesMu     sync.RWMutex
-	registeredFeatureGates       = make(map[string]bool)
-	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"} // TODO: deprecated should be clean up
+	scheme                   = runtime.NewScheme()
+	registeredFeatureGatesMu sync.RWMutex
+	registeredFeatureGates   = make(map[string]bool)
 )
 
 func init() {
-	// Support deprecated pseudo config CRD
-	var builder runtime.SchemeBuilder
-	(&builder).Register(func(scheme *runtime.Scheme) error {
-		scheme.AddKnownTypes(deprecatedSchemeGroupVersion,
-			&configapi.EndpointPickerConfig{},
-		)
-		// AddToGroupVersion allows the serialization of client types like ListOptions.
-		v1.AddToGroupVersion(scheme, deprecatedSchemeGroupVersion)
-		return nil
-	})
-
-	utilruntime.Must(configapi.Install(scheme))
-	utilruntime.Must((&builder).AddToScheme(scheme))
-
+	utilruntime.Must(configapiv1.Install(scheme))
+	// TODO: remove together with the v1alpha1 types.
+	utilruntime.Must(configapiv1alpha1.Install(scheme))
 }
 
 // RegisterFeatureGate registers a feature gate name for validation purposes.
@@ -80,21 +67,14 @@ func RegisterFeatureGate(gate string, isEnabledByDefault bool) {
 
 // LoadRawConfig parses the raw configuration bytes, applies initial defaults, and extracts feature gates.
 // It does not instantiate plugins.
-func LoadRawConfig(configBytes []byte, logger logr.Logger, extraGates ...string) (*configapi.EndpointPickerConfig, map[string]bool, error) {
-	var rawConfig *configapi.EndpointPickerConfig
+func LoadRawConfig(configBytes []byte, logger logr.Logger, extraGates ...string) (*configapiv1.EndpointPickerConfig, map[string]bool, error) {
+	var rawConfig *configapiv1.EndpointPickerConfig
 	var err error
 	if len(configBytes) != 0 {
-		rawConfig, err = decodeRawConfig(configBytes)
+		rawConfig, err = decodeRawConfig(logger, configBytes)
 		if err != nil {
 			return nil, nil, err
 		}
-
-		if rawConfig.GroupVersionKind().GroupVersion() == deprecatedSchemeGroupVersion {
-			logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha1/EndpointPickerConfig is deprecated",
-				"replacement", "llm-d.ai/v1alpha1/EndpointPickerConfig")
-		}
-
-		migrateDiscoveryConfig(logger, rawConfig)
 
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
 	} else {
@@ -128,29 +108,10 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger, extraGates ...string)
 	return rawConfig, featureConfig, nil
 }
 
-// migrateDiscoveryConfig lifts the deprecated bare pluginRef into the
-// consolidated discovery section:
-//
-//	dataLayer.discovery.pluginRef -> dataLayer.discovery.endpoints.pluginRef
-func migrateDiscoveryConfig(logger logr.Logger, rawConfig *configapi.EndpointPickerConfig) {
-	if rawConfig.DataLayer == nil {
-		return
-	}
-	dl := rawConfig.DataLayer
-
-	//nolint:staticcheck // SA1019: dl.Discovery.PluginRef is deprecated: use discovery.endpoints instead.
-	if dl.Discovery != nil && dl.Discovery.PluginRef != "" {
-		logger.Info("DEPRECATION: dataLayer.discovery.pluginRef is deprecated, use dataLayer.discovery.endpoints.pluginRef instead. If both are set, the new field is used.")
-		if dl.Discovery.Endpoints == nil {
-			dl.Discovery.Endpoints = &configapi.EndpointDiscoveryConfig{PluginRef: dl.Discovery.PluginRef}
-		}
-	}
-}
-
 // InstantiateAndConfigure performs the heavy lifting of plugin instantiation, system architecture injection, and
 // scheduler construction.
 func InstantiateAndConfigure(
-	rawConfig *configapi.EndpointPickerConfig,
+	rawConfig *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	logger logr.Logger,
 ) (*config.Config, error) {
@@ -228,7 +189,7 @@ func InstantiateAndConfigure(
 // beyond the saturation detector. The saturation detector is honored by the legacy admission path
 // even when the flowControl feature gate is disabled, so it alone does not indicate ignored
 // configuration.
-func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
+func flowControlSettingsConfigured(fc *configapiv1.FlowControlConfig) bool {
 	if fc == nil {
 		return false
 	}
@@ -238,16 +199,29 @@ func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
 		fc.UsageLimitPolicyPluginRef != ""
 }
 
-func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error) {
-	cfg := &configapi.EndpointPickerConfig{}
+// decodeRawConfig decodes a configuration in any accepted apiVersion and returns
+// it as v1, which is the only version the rest of the EPP reads. Configurations
+// in an older apiVersion are converted and logged as deprecated.
+func decodeRawConfig(logger logr.Logger, configBytes []byte) (*configapiv1.EndpointPickerConfig, error) {
 	codecs := serializer.NewCodecFactory(scheme, serializer.EnableStrict)
-	if err := runtime.DecodeInto(codecs.UniversalDecoder(), configBytes, cfg); err != nil {
+	obj, gvk, err := codecs.UniversalDeserializer().Decode(configBytes, nil, nil)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode configuration JSON/YAML: %w", err)
 	}
-	return cfg, nil
+
+	switch cfg := obj.(type) {
+	case *configapiv1.EndpointPickerConfig:
+		return cfg, nil
+	case *configapiv1alpha1.EndpointPickerConfig:
+		logger.Info("DEPRECATION: apiVersion "+gvk.GroupVersion().String()+"/EndpointPickerConfig is deprecated and is removed in a later release",
+			"replacement", configapiv1.GroupVersion.String()+"/EndpointPickerConfig")
+		return convertV1alpha1ToV1(logger, cfg), nil
+	default:
+		return nil, fmt.Errorf("unsupported configuration type %T for apiVersion %s", obj, gvk.GroupVersion())
+	}
 }
 
-func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle, logger logr.Logger) error {
+func instantiatePlugins(configuredPlugins []configapiv1.PluginSpec, handle fwkplugin.Handle, logger logr.Logger) error {
 	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
 	if err != nil {
 		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
@@ -271,10 +245,10 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 	return nil
 }
 
-func buildPluginDAG(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) ([]configapi.PluginSpec, error) {
+func buildPluginDAG(configuredPlugins []configapiv1.PluginSpec, handle fwkplugin.Handle) ([]configapiv1.PluginSpec, error) {
 	graph := map[string][]string{}
-	pluginMap := map[string]configapi.PluginSpec{}
-	orderedPlugins := []configapi.PluginSpec{}
+	pluginMap := map[string]configapiv1.PluginSpec{}
+	orderedPlugins := []configapiv1.PluginSpec{}
 
 	for _, spec := range configuredPlugins {
 		if parserFunc, ok := fwkplugin.PluginsWithPluginDependencies[spec.Type]; !ok {
@@ -352,7 +326,7 @@ func findPluginDependencies(params any) []string {
 }
 
 func buildSchedulerConfig(
-	configProfiles []configapi.SchedulingProfile,
+	configProfiles []configapiv1.SchedulingProfile,
 	handle fwkplugin.Handle,
 ) (*scheduling.SchedulerConfig, error) {
 
@@ -407,7 +381,7 @@ func buildSchedulerConfig(
 	return scheduling.NewSchedulerConfig(profileHandler, profiles), nil
 }
 
-func loadFeatureConfig(gates configapi.FeatureGates) (map[string]bool, error) {
+func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) {
 	registeredFeatureGatesMu.RLock()
 	defer registeredFeatureGatesMu.RUnlock()
 	config := make(map[string]bool, len(registeredFeatureGates))
@@ -429,7 +403,7 @@ func loadFeatureConfig(gates configapi.FeatureGates) (map[string]bool, error) {
 	return config, nil
 }
 
-func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
+func buildParserRegistry(rawParserConfigs []configapiv1.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
 	if len(rawParserConfigs) == 0 {
 		return nil, errors.New("no parsers configured")
 	}
@@ -449,7 +423,7 @@ func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkpl
 	return handlers.NewParserRegistry(parsers, logger), nil
 }
 
-func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {
+func buildDataLayerConfig(rawDataConfig *configapiv1.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {
 	cfg := datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{},
 	}
@@ -458,21 +432,23 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
-	if ref := rawDataConfig.CrossReplicaSyncerPluginRef; ref != "" {
-		syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
-		if !ok {
-			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+	if cr := rawDataConfig.CrossReplica; cr != nil {
+		if ref := cr.SyncerPluginRef; ref != "" {
+			syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
+			if !ok {
+				return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+			}
+			cfg.Syncer = syncer
 		}
-		cfg.Syncer = syncer
-	}
-	if iv := rawDataConfig.CrossReplicaSyncInterval; iv != nil {
-		cfg.SyncInterval = iv.Duration
-	}
-	if timeout := rawDataConfig.CrossReplicaPublishTimeout; timeout != nil {
-		if timeout.Duration <= 0 {
-			return nil, fmt.Errorf("crossReplicaPublishTimeout must be positive, got %s", timeout.Duration)
+		if iv := cr.SyncInterval; iv != nil {
+			cfg.SyncInterval = iv.Duration
 		}
-		cfg.PublishTimeout = timeout.Duration
+		if timeout := cr.PublishTimeout; timeout != nil {
+			if timeout.Duration <= 0 {
+				return nil, fmt.Errorf("crossReplica.publishTimeout must be positive, got %s", timeout.Duration)
+			}
+			cfg.PublishTimeout = timeout.Duration
+		}
 	}
 
 	for _, source := range rawDataConfig.Sources {

@@ -239,7 +239,7 @@ router:
     pluginsConfigFile: "custom-plugins.yaml"
     pluginsCustomConfig:
       custom-plugins.yaml: |
-        apiVersion: inference.networking.x-k8s.io/v1alpha1
+        apiVersion: llm-d.ai/v1
         kind: EndpointPickerConfig
         plugins:
         - type: queue-scorer
@@ -288,7 +288,7 @@ router:
   epp:
     pluginsConfigFile: custom-plugins.yaml
     pluginsConfig:
-      apiVersion: llm-d.ai/v1alpha1
+      apiVersion: llm-d.ai/v1
       kind: EndpointPickerConfig
       plugins:
         - type: queue-scorer

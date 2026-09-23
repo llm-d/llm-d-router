@@ -27,6 +27,7 @@ jobs:
       - name: Validate release-note block
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
 
@@ -38,6 +39,10 @@ jobs:
             tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
 
           if [[ -z "$NOTE" ]]; then
+            if [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
+              echo "Dependabot PR body has no release-note block; treating as NONE."
+              exit 0
+            fi
             echo "::error::No release-note block found in the PR body. Add a \`\`\`release-note\`\`\` block (write NONE if there is no user-facing change)."
             exit 1
           fi

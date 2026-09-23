@@ -1,4 +1,4 @@
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 featureGates:
 - flowControl
 kind: EndpointPickerConfig

@@ -37,7 +37,6 @@ const (
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"

@@ -19,6 +19,7 @@ package endpointattribute
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,7 @@ func endpointWith(queue int, kvUsage float64) fwksched.Endpoint {
 		attrmetrics.ScalarMetricValue(kvUsage))
 	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{},
-		&fwkdl.Metrics{WaitingQueueSize: queue, KVCacheUsagePercent: kvUsage},
+		&fwkdl.Metrics{WaitingQueueSize: queue, KVCacheUsagePercent: kvUsage, UpdateTime: time.Now()},
 		attrs,
 	)
 }
@@ -117,7 +118,7 @@ func TestParityQueueScorer(t *testing.T) {
 func TestDivergenceWhenAttributeAbsent(t *testing.T) {
 	noAttr := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{},
-		&fwkdl.Metrics{WaitingQueueSize: 0, KVCacheUsagePercent: 0.0},
+		&fwkdl.Metrics{WaitingQueueSize: 0, KVCacheUsagePercent: 0.0, UpdateTime: time.Now()},
 		fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{noAttr}
