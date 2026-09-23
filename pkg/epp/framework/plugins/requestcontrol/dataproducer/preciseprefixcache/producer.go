@@ -31,7 +31,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -94,8 +93,7 @@ type Producer struct {
 	kvCacheIndexer kvCacheIndexer
 
 	subscribersManager subscriberManager
-	kvEventsConfig     *kvevents.Config
-	podSelector        labels.Selector // nil matches every endpoint.
+	subscriptions      *kvevents.EndpointSubscriptions
 
 	dk plugin.DataKey
 
@@ -106,10 +104,6 @@ type Producer struct {
 	speculativeEnabled bool
 
 	blockSizeTokens int
-
-	// Plugin-lifetime, not request-scoped: SubscriberManager binds each
-	// subscriber's goroutine to the ctx passed at registration.
-	subscriberCtx context.Context
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -155,16 +149,6 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		config.KVEventsConfig = kvevents.DefaultConfig()
 	}
 
-	var podSelector labels.Selector
-	if kc := config.KVEventsConfig; kc.DiscoverPods && kc.PodDiscoveryConfig != nil && kc.PodDiscoveryConfig.PodLabelSelector != "" {
-		sel, err := labels.Parse(kc.PodDiscoveryConfig.PodLabelSelector)
-		if err != nil {
-			return nil, fmt.Errorf("invalid kvEventsConfig.podDiscoveryConfig.podLabelSelector %q: %w",
-				kc.PodDiscoveryConfig.PodLabelSelector, err)
-		}
-		podSelector = sel
-	}
-
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token processor: %w", err)
@@ -187,6 +171,10 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
+	subscriptions, err := kvevents.NewEndpointSubscriptions(ctx, config.KVEventsConfig, subscribersManager)
+	if err != nil {
+		return nil, err
+	}
 	if config.KVEventsConfig.ZMQEndpoint != "" {
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, "", config.KVEventsConfig.TopicFilter, false); err != nil {
@@ -203,15 +191,13 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
 		subscribersManager: subscribersManager,
-		kvEventsConfig:     config.KVEventsConfig,
-		podSelector:        podSelector,
+		subscriptions:      subscriptions,
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		pluginState:        plugin.NewPluginState(ctx),
 		speculativeCache:   speculativeCache,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
-		subscriberCtx:      ctx,
 	}, nil
 }
 

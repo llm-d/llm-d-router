@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package preciseprefixcache
+package sessionprefixcache
 
 import (
 	"context"
@@ -26,27 +26,20 @@ import (
 
 var _ fwkdl.EndpointExtractor = &Producer{}
 
-// Extract subscribes matching endpoints to per-pod KV events when discovery is
-// enabled. Deleted endpoints and endpoints that stop matching lose their
-// subscriber and cached index entries.
+// Extract subscribes matching endpoints to per-pod KV events. Deleted
+// endpoints and endpoints that stop matching lose their subscriber. Retiring
+// the subscriber queues the endpoint's reset behind the events it already
+// accepted, so the index is not cleared here: a direct clear could be
+// overtaken by queued events and leave stale residency.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
-	if !p.subscriptions.Enabled() {
-		return nil
-	}
 	meta := event.Endpoint.GetMetadata()
 	if meta == nil || meta.ID.Name == "" {
 		return nil
 	}
-
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	ctx = log.IntoContext(ctx, logger)
-	endpointKey := meta.ID.String()
-
-	switch {
-	case event.Type == fwkdl.EventAddOrUpdate && p.subscriptions.Matches(meta.Labels):
-		return p.subscriptions.Ensure(ctx, endpointKey, meta.Address, meta.Port, meta.GetRankIndex())
-	case event.Type == fwkdl.EventAddOrUpdate || event.Type == fwkdl.EventDelete:
-		p.subscriptions.Remove(ctx, endpointKey)
+	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithName(p.typedName.String()))
+	if event.Type == fwkdl.EventAddOrUpdate && p.subscriptions.Matches(meta.Labels) {
+		return p.subscriptions.Ensure(ctx, meta.ID.String(), meta.Address, meta.Port, meta.GetRankIndex())
 	}
+	p.subscriptions.Remove(ctx, meta.ID.String())
 	return nil
 }
