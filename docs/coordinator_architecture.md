@@ -275,7 +275,8 @@ steps read and mutate. The load-bearing fields:
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
 it as the base header set, then stamp the request ID and `EPP-Profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
-request. Any client-provided value under that name is discarded.
+request. Any client-provided value under that name is discarded. Client values of
+`EPP-Profile` and `x-prefill-pin` are also discarded, because EPP routes on them.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -411,10 +412,44 @@ KV connector protocols ([pkg/coordinator/connectors/kv/](../pkg/coordinator/conn
 | `kv-sglang` | `sglang` | SGLang bootstrap: `bootstrap_host`, `bootstrap_port`, `bootstrap_room`. |
 | `kv-shared-storage` | `shared-storage` | Shared filesystem / object store: prefill writes KV, decode reads it; no transfer descriptor on the wire. |
 
-The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and can be
-overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
-is read once on the first prefill request that uses the connector; a non-integer value is
-rejected in favor of the default and logged at error level.
+`kv-sglang` needs the `prefill-decode` step; the `prefill` and `decode` steps reject it
+at startup. An SGLang prefill pod completes a request only after the decode pod has joined
+a room on its bootstrap server, so both requests must be in flight at the same time, and
+the decode body must name the prefill pod before either request is sent. The step:
+
+1. Sends the prefill body to the `prefill` profile with `Prefer: reserve-endpoint`. EPP
+   schedules it and answers `200` with the picked pod on `x-prefill-host-port`, without
+   forwarding it.
+2. Writes `bootstrap_host` (that pod's IP), `bootstrap_port`, and one integer
+   `bootstrap_room` at the top level of both bodies, and removes the client's
+   `routed_dp_rank`, `data_parallel_rank`, and `disagg_prefill_dp_rank`. No
+   `kv_transfer_params` is sent. The client's `Prefer` and `x-data-parallel-rank`
+   headers are not forwarded: a client `Prefer: reserve-endpoint` would make EPP answer
+   the pinned prefill request instead of running it, and SGLang runs a request on the
+   rank that `x-data-parallel-rank` names, which can conflict with the rank the room
+   implies.
+3. Sends the prefill request with `x-prefill-pin: <ip:port>` and the decode request at the
+   same time. Each of the three requests carries its own `x-request-id` (`<id>-reserve`,
+   `<id>-prefill`, `<id>`), because EPP plugins key per-request state by it.
+4. Streams decode to the client. The prefill response is read for its status only. When one
+   request fails, the other is cancelled. A prefill failure before decode has answered is
+   returned to the client; after decode has started, the client gets a truncated response.
+
+The prefill EPP needs two plugins: `reserve-endpoint` (answers the reservation, see
+[its README](../pkg/epp/framework/plugins/requestcontrol/reserveendpoint/README.md)) and
+`prefill-pin-screener` (keeps only the pinned pod, and answers 503 when that pod is gone,
+see [its README](../pkg/epp/framework/plugins/requestcontrol/screener/prefillpin/README.md)).
+Without `reserve-endpoint`, EPP rejects the reservation instead of forwarding it.
+
+The coordinator does not choose a data-parallel rank. With several ranks behind one SGLang
+HTTP port, SGLang picks the rank without the prefix cache. The SGLang Rust server mode
+(`SGLANG_RUST_SERVER=1`, one HTTP port per rank) is not supported: there the bootstrap port
+is the prefill endpoint's own port, and the connector always writes the fixed port.
+
+The `kv-sglang` `bootstrap_port` defaults to 8998 and can be overridden process-wide with
+the `SGLANG_BOOTSTRAP_PORT` environment variable. The value is read once on the first
+request that uses the connector; a non-integer value is rejected in favor of the default
+and logged at error level.
 
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
@@ -791,6 +826,7 @@ only the request carrier differs.
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
 | `decode` | Stream the final completion to the client. | `kv_connector` |
+| `prefill-decode` | Replaces `prefill` and `decode` for a KV connector whose prefill and decode requests must be in flight together (`kv-sglang`): reserve a prefill pod, send both requests at once, stream decode to the client. See [KV and EC transfer protocols](#kv-and-ec-transfer-protocols). | `use_openai_format`, `kv_connector`, `ec_connector` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step

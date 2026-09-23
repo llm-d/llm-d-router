@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -44,6 +45,11 @@ import (
 // It flows from the proxy's ModifyResponse to its ErrorHandler, which swallows
 // it so the miss can fall through to the rest of the pipeline.
 var errCacheMiss = errors.New("cache miss")
+
+// errPeerLegFailed is the cancellation cause a step sets on a decode request
+// when the prefill request sent with it has failed. The decode proxy's
+// ErrorHandler swallows it, so the step can answer with the prefill error.
+var errPeerLegFailed = errors.New("peer request failed")
 
 // newDecodeProxyRequest builds the decode-phase POST to the gateway: it marshals
 // body, targets gwClient.BaseURL()+reqCtx.OriginalPath, and stamps the JSON
@@ -100,6 +106,23 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 type decodeOutcome struct {
 	Status       int
 	TransportErr error
+	// BodyComplete is true once the upstream response body was read to its
+	// end, so the client received the whole response.
+	BodyComplete bool
+}
+
+// eofReader sets *eof when its body has been read to io.EOF.
+type eofReader struct {
+	io.ReadCloser
+	eof *bool
+}
+
+func (r *eofReader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) {
+		*r.eof = true
+	}
+	return n, err
 }
 
 // newDecodeProxy builds the streaming reverse proxy for a decode-phase request
@@ -107,7 +130,8 @@ type decodeOutcome struct {
 // when non-nil, inspects each upstream response (the conditional cache probe
 // uses it to detect a 412) and runs after the outcome captures the status.
 // Transport errors are logged and answered 502, except errCacheMiss, which is
-// swallowed so the miss falls through.
+// swallowed so the miss falls through, and a cancellation caused by
+// errPeerLegFailed, which is swallowed so the step can answer instead.
 //
 // A failure after the upstream response has started streaming cannot become a
 // 502: the 200 status and partial body are already on the wire, so the proxy
@@ -122,6 +146,7 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 		Transport:     transport,
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
+			resp.Body = &eofReader{ReadCloser: resp.Body, eof: &out.BodyComplete}
 			if modifyResponse != nil {
 				return modifyResponse(resp)
 			}
@@ -129,7 +154,7 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 		},
 		ErrorLog: log.New(&proxyErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, proxyErr error) {
-			if errors.Is(proxyErr, errCacheMiss) {
+			if errors.Is(proxyErr, errCacheMiss) || errors.Is(context.Cause(req.Context()), errPeerLegFailed) {
 				return
 			}
 			// A request whose context already ended (client disconnected, or a
@@ -149,6 +174,27 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 		},
 	}
 	return proxy, out
+}
+
+// streamedError converts a decode outcome to the error its step returns: a
+// transport failure or an upstream 4xx/5xx, both already answered to the client.
+func (o *decodeOutcome) streamedError(step string) error {
+	if o.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: step, Cause: o.TransportErr}
+	}
+	if o.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: step, StatusCode: o.Status}
+	}
+	return nil
+}
+
+// serveDecode proxies proxyReq through the gateway and streams the response to
+// the client.
+func serveDecode(logger logr.Logger, gwClient *gateway.Client, reqCtx *pipeline.RequestContext, proxyReq *http.Request) *decodeOutcome {
+	transport := instrumentedTransport(gwClient.Transport(), coordmetrics.UpstreamDecode)
+	proxy, out := newDecodeProxy(logger, transport, nil)
+	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
+	return out
 }
 
 // proxyErrorLogWriter adapts the reverse proxy's *log.Logger sink to the
