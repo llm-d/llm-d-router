@@ -59,6 +59,10 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // and conversation reference a prior turn, background asks for an async job
 // the router cannot poll, and file_id is part of the Responses file
 // hydration API, referring to a file the router never stored.
+//
+// store is left unchecked: it is handled upstream by the stateful proxy
+// (the agentic-api layer strips it before the request reaches the router),
+// and forwarding it is harmless regardless since it defaults to true.
 func RejectStatefulResponsesFields(body map[string]any) error {
 	for _, field := range []string{FieldPreviousResponseID, FieldConversation, FieldBackground} {
 		if _, ok := body[field]; ok {
