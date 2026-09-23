@@ -408,9 +408,10 @@ for the request, and the source records which branch resolved it: `header` for t
 `x-gateway-inference-fairness-id`, `agent_identity` when the agent-identity plugin supplies
 the client's session identifier, or `default` for the `default-flow` sentinel. Source
 `header` identifies the resolution branch, not producer authentication. Requests that fail
-before the identity resolves keep the header value on their spans, while their
-`fairness_id` metric label is `default-flow`. Span values are not subject to the
-`fairness_id` metric-label cardinality cap. The pair is not propagated as request headers.
+before the identity resolves keep the value set at ingress: the fairness header value, or
+`default-flow` with source `default` when the header is absent, even if the agent-identity
+plugin would have supplied one. Span values are not subject to the `fairness_id`
+metric-label cardinality cap. The pair is not propagated as request headers.
 
 #### Complete Monitoring & Tracing Example
 

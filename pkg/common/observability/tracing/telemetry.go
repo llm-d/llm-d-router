@@ -80,8 +80,6 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	opt := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sampler),
 		sdktrace.WithResource(res),
-		// Registered ahead of the exporter's processor so attributes added at OnStart
-		// are present on the span the exporter later reads.
 		sdktrace.WithSpanProcessor(NewRequestAttributionProcessor()),
 	}
 
