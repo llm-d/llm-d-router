@@ -472,7 +472,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should strip stateful Responses fields from both the prefill and the decode request", func() {
+	It("should refuse a Responses request carrying stateful fields", func() {
 		By("starting the proxy")
 		go func() {
 			defer GinkgoRecover()
@@ -504,26 +504,15 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 
-		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
-			Fail(string(bp))
-		}
+		By("verifying the client got a 400 naming the field")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadRequest))
+		bp, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(bp)).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
 
-		By("verifying the prefill request dropped the stateful fields")
-		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
-		prefillReq := testInfo.prefillHandler.CompletionRequests[0]
-		Expect(prefillReq).ToNot(HaveKey("previous_response_id"))
-		Expect(prefillReq).ToNot(HaveKey("conversation"))
-		Expect(prefillReq).ToNot(HaveKey("background"))
-		Expect(prefillReq).To(HaveKeyWithValue("store", false))
-
-		By("verifying the decode request dropped the stateful fields too")
-		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
-		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
-		Expect(decodeReq).ToNot(HaveKey("previous_response_id"))
-		Expect(decodeReq).ToNot(HaveKey("conversation"))
-		Expect(decodeReq).ToNot(HaveKey("background"))
-		Expect(decodeReq).To(HaveKeyWithValue("store", false))
+		By("verifying neither backend was dispatched")
+		Expect(testInfo.prefillHandler.CompletionRequests).To(BeEmpty())
+		Expect(testInfo.decodeHandler.CompletionRequests).To(BeEmpty())
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

@@ -17,7 +17,6 @@ limitations under the License.
 package proxy
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -31,44 +30,40 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
-// statefulResponsesTestBody is a /v1/responses body carrying every field
-// reqcommon.DropStatefulResponsesFields removes, shared by the tests that
-// assert those fields are stripped before the request reaches an upstream.
-const statefulResponsesTestBody = `{"model":"m","input":"hi","previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
+// statefulResponsesTestBody is a /v1/responses body carrying the fields
+// reqcommon.RejectStatefulResponsesFields refuses, shared by the tests that
+// assert such a request is refused before it reaches any upstream.
+const statefulResponsesTestBody = `{"model":"m","input":"hi","previous_response_id":"resp-123","conversation":"conv-123","background":true}`
 
-// requireStatefulResponsesFieldsStripped asserts that body carries none of
-// the fields reqcommon.DropStatefulResponsesFields removes, and that store
-// was forced to false rather than left absent.
-func requireStatefulResponsesFieldsStripped(t *testing.T, body map[string]any) {
+// requireStatefulResponsesRejected asserts the handler answered 400 naming the
+// offending field and dispatched nothing upstream. previous_response_id is the
+// first field RejectStatefulResponsesFields checks, so it is the one named for
+// statefulResponsesTestBody.
+func requireStatefulResponsesRejected(t *testing.T, recorder *httptest.ResponseRecorder, dispatched bool) {
 	t.Helper()
-	require.NotNil(t, body)
-	for _, field := range []string{reqcommon.FieldPreviousResponseID, reqcommon.FieldConversation, reqcommon.FieldBackground} {
-		_, ok := body[field]
-		require.Falsef(t, ok, "expected %q to be dropped, got %v", field, body[field])
-	}
-	require.Equal(t, false, body[reqcommon.FieldStore])
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Contains(t, recorder.Body.String(), reqcommon.FieldPreviousResponseID)
+	require.False(t, dispatched, "request reached an upstream despite an unsupported field")
 }
 
-// TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode covers
-// handleSharedStorage's default path (no cache_hit_threshold): prefill, then
-// decode. Both requests are built from the same body readJSONBody already
-// stripped.
-func TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode(t *testing.T) {
-	var prefillBody map[string]any
-	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&prefillBody)
+// TestSharedStorage_RejectsStatefulResponsesFields covers handleSharedStorage's
+// default path (no cache_hit_threshold): the request is refused in readJSONBody,
+// so neither the prefill nor the decode upstream is ever dispatched.
+func TestSharedStorage_RejectsStatefulResponsesFields(t *testing.T) {
+	var dispatched bool
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		dispatched = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer prefill.Close()
 
-	var decodeBody map[string]any
 	decodeURL, err := url.Parse("http://decoder:8000")
 	require.NoError(t, err)
 	srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: KVConnectorSharedStorage})
 	srv.logger = log.Log
 	srv.allowlistValidator = &AllowlistValidator{}
-	srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&decodeBody)
+	srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		dispatched = true
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop"}]}`))
 	})
@@ -77,39 +72,6 @@ func TestSharedStorage_StripsStatefulResponsesFieldsFromPrefillAndDecode(t *test
 	req.Header.Set(routing.PrefillEndpointHeader, strings.TrimPrefix(prefill.URL, "http://"))
 	recorder := httptest.NewRecorder()
 	srv.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
-	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 
-	requireStatefulResponsesFieldsStripped(t, prefillBody)
-	requireStatefulResponsesFieldsStripped(t, decodeBody)
-}
-
-// TestSharedStorage_DecodeFirstAttempt_StripsStatefulResponsesFields targets
-// the decode-first attempt handleSharedStorage takes when cache_hit_threshold
-// is present: that request is built via cloneRequestWithBody from
-// readJSONBody's raw bytes, not from the parsed body map.
-func TestSharedStorage_DecodeFirstAttempt_StripsStatefulResponsesFields(t *testing.T) {
-	var decodeBody map[string]any
-	decodeURL, err := url.Parse("http://decoder:8000")
-	require.NoError(t, err)
-	srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: KVConnectorSharedStorage})
-	srv.logger = log.Log
-	srv.allowlistValidator = &AllowlistValidator{}
-	srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&decodeBody)
-		w.Header().Set("Content-Type", "application/json")
-		// No cache_threshold finish_reason, so decode succeeds without ever
-		// falling back to prefill.
-		_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop"}]}`))
-	})
-
-	body := `{"model":"m","input":"hi","cache_hit_threshold":0.5,"previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
-	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
-	// Never dialed: decode succeeds on the first attempt, so handleSharedStorage
-	// returns before this host would be used.
-	req.Header.Set(routing.PrefillEndpointHeader, "unused-prefill-host:9999")
-	recorder := httptest.NewRecorder()
-	srv.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
-	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-
-	requireStatefulResponsesFieldsStripped(t, decodeBody)
+	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
