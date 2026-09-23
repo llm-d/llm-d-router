@@ -78,7 +78,7 @@ func TestProducerResidencyAgainstModel(t *testing.T) {
 			lookup := attrsession.SessionCacheRequest{SessionID: "query", TotalTokens: total}
 			for _, path := range paths {
 				lookup.Prefixes = append(lookup.Prefixes, attrsession.SessionCachePrefix{
-					BlockHashes: path, BlockSizeTokens: 16, Exact: exact,
+					CacheNamespace: "model-v1", BlockHashes: path, BlockSizeTokens: 16, Exact: exact,
 				})
 			}
 			for endpoint, info := range matchOn(t, p, lookupRequest("query", lookup)) {
@@ -136,7 +136,7 @@ func TestProducerConcurrentEventsAndQueries(t *testing.T) {
 		wg.Go(func() {
 			for range 200 {
 				lookup := attrsession.SessionCacheRequest{SessionID: "query", TotalTokens: 47,
-					Prefixes: []attrsession.SessionCachePrefix{{BlockHashes: []uint64{10, 20, 30}, BlockSizeTokens: 16, Exact: reader%2 == 0}}}
+					Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20, 30}, BlockSizeTokens: 16, Exact: reader%2 == 0}}}
 				endpoints := freshEndpoints()
 				if err := p.Produce(t.Context(), lookupRequest("query", lookup), endpoints); err != nil {
 					errors <- err
@@ -164,6 +164,6 @@ func TestProducerConcurrentEventsAndQueries(t *testing.T) {
 		require.NoError(t, p.events.Reset(t.Context(), address))
 	}
 	lookup := attrsession.SessionCacheRequest{SessionID: "final", TotalTokens: 48,
-		Prefixes: []attrsession.SessionCachePrefix{{BlockHashes: []uint64{10, 20, 30}, BlockSizeTokens: 16, Exact: true}}}
+		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20, 30}, BlockSizeTokens: 16, Exact: true}}}
 	require.Zero(t, firstMatch(t, p, lookupRequest("final", lookup)).MatchBlocks())
 }

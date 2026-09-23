@@ -2,15 +2,18 @@
 
 **Type:** `session-prefix-cache-producer`
 
+Alpha plugin; enable `--allow-experimental-plugins`.
+
 DataProducer that resolves a session producer's engine-block prefixes against
 block residency observed from vLLM KV events, and publishes per-endpoint
-`PrefixCacheMatchInfo`. It serves requests whose tokens are estimated rather
-than rendered: the prefixes are the engine's own block hashes, learned from
-events, so neither the lookup path nor the ingestion path hashes tokens.
+`PrefixCacheMatchInfo`. It works with real or estimated
+tokens. Prefixes contain engine block hashes learned from events; neither
+lookup nor event ingestion renders prompts or hashes tokens.
 Pairs with the generic [`prefix-cache-scorer`](../../../scheduling/scorer/prefix/),
 which must reference this producer by name.
 
 Pipeline per request:
+
 - Consume `SessionCacheRequest` from the configured session producer.
 - Resolve each candidate prefix against every observed cache (endpoint,
   data-parallel rank, KV-cache group) of the candidate endpoints and keep the
@@ -29,6 +32,7 @@ A request without a `SessionCacheRequest` attribute, or with an empty
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `sessionCacheRequestProducerName` | string | required | Instance name of the plugin that publishes `SessionCacheRequest`. |
+| `cacheNamespace` | string | required | Compatible model, hash algorithm, and cache salt settings for the subscribed engines. |
 | `indexConfig` | object | `kvblock.DefaultIndexConfig()` | In-memory residency index. `redisConfig` is rejected. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. Per-endpoint pod discovery of vLLM engines is required; a global `zmqEndpoint` and `engineType: sglang` are rejected. |
 
@@ -37,6 +41,7 @@ A request without a `SessionCacheRequest` attribute, or with an empty
   name: session-cache
   parameters:
     sessionCacheRequestProducerName: sessions
+    cacheNamespace: qwen-v1
     kvEventsConfig:
       podDiscoveryConfig:
         socketPort: 5557
@@ -46,8 +51,9 @@ A request without a `SessionCacheRequest` attribute, or with an empty
 ```
 
 The `sessions` plugin is a session producer configured by the integration.
-The repository ships no session producer; configuration loading fails when the
-named plugin is absent.
+There is no default producer of `SessionCacheRequest`; configuration loading
+fails when the named producer is absent. The existing `session-id-producer`
+provides identity only and does not produce cache prefixes.
 
 ## Session producer contract
 
@@ -71,19 +77,29 @@ interface between the two plugins.
   estimated. It bounds coverage and is the prompt length the inflight-load
   producer accounts for this request.
 - `Prefixes`: candidate prompt prefixes as ordered engine block hashes with
-  their block size. Each is resolved on its own; candidates are never
-  concatenated. `Exact` marks a prefix the prompt is known to begin with.
+  their block size and cache namespace. Each is resolved on its own;
+  candidates are never concatenated. `Exact` marks a prefix the prompt is
+  known to begin with.
 
 A session producer learns block hashes from the engine's KV events. It can
 subscribe to them on its own with `kvevents.NewConsumerPool`, keeping one
 subscriber per discovered engine through `kvevents.EndpointSubscriptions`; the
 pool delivers decoded batches with the reporting endpoint, data-parallel rank,
-cache group, and the `session_id` each stored block was reported under. The hashes reported for a session's request, cut at
-the prompt boundary from the response usage, are that session's next candidate
-prefix. The session producer scopes candidates by tenant, model, and cache
-salt, and bounds its own storage.
+cache group, and the `session_id` each stored block was reported under. The
+manager assembles ordered paths from parent links, retaining concurrent
+branches separately. Block count times block size measures full-block
+coverage; response usage supplies the prompt length including its partial
+tail. Generated-token blocks must be excluded from prompt coverage. The
+session producer scopes candidates by tenant, model, and cache salt, and
+bounds its own storage.
 
 ## Residency
+
+Each producer instance serves one `cacheNamespace`. Candidate prefixes with
+a missing or different namespace are ignored. Configure pod discovery to
+select engines with compatible hash semantics; the namespace is an operator
+assertion, not something the producer can infer from a block hash. Use separate
+producer instances for incompatible engines.
 
 Residency is recorded per physical cache: endpoint, data-parallel rank, and
 KV-cache group. A block hash reported by two caches has two entries. A prefix
@@ -100,9 +116,9 @@ the next store report.
 
 `AllBlocksCleared`, a stream gap without replay, a failed replay, a reconnect,
 subscriber attachment, and endpoint removal each reset the affected endpoint's
-residency. The subscriber then replays from the start of the engine's retained
-history, and a history that no longer reaches the requested sequence rebuilds
-residency from the retained suffix.
+residency. When replay is configured, a new or reconnected subscriber rebuilds
+residency from the engine's retained history. If replay no longer reaches the
+requested sequence, residency is rebuilt from the retained suffix.
 
 The index is in memory and private to the producer instance. Each EPP replica
 subscribes to the engines and builds its own residency; one replica's reset

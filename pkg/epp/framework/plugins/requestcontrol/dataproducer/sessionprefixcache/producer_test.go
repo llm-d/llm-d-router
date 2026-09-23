@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -44,6 +46,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -94,7 +97,7 @@ func (m *testSessionProducer) ProcessEvents(_ context.Context, _ kvevents.EventS
 	for _, event := range batch.Events {
 		if ev, ok := event.(*kvevents.BlockStoredEvent); ok && ev.SessionID != nil {
 			m.observations[*ev.SessionID] = attrsession.SessionCachePrefix{
-				BlockHashes: append([]uint64(nil), ev.BlockHashes...), BlockSizeTokens: ev.BlockSize,
+				CacheNamespace: "model-v1", BlockHashes: append([]uint64(nil), ev.BlockHashes...), BlockSizeTokens: ev.BlockSize,
 			}
 		}
 	}
@@ -106,7 +109,7 @@ func (*testSessionProducer) Reset(context.Context, string) error { return nil }
 func newTestProducer(t *testing.T) (*Producer, *testSessionProducer) {
 	t.Helper()
 	sessions := &testSessionProducer{observations: make(map[string]attrsession.SessionCachePrefix)}
-	p, err := PluginFactory("cache", plugin.StrictDecoder(json.RawMessage(`{"sessionCacheRequestProducerName":"sessions"}`)),
+	p, err := PluginFactory("cache", plugin.StrictDecoder(json.RawMessage(`{"sessionCacheRequestProducerName":"sessions","cacheNamespace":"model-v1"}`)),
 		plugin.NewEppHandle(t.Context(), nil))
 	require.NoError(t, err)
 	producer := p.(*Producer)
@@ -184,7 +187,7 @@ func TestProducerTotalTokensBoundCoverageAndLoad(t *testing.T) {
 					&kvevents.BlockStoredEvent{BlockHashes: hashes, BlockSize: 64, DeviceTier: "GPU"},
 					&kvevents.BlockRemovedEvent{BlockHashes: hashes[resident:], DeviceTier: "GPU"})
 				req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 7200,
-					Prefixes: []attrsession.SessionCachePrefix{{BlockHashes: hashes, BlockSizeTokens: 64}}})
+					Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: hashes, BlockSizeTokens: 64}}})
 				req.Body.TokenizedRequest = fwkrh.NewTokenizedRequest([][]uint32{make([]uint32, inputCount)})
 				endpoints := freshEndpoints()
 				require.NoError(t, p.Produce(t.Context(), req, endpoints))
@@ -344,7 +347,7 @@ func TestProducerBlockSizeIsolation(t *testing.T) {
 	observe(t, p, nil, kvevents.EventSource{Endpoint: "10.0.0.2:8080"},
 		&kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 32, DeviceTier: "GPU"})
 	req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 32,
-		Prefixes: []attrsession.SessionCachePrefix{{BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
+		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
 	for _, info := range matchOn(t, p, req) {
 		assert.Zero(t, info.MatchBlocks())
 	}
@@ -370,8 +373,8 @@ func TestProducerScopeAndBranchIsolation(t *testing.T) {
 	}
 	req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 48,
 		Prefixes: []attrsession.SessionCachePrefix{
-			{BlockHashes: []uint64{10, 20, 40}, BlockSizeTokens: 16, Exact: true},
-			{BlockHashes: []uint64{10, 30, 50}, BlockSizeTokens: 16, Exact: true},
+			{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20, 40}, BlockSizeTokens: 16, Exact: true},
+			{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 30, 50}, BlockSizeTokens: 16, Exact: true},
 		}})
 	check := func() {
 		t.Helper()
@@ -439,9 +442,9 @@ func TestProducerStampPreservesLargeArguments(t *testing.T) {
 func TestProducerConfiguration(t *testing.T) {
 	for name, params := range map[string]string{
 		"missing producer name": `{}`,
-		"sglang events":         `{"sessionCacheRequestProducerName":"sessions","kvEventsConfig":{"engineType":"sglang"}}`,
-		"global socket":         `{"sessionCacheRequestProducerName":"sessions","kvEventsConfig":{"zmqEndpoint":"tcp://localhost:5557"}}`,
-		"no discovery":          `{"sessionCacheRequestProducerName":"sessions","kvEventsConfig":{"discoverPods":false}}`,
+		"sglang events":         `{"sessionCacheRequestProducerName":"sessions","cacheNamespace":"model-v1","kvEventsConfig":{"engineType":"sglang"}}`,
+		"global socket":         `{"sessionCacheRequestProducerName":"sessions","cacheNamespace":"model-v1","kvEventsConfig":{"zmqEndpoint":"tcp://localhost:5557"}}`,
+		"no discovery":          `{"sessionCacheRequestProducerName":"sessions","cacheNamespace":"model-v1","kvEventsConfig":{"discoverPods":false}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := PluginFactory("cache", plugin.StrictDecoder(json.RawMessage(params)), plugin.NewEppHandle(t.Context(), nil))
@@ -452,7 +455,7 @@ func TestProducerConfiguration(t *testing.T) {
 
 func TestProducerRejectsRedis(t *testing.T) {
 	server := miniredis.RunT(t)
-	params := fmt.Sprintf(`{"sessionCacheRequestProducerName":"sessions","indexConfig":{"redisConfig":{"address":%q}}}`, server.Addr())
+	params := fmt.Sprintf(`{"sessionCacheRequestProducerName":"sessions","cacheNamespace":"model-v1","indexConfig":{"redisConfig":{"address":%q}}}`, server.Addr())
 	_, err := PluginFactory("cache", plugin.StrictDecoder(json.RawMessage(params)), plugin.NewEppHandle(t.Context(), nil))
 	require.ErrorContains(t, err, "redisConfig")
 	assert.Zero(t, server.CommandCount(), "reject Redis before opening a connection")
@@ -462,7 +465,7 @@ func TestProducerCoverageAndEventScope(t *testing.T) {
 	p, _ := newTestProducer(t)
 	source := kvevents.EventSource{Endpoint: "10.0.0.1:8080"}
 	lookup := attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 32,
-		Prefixes: []attrsession.SessionCachePrefix{{BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}}
+		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}}
 	store := &kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16,
 		DeviceTier: "GPU", GroupIdx: ptr.To(0), KVCacheSpecKind: kvevents.KVCacheSpecKindFullAttention}
 	batch := kvevents.EventBatch{DataParallelRank: ptr.To(1)}
@@ -510,7 +513,7 @@ func TestProducerIndependentReplicas(t *testing.T) {
 	source := kvevents.EventSource{Endpoint: "10.0.0.1:8080"}
 	store := &kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16, DeviceTier: "GPU"}
 	req := lookupRequest("next", attrsession.SessionCacheRequest{SessionID: "next", TotalTokens: 32,
-		Prefixes: []attrsession.SessionCachePrefix{{BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
+		Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: "model-v1", BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
 	for _, p := range []*Producer{first, second} {
 		observe(t, p, nil, source, store)
 		assert.Equal(t, 32, firstMatch(t, p, req).CachedBlockCount())
@@ -520,4 +523,40 @@ func TestProducerIndependentReplicas(t *testing.T) {
 	assert.Zero(t, firstMatch(t, second, req).CachedBlockCount())
 	observe(t, second, nil, source, store)
 	assert.Equal(t, 32, firstMatch(t, second, req).CachedBlockCount())
+}
+
+func TestProducerCacheNamespace(t *testing.T) {
+	p, _ := newTestProducer(t)
+	observe(t, p, nil, kvevents.EventSource{Endpoint: "10.0.0.1:8080"},
+		&kvevents.BlockStoredEvent{BlockHashes: []uint64{10, 20}, BlockSize: 16, DeviceTier: "GPU"})
+	for _, namespace := range []string{"model-v1", "different-model", ""} {
+		t.Run(namespace, func(t *testing.T) {
+			req := lookupRequest("request", attrsession.SessionCacheRequest{SessionID: "request", TotalTokens: 32,
+				Prefixes: []attrsession.SessionCachePrefix{{CacheNamespace: namespace, BlockHashes: []uint64{10, 20}, BlockSizeTokens: 16, Exact: true}}})
+			info := firstMatch(t, p, req)
+			expected := 0
+			if namespace == "model-v1" {
+				expected = 32
+			}
+			assert.Equal(t, expected, info.MatchBlocks())
+			assert.Equal(t, expected, info.CachedBlockCount())
+		})
+	}
+	_, err := PluginFactory("cache", plugin.StrictDecoder(json.RawMessage(`{"sessionCacheRequestProducerName":"sessions"}`)), plugin.NewEppHandle(t.Context(), nil))
+	require.ErrorContains(t, err, "cacheNamespace is required")
+}
+
+func TestProducerDataDependencies(t *testing.T) {
+	p, sessions := newTestProducer(t)
+	// Expose only the request producer methods, with no event consumer contract.
+	manager := struct{ requestcontrol.DataProducer }{sessions}
+	scorer, err := prefix.New(t.Context(), "scorer", "cache")
+	require.NoError(t, err)
+	order, err := datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{scorer, p, manager})
+	require.NoError(t, err)
+	require.Len(t, order, 3)
+	assert.Less(t, slices.Index(order, manager.TypedName().String()), slices.Index(order, p.TypedName().String()))
+	assert.Less(t, slices.Index(order, p.TypedName().String()), slices.Index(order, scorer.TypedName().String()))
+	_, err = datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{p, scorer})
+	require.Error(t, err, "the named session producer is required")
 }

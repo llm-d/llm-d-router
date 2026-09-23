@@ -149,7 +149,6 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		config.KVEventsConfig = kvevents.DefaultConfig()
 	}
 
-
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(config.TokenProcessorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token processor: %w", err)

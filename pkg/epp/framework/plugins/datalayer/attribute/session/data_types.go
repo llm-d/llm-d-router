@@ -79,6 +79,9 @@ type SessionCacheRequest struct {
 // SessionCachePrefix is a run of engine block hashes from the start of a
 // prompt, as the engine reports them in its KV events.
 type SessionCachePrefix struct {
+	// CacheNamespace identifies compatible model, hash algorithm, and cache
+	// salt settings. It must match the cache producer configuration.
+	CacheNamespace  string
 	BlockHashes     []uint64
 	BlockSizeTokens int
 	// Exact asserts that the request's prompt begins with these blocks, so

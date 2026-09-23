@@ -41,8 +41,11 @@ type EventConsumer interface {
 
 // NewConsumerPool uses the existing subscriber queues and replay handling with
 // a consumer that owns event processing. It performs no token hashing.
-func NewConsumerPool(cfg *Config, adapter EngineAdapter, consumer EventConsumer) *Pool {
-	p := NewPool(cfg, nil, nil, adapter)
+func NewConsumerPool(cfg *Config, adapter EngineAdapter, consumer EventConsumer) (*Pool, error) {
+	p, err := NewPool(cfg, nil, nil, adapter)
+	if err != nil {
+		return nil, err
+	}
 	p.consumer = consumer
-	return p
+	return p, nil
 }
