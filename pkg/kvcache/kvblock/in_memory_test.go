@@ -268,3 +268,126 @@ func TestAddWithNilEngineKeys(t *testing.T) {
 	_, err = index.GetRequestKey(ctx, requestKey)
 	assert.Error(t, err, "GetRequestKey should fail since no engineKey mapping was created")
 }
+
+func TestInMemoryIndexEvictDoesNotPromoteRecency(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	cfg := &InMemoryIndexConfig{
+		Size:         2,
+		PodCacheSize: 2,
+	}
+	index, err := NewInMemoryIndex(cfg)
+	require.NoError(t, err)
+
+	requestKey1 := BlockHash(79215516)
+	requestKey2 := BlockHash(12871930)
+	requestKey3 := BlockHash(69914638)
+
+	err = index.Add(ctx, nil, []BlockHash{requestKey1}, []PodEntry{
+		{PodIdentifier: "pod1", DeviceTier: "gpu"},
+		{PodIdentifier: "pod2", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+	err = index.Add(ctx, nil, []BlockHash{requestKey2}, []PodEntry{
+		{PodIdentifier: "pod3", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+
+	err = index.Evict(ctx, requestKey1, RequestKey, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}})
+	require.NoError(t, err)
+
+	err = index.Add(ctx, nil, []BlockHash{requestKey3}, []PodEntry{
+		{PodIdentifier: "pod4", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+	require.NoError(t, err)
+
+	assert.NotContains(t, podsPerKey, requestKey1)
+	assert.Contains(t, podsPerKey, requestKey2)
+	assert.Contains(t, podsPerKey, requestKey3)
+}
+
+func TestInMemoryIndexEngineKeyEvictDoesNotPromoteRecency(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	cfg := &InMemoryIndexConfig{
+		Size:         2,
+		PodCacheSize: 2,
+	}
+	index, err := NewInMemoryIndex(cfg)
+	require.NoError(t, err)
+
+	engineKey1 := BlockHash(72735753)
+	requestKey1 := BlockHash(79215516)
+	engineKey2 := BlockHash(41341092)
+	requestKey2 := BlockHash(12871930)
+	engineKey3 := BlockHash(34012886)
+	requestKey3 := BlockHash(69914638)
+
+	err = index.Add(ctx, []BlockHash{engineKey1}, []BlockHash{requestKey1}, []PodEntry{
+		{PodIdentifier: "pod1", DeviceTier: "gpu"},
+		{PodIdentifier: "pod2", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+	err = index.Add(ctx, []BlockHash{engineKey2}, []BlockHash{requestKey2}, []PodEntry{
+		{PodIdentifier: "pod3", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+
+	err = index.Evict(ctx, engineKey1, EngineKey, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}})
+	require.NoError(t, err)
+
+	err = index.Add(ctx, []BlockHash{engineKey3}, []BlockHash{requestKey3}, []PodEntry{
+		{PodIdentifier: "pod4", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+	require.NoError(t, err)
+
+	assert.NotContains(t, podsPerKey, requestKey1)
+	assert.Contains(t, podsPerKey, requestKey2)
+	assert.Contains(t, podsPerKey, requestKey3)
+}
+
+func TestInMemoryIndexLookupStillPromotesRecency(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	cfg := &InMemoryIndexConfig{
+		Size:         2,
+		PodCacheSize: 1,
+	}
+	index, err := NewInMemoryIndex(cfg)
+	require.NoError(t, err)
+
+	requestKey1 := BlockHash(79215516)
+	requestKey2 := BlockHash(12871930)
+	requestKey3 := BlockHash(69914638)
+
+	err = index.Add(ctx, nil, []BlockHash{requestKey1}, []PodEntry{
+		{PodIdentifier: "pod1", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+	err = index.Add(ctx, nil, []BlockHash{requestKey2}, []PodEntry{
+		{PodIdentifier: "pod2", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, podsPerKey, requestKey1)
+
+	err = index.Add(ctx, nil, []BlockHash{requestKey3}, []PodEntry{
+		{PodIdentifier: "pod3", DeviceTier: "gpu"},
+	})
+	require.NoError(t, err)
+
+	podsPerKey, err = index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, podsPerKey, requestKey1)
+	assert.NotContains(t, podsPerKey, requestKey2)
+	assert.Contains(t, podsPerKey, requestKey3)
+}
