@@ -73,9 +73,6 @@ const (
 	// pins to false on the synthetic encoder request it builds. The field is
 	// never read off the client's request.
 	requestFieldStore = "store"
-
-	// requestFieldModel is the model field common to every inference API this
-	// sidecar supports.
 	requestFieldModel = "model"
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM

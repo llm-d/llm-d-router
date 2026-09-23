@@ -206,6 +206,49 @@ func TestExtractMMItems(t *testing.T) {
 			apiType:  reqcommon.APITypeChatCompletions,
 			expected: 0,
 		},
+		// input_image is a Responses content part. Extracting it from a chat
+		// request would build an encoder body vLLM's chat API rejects, failing
+		// the fanout for a request that used to succeed.
+		{
+			name: "chat completions input_image part is not extracted",
+			request: map[string]any{
+				"messages": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":      "input_image",
+								"image_url": "https://example.com/image.jpg",
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeChatCompletions,
+			expected: 0,
+		},
+		{
+			name: "chat completions image_url alongside a stray input_image part",
+			request: map[string]any{
+				"messages": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":      "image_url",
+								"image_url": map[string]any{"url": "https://example.com/real.jpg"},
+							},
+							map[string]any{
+								"type":      "input_image",
+								"image_url": "https://example.com/stray.jpg",
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeChatCompletions,
+			expected: 1,
+		},
 	}
 
 	for _, tt := range tests {
