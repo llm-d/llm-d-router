@@ -120,7 +120,7 @@ The same pattern applies to `llm_d_coordinator_request_output_tokens_attributed_
 The helper `queryDimensionCounterDelta` encapsulates the start/end pair and is called
 twice (once per metric). Results are merged into a single `InferenceDimensionResult`.
 
-If `COORDINATOR_REQUESTATTRIBUTION_ENABLED` is false,
+If `COORDINATOR_REQUEST_ATTRIBUTION_ENABLED` is false,
 `QueryInferenceDimensionTokens` returns an empty result immediately without querying
 Prometheus.
 
@@ -263,7 +263,7 @@ list the three new supported dimensions: `user_id`, `tenant_id`, `workload_id`.
 | `modules/prometheus-source/pkg/prom/inference_queries.go` | Add | `QueryInferenceDimensionTokens` (counter `increase` delta strategy), `queryDimensionCounterDelta`, decoder, `mergeDimensionDeltas` |
 | `modules/collector-source/pkg/collector/metricsquerier.go` | Add | Stub impl (returns empty) for `QueryInferenceDimensionTokens` |
 | `pkg/inferencecost/types.go` | Extend | `UserID/TenantID/WorkloadID` on `InferenceCostProperties`; `AttributionEnabled` on `Config` |
-| `pkg/inferencecost/env.go` | Extend | Reader for `COORDINATOR_REQUESTATTRIBUTION_ENABLED` |
+| `pkg/inferencecost/env.go` | Extend | Reader for `COORDINATOR_REQUEST_ATTRIBUTION_ENABLED` |
 | `pkg/inferencecost/apitypes.go` | Extend | `UserID/TenantID/WorkloadID` on `InferenceCostAPIProperties`; update `newInferenceCostResponse` |
 | `pkg/inferencecost/collector.go` | Extend | `QueryInferenceDimensionTokens` future; stores `InferenceDimensionResult` as field after collect; `BuildDimensionCosts(modelCosts)` public method; coverage warning against `llm_d_coordinator_request_input_tokens_sum` |
 | `pkg/inferencecost/aggregate.go` | Extend | 3 new dimensions in map + switch statements |
@@ -544,7 +544,7 @@ Model-level entries have no `tenantId`, `workloadId`, or `userId` in their
 carry all three.
 
 > [!NOTE]
-> Attribution must be enabled (`COORDINATOR_REQUESTATTRIBUTION_ENABLED=true`)
+> Attribution must be enabled (`COORDINATOR_REQUEST_ATTRIBUTION_ENABLED=true`)
 > for dimension-level entries to appear. When attribution is disabled, all
 > requests return model-level entries only — existing behaviour is fully
 > preserved.
@@ -563,7 +563,7 @@ carry all three.
 | **`target_model_name` join key** | Label on attributed counters, populated by the coordinator from the vLLM decode response body; joined on `target_model_name:namespace` in OpenCost; matches the EPP label name exactly | The coordinator intercepts the decode response and extracts the `model` field — the same authoritative value vLLM returns. Falls back to `model_name` (requested model) on error paths. Using `target_model_name` (not `serving_model`) keeps coordinator and EPP metric label sets aligned so the two can be joined. |
 | **`requested_model` excluded from group-by** | Omitted from `InferenceDimensionKey` and PromQL `sum by (…)` | Cost rate is driven by `target_model_name`; including `requested_model` inflates cardinality without adding cost signal. Attribution by what was *served*, not what was *requested*, is the correct billing model. |
 | **Coverage warning denominator** | `llm_d_coordinator_request_input_tokens_sum` (coordinator's un-attributed histogram) | The coordinator owns prompt token counts. In the coordinator model, `vllm:prompt_tokens_total` is not the right denominator because it counts tokens at the vLLM level, not the coordinator entry point. The coordinator's un-attributed histogram is the ground truth for the number of requests that passed through the attribution path. |
-| **Backward compatibility** | New fields are empty-string by default; feature is opt-in via `COORDINATOR_REQUESTATTRIBUTION_ENABLED=true` | Deployments without attribution configured are completely unaffected. |
+| **Backward compatibility** | New fields are empty-string by default; feature is opt-in via `COORDINATOR_REQUEST_ATTRIBUTION_ENABLED=true` | Deployments without attribution configured are completely unaffected. |
 
 ---
 

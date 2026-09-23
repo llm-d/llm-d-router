@@ -148,11 +148,12 @@ differ from `model_name` when a model-selector rewrite is in effect. When
 `target_model_name` is unavailable (error path, non-streaming response body not yet
 parsed), it defaults to `model_name`.
 
-`namespace` is the Kubernetes namespace of the coordinator pod. Emitting `namespace` from the coordinator itself ensures the
-> label is always present with the correct value regardless of how Prometheus is configured
-> to scrape the endpoint. It also enables the `target_model_name:namespace` composite join
-> key used by OpenCost to partition dimension-token data per deployment when multiple
-> coordinators run in different namespaces on a shared cluster.
+`namespace` is the Kubernetes namespace of the coordinator pod. Emitting `namespace` from
+the coordinator itself ensures the label is always present with the correct value
+regardless of how Prometheus is configured to scrape the endpoint. It also enables the
+`target_model_name:namespace` composite join key used by OpenCost to partition
+dimension-token data per deployment when multiple coordinators run in different
+namespaces on a shared cluster.
 
 `tenant_id` and `workload_id` are always present as labels. Both are header-driven with
 no closed set; they **must** be routed through the coordinator's existing
@@ -170,12 +171,20 @@ request arrives:
 3. If the admitted set is already at 1 000 entries, the value is folded to the
    sentinel `"other"` — the request is still recorded; only its label value changes.
 
-This means the coordinator can never accumulate more than 1 000 distinct
-`tenant_id` time series, 1 000 distinct `workload_id` time series, etc.,
-regardless of what headers clients send. A deployment with no header-injection
-policy (arbitrary client-supplied values) hits the cap and collapses noise onto
-`"other"` rather than growing without bound. The same cap (`maxModelLabelValues =
-1000`) is already in use for `model_name` and for the EPP's `fairness_id` label.
+`BoundedLabel` caps the number of distinct values admitted **per label
+dimension** at 1 000. It does **not** cap the total number of time series, which
+is the cross-product of distinct values across all dimensions. With four
+independently bounded dimensions (`model_name`, `tenant_id`, `workload_id`,
+`target_model_name`) the worst-case series count on
+`llm_d_coordinator_request_input_tokens_attributed_total` is on the order of
+1 000⁴. All four dimensions are influenced by client-supplied input (three
+headers plus the request body), so a single client can drive the product upward
+without any individual per-dimension cap ever being reached.
+
+The per-dimension caps therefore guard against noise and unbounded *distinct
+value* growth, not against cross-dimensional series explosion. The same cap
+(`maxModelLabelValues = 1 000`) is already in use for `model_name` and for the
+EPP's `fairness_id` label.
 
 `user_id` is **conditionally** included, controlled by coordinator configuration:
 
@@ -190,9 +199,16 @@ request_attribution:
 
 > [!WARNING]
 > **Cardinality**: `tenant_id`, `workload_id`, and `target_model_name` are header- or
-> body-sourced with no closed set. All three are enforced through `BoundedLabel` (cap
-> 1 000 each) so the coordinator cannot be OOM'd through label injection regardless of
-> header content. `user_id` is **not** passed through `BoundedLabel`: when
+> body-sourced with no closed set. All three are bounded per dimension by `BoundedLabel`
+> (cap 1 000 each), which limits the number of distinct values admitted for each label
+> individually. It does **not** limit the total number of time series: Prometheus series
+> count is the product across co-occurring label values. With four client-influenced
+> dimensions the worst-case series count is on the order of 1 000⁴ — a single client
+> with arbitrary header values can exhaust memory without any individual cap being
+> exceeded. Deployments that do not enforce attribution headers from a trusted upstream
+> (e.g. a gateway or service mesh that injects them) should either lower the per-dimension
+> caps or disable the attributed metric families entirely and rely on the structured log
+> for per-request attribution. `user_id` is **not** passed through `BoundedLabel`: when
 > `prometheus_user_id_label: false` (the default) the label is absent entirely, and when
 > `true` the operator has asserted a bounded, known requestor population. Do **not**
 > enable `prometheus_user_id_label` for public-facing deployments with unbounded end-user
@@ -322,11 +338,14 @@ One additional field is set in `handleInference` from the request headers; two m
 populated by the attribution hook after the response is received:
 
 ```go
-// TargetModelName is the actual backend model name used to serve the request.
-// Source priority: (1) x-llm-d-model-name-rewrite request header (EPP deployments),
-// (2) "model" field from decode response body (non-EPP deployments),
-// (3) RequestContext.Model as last-resort fallback.
-// Set in handleInference (source 1); attribution hook provides sources 2 and 3.
+// TargetModelName is the model name reported in the decode response body.
+// Populated by the attribution hook from the "model" field of the decode
+// response body, falling back to RequestContext.Model when the body is
+// unavailable or unparseable.
+//
+// Known limitation: in EPP deployments the EPP rewrites the response body
+// "model" field back to the client-facing name before forwarding, so
+// TargetModelName reports the requested model rather than the served one.
 TargetModelName string
 
 // CompletionTokens is the completion token count from the decode response body.
@@ -352,19 +371,20 @@ is correct:
 
 ```go
 if s.attributionCfg.Enabled {
-    reqCtx.TenantID        = attributionHeader(r.Header, "x-llm-d-tenant-id")
-    reqCtx.UserID          = attributionHeader(r.Header, "x-llm-d-user-id")
-    reqCtx.WorkloadID      = attributionHeader(r.Header, "x-llm-d-workload-id")
-    reqCtx.TargetModelName = r.Header.Get("x-llm-d-model-name-rewrite")
+    reqCtx.TenantID   = attributionHeader(r.Header, "x-llm-d-tenant-id")
+    reqCtx.UserID     = attributionHeader(r.Header, "x-llm-d-user-id")
+    reqCtx.WorkloadID = attributionHeader(r.Header, "x-llm-d-workload-id")
 }
 ```
 
-`x-llm-d-model-name-rewrite` is set by the EPP to the actual backend model name before
-routing. It is the authoritative source for `target_model_name` because the EPP rewrites
-the response body `"model"` field **back to the client-facing name** before forwarding the
-response through the Gateway — making the body field unreliable in EPP deployments. When
-the header is absent (non-EPP deployments), `TargetModelName` stays empty and the
-attribution hook fills it from the response body.
+`TargetModelName` is not set here. It is populated by the attribution hook from the
+`"model"` field of the decode response body, falling back to `RequestContext.Model`
+when the body is unavailable or unparseable.
+
+Known limitation: in EPP deployments the EPP rewrites the response body `"model"` field
+back to the client-facing name before the response is forwarded, so the body reports the
+requested model rather than the served one. Resolving this requires the EPP to publish
+the rewrite target on the response, which is out of scope for this proposal.
 
 Where `attributionHeader` is a small helper that returns the header value or `"unknown"`:
 
@@ -449,9 +469,10 @@ The hook fires for both cache-hit and cache-miss paths:
   on the 200 response before `ServeHTTP` returns, which is before `ErrPipelineDone` is
   returned by `Execute`. Attribution is captured correctly.
 - **Cache miss** (`conditional-decode` returns `nil` after a 412): `ModifyResponse` is
-  not called by the proxy (the `ErrorHandler` swallows `errCacheMiss`). The
-  `conditional-decode` hook therefore does nothing. The pipeline continues to `decode`,
-  whose hook captures and emits attribution for the actual response.
+  called and is what detects the 412, so the attribution branch of the composed closure
+  must return early on `StatusPreconditionFailed` without installing the tee or emitting.
+  The pipeline continues to `decode`, whose hook captures and emits attribution for the
+  actual response.
 
 #### Metric and log emission
 
@@ -491,7 +512,7 @@ logger.Info("request.complete",
 |---|---|---|
 | Prompt tokens | `len(reqCtx.TokenIDs)` after the render step, or `reqCtx.PromptTokensFromBody` parsed by the attribution hook | When `render` is not in the pipeline, the hook reads `usage.prompt_tokens` from the decode response body and stores it in `PromptTokensFromBody`. |
 | Completion tokens | `usage.completion_tokens` from the decode response body | Parsed by the attribution hook; not available before decode. |
-| `target_model_name` | **Primary**: `x-llm-d-model-name-rewrite` request header (set by EPP). **Fallback**: `"model"` field from decode response body (non-EPP deployments). **Last resort**: `reqCtx.Model` (the requested model). | The EPP rewrites the response body `"model"` field back to the client-facing name, so the body is unreliable in EPP deployments. The header carries the real backend model name and is read in `handleInference` before the pipeline runs. |
+| `target_model_name` | `"model"` field from decode response body; falls back to `reqCtx.Model` when body is unavailable or unparseable. | Known limitation: in EPP deployments the EPP rewrites the response body `"model"` field back to the client-facing name before forwarding, so the body reports the requested model rather than the served one. |
 
 For streaming responses, vLLM emits a final SSE chunk containing only `usage` when
 `stream_options.include_usage: true` is set:
