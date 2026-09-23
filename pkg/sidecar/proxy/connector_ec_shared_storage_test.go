@@ -22,11 +22,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -162,16 +164,38 @@ func TestExtractMMItems(t *testing.T) {
 			apiType:  reqcommon.APITypeResponses,
 			expected: 1,
 		},
+		// A part referencing a file_id cannot reach extractMMItems, because
+		// RejectStatefulResponsesFields refuses the request at the entry
+		// point. The reachable no-URL shapes are a nested object, which is
+		// chat's spelling of the field, and an absent image_url.
 		{
-			name: "responses input_image with no fetchable url is skipped",
+			name: "responses input_image with a nested image_url is skipped",
 			request: map[string]any{
 				"input": []any{
 					map[string]any{
 						"role": "user",
 						"content": []any{
 							map[string]any{
-								"type":    "input_image",
-								"file_id": "file-123",
+								"type":      "input_image",
+								"image_url": map[string]any{"url": "https://example.com/image.jpg"},
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 0,
+		},
+		{
+			name: "responses input_image with no image_url is skipped",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":   "input_image",
+								"detail": "high",
 							},
 						},
 					},
@@ -247,6 +271,92 @@ func TestExtractMMItems(t *testing.T) {
 				},
 			},
 			apiType:  reqcommon.APITypeChatCompletions,
+			expected: 1,
+		},
+		// image_url, audio_url and video_url nest the URL under a same-named
+		// object, a shape the Responses schema does not define. Extracting one
+		// from a Responses request would build an encoder body vLLM's
+		// Responses API rejects, failing the fanout for the whole request.
+		{
+			name: "responses image_url part is not extracted",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":      "image_url",
+								"image_url": map[string]any{"url": "https://example.com/image.jpg"},
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 0,
+		},
+		{
+			name: "responses audio_url and video_url parts are not extracted",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":      "audio_url",
+								"audio_url": map[string]any{"url": "https://example.com/speech.wav"},
+							},
+							map[string]any{
+								"type":      "video_url",
+								"video_url": map[string]any{"url": "https://example.com/clip.mp4"},
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 0,
+		},
+		{
+			name: "responses input_image alongside a stray image_url part",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":      "image_url",
+								"image_url": map[string]any{"url": "https://example.com/stray.jpg"},
+							},
+							map[string]any{
+								"type":      "input_image",
+								"image_url": "https://example.com/real.jpg",
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
+			expected: 1,
+		},
+		// input_audio carries the same inline data and format payload on both
+		// APIs, so neither shape gates it.
+		{
+			name: "responses input_audio part is extracted",
+			request: map[string]any{
+				"input": []any{
+					map[string]any{
+						"role": "user",
+						"content": []any{
+							map[string]any{
+								"type":        "input_audio",
+								"input_audio": map[string]any{"data": "AAAA", "format": "wav"},
+							},
+						},
+					},
+				},
+			},
+			apiType:  reqcommon.APITypeResponses,
 			expected: 1,
 		},
 	}
@@ -397,6 +507,60 @@ func responsesInputRequest(items ...map[string]any) map[string]any {
 	return map[string]any{"input": json.RawMessage(input)}
 }
 
+// TestFanoutEncoderPath locks in the path the encoder is addressed on for
+// each API type. The dedup and pipeline tests answer on any path, so without
+// this an inverted selection in fanoutEncoder would send every chat request
+// to the Responses endpoint and fail nothing.
+func TestFanoutEncoderPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  map[string]any
+		apiType  reqcommon.APIType
+		wantPath string
+	}{
+		{
+			name:     "chat completions request",
+			request:  userMessageRequest(imageURLItem("https://example.com/image.jpg")),
+			apiType:  reqcommon.APITypeChatCompletions,
+			wantPath: reqcommon.PathChatCompletions,
+		},
+		{
+			name:     "responses request",
+			request:  responsesInputRequest(inputImageItem("https://example.com/image.jpg")),
+			apiType:  reqcommon.APITypeResponses,
+			wantPath: reqcommon.PathResponses,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPaths []string
+			var mu sync.Mutex
+			encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				gotPaths = append(gotPaths, r.URL.Path)
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer encoderBackend.Close()
+
+			encoderURL, err := url.Parse(encoderBackend.URL)
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+			srv.logger = log.Log
+
+			err = srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderURL.Host}, "test-req-id", tt.apiType)
+			require.NoError(t, err)
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, []string{tt.wantPath}, gotPaths)
+		})
+	}
+}
+
 func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 	var requestCount atomic.Int32
 	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -442,6 +606,26 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 			name:          "inline audio items are never deduplicated",
 			request:       userMessageRequest(inlineAudioItem("aaa"), inlineAudioItem("aaa")),
 			apiType:       reqcommon.APITypeChatCompletions,
+			expectedCalls: 2,
+		},
+		// One URL at two detail levels is two distinct encoder inputs, so
+		// keying the dedup on the URL alone would drop the second.
+		{
+			name: "duplicate image URLs with different detail are both sent",
+			request: userMessageRequest(
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/same.jpg", "detail": "low"}},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/same.jpg", "detail": "high"}},
+			),
+			apiType:       reqcommon.APITypeChatCompletions,
+			expectedCalls: 2,
+		},
+		{
+			name: "responses input_image URLs with different detail are both sent",
+			request: responsesInputRequest(
+				map[string]any{"type": "input_image", "image_url": "https://example.com/same.jpg", "detail": "low"},
+				map[string]any{"type": "input_image", "image_url": "https://example.com/same.jpg", "detail": "high"},
+			),
+			apiType:       reqcommon.APITypeResponses,
 			expectedCalls: 2,
 		},
 		{

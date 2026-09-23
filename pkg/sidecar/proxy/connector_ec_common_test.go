@@ -34,6 +34,83 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// TestRequestInput pins requestInput's own contract. extractMMItems discards
+// the error and returns an empty slice on both the no-error and the error
+// paths, so no test reaching through that caller can tell them apart.
+func TestRequestInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     any
+		absent    bool
+		wantItems int
+		wantErr   bool
+	}{
+		{
+			name:   "absent input",
+			absent: true,
+		},
+		{
+			name:      "input array",
+			input:     json.RawMessage(`[{"role":"user"},{"role":"user"}]`),
+			wantItems: 2,
+		},
+		{
+			name:  "bare string is a single text turn",
+			input: json.RawMessage(`"hello"`),
+		},
+		{
+			name:  "explicit null is treated as absent",
+			input: json.RawMessage(`null`),
+		},
+		{
+			name:    "object",
+			input:   json.RawMessage(`{"role":"user"}`),
+			wantErr: true,
+		},
+		{
+			name:    "number",
+			input:   json.RawMessage(`42`),
+			wantErr: true,
+		},
+		{
+			name:    "bool",
+			input:   json.RawMessage(`true`),
+			wantErr: true,
+		},
+		// requestMessages accepts an already-decoded slice; requestInput
+		// refuses one, because nothing writes a decoded slice under input.
+		{
+			name:    "decoded slice of raw messages",
+			input:   []json.RawMessage{json.RawMessage(`{"role":"user"}`)},
+			wantErr: true,
+		},
+		{
+			name:    "fully decoded array",
+			input:   []any{map[string]any{"role": "user"}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := map[string]any{}
+			if !tt.absent {
+				request[requestFieldInput] = tt.input
+			}
+
+			items, err := requestInput(request)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, items)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Len(t, items, tt.wantItems)
+		})
+	}
+}
+
 func TestECPipelineTokenLimits(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -340,6 +417,45 @@ func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
 	assert.Equal(t, "test-model", encoderRequest["model"])
 	assert.Equal(t, false, encoderRequest["store"])
 	assert.ElementsMatch(t, []string{"model", "input", "store", "max_output_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
+}
+
+// TestBuildEncoderRequest_OnlyModelAndMessages is the chat completions
+// counterpart of TestBuildEncoderRequest_OnlyModelAndInput. The value-level
+// cap assertions cannot see whether the encoder request was built fresh or
+// copied from the client, because CapSingleToken produces the same caps
+// either way; only the exact key set does.
+func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
+	originalRequest := map[string]any{
+		"model": "test-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "https://example.com/img1.jpg"},
+					},
+				},
+			},
+		},
+		"temperature":     0.7,
+		"n":               4,
+		"response_format": map[string]any{"type": "json_object"},
+		"logit_bias":      map[string]any{"123": -100},
+		"stream_options":  map[string]any{"include_usage": true},
+		"tools":           []any{map[string]any{"type": "function", "function": map[string]any{"name": "f", "parameters": map[string]any{}}}},
+		"tool_choice":     map[string]any{"type": "function", "function": map[string]any{"name": "f"}},
+	}
+
+	mmItem := map[string]any{
+		"type":      "image_url",
+		"image_url": map[string]any{"url": "https://example.com/img1.jpg"},
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
+
+	assert.Equal(t, "test-model", encoderRequest["model"])
+	assert.ElementsMatch(t, []string{"model", "messages", "max_tokens", "max_completion_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
 }
 
 // TestBuildEncoderRequest_NoModel locks in that an absent client model stays
