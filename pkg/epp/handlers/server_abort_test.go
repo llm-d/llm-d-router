@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
 
@@ -132,6 +133,7 @@ func TestTerminationCause(t *testing.T) {
 		name   string
 		state  streamRequestState
 		ctxErr error
+		answer map[string]string
 		want   fwkrc.TerminationCause
 	}{
 		{
@@ -152,6 +154,12 @@ func TestTerminationCause(t *testing.T) {
 			want:  fwkrc.TerminationCauseError,
 		},
 		{
+			name:   "a request EPP answered itself is answered, not an error",
+			state:  bodyRequestResponsesComplete,
+			answer: map[string]string{routing.ReservedEndpointHeader: "10.0.3.7:8000"},
+			want:   fwkrc.TerminationCauseAnswered,
+		},
+		{
 			name:  "skipped response processing never observes completion",
 			state: requestResponseProcessingSkipped,
 			want:  fwkrc.TerminationCauseError,
@@ -161,7 +169,7 @@ func TestTerminationCause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			reqCtx := &RequestContext{requestState: tt.state}
+			reqCtx := &RequestContext{requestState: tt.state, AnswerHeaders: tt.answer}
 			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
 		})
 	}
