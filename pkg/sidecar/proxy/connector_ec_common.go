@@ -36,9 +36,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Multimodal content types that need encoder processing. input_image is the
-// Responses API's equivalent of image_url, and extractMMItems matches it only
-// on a Responses request: vLLM's chat API defines no such content part.
+// Multimodal content types that need encoder processing. extractMMItems gates
+// each type on the request shape that defines it: the *_url types on chat
+// completions, input_image on Responses. input_audio is ungated because both
+// shapes define it with the same inline payload.
 var mmTypes = map[string]bool{
 	"image_url":   true,
 	"audio_url":   true,
@@ -48,9 +49,14 @@ var mmTypes = map[string]bool{
 }
 
 // requestInput returns the request's Responses input items, decoded the
-// same way requestMessages decodes messages. Responses' input may also be a
-// bare JSON string (a single text turn), which yields a nil slice and no
-// error, the same as an absent field.
+// same way requestMessages decodes messages. A bare JSON string (a single
+// text turn) and an explicit JSON null both yield a nil slice and no error,
+// the same as an absent field.
+//
+// Unlike requestMessages there is no []json.RawMessage case: input is absent
+// from inspectedRequestFields, so decodeRequestBody always leaves it raw, and
+// the chunked-decode path that caches a decoded slice under messages is gated
+// to chat completions.
 func requestInput(req map[string]any) ([]json.RawMessage, error) {
 	switch v := req[requestFieldInput].(type) {
 	case nil:
@@ -116,6 +122,11 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		return items
 	}
 
+	// Elements and parts that cannot carry multimodal content are skipped
+	// silently: a non-object element, a string content field (the ordinary
+	// text-only turn, which would log on nearly every request), and a part
+	// with no string type. A part whose type is multimodal but unusable logs
+	// instead.
 	for _, raw := range wrapped {
 		var itemMap map[string]any
 		if err := json.Unmarshal(raw, &itemMap); err != nil {
@@ -138,18 +149,28 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			if !ok {
 				continue
 			}
-			if partType == "input_image" {
+			// Priming a part the request's own API does not define posts a
+			// body the encoder rejects, failing the fanout for the whole
+			// request. The *_url types nest the URL under a same-named
+			// object, which the Responses schema does not define.
+			switch partType {
+			case "input_image":
 				if apiType != reqcommon.APITypeResponses {
-					// A chat request carrying a Responses part: priming it
-					// would post a body the encoder's chat API rejects,
-					// failing the fanout for the whole request.
-					logger.V(logging.DEBUG).Info("skipping input_image outside a Responses request")
+					logger.V(logging.DEBUG).Info("skipping content part the request's API does not define", "type", partType, "apiType", apiType)
 					continue
 				}
 				if mmItemURL(partMap) == "" {
-					// A file_id-referenced image (no image_url string) has no
-					// content the encoder can fetch or receive inline.
-					logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL", "hasFileID", partMap["file_id"] != nil)
+					// input_image carries its URL as a bare string. Anything
+					// else, including chat's nested object, leaves nothing the
+					// encoder can fetch. A part referencing a file_id never
+					// reaches here: RejectStatefulResponsesFields refuses the
+					// request first.
+					logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL")
+					continue
+				}
+			case "image_url", "audio_url", "video_url":
+				if apiType == reqcommon.APITypeResponses {
+					logger.V(logging.DEBUG).Info("skipping content part the request's API does not define", "type", partType, "apiType", apiType)
 					continue
 				}
 			}
@@ -184,7 +205,7 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any, 
 	if model, ok := originalRequest[requestFieldModel]; ok {
 		encoderRequest[requestFieldModel] = model
 	}
-	message := map[string]any{"role": "user", "content": []map[string]any{mmItem}}
+	message := map[string]any{requestFieldRole: "user", requestFieldContent: []map[string]any{mmItem}}
 	if apiType == reqcommon.APITypeResponses {
 		encoderRequest[requestFieldInput] = []map[string]any{message}
 		encoderRequest[requestFieldStore] = false
@@ -219,25 +240,39 @@ func mmItemURL(item map[string]any) string {
 }
 
 // mmItemsForFanout extracts the multimodal items from a request body and
-// deduplicates URL-based items (image_url / audio_url / video_url /
-// input_image). Non-URL items (e.g. inline input_audio) are kept verbatim.
-// Returns nil when there is no multimodal content. The caller should skip
-// the encoder stage in that case.
+// deduplicates the URL-bearing ones. Items carrying inline data are kept
+// verbatim: identical payloads are cheap to compare but the encoder treats
+// each as its own input. Returns nil when there is no multimodal content.
+// The caller should skip the encoder stage in that case.
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
 	raw := extractMMItems(s.logger, originalRequest, apiType)
 	if len(raw) == 0 {
 		return nil
 	}
-	seenURLs := make(map[string]struct{})
+	seen := make(map[string]struct{})
 	items := make([]map[string]any, 0, len(raw))
 	for _, item := range raw {
-		if url := mmItemURL(item); url != "" {
-			if _, seen := seenURLs[url]; seen {
-				s.logger.V(logging.DEBUG).Info("skipping duplicate multimodal URL", "url", url, "requestID", requestID)
-				continue
-			}
-			seenURLs[url] = struct{}{}
+		url := mmItemURL(item)
+		if url == "" {
+			items = append(items, item)
+			continue
 		}
+		// Two parts are one encoder request only when every field matches, not
+		// merely the URL: detail selects the resolution the encoder processes,
+		// so one URL at two detail levels is two distinct embeddings. Marshal
+		// is the canonical key because encoding/json sorts map keys at every
+		// depth.
+		key, err := json.Marshal(item)
+		if err != nil {
+			s.logger.V(logging.DEBUG).Info("cannot key multimodal item, keeping it", "error", err, "url", url, "requestID", requestID)
+			items = append(items, item)
+			continue
+		}
+		if _, dup := seen[string(key)]; dup {
+			s.logger.V(logging.DEBUG).Info("skipping duplicate multimodal item", "url", url, "requestID", requestID)
+			continue
+		}
+		seen[string(key)] = struct{}{}
 		items = append(items, item)
 	}
 	return items
@@ -250,9 +285,10 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 // callback may return an error to fail the whole fan-out, or nil to
 // accept. perItem may be nil for fire-and-forget primer-style usage.
 //
-// The first goroutine to fail cancels ctx so sibling encoder requests are
-// aborted at the transport layer. Every failure is logged before propagating;
-// grp.Wait returns the first non-nil error.
+// The first goroutine to fail cancels the group context so sibling encoder
+// requests are aborted at the transport layer. Every failure is logged before
+// propagating. errgroup records that first error before cancelling, so
+// grp.Wait returns the root cause rather than a sibling's context.Canceled.
 func (s *Server) fanoutEncoder(
 	ctx context.Context,
 	originalRequest map[string]any,
@@ -307,6 +343,8 @@ func (s *Server) fanoutEncoder(
 			pw := &bufferedResponseWriter{}
 			encoderHandler.ServeHTTP(pw, req)
 
+			// isHTTPError covers 3xx and a handler that wrote no status at
+			// all (statusCode 0), so only 2xx reaches perItem.
 			if isHTTPError(pw.statusCode) {
 				err := fmt.Errorf("encoder request failed for item %d with status %d: %s", idx, pw.statusCode, pw.buffer.String())
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
@@ -345,8 +383,9 @@ func (s *Server) runPDPipeline(
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		s.logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
 		}
 		return
 	}
