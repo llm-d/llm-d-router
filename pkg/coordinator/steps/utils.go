@@ -65,7 +65,7 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 // the key surfaces stale config instead of silently ignoring it.
 func rejectUseOpenAIFormatOverride(step string, params map[string]any) error {
 	if _, ok := params["use_openai_format"]; ok {
-		return fmt.Errorf("%s: use_openai_format cannot be overridden for this step; overriding it was supported in the past but is not supported now", step)
+		return fmt.Errorf("%s: use_openai_format is not a valid parameter for this step", step)
 	}
 	return nil
 }
