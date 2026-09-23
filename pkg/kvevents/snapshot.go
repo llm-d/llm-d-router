@@ -554,7 +554,7 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 		}
 		log.FromContext(ctx).Info("KV publisher has no snapshot endpoint, indexing live events only", "endpoint", s.endpoint)
 		recoveryComplete()
-		return follow(ctx, take, 0, func(msg snapshotLive) error {
+		index := func(msg snapshotLive) error {
 			if msg.snapshotEnabled() {
 				return fmt.Errorf("publisher changed to snapshot-enabled frames")
 			}
@@ -562,7 +562,11 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 				log.FromContext(ctx).Error(err, "Failed to apply KV event batch", "endpoint", s.endpoint)
 			}
 			return nil
-		})
+		}
+		if err := index(first); err != nil {
+			return err
+		}
+		return follow(ctx, take, 0, index)
 	}
 	pool.strict = true
 	if !strings.HasPrefix(first.topic, "kv@") || strings.Count(first.topic, "@") != 2 {

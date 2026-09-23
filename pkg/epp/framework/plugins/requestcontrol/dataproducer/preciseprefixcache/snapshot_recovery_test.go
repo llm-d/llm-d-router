@@ -259,16 +259,23 @@ func TestSnapshotModeServesPublishersWithoutSnapshotEndpoint(t *testing.T) {
 	req := &scheduling.InferenceRequest{TargetModel: "test-model", Body: &rh.InferenceRequestBody{TokenizedRequest: &rh.TokenizedRequest{Prompts: []rh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}}}}}
 	prefix, err := scorer.New(ctx, "prefix", "live-only")
 	require.NoError(t, err)
-	score := func() float64 {
-		require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{ep}))
-		return prefix.Score(ctx, req, []scheduling.Endpoint{ep})[ep]
+	scoreOf := func(r *scheduling.InferenceRequest) float64 {
+		require.NoError(t, p.Produce(ctx, r, []scheduling.Endpoint{ep}))
+		return prefix.Score(ctx, r, []scheduling.Endpoint{ep})[ep]
 	}
+	score := func() float64 { return scoreOf(req) }
 	requests := func() int { server.mu.Lock(); defer server.mu.Unlock(); return server.requests }
 	publish := func() { server.mu.Lock(); server.send(server.chunks[0]); server.mu.Unlock() }
 	// Until the first frame the publisher's mode is unknown and it has no affinity.
 	require.Never(t, func() bool { return p.snapshots.Status().LiveOnly != 0 || score() != 0 }, time.Second, 50*time.Millisecond)
-	// An 8-byte sequence frame means no snapshot endpoint; live events give affinity at once.
-	require.Eventually(t, func() bool { publish(); return score() == 1 }, 3*time.Second, 50*time.Millisecond)
+	// An 8-byte sequence frame means no snapshot endpoint. The frame that decides the mode is indexed too,
+	// so a later block chained to it gives full affinity.
+	publish()
+	server.mu.Lock()
+	server.send(snapshotBatch(t, map[string]any{"type": "BlockStored", "block_hashes": []uint64{202}, "parent_block_hash": uint64(101), "token_ids": []uint32{5, 6, 7, 8}, "block_size": 4}))
+	server.mu.Unlock()
+	chained := &scheduling.InferenceRequest{TargetModel: "test-model", Body: &rh.InferenceRequestBody{TokenizedRequest: &rh.TokenizedRequest{Prompts: []rh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7, 8}}}}}}
+	require.Eventually(t, func() bool { return scoreOf(chained) == 1 }, 3*time.Second, 50*time.Millisecond)
 	require.Equal(t, 1, p.snapshots.Status().LiveOnly)
 	// Idle engines send nothing without a snapshot endpoint; affinity must outlive the heartbeat and snapshot timeouts.
 	require.Never(t, func() bool { return score() != 1 }, 12*time.Second, 100*time.Millisecond)
