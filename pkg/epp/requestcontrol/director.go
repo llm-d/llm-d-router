@@ -308,6 +308,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err != nil {
 		return reqCtx, err
 	}
+	if reqCtx.AnswerHeaders != nil {
+		// The request is answered, not forwarded, so its body is not rewritten.
+		return reqCtx, nil
+	}
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
@@ -515,6 +519,22 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 				Msg:  "conditional-decode request received but no gate plugin is configured",
 			}
 		}
+	}
+
+	// "Prefer: reserve-endpoint" asks which endpoint EPP picks, without
+	// forwarding. Default-deny when no PreRequest plugin claimed it, so an EPP
+	// without the plugin never sends the request to a model server.
+	if routing.HasPreference(reqCtx.SchedulingRequest.Headers, routing.PreferReserveEndpoint) {
+		endpoint, claimed := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, fwkrc.ReservedEndpointAttributeKey)
+		if !claimed || endpoint == "" {
+			return reqCtx, errcommon.Error{
+				Code: errcommon.Internal,
+				Msg:  "reserve-endpoint request received but no plugin claimed it",
+			}
+		}
+		// The evictor does not track the request: it is answered, not dispatched.
+		reqCtx.AnswerHeaders = map[string]string{routing.ReservedEndpointHeader: endpoint}
+		return reqCtx, nil
 	}
 
 	if d.requestEvictor != nil {

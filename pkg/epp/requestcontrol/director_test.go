@@ -2337,3 +2337,118 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 		})
 	}
 }
+
+// TestPrepareRequest_ReserveEndpoint pins the director's handling of
+// "Prefer: reserve-endpoint": a claimed request is answered with the picked
+// endpoint on x-prefill-host-port instead of being forwarded, and an unclaimed
+// one is rejected so it never reaches a model server.
+func TestPrepareRequest_ReserveEndpoint(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	scheduleResult := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {
+				TargetEndpoints: []fwksched.Endpoint{
+					&fwksched.ScoredEndpoint{
+						Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							Address: "10.0.3.7",
+							Port:    "8000",
+							ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+						}, nil, nil),
+					},
+				},
+			},
+		},
+		PrimaryProfileName: "prefill",
+	}
+
+	claim := func(value any) fwkrc.PreRequest {
+		return &mockPreRequestPlugin{
+			name: "claimer",
+			modifyFn: func(r *fwksched.InferenceRequest) {
+				r.PutAttribute(fwkrc.ReservedEndpointAttributeKey, value)
+			},
+		}
+	}
+	reserve := map[string]string{routing.PreferHeader: routing.PreferReserveEndpoint}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		plugins     []fwkrc.PreRequest
+		profileName string
+		wantAnswer  map[string]string
+		wantErrCode string
+	}{
+		{
+			name:    "no Prefer header is forwarded",
+			headers: map[string]string{},
+			plugins: []fwkrc.PreRequest{claim("10.0.3.7:8000")},
+		},
+		{
+			name:        "reserve-endpoint with no plugin is rejected",
+			headers:     reserve,
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:        "reserve-endpoint with a plugin that does not claim is rejected",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{&mockPreRequestPlugin{name: "noop"}},
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:        "reserve-endpoint claimed with an empty endpoint is rejected",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{claim("")},
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:        "reserve-endpoint claimed with a non-string value is rejected",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{claim(true)},
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:       "reserve-endpoint claimed is answered with the endpoint",
+			headers:    reserve,
+			plugins:    []fwkrc.PreRequest{claim("10.0.3.7:8000")},
+			wantAnswer: map[string]string{routing.ReservedEndpointHeader: "10.0.3.7:8000"},
+		},
+		{
+			// A per-phase prefill EPP runs its only profile as "default".
+			name:        "reserve-endpoint header does not depend on the profile name",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{claim("10.0.3.7:8000")},
+			profileName: "default",
+			wantAnswer:  map[string]string{routing.ReservedEndpointHeader: "10.0.3.7:8000"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(tt.plugins...)}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req-" + tt.name, Headers: tt.headers},
+			}
+			result := scheduleResult
+			if tt.profileName != "" {
+				result = &fwksched.SchedulingResult{
+					ProfileResults:     map[string]*fwksched.ProfileRunResult{tt.profileName: scheduleResult.ProfileResults["prefill"]},
+					PrimaryProfileName: tt.profileName,
+				}
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, result)
+
+			if tt.wantErrCode != "" {
+				var e errcommon.Error
+				require.ErrorAs(t, err, &e)
+				assert.Equal(t, tt.wantErrCode, e.Code)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantAnswer, got.AnswerHeaders)
+			assert.NotNil(t, got.TargetPod, "TargetPod stays set so the stream-end cleanup releases plugin state")
+		})
+	}
+}

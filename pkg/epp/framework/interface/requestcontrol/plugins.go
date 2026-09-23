@@ -45,6 +45,14 @@ const (
 // fast fallback rather than a silent forward.
 var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
 
+// ReservedEndpointAttributeKey is the request-attribute key a PreRequest
+// plugin sets, to the picked endpoint's <ip:port> as a string, when it claims
+// the "Prefer: reserve-endpoint" preference. The director then answers the
+// caller with 200 and that endpoint instead of forwarding the request. A
+// reserve-endpoint request that no plugin claimed is rejected, so an EPP
+// without the plugin never forwards it to a model server.
+var ReservedEndpointAttributeKey = plugin.NewDataKey("reserve-endpoint.endpoint", "")
+
 // Screener performs preliminary filtering of located endpoints before data
 // production, admission, and scheduling profiles run. Every screener sees the
 // same input set, and the framework intersects their results.
