@@ -406,7 +406,7 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 		},
 		{
 			name:      "undecodable background bytes are rejected",
-			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`tru`)},
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`{`)},
 			wantField: FieldBackground,
 		},
 		{

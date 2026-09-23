@@ -37,8 +37,8 @@ import (
 )
 
 // Multimodal content types that need encoder processing. input_image is the
-// Responses API's equivalent of image_url; the other three chat-completions
-// types have no Responses counterpart in the current API.
+// Responses API's equivalent of image_url, and extractMMItems matches it only
+// on a Responses request: vLLM's chat API defines no such content part.
 var mmTypes = map[string]bool{
 	"image_url":   true,
 	"audio_url":   true,
@@ -138,11 +138,20 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			if !ok {
 				continue
 			}
-			if partType == "input_image" && mmItemURL(partMap) == "" {
-				// A file_id-referenced image (no image_url string) has no
-				// content the encoder can fetch or receive inline.
-				logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL", "hasFileID", partMap["file_id"] != nil)
-				continue
+			if partType == "input_image" {
+				if apiType != reqcommon.APITypeResponses {
+					// A chat request carrying a Responses part: priming it
+					// would post a body the encoder's chat API rejects,
+					// failing the fanout for the whole request.
+					logger.V(logging.DEBUG).Info("skipping input_image outside a Responses request")
+					continue
+				}
+				if mmItemURL(partMap) == "" {
+					// A file_id-referenced image (no image_url string) has no
+					// content the encoder can fetch or receive inline.
+					logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL", "hasFileID", partMap["file_id"] != nil)
+					continue
+				}
 			}
 
 			if mmTypes[partType] {
