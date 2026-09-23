@@ -65,13 +65,18 @@ const (
 	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
 	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
-	// requestFieldStore is decoded to a bool so a second DropStatefulResponsesFields
-	// pass over an already-stripped body reports no change and skips the re-marshal.
-	requestFieldStore = reqcommon.FieldStore
+	// requestFieldBackground is decoded to a bool so that
+	// reqcommon.RejectStatefulResponsesFields can read it as one.
+	requestFieldBackground = reqcommon.FieldBackground
 
 	// requestFieldInput is the Responses API's analog of requestFieldMessages
 	// for chat completions.
-	requestFieldInput = "input"
+	requestFieldInput = reqcommon.FieldInput
+
+	// requestFieldStore names the Responses field that buildEncoderRequest
+	// pins to false on the synthetic encoder request it builds. The field is
+	// never read off the client's request.
+	requestFieldStore = "store"
 
 	// requestFieldModel is the model field common to every inference API this
 	// sidecar supports.

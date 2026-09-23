@@ -17,7 +17,6 @@ limitations under the License.
 package proxy
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -147,7 +146,7 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 				if req.URL == nil {
 					// A server never hands a handler a nil URL or Body; the
 					// decoder-only passthrough for a Responses request reads
-					// both to strip unsupported stateful fields.
+					// both to check for unsupported stateful fields.
 					req.URL = &url.URL{Path: apiType.Path()}
 				}
 				if req.Body == nil {
@@ -196,20 +195,19 @@ func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
 }
 
-// TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields locks in
+// TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields locks in
 // that a /v1/responses request with no prefill header, no encoder header,
 // and no P2P/data-parallel/chunked-decode routing (i.e. the plain decoder
-// passthrough) still has its unsupported stateful fields stripped, the same
-// as every other routing branch.
-func TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields(t *testing.T) {
+// passthrough) is refused for an unsupported stateful field, the same as
+// every other routing branch.
+func TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
 
-	var capturedBody map[string]any
-	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
 	})
 
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
@@ -217,28 +215,24 @@ func TestServer_ResponsesDecoderOnlyPassthroughStripsStatefulFields(t *testing.T
 
 	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
-	requireStatefulResponsesFieldsStripped(t, capturedBody)
-	if capturedBody["input"] != "hi" {
-		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
-	}
+	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
-// TestServer_ResponsesDataParallelPassthroughStripsStatefulFields locks in
+// TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields locks in
 // that a /v1/responses request routed by the (deprecated)
-// x-data-parallel-host-port header still has its unsupported stateful
-// fields stripped. dataParallelHandler forwards straight to another rank's
-// decoder proxy and never reads the body itself, so it depends entirely on
-// disaggregatedPrefillHandler stripping the fields before calling it.
-func TestServer_ResponsesDataParallelPassthroughStripsStatefulFields(t *testing.T) {
+// x-data-parallel-host-port header is refused for an unsupported stateful
+// field. dataParallelHandler forwards straight to another rank's decoder
+// proxy and never reads the body itself, so it depends entirely on
+// disaggregatedPrefillHandler refusing the request before calling it.
+func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
 
-	var capturedBody map[string]any
+	var dispatched bool
 	const dpHostPort = "10.0.0.5:8001"
 	s.dataParallelProxies = map[string]http.Handler{
-		dpHostPort: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-			body, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(body, &capturedBody)
+		dpHostPort: http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			dispatched = true
 		}),
 	}
 
@@ -248,26 +242,22 @@ func TestServer_ResponsesDataParallelPassthroughStripsStatefulFields(t *testing.
 
 	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
-	requireStatefulResponsesFieldsStripped(t, capturedBody)
-	if capturedBody["input"] != "hi" {
-		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
-	}
+	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
-// TestServer_ResponsesP2PSourcePassthroughStripsStatefulFields locks in that
+// TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields locks in that
 // a /v1/responses request carrying a KV cache source header, routed through
-// decodeWithP2PSource, still has its unsupported stateful fields stripped.
+// decodeWithP2PSource, is refused for an unsupported stateful field.
 // decodeWithP2PSource reads the body itself via readJSONBody, independently
-// of the strip disaggregatedPrefillHandler already applied on this path.
-func TestServer_ResponsesP2PSourcePassthroughStripsStatefulFields(t *testing.T) {
+// of the check disaggregatedPrefillHandler already applied on this path.
+func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
 
-	var capturedBody map[string]any
-	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &capturedBody)
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
 	})
 
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
@@ -276,14 +266,11 @@ func TestServer_ResponsesP2PSourcePassthroughStripsStatefulFields(t *testing.T) 
 
 	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
-	requireStatefulResponsesFieldsStripped(t, capturedBody)
-	if capturedBody["input"] != "hi" {
-		t.Errorf("expected unrelated fields to survive, got input=%v", capturedBody["input"])
-	}
+	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
 // TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody locks in
-// that the decoder-only passthrough's read of the body to strip stateful
+// that the decoder-only passthrough's read of the body to check for stateful
 // fields fails closed: a client that drops the connection mid-body is
 // refused before dataParallelHandler or the decoder proxy ever runs.
 func TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody(t *testing.T) {
