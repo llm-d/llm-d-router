@@ -65,3 +65,37 @@ func TestSnapshotShutdownCancelsStalledHandshake(t *testing.T) {
 		t.Fatal("shutdown waited for a stalled ZMQ handshake")
 	}
 }
+
+func TestSnapshotRetriesStalledHandshake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn
+		}
+	}()
+	cfg := kvevents.DefaultConfig()
+	cfg.SnapshotPort = 5559
+	tokens, err := kvblock.NewChunkedTokenDatabase(nil)
+	require.NoError(t, err)
+	manager, err := kvevents.NewSnapshotManager(cfg, nil, tokens, engineadapter.NewVLLMAdapter(), nil)
+	require.NoError(t, err)
+	defer manager.Shutdown(ctx)
+	require.NoError(t, manager.EnsureSubscriber(ctx, "pod", "pod:8000", "tcp://"+listener.Addr().String(), "", "kv@", true))
+	for i := range 2 {
+		select {
+		case conn := <-accepted:
+			defer conn.Close()
+		case <-time.After(15 * time.Second):
+			t.Fatalf("connection %d not attempted; a stalled greeting must not block the subscriber", i+1)
+		}
+	}
+}

@@ -270,8 +270,8 @@ func TestSnapshotModeServesPublishersWithoutSnapshotEndpoint(t *testing.T) {
 	// An 8-byte sequence frame means no snapshot endpoint; live events give affinity at once.
 	require.Eventually(t, func() bool { publish(); return score() == 1 }, 3*time.Second, 50*time.Millisecond)
 	require.Equal(t, 1, p.snapshots.Status().LiveOnly)
-	// Idle engines send nothing without a snapshot endpoint; affinity must survive the heartbeat window.
-	require.Never(t, func() bool { return score() != 1 }, 6*time.Second, 100*time.Millisecond)
+	// Idle engines send nothing without a snapshot endpoint; affinity must outlive the heartbeat and snapshot timeouts.
+	require.Never(t, func() bool { return score() != 1 }, 12*time.Second, 100*time.Millisecond)
 	require.Zero(t, requests(), "a publisher without a snapshot endpoint must not be asked for snapshots")
 	require.Equal(t, 0, p.snapshots.Status().Ready)
 

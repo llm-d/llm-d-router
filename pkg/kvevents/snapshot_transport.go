@@ -21,14 +21,14 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	zmq "github.com/go-zeromq/zmq4"
 	"github.com/go-zeromq/zmq4/transport"
 )
 
 // zmq4's TCP dial deadline does not cover the ZMTP handshake. Closing the
-// underlying connection on cancellation also interrupts a stalled greeting.
+// underlying connection on cancellation interrupts a stalled greeting or read;
+// callers bound each phase with their context.
 type snapshotTransport struct{ transport.Transport }
 type snapshotConn struct {
 	net.Conn
@@ -45,18 +45,6 @@ func (snapshotTransport) Dial(ctx context.Context, dialer transport.Dialer, addr
 		return nil, err
 	}
 	return &snapshotConn{Conn: conn, stop: context.AfterFunc(ctx, func() { _ = conn.Close() })}, nil
-}
-func (c *snapshotConn) Read(b []byte) (int, error) {
-	if err := c.SetReadDeadline(time.Now().Add(snapshotTimeout)); err != nil {
-		return 0, err
-	}
-	return c.Conn.Read(b)
-}
-func (c *snapshotConn) Write(b []byte) (int, error) {
-	if err := c.SetWriteDeadline(time.Now().Add(snapshotTimeout)); err != nil {
-		return 0, err
-	}
-	return c.Conn.Write(b)
 }
 func (c *snapshotConn) Close() error { c.stop(); return c.Conn.Close() }
 func snapshotTCP(endpoint string) string {

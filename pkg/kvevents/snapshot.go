@@ -454,7 +454,14 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 	if err := sub.SetOption(zmq.OptionSubscribe, s.topicFilter); err != nil {
 		return err
 	}
-	if err := sub.Dial(snapshotTCP(s.endpoint)); err != nil {
+	// Live frames carry no deadline: idle publishers without a snapshot
+	// endpoint are silent, and snapshot publishers are bounded by heartbeats.
+	dialing := time.AfterFunc(snapshotTimeout, cancel)
+	err := sub.Dial(snapshotTCP(s.endpoint))
+	if !dialing.Stop() {
+		return fmt.Errorf("dial %s: handshake timeout", s.endpoint)
+	}
+	if err != nil {
 		return err
 	}
 	live := make(chan snapshotLive, 256)
