@@ -17,6 +17,7 @@ limitations under the License.
 package request
 
 import (
+	"encoding/json"
 	"maps"
 	"reflect"
 	"strings"
@@ -331,6 +332,35 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 		{
 			name: "malformed input array does not panic",
 			body: map[string]any{"input": []any{"not a map", 42, map[string]any{"content": "not an array"}}},
+		},
+		// A caller that decodes a body selectively, as the sidecar proxy does,
+		// leaves the fields it does not read as raw bytes. Skipping those would
+		// report the request as supported without having inspected it.
+		{
+			name:      "background true as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`true`)},
+			wantField: FieldBackground,
+		},
+		{
+			name: "background false as raw bytes is the default",
+			body: map[string]any{"input": "hi", FieldBackground: json.RawMessage(`false`)},
+		},
+		{
+			name:      "file_id in an input array of raw bytes is rejected",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]}]`)},
+			wantField: FieldFileID,
+		},
+		{
+			name: "input array of raw bytes with no file_id",
+			body: map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]`)},
+		},
+		{
+			name: "input string as raw bytes has nothing to walk",
+			body: map[string]any{FieldInput: json.RawMessage(`"hi"`)},
+		},
+		{
+			name: "undecodable input bytes do not panic",
+			body: map[string]any{FieldInput: json.RawMessage(`[{"role":`)},
 		},
 	}
 

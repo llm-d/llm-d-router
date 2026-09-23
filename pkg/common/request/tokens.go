@@ -17,6 +17,7 @@ limitations under the License.
 package request
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 )
@@ -63,17 +64,53 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // store is left unchecked: it is handled upstream by the stateful proxy
 // (the agentic-api layer strips it before the request reaches the router),
 // and forwarding it is harmless regardless since it defaults to true.
+//
+// body may hold its values decoded or as json.RawMessage, so a caller that
+// decodes only the fields it reads passes its body as-is.
 func RejectStatefulResponsesFields(body map[string]any) error {
 	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
 		if _, ok := body[field]; ok {
 			return fmt.Errorf("field %q is not supported by the router", field)
 		}
 	}
-	if background, ok := body[FieldBackground].(bool); ok && background {
+	if boolFromAny(body[FieldBackground]) {
 		return fmt.Errorf("field %q is not supported by the router", FieldBackground)
 	}
-	if input, ok := body[FieldInput].([]any); ok && inputReferencesFile(input) {
+	if inputReferencesFile(arrayFromAny(body[FieldInput])) {
 		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
+	}
+	return nil
+}
+
+// boolFromAny coerces a JSON-decoded value into a bool. A caller that decodes a
+// body selectively, as the sidecar proxy does to keep free-form content
+// byte-exact, leaves the fields it does not read as raw JSON bytes, so that form
+// is accepted too: a check that silently skipped it would report a request as
+// supported without having inspected it. Any other value yields false.
+func boolFromAny(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case json.RawMessage:
+		var decoded bool
+		return json.Unmarshal(t, &decoded) == nil && decoded
+	}
+	return false
+}
+
+// arrayFromAny coerces a JSON-decoded value into a []any, accepting the raw-bytes
+// form for the reason given on boolFromAny. A value that is absent, not an array
+// (a Responses input is a string or an array), or bytes that do not decode all
+// yield nil, which a caller walks as empty.
+func arrayFromAny(v any) []any {
+	switch t := v.(type) {
+	case []any:
+		return t
+	case json.RawMessage:
+		var decoded []any
+		if json.Unmarshal(t, &decoded) == nil {
+			return decoded
+		}
 	}
 	return nil
 }
