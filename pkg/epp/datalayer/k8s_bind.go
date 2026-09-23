@@ -40,6 +40,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // BindNotificationSource registers a watcher/reconciler for the source's GVK.
@@ -201,6 +202,7 @@ func (rn *notificationReconciler) dispatch(ctx context.Context, log logr.Logger,
 	var extractErrors []error
 	for _, ext := range rn.extractors {
 		if err := ext.Extract(ctx, *processed); err != nil {
+			metrics.RecordDataLayerExtractError(rn.src.TypedName().Type, ext.TypedName().Type)
 			log.Error(err, "extractor failed", "extractor", ext.TypedName())
 			extractErrors = append(extractErrors, fmt.Errorf("extractor %s failed: %w", ext.TypedName(), err))
 		}
