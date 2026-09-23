@@ -44,6 +44,8 @@ const PluginType = "session-prefix-cache-producer"
 
 // PluginConfig configures the session-prefix-cache-producer.
 type PluginConfig struct {
+	// CacheNamespace identifies the compatible engine caches in this index.
+	CacheNamespace string `json:"cacheNamespace"`
 	// SessionCacheRequestProducerName names the plugin instance that publishes
 	// SessionCacheRequest for each request.
 	SessionCacheRequestProducerName string `json:"sessionCacheRequestProducerName"`
@@ -63,9 +65,10 @@ var _ requestcontrol.DataProducer = &Producer{}
 // the request with its session identity in PreRequest. Event handling lives
 // in events.go and per-pod subscriber lifecycle in extractor.go.
 type Producer struct {
-	typedName plugin.TypedName
-	dk        plugin.DataKey
-	sessionDK plugin.DataKey
+	typedName      plugin.TypedName
+	dk             plugin.DataKey
+	sessionDK      plugin.DataKey
+	cacheNamespace string
 
 	events        *eventConsumer
 	subscriptions *kvevents.EndpointSubscriptions
@@ -95,6 +98,9 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 // consumers must match. The KV-events pool starts in background goroutines
 // bound to ctx.
 func New(ctx context.Context, name string, config PluginConfig) (*Producer, error) {
+	if config.CacheNamespace == "" {
+		return nil, errors.New("cacheNamespace is required")
+	}
 	if config.SessionCacheRequestProducerName == "" {
 		return nil, errors.New("sessionCacheRequestProducerName is required")
 	}
@@ -120,19 +126,29 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
 	}
 	events := newEventConsumer(kvblock.NewTracedIndex(index))
-	pool := kvevents.NewConsumerPool(kc, adapter, events)
-	subscriptions, err := kvevents.NewEndpointSubscriptions(ctx, kc, kvevents.NewSubscriberManager(pool))
+	pool, err := kvevents.NewConsumerPool(kc, adapter, events)
+	if err != nil {
+		return nil, err
+	}
+	manager := kvevents.NewSubscriberManager(pool)
+	subscriptions, err := kvevents.NewEndpointSubscriptions(ctx, kc, manager)
 	if err != nil {
 		return nil, err
 	}
 	pool.Start(ctx)
+	go func() {
+		<-ctx.Done()
+		manager.Shutdown(ctx)
+		pool.Shutdown(ctx)
+	}()
 
 	return &Producer{
-		typedName:     plugin.TypedName{Type: PluginType, Name: name},
-		dk:            attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
-		sessionDK:     attrsession.SessionCacheRequestDataKey.WithNonEmptyProducerName(config.SessionCacheRequestProducerName),
-		events:        events,
-		subscriptions: subscriptions,
+		cacheNamespace: config.CacheNamespace,
+		typedName:      plugin.TypedName{Type: PluginType, Name: name},
+		dk:             attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		sessionDK:      attrsession.SessionCacheRequestDataKey.WithNonEmptyProducerName(config.SessionCacheRequestProducerName),
+		events:         events,
+		subscriptions:  subscriptions,
 	}, nil
 }
 
@@ -180,7 +196,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	}
 	best := make(map[string]*attrprefix.PrefixCacheMatchInfo, len(endpoints))
 	for _, prefix := range lookup.Prefixes {
-		if len(prefix.BlockHashes) == 0 {
+		if prefix.CacheNamespace != p.cacheNamespace || len(prefix.BlockHashes) == 0 {
 			continue
 		}
 		if prefix.BlockSizeTokens <= 0 {

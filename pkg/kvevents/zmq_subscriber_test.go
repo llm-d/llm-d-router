@@ -209,6 +209,9 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 			if replay.seq < startSeq {
 				continue
 			}
+			if replay.seq == buffer.omitSeq.Load() && buffer.omitOnce.CompareAndSwap(true, false) {
+				continue
+			}
 			if messageDelay > 0 {
 				time.Sleep(messageDelay)
 			}
@@ -826,7 +829,8 @@ func TestZMQSubscriber_ConsumerReconnectReplaysWithoutLiveTraffic(t *testing.T) 
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
 	consumer := &reconnectConsumer{stored: make(chan uint64, 10), resets: make(chan string, 10)}
-	pool := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	pool, err := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	require.NoError(t, err)
 	pool.Start(ctx)
 	subManager := kvevents.NewSubscriberManager(pool)
 	t.Cleanup(func() {

@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kvevents
 
 import (
@@ -31,7 +47,8 @@ func (c *recordingConsumer) Reset(_ context.Context, endpoint string) error {
 
 func TestConsumerPoolOrderedEventsAndReset(t *testing.T) {
 	c := &recordingConsumer{}
-	p := NewConsumerPool(DefaultConfig(), &sourceEndpointAdapter{}, c)
+	p, err := NewConsumerPool(DefaultConfig(), &sourceEndpointAdapter{}, c)
+	require.NoError(t, err)
 	t.Cleanup(func() { p.Shutdown(t.Context()) })
 	for _, msg := range []*RawMessage{
 		{Payload: []byte{1}, SourceEndpoint: "serving:8000", Sequence: 4},
@@ -52,7 +69,8 @@ func TestConsumerPoolOrderedEventsAndReset(t *testing.T) {
 func TestConsumerSubscriberInvalidatesWithoutReplay(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Concurrency = 1
-	p := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	p, err := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	require.NoError(t, err)
 	t.Cleanup(func() { p.Shutdown(t.Context()) })
 	z := newZMQSubscriber(p, "pod", "serving:8000", "", "", "", true)
 	require.True(t, z.acceptLiveWithoutReplay("topic", 4))
@@ -74,7 +92,8 @@ func TestConsumerSubscriberInvalidatesWithoutReplay(t *testing.T) {
 func TestConsumerSubscriberDetachDrainsBeforeReset(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Concurrency = 1
-	p := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	p, err := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	require.NoError(t, err)
 	t.Cleanup(func() { p.Shutdown(t.Context()) })
 	sm := NewSubscriberManager(p)
 	done := make(chan struct{})
@@ -99,7 +118,8 @@ func TestConsumerSubscriberDetachDrainsBeforeReset(t *testing.T) {
 func TestConsumerSubscriberAttachInvalidatesRetainedState(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Concurrency = 1
-	p := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	p, err := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	require.NoError(t, err)
 	t.Cleanup(func() { p.Shutdown(t.Context()) })
 	sm := NewSubscriberManager(p)
 	// No socket is needed to verify ordering before the subscriber starts.
@@ -124,7 +144,8 @@ func TestConsumerSubscriberRetirementDoesNotWaitForSocketClose(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Concurrency = 1
-			p := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+			p, err := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+			require.NoError(t, err)
 			t.Cleanup(func() { p.Shutdown(t.Context()) })
 			sm := NewSubscriberManager(p)
 			t.Cleanup(func() { sm.Shutdown(t.Context()) })
@@ -139,9 +160,8 @@ func TestConsumerSubscriberRetirementDoesNotWaitForSocketClose(t *testing.T) {
 			completed := make(chan error, 1)
 			go func() {
 				if replace {
-					ctx, cancel := context.WithCancel(t.Context())
-					cancel()
-					completed <- sm.EnsureSubscriber(ctx, "pod", "serving:8000", "new", "", "", true)
+					// A bound socket waits without generating reconnect resets.
+					completed <- sm.EnsureSubscriber(t.Context(), "pod", "serving:8000", "tcp://127.0.0.1:0", "", "", false)
 				} else {
 					sm.RemoveSubscriber(t.Context(), "pod")
 					completed <- nil

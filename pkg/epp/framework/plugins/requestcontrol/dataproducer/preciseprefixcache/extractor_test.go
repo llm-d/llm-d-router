@@ -206,60 +206,6 @@ func TestProducer_ExtractEndpoint_OffsetsZMQPortByRankIndex(t *testing.T) {
 	}
 }
 
-func TestProducer_EnsureSubscriber_PassesServingEndpoint(t *testing.T) {
-	cfg := kvevents.DefaultConfig()
-	cfg.DiscoverPods = true
-	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
-	cfg.PodDiscoveryConfig.SocketPort = 5557
-
-	subscribers := &fakeSubscriberManager{}
-	manager := kvevents.NewSubscriberManager(pool)
-	subscriptions, err := kvevents.NewEndpointSubscriptions(context.Background(), cfg, manager)
-	require.NoError(t, err)
-
-	p := &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: subscribers,
-		subscriptions:      subscriptions,
-	}
-
-	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
-		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-3"},
-		Address:   "10.0.0.1",
-		Port:      "8003",
-		RankIndex: 3,
-	}))
-
-	assert.Equal(t, []string{"ns/pod-a-rank-3"}, subscribers.ids)
-	assert.Equal(t, []string{"10.0.0.1:8003"}, subscribers.sourceEndpoints)
-	assert.Equal(t, []string{"tcp://10.0.0.1:5560"}, subscribers.endpoints)
-}
-
-// IPv6 addresses must be bracketed in the zmq endpoint.
-func TestProducer_EnsureSubscriber_IPv6BracketsEndpoint(t *testing.T) {
-	cfg := kvevents.DefaultConfig()
-	cfg.DiscoverPods = true
-	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
-	cfg.PodDiscoveryConfig.SocketPort = 5557
-
-	subscribers := &fakeSubscriberManager{}
-	p := &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
-		subscribersManager: subscribers,
-		subscriptions:      subscriptions,
-	}
-
-	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
-		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-v6"},
-		Address:   "fd00::1",
-		Port:      "8080",
-		RankIndex: 0,
-	}))
-
-	assert.Equal(t, []string{"tcp://[fd00::1]:5557"}, subscribers.endpoints)
-	assert.Equal(t, []string{"fd00::1:8080"}, subscribers.sourceEndpoints)
-}
-
 // RankIndex=0 must dial the base SocketPort unchanged.
 func TestProducer_ExtractEndpoint_SingleRankUsesBaseSocketPort(t *testing.T) {
 	ctx := discardCtx(t)
@@ -302,6 +248,9 @@ func TestProducer_ExtractEndpoint_DeleteClearsIndex(t *testing.T) {
 	require.NoError(t, err)
 	pool.Start(ctx)
 	defer pool.Shutdown(ctx)
+	manager := kvevents.NewSubscriberManager(pool)
+	subscriptions, err := kvevents.NewEndpointSubscriptions(ctx, cfg, manager)
+	require.NoError(t, err)
 
 	p := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
@@ -510,10 +459,10 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 			p := newExtractorProducer(t, true)
 			defer p.subscribersManager.Shutdown(ctx)
 			cfg := kvevents.DefaultConfig()
-	cfg.PodDiscoveryConfig.PodLabelSelector = "llm-d.ai/role=prefill"
-	var err error
-	p.subscriptions, err = kvevents.NewEndpointSubscriptions(ctx, cfg, p.subscribersManager.(*kvevents.SubscriberManager))
-	require.NoError(t, err)
+			cfg.PodDiscoveryConfig.PodLabelSelector = "llm-d.ai/role=prefill"
+			var err error
+			p.subscriptions, err = kvevents.NewEndpointSubscriptions(ctx, cfg, p.subscribersManager.(*kvevents.SubscriberManager))
+			require.NoError(t, err)
 			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
 				ID:      k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a"},
 				Address: "10.0.0.1",

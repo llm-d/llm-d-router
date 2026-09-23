@@ -31,7 +31,9 @@ func newTestEndpointSubscriptions(t *testing.T, cfg *Config) (*EndpointSubscript
 	// Subscriber goroutines outlive the test; a discarded logger avoids a
 	// race with the t-bound logger after cleanup.
 	ctx := log.IntoContext(context.Background(), logr.Discard())
-	manager := NewSubscriberManager(NewPool(cfg, nil, nil, nil))
+	pool, err := NewPool(cfg, nil, nil, nil)
+	require.NoError(t, err)
+	manager := NewSubscriberManager(pool)
 	t.Cleanup(func() { manager.Shutdown(ctx) })
 	subscriptions, err := NewEndpointSubscriptions(ctx, cfg, manager)
 	require.NoError(t, err)
