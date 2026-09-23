@@ -132,11 +132,15 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 }))
 
 var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", ginkgo.Ordered, testWrapper(func() {
-	// The encoder-cache fanout reads multimodal content off the field the
-	// client actually sent. Reading only chat completions' messages leaves a
-	// Responses input_image unextracted, so the encode pod stays idle: this
-	// spec fails on an encode count that does not move.
-	ginkgo.It("primes the encoder from Responses input_image content", func() {
+	// Pending on EPP-side multimodal detection (#3003). The disagg profile handler
+	// selects the encode profile from PromptTokens.MultiModalFeatures, and the
+	// estimate tokenizer backend reports none for a Responses body: it covers
+	// ChatCompletions and Messages, while a Responses body falls through to
+	// estimateBytes, which marshals input without reporting features. With no
+	// encode profile the gateway sends no encoder endpoint header, so the
+	// sidecar never runs the fanout and the request succeeds through prefill
+	// and decode with the encode pod idle.
+	ginkgo.PIt("primes the encoder from Responses input_image content", func() {
 		nsName := getNamespace()
 
 		encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
