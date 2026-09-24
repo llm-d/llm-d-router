@@ -179,6 +179,11 @@ func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
 			meta.duration = v
 		}
 	}
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioBytesPerSecondHeaderKey); ok {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			meta.bytesPerSecond = v
+		}
+	}
 	return meta
 }
 

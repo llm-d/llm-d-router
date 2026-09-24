@@ -188,10 +188,12 @@ type videoMetadata struct {
 }
 
 // audioMetadata carries per-request audio properties parsed from the
-// x-llm-d-audio- request headers. A zero duration means "not provided"; the
-// estimator falls back to configuration and then built-in defaults.
+// x-llm-d-audio- request headers. A zero field means "not provided"; the
+// estimator falls back per field to the payload, configuration, and then
+// built-in defaults.
 type audioMetadata struct {
-	duration float64 // seconds
+	duration       float64 // seconds
+	bytesPerSecond int     // byte rate of a payload that does not declare one
 }
 
 // videoEstimator estimates a video's placeholder-token count as
@@ -356,13 +358,10 @@ func (e videoEstimator) tokensPerFrame(meta videoMetadata) int {
 }
 
 const (
-	// Audio estimation modes.
-	audioModeDynamic = "dynamic"
-	audioModeStatic  = "static"
-
 	defaultAudioDuration = 10 // seconds
-	// defaultAudioTokensPerSecond is the Qwen3-Omni RVQ codec frame rate. Per-model
-	// rates belong in configuration; this is only the no-config fallback.
+	// defaultAudioTokensPerSecond is Qwen3-Omni's audio encoder rate, a token per
+	// 80ms. Per-model rates belong in configuration; this is only the no-config
+	// fallback.
 	defaultAudioTokensPerSecond = 12.5
 	defaultAudioOverheadTokens  = 14 // prompt template + text tokens
 	// defaultAudioBytesPerSecond converts a payload length into seconds for clips
@@ -384,11 +383,9 @@ const (
 // clip: a header value wins, then the payload itself, then configuration, then
 // the built-in default. The zero value is valid and uses all built-in defaults.
 type audioEstimator struct {
-	mode           string
-	staticToken    int
 	tokensPerSec   float64
 	overheadTokens int
-	bytesPerSec    int
+	defBytesPerSec int
 	defDuration    float64
 	maxTokens      int
 }
@@ -401,17 +398,13 @@ func newAudioEstimator(cfg *estimateConfig) audioEstimator {
 	}
 	aud := cfg.Audio
 	est := audioEstimator{
-		mode:        aud.Mode,
 		defDuration: aud.DefaultDuration,
 		maxTokens:   aud.MaxAudioTokens,
-	}
-	if aud.Static != nil {
-		est.staticToken = aud.Static.NumTokens
 	}
 	if aud.Dynamic != nil {
 		est.tokensPerSec = aud.Dynamic.TokensPerSecond
 		est.overheadTokens = aud.Dynamic.OverheadTokens
-		est.bytesPerSec = aud.Dynamic.BytesPerSecond
+		est.defBytesPerSec = aud.Dynamic.DefaultBytesPerSecond
 	}
 	return est
 }
@@ -420,13 +413,6 @@ func newAudioEstimator(cfg *estimateConfig) audioEstimator {
 // inline base64 payload of an input_audio block and is empty for a clip carried
 // by URL. Always >= 1 so every clip carries weight.
 func (e audioEstimator) placeholderCount(data string, meta audioMetadata) int {
-	if e.mode == audioModeStatic {
-		if e.staticToken > 0 {
-			return e.staticToken
-		}
-		return 1
-	}
-
 	tokensPerSec := e.tokensPerSec
 	if tokensPerSec <= 0 {
 		tokensPerSec = defaultAudioTokensPerSecond
@@ -438,8 +424,8 @@ func (e audioEstimator) placeholderCount(data string, meta audioMetadata) int {
 	}
 
 	tokens := overhead + int(tokensPerSec*e.durationSeconds(data, meta))
-	if e.maxTokens > 0 && tokens > e.maxTokens {
-		tokens = e.maxTokens
+	if e.maxTokens > 0 {
+		tokens = min(tokens, e.maxTokens)
 	}
 	if tokens < 1 {
 		tokens = 1
@@ -459,10 +445,7 @@ func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64
 		if seconds, ok := wavDurationFromBase64(data); ok {
 			return seconds
 		}
-		rate := e.bytesPerSec
-		if rate <= 0 {
-			rate = defaultAudioBytesPerSecond
-		}
+		rate := e.bytesPerSecond(meta)
 		if n := base64DecodedLen(audioBase64Payload(data)); n > 0 {
 			return float64(n) / float64(rate)
 		}
@@ -471,6 +454,20 @@ func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64
 		return e.defDuration
 	}
 	return defaultAudioDuration
+}
+
+// bytesPerSecond resolves the byte rate used to turn a payload length into
+// seconds. The clip's own header wins, then the configured default, then the
+// built-in one. Only clips that are not PCM WAV reach this: a WAV payload
+// declares its byte rate itself.
+func (e audioEstimator) bytesPerSecond(meta audioMetadata) int {
+	if meta.bytesPerSecond > 0 {
+		return meta.bytesPerSecond
+	}
+	if e.defBytesPerSec > 0 {
+		return e.defBytesPerSec
+	}
+	return defaultAudioBytesPerSecond
 }
 
 // wavDurationFromBase64 returns the length of a base64 PCM WAV payload, its data

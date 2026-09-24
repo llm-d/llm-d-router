@@ -621,6 +621,24 @@ func TestParseAudioMetadataHeaders(t *testing.T) {
 			want:    audioMetadata{},
 		},
 		{
+			name:    "byte rate present",
+			headers: map[string]string{metadata.AudioBytesPerSecondHeaderKey: "16000"},
+			want:    audioMetadata{bytesPerSecond: 16000},
+		},
+		{
+			name: "both present",
+			headers: map[string]string{
+				metadata.AudioDurationHeaderKey:       "12.5",
+				metadata.AudioBytesPerSecondHeaderKey: "16000",
+			},
+			want: audioMetadata{duration: 12.5, bytesPerSecond: 16000},
+		},
+		{
+			name:    "malformed byte rate ignored",
+			headers: map[string]string{metadata.AudioBytesPerSecondHeaderKey: "fast"},
+			want:    audioMetadata{},
+		},
+		{
 			name:    "non-positive ignored",
 			headers: map[string]string{metadata.AudioDurationHeaderKey: "-1"},
 			want:    audioMetadata{},
@@ -733,15 +751,39 @@ func TestAudioEstimator_NonWAVUsesByteRate(t *testing.T) {
 	assert.Equal(t, audioTokens(2), tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
-// TestAudioEstimator_CustomBytesPerSecond asserts the byte-rate knob changes the
-// duration read out of a non-WAV payload.
-func TestAudioEstimator_CustomBytesPerSecond(t *testing.T) {
+// TestAudioEstimator_DefaultBytesPerSecond asserts the configured default byte
+// rate changes the duration read out of a non-WAV payload.
+func TestAudioEstimator_DefaultBytesPerSecond(t *testing.T) {
 	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic: &dynamicAudioConfig{BytesPerSecond: 32000},
+		Dynamic: &dynamicAudioConfig{DefaultBytesPerSecond: 32000},
 	}})}
 	tp, err := b.produce(context.Background(), chatInputAudioBody(rawAudioBase64(32000), "mp3"))
 	require.NoError(t, err)
 	assert.Equal(t, audioTokens(1), tp.Prompts[0].MultiModalFeatures[0].Length, "32000 bytes at 32000 B/s is one second")
+}
+
+// TestAudioEstimator_HeaderBytesPerSecondWins asserts the byte rate a request
+// declares beats the configured default, so clips of different bitrates in one
+// deployment are each measured with their own rate.
+func TestAudioEstimator_HeaderBytesPerSecondWins(t *testing.T) {
+	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+		Dynamic: &dynamicAudioConfig{DefaultBytesPerSecond: 32000},
+	}})}
+	body := chatInputAudioBody(rawAudioBase64(32000), "mp3")
+
+	tp, err := b.produce(withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{bytesPerSecond: 16000}}), body)
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(2), tp.Prompts[0].MultiModalFeatures[0].Length, "32000 bytes at 16000 B/s is two seconds")
+}
+
+// TestAudioEstimator_DurationHeaderBeatsByteRate asserts a declared duration
+// short-circuits the byte-rate path entirely.
+func TestAudioEstimator_DurationHeaderBeatsByteRate(t *testing.T) {
+	tp, err := estimateBackend{}.produce(
+		withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: 5, bytesPerSecond: 1}}),
+		chatInputAudioBody(rawAudioBase64(32000), "mp3"))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestAudioEstimator_MaxAudioTokens asserts the cap bounds a long clip, the way
@@ -765,17 +807,6 @@ func TestAudioEstimator_HeaderDurationOverridesPayload(t *testing.T) {
 	fromPayload, err := estimateBackend{}.produce(context.Background(), body)
 	require.NoError(t, err)
 	assert.Equal(t, audioTokens(1.5), fromPayload.Prompts[0].MultiModalFeatures[0].Length, "the header must win over the payload")
-}
-
-// TestAudioEstimator_StaticMode asserts static mode emits a constant per-clip
-// count regardless of the payload.
-func TestAudioEstimator_StaticMode(t *testing.T) {
-	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Mode: audioModeStatic, Static: &staticAudioConfig{NumTokens: 128},
-	}})}
-	tp, err := b.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, 48000), "wav"))
-	require.NoError(t, err)
-	assert.Equal(t, 128, tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestAudioEstimator_MalformedPayloadStillCounts asserts a truncated or
@@ -805,7 +836,6 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	clip := wavBase64(16000, 1, 96000) // 96000 bytes at 32000 B/s is 3s
 
 	gemma4 := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Mode:           audioModeDynamic,
 		Dynamic:        &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
 		MaxAudioTokens: 100000,
 	}})}
@@ -814,7 +844,6 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	assert.Equal(t, 3*25+2, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped audio length")
 
 	qwen3omni := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Mode:    audioModeDynamic,
 		Dynamic: &dynamicAudioConfig{TokensPerSecond: 12.5, OverheadTokens: 2},
 	}})}
 	tp, err = qwen3omni.produce(context.Background(), chatInputAudioBody(clip, "wav"))

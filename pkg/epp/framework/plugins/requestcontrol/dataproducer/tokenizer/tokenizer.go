@@ -105,27 +105,17 @@ type estimateConfig struct {
 // x-llm-d-audio-duration-seconds header wins, then the payload itself, then
 // defaultDuration.
 type audioEstimateConfig struct {
-	// Mode selects "dynamic" (tokens-per-second * duration) or "static" (a constant count).
-	Mode string `json:"mode,omitempty"`
 	// DefaultDuration is the clip length in seconds used when neither the header
 	// nor the payload provides one, as for a clip referenced by URL.
 	DefaultDuration float64 `json:"defaultDuration,omitempty"`
-	// Static configures the static (constant per-audio) mode.
-	Static *staticAudioConfig `json:"static,omitempty"`
-	// Dynamic configures the dynamic (tokens-per-second) mode.
+	// Dynamic configures the per-tower rate parameters.
 	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
 	// MaxAudioTokens caps the total placeholder count, mirroring maxVideoTokens.
 	// Zero means uncapped.
 	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
 }
 
-// staticAudioConfig is the static-mode parameter.
-type staticAudioConfig struct {
-	// NumTokens is the per-audio placeholder count.
-	NumTokens int `json:"numTokens,omitempty"`
-}
-
-// dynamicAudioConfig is the dynamic-mode parameter.
+// dynamicAudioConfig holds the per-tower rate parameters.
 type dynamicAudioConfig struct {
 	// TokensPerSecond is the placeholder tokens per second of audio. It is
 	// fractional because audio towers do not land on whole rates: Qwen3-Omni is
@@ -134,9 +124,10 @@ type dynamicAudioConfig struct {
 	// OverheadTokens is the fixed prompt template + text token overhead added
 	// to every audio estimate.
 	OverheadTokens int `json:"overheadTokens,omitempty"`
-	// BytesPerSecond converts a payload length to seconds when the clip is not
-	// PCM WAV, whose own header carries an exact byte rate.
-	BytesPerSecond int `json:"bytesPerSecond,omitempty"`
+	// DefaultBytesPerSecond converts a payload length to seconds when the clip is
+	// not PCM WAV, whose own header carries an exact byte rate, and the request
+	// does not carry an x-llm-d-audio-bytes-per-second header either.
+	DefaultBytesPerSecond int `json:"defaultBytesPerSecond,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.

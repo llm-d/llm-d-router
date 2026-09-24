@@ -176,26 +176,25 @@ maxAudioTokens)`. Audio towers turn a clip into encoder frames at a fixed rate a
 pool them into tokens, so the count follows the clip's length rather than its
 payload size. Duration is resolved per clip: the `x-llm-d-audio-duration-seconds`
 header wins, then the payload itself — exact for PCM WAV, whose header declares a
-byte rate, and payload bytes ÷ `bytesPerSecond` for anything else — then
+byte rate, and payload bytes ÷ the byte rate for anything else — then
 `defaultDuration`, which is what a clip carried by reference falls back to.
 The rate is the one knob a new tower needs: gemma4's mel front end emits a token
 per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's AuT encoder one per 80ms
 (`tokensPerSecond: 12.5`), and both wrap a clip in begin/end markers
 (`overheadTokens: 2`).
 
-| Request header                   | Format        | Description                                               |
-| -------------------------------- | ------------- | --------------------------------------------------------- |
-| `x-llm-d-audio-duration-seconds` | float seconds | Clip length; overrides the payload and `defaultDuration`. |
+| Request header                    | Format        | Description                                                                          |
+| --------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `x-llm-d-audio-duration-seconds`  | float seconds | Clip length; overrides the payload and `defaultDuration`.                             |
+| `x-llm-d-audio-bytes-per-second`  | integer       | Byte rate of this clip's payload; overrides `defaultBytesPerSecond`. Ignored when the payload is PCM WAV or the duration header is set. |
 
-| Parameter                                | Default   | Description                                                                  |
-| ---------------------------------------- | --------- | ---------------------------------------------------------------------------- |
-| `estimate.audio.mode`                    | `dynamic` | `dynamic` (duration×tokensPerSecond) or `static` (a constant per-clip count). |
-| `estimate.audio.dynamic.tokensPerSecond` | `12.5`    | The audio tower's placeholder tokens per second of audio.                     |
-| `estimate.audio.dynamic.overheadTokens`  | `14`      | Constant added to every clip, modeling the prompt template and per-clip markers. |
-| `estimate.audio.dynamic.bytesPerSecond`  | `16000`   | Byte rate used to read a duration out of a non-WAV payload (~128kbps).        |
-| `estimate.audio.static.numTokens`        | –         | Static-mode per-clip placeholder count.                                       |
-| `estimate.audio.defaultDuration`         | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
-| `estimate.audio.maxAudioTokens`          | –         | Overall placeholder cap for a clip (0 = uncapped).                            |
+| Parameter                                       | Default   | Description                                                                  |
+| ----------------------------------------------- | --------- | ---------------------------------------------------------------------------- |
+| `estimate.audio.dynamic.tokensPerSecond`        | `12.5`    | The audio tower's placeholder tokens per second of audio.                     |
+| `estimate.audio.dynamic.overheadTokens`         | `14`      | Constant added to every clip, modeling the prompt template and per-clip markers. |
+| `estimate.audio.dynamic.defaultBytesPerSecond`  | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
+| `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
+| `estimate.audio.maxAudioTokens`                 | –         | Overall placeholder cap for a clip (0 = uncapped).                            |
 
 ## Failure mode
 

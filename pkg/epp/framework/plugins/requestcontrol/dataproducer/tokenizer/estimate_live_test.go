@@ -198,21 +198,22 @@ var qwen3OmniAudioCase = audioModelCase{
 	name:  "qwen3omni",
 	model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
 	cfg: &estimateConfig{Audio: &audioEstimateConfig{
-		Mode:    audioModeDynamic,
 		Dynamic: &dynamicAudioConfig{TokensPerSecond: 12.5, OverheadTokens: 2},
 	}},
 }
 
 // gemma4AudioCase configures estimation for a gemma4 server. Its mel front end
 // takes 20ms frames at a 10ms hop through two stride-2 convolutions, a token per
-// 40ms, so 25 tokens per second with the same begin/end markers. Qwen3-VL has no
-// audio tower, which is why Qwen3-Omni stands in for that family above.
+// 40ms, so 25 tokens per second with the same begin/end markers, capped at 750
+// tokens (30s). Qwen3-VL has no audio tower, which is why Qwen3-Omni stands in
+// for that family above. gemma-4-31B-it has none either, so this runs the E2B
+// variant; E4B shares its processor and chat template.
 var gemma4AudioCase = audioModelCase{
 	name:  "gemma4",
-	model: "google/gemma-4-31B-it",
+	model: "google/gemma-4-E2B-it",
 	cfg: &estimateConfig{Audio: &audioEstimateConfig{
-		Mode:    audioModeDynamic,
-		Dynamic: &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
+		Dynamic:        &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
+		MaxAudioTokens: 750,
 	}},
 }
 
