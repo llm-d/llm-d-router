@@ -200,9 +200,10 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
-		// Neither dataParallelHandler nor the decoder passthrough reads the
-		// body, so the Responses guard has to run here. readJSONBody consumes
-		// r.Body, hence the reclone over the same bytes.
+		// dataParallelHandler and the decoder passthrough forward r unread, so
+		// the guard in readJSONBody would never run on those branches.
+		// decodeWithP2PSource reads the body itself and re-runs it.
+		// readJSONBody consumes r.Body, so r is rebuilt over the same bytes.
 		if apiType == reqcommon.APITypeResponses {
 			raw, _, ok := s.readJSONBody(r, w)
 			if !ok {

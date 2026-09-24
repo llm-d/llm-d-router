@@ -52,4 +52,35 @@ const (
 	FieldInput                = "input"
 	FieldContent              = "content"
 	FieldFileID               = "file_id"
+	FieldMessages             = "messages"
+	FieldModel                = "model"
+	FieldRole                 = "role"
+	FieldType                 = "type"
+	FieldURL                  = "url"
+	FieldImageURL             = "image_url"
+	FieldStore                = "store"
+	FieldMMProcessorKwargs    = "mm_processor_kwargs"
+	FieldMediaIOKwargs        = "media_io_kwargs"
+	FieldAnnotations          = "annotations"
+	FieldOutput               = "output"
+)
+
+// Content part types, the values a content part's FieldType takes. A
+// chat-completions *_url part nests its URL and options under one object keyed
+// by the part type, so PartTypeImageURL and FieldImageURL hold the same string
+// in different roles; a Responses input_image instead carries a bare image_url
+// string with its options as siblings.
+//
+// The Responses input content union is input_text / input_image / input_file, so
+// a Responses request carrying one of the others is refused by the model
+// server. FieldFileID on an input_image, input_file or
+// computer_screenshot names a Files API upload the serving engine has to fetch.
+const (
+	PartTypeImageURL           = "image_url"
+	PartTypeAudioURL           = "audio_url"
+	PartTypeVideoURL           = "video_url"
+	PartTypeInputAudio         = "input_audio"
+	PartTypeInputImage         = "input_image"
+	PartTypeInputFile          = "input_file"
+	PartTypeComputerScreenshot = "computer_screenshot"
 )

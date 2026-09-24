@@ -254,9 +254,9 @@ var _ = Describe("readJSONBody", func() {
 	})
 
 	// decodeRequestBody leaves input raw, so the file_id walk decodes the array
-	// itself. An out-of-range number fails that decode while the enclosing
-	// document stays valid, which would otherwise read as "no file_id here".
-	It("rejects an input the file_id walk cannot decode", func() {
+	// itself. A number outside float64 range must not stop that walk: the model
+	// server parses the same body, so the file_id beside it has to be found.
+	It("finds a file_id beside an out-of-range number", func() {
 		w := httptest.NewRecorder()
 		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]},1e999]}`
 
@@ -264,7 +264,17 @@ var _ = Describe("readJSONBody", func() {
 
 		Expect(ok).To(BeFalse())
 		Expect(w.Code).To(Equal(http.StatusBadRequest))
-		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldInput))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldFileID))
+	})
+
+	It("forwards an input carrying an out-of-range number and no file_id", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}],"pinned":1e999}]}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue(), "body=%s", w.Body.String())
+		Expect(parsed).To(HaveKey(reqcommon.FieldInput))
 	})
 
 	It("forwards an input array with no file_id", func() {

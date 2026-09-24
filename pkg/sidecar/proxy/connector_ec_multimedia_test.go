@@ -34,15 +34,10 @@ import (
 )
 
 // TestHandleEC_Multimedia asserts that video_url, audio_url, and input_audio
-// items flow through both EC connectors the same way image_url items do.
-// mmTypes in connector_ec_common.go treats video_url / audio_url uniformly
-// with image_url (URL-based, dedup-eligible), while input_audio is inline and
-// never deduplicates. This table exercises those paths against handleECNIXL
-// (threads encoder ec_transfer_params into the prefill body) and
-// handleECSharedStorage (primer only — encoder responses are discarded).
-//
-// Inline audio never deduplicates (see fanoutEncoderPrimerDeduplication note),
-// so two input_audio blocks always produce two encoder calls.
+// items flow through both EC connectors the same way image_url items do. This
+// table exercises those paths against handleECNIXL (threads encoder
+// ec_transfer_params into the prefill body) and handleECSharedStorage (primer
+// only, encoder responses are discarded).
 func TestHandleEC_Multimedia(t *testing.T) {
 	tests := []struct {
 		name         string

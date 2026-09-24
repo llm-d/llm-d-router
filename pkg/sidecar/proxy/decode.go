@@ -50,9 +50,9 @@ const (
 	responseFieldIndex            = "index"
 	responseFieldDelta            = "delta"
 
-	requestFieldMessages = "messages"
-	requestFieldRole     = "role"
-	requestFieldContent  = "content"
+	requestFieldMessages = reqcommon.FieldMessages
+	requestFieldRole     = reqcommon.FieldRole
+	requestFieldContent  = reqcommon.FieldContent
 
 	roleAssistant = "assistant"
 )
