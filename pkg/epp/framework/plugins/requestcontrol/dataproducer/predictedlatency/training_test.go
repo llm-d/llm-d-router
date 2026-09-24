@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +25,8 @@ import (
 	"time"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -296,4 +299,64 @@ func TestBulkPredictWithMetrics_NilMetricsState(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, results)
 	assert.True(t, strings.Contains(err.Error(), "metrics state at index 0 cannot be nil"))
+}
+
+// TestBulkPredictWithMetrics_PredictionDurationModelLabels pins which model name
+// lands on which label of the prediction-duration metrics. The incoming model
+// belongs on model_name and the post-rewrite target on target_model_name, as
+// every other recorder in this package does it.
+func TestBulkPredictWithMetrics_PredictionDurationModelLabels(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registerMetrics(registry))
+
+	mp := &mockPredictor{
+		predictions: map[string]*latencypredictor.PredictionResponse{
+			"0.5": {TTFT: 0.5, TPOT: 0.03},
+		},
+	}
+	plCtx := &predictedLatencyCtx{
+		schedulingRequest: fwksched.InferenceRequest{TargetModel: "target-model"},
+		incomingModelName: "incoming-model",
+	}
+
+	_, err := bulkPredictWithMetrics(context.Background(), "test-plugin", "test-type", plCtx, mp,
+		[]*fwkdl.Metrics{{KVCacheUsagePercent: 0.5}}, "",
+		[]*fwkdl.EndpointMetadata{{ID: types.NamespacedName{Namespace: "default", Name: "pod1"}}},
+		[]int{1}, []int{1}, []float64{0.0}, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"llm_d_epp_request_ttft_prediction_duration_seconds",
+		"llm_d_epp_request_tpot_prediction_duration_seconds",
+	} {
+		labels := labelsForFamily(t, families, name)
+		assert.Equal(t, "incoming-model", labels["model_name"],
+			"%s: model_name must carry the incoming model", name)
+		assert.Equal(t, "target-model", labels["target_model_name"],
+			"%s: target_model_name must carry the target model", name)
+	}
+}
+
+// labelsForFamily returns the label set of the single sample in the named family.
+func labelsForFamily(t *testing.T, families []*dto.MetricFamily, name string) map[string]string {
+	t.Helper()
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		require.Len(t, family.GetMetric(), 1, "%s: expected exactly one sample", name)
+		labels := map[string]string{}
+		for _, pair := range family.GetMetric()[0].GetLabel() {
+			labels[pair.GetName()] = pair.GetValue()
+		}
+		return labels
+	}
+	t.Fatalf("metric family %q not found", name)
+	return nil
 }

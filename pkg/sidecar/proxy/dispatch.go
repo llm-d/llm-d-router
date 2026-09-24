@@ -1,0 +1,215 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package proxy
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+)
+
+// contextKey is a custom type for context keys to avoid collisions
+type contextKey string
+
+const requestStartTimeKey contextKey = "request_start_time"
+
+func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
+	return semconv.LLMDOpenAIAPI(apiType.String())
+}
+
+// disaggregatedPrefillHandler routes OpenAI-style requests: optional encoder (EPD) stage,
+// optional P/D prefill when the prefill header is set, otherwise decoder (or data-parallel).
+func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestStart := time.Now()
+		tracer := tracing.Tracer(tracerScope)
+		ctx, span := tracer.Start(r.Context(), "forward_request",
+			trace.WithSpanKind(trace.SpanKindServer),
+		)
+		defer span.End()
+
+		// Tag this handler's log lines with the trace they belong to. The proxy
+		// logger is process-scoped, so seed it into the context first. Connectors
+		// reached from here still log through s.logger and stay uncorrelated;
+		// the request context carries the correlated logger for them to adopt.
+		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
+		logger := log.FromContext(ctx)
+
+		ctx = context.WithValue(ctx, requestStartTimeKey, requestStart)
+		r = r.WithContext(ctx)
+
+		requestPath := ""
+		if r.URL != nil {
+			requestPath = r.URL.Path
+		}
+		span.SetAttributes(
+			semconv.LLMDPDProxyConnector(s.config.KVConnector),
+			semconv.LLMDPDProxyKVConnector(s.config.KVConnector),
+			semconv.LLMDPDProxyECConnector(s.config.ECConnector),
+			semconv.LLMDPDProxyRequestPath(requestPath),
+			openAIAPIAttr(apiType),
+		)
+
+		prefillHostPorts := r.Header.Values(routing.PrefillEndpointHeader)
+		r.Header.Del(routing.PrefillEndpointHeader)
+
+		if len(prefillHostPorts) == 1 {
+			prefillHostPorts = strings.Split(prefillHostPorts[0], ",")
+		}
+
+		numHosts := len(prefillHostPorts)
+		var prefillHostPort string
+		if numHosts > 0 {
+			if s.config.EnablePrefillerSampling {
+				prefillHostPort = strings.TrimSpace(prefillHostPorts[s.prefillSamplerFn(numHosts)])
+			} else {
+				prefillHostPort = strings.TrimSpace(prefillHostPorts[0])
+			}
+		}
+
+		if len(prefillHostPort) == 0 {
+			logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())
+			span.SetAttributes(
+				semconv.LLMDPDProxyDisaggregationUsed(false),
+				semconv.LLMDPDProxyReason("no_prefill_header"),
+			)
+		} else {
+			span.SetAttributes(
+				semconv.LLMDPDProxyDisaggregationUsed(true),
+				semconv.LLMDPDProxyPrefillTarget(prefillHostPort),
+				semconv.LLMDPDProxyPrefillCandidates(numHosts),
+			)
+		}
+
+		if len(prefillHostPort) > 0 {
+			if !s.allowlistValidator.IsAllowed(prefillHostPort) {
+				logger.Error(nil, "SSRF protection: prefill target not in allowlist",
+					"target", prefillHostPort,
+					"clientIP", r.RemoteAddr,
+					"userAgent", r.Header.Get("User-Agent"),
+					"requestPath", r.URL.Path)
+				span.SetAttributes(
+					semconv.LLMDPDProxyError("ssrf_protection_denied"),
+					semconv.LLMDPDProxyDeniedTarget(prefillHostPort),
+				)
+				span.SetStatus(codes.Error, "SSRF protection: prefill target not in allowlist")
+				http.Error(w, "Forbidden: prefill target not allowed by SSRF protection", http.StatusForbidden)
+				return
+			}
+			logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
+		}
+
+		kvCacheSource := strings.TrimSpace(r.Header.Get(routing.KVCacheSourceHeader))
+		r.Header.Del(routing.KVCacheSourceHeader)
+		if kvCacheSource != "" {
+			switch {
+			case !s.p2pPullAvailable():
+				logger.V(logging.DEBUG).Info("ignoring KV cache source header: connector does not support P2P pulls",
+					"connector", s.config.KVConnector)
+				kvCacheSource = ""
+			case !isHostPort(kvCacheSource):
+				logger.Info("ignoring malformed KV cache source header", "value", kvCacheSource)
+				kvCacheSource = ""
+			case !s.allowlistValidator.IsAllowed(kvCacheSource):
+				logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
+					"target", kvCacheSource, "clientIP", r.RemoteAddr)
+				kvCacheSource = ""
+			}
+		}
+		if kvCacheSource != "" {
+			span.SetAttributes(semconv.LLMDPDProxyKVCacheSource(kvCacheSource))
+		}
+
+		encoderHostPorts := r.Header.Values(routing.EncoderEndpointsHeader)
+		r.Header.Del(routing.EncoderEndpointsHeader)
+		if len(encoderHostPorts) == 1 {
+			encoderHostPorts = strings.Split(encoderHostPorts[0], ",")
+		}
+
+		var allowedEncoders []string
+		if len(encoderHostPorts) > 0 {
+			allowedEncoders = make([]string, 0, len(encoderHostPorts))
+			for _, encoderHost := range encoderHostPorts {
+				encoderHost = strings.TrimSpace(encoderHost)
+				if s.allowlistValidator.IsAllowed(encoderHost) {
+					allowedEncoders = append(allowedEncoders, encoderHost)
+					logger.V(logging.DEBUG).Info("SSRF protection: encoder target allowed", "target", encoderHost)
+				} else {
+					logger.Info("SSRF protection: encoder target not in allowlist, removing from list",
+						"target", encoderHost,
+						"clientIP", r.RemoteAddr,
+						"userAgent", r.Header.Get("User-Agent"),
+						"requestPath", r.URL.Path)
+				}
+			}
+		}
+
+		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
+			logger.V(logging.DEBUG).Info("encoder headers detected, using EC connector",
+				"encoderCount", len(allowedEncoders),
+				"encoderCandidates", len(encoderHostPorts),
+				"hasPrefiller", len(prefillHostPort) > 0)
+			span.SetAttributes(
+				semconv.LLMDECProxyEncodeDisaggregationUsed(true),
+				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
+				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
+			)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
+			return
+		}
+
+		if len(encoderHostPorts) > 0 && len(allowedEncoders) == 0 {
+			logger.Info("SSRF protection: all encoder targets filtered out, falling back to P/D or decoder-only")
+			span.SetAttributes(
+				semconv.LLMDECProxyEncodeDisaggregationUsed(false),
+				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
+				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
+			)
+		}
+
+		if len(prefillHostPort) > 0 {
+			logger.V(logging.DEBUG).Info("using P/D protocol")
+			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
+			return
+		}
+
+		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
+		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+			if kvCacheSource != "" {
+				s.decodeWithP2PSource(w, r, kvCacheSource)
+				return
+			}
+			if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
+				s.runChunkedDecode(w, r)
+				return
+			}
+			s.decoderProxy.ServeHTTP(w, r)
+		}
+	}
+}

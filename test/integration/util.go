@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -238,9 +240,13 @@ func CreateGrpcPayload(msg proto.Message) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(b) > math.MaxUint32 {
+		return nil, fmt.Errorf("marshaled message too large for gRPC length-prefixed framing: %d bytes", len(b))
+	}
+
 	payload := make([]byte, 5+len(b))
-	payload[0] = 0 // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b)))
+	payload[0] = 0                                           // 0 = uncompressed
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) // #nosec G115 -- bounds-checked above
 	copy(payload[5:], b)
 	return payload, nil
 }

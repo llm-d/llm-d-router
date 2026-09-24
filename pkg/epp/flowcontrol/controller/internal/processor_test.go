@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,6 +34,7 @@ import (
 	testclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
@@ -42,6 +44,7 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -317,6 +320,24 @@ func TestProcessor(t *testing.T) {
 			outcome, err := h.waitForFinalization(item)
 			assert.Equal(t, types.QueueOutcomeDispatched, outcome, "The final outcome should be Dispatched")
 			require.NoError(t, err, "A successful dispatch should not produce an error")
+		})
+
+		t.Run("should evict item that expires in the enqueue buffer", func(t *testing.T) {
+			t.Parallel()
+			h := newTestHarness(t, testCleanupTick)
+			item := h.newTestItem("req-expired-before-enqueue", testFlow, testShortTTL)
+			q := h.addQueue(testFlow)
+
+			h.Start()
+			require.NoError(t, h.processor.Submit(item), "precondition: Submit should not fail")
+			h.clock.Step(testShortTTL)
+			h.Go()
+
+			outcome, err := h.waitForFinalization(item)
+			assert.Equal(t, types.QueueOutcomeEvictedTTL, outcome)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, types.ErrTTLExpired)
+			assert.Zero(t, q.Len(), "expired item must not enter the managed queue")
 		})
 
 		t.Run("should reject item when at capacity", func(t *testing.T) {
@@ -1243,6 +1264,44 @@ func TestProcessor(t *testing.T) {
 				assert.True(t, dispatched, "should dispatch when only non-empty partitions are healthy")
 			})
 
+			t.Run("should drop unpartitioned detector series once stages are evaluated", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "unpartitioned-series-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlDetectorSaturation(detector, flowcontrol.SaturationStageFromContext(ctx), 1.0)
+					return 1.0
+				}
+
+				// Empty pool: the detector is evaluated without a stage.
+				h.endpointCandidates.Candidates = nil
+				h.processor.dispatchCycle(context.Background())
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				families, err := ctrlmetrics.Registry.Gather()
+				require.NoError(t, err)
+				var stages []string
+				for _, mf := range families {
+					if mf.GetName() != "llm_d_epp_flow_control_detector_saturation" {
+						continue
+					}
+					for _, m := range mf.GetMetric() {
+						labels := map[string]string{}
+						for _, lp := range m.GetLabel() {
+							labels[lp.GetName()] = lp.GetValue()
+						}
+						if labels["detector"] == detector {
+							stages = append(stages, labels["stage"])
+						}
+					}
+				}
+				assert.Equal(t, []string{"decode"}, stages, "only the decode series should remain")
+			})
+
 			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
 				t.Parallel()
 				h := newTestHarness(t, testCleanupTick)
@@ -1258,18 +1317,21 @@ func TestProcessor(t *testing.T) {
 
 				// Track which endpoints each Saturation call receives.
 				var calls [][]string
-				h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+				var stages []string
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
 					roles := make([]string, 0, len(endpoints))
 					for _, ep := range endpoints {
 						roles = append(roles, ep.GetMetadata().Labels[bylabel.RoleLabel])
 					}
 					calls = append(calls, roles)
+					stages = append(stages, flowcontrol.SaturationStageFromContext(ctx))
 					return 0.2
 				}
 
 				h.processor.dispatchCycle(context.Background())
 
 				require.Len(t, calls, 2, "detector should be called once per stage")
+				assert.Equal(t, []string{"prefill", "decode"}, stages, "each call should name its stage in the context")
 				// Prefill pool: prefill + interleaved
 				assert.ElementsMatch(t, []string{bylabel.RolePrefill, bylabel.RolePrefillDecode}, calls[0])
 				// Decode pool: decode + interleaved

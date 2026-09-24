@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -102,7 +103,7 @@ func (p *Predictor) PredictBulk(ctx context.Context, requests []PredictionReques
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //nolint:gosec // operator-config URL via config.PredictionURLs
 	if err != nil {
 		return nil, fmt.Errorf("failed to call bulk prediction endpoint %s: %w", url, err)
 	}
@@ -215,7 +216,7 @@ func (p *Predictor) predictHTTP(ctx context.Context, req PredictionRequest) (*Pr
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.httpClient.Do(httpReq) //nolint:gosec // operator-config URL via config.PredictionURLs
 	if err != nil {
 		return nil, fmt.Errorf("failed to call prediction endpoint %s: %w", url, err)
 	}
@@ -302,7 +303,7 @@ func (p *Predictor) refreshServerStatus(ctx context.Context) error {
 		return fmt.Errorf("failed to create server status request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //nolint:gosec // operator-config URL via config.TrainingURL
 	if err != nil {
 		return fmt.Errorf("failed to call /status endpoint: %w", err)
 	}
@@ -338,6 +339,6 @@ func (p *Predictor) getRandomPredictionURL() string {
 	if len(p.config.PredictionURLs) == 1 {
 		return p.config.PredictionURLs[0]
 	}
-	index := p.rng.Intn(len(p.config.PredictionURLs))
+	index := rand.IntN(len(p.config.PredictionURLs)) //nolint:gosec // non-crypto load-balancing pick across configured URLs
 	return p.config.PredictionURLs[index]
 }

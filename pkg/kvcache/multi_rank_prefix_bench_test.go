@@ -39,7 +39,10 @@ var multiRankBackends = []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.
 
 func multiRankPodID(i int) string { return fmt.Sprintf("10.0.%d.%d:8200", i/256, i%256) }
 
-// multiRankIndexer builds the fixture behind the production decorator chain.
+// multiRankIndexer builds the fixture behind the production decorator chain
+// and fails if that chain does not preserve the walk capability: a silent
+// fallback would measure the materialized path while claiming to measure the
+// walk.
 func multiRankIndexer(tb testing.TB) (*kvcache.Indexer, []kvblock.BlockHash) {
 	tb.Helper()
 	inner, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 20, PodCacheSize: 512})
@@ -63,6 +66,9 @@ func multiRankIndexer(tb testing.TB) (*kvcache.Indexer, []kvblock.BlockHash) {
 		tb.Fatal(err)
 	}
 	wrapped := kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(inner))
+	if _, ok := wrapped.(kvblock.KeyWalker); !ok {
+		tb.Fatal("production decorator chain does not expose KeyWalker: benchmark would measure the fallback")
+	}
 	return kvcache.NewIndexerForTest(&mockTokenProcessor{}, wrapped, multiRankBackends), keys
 }
 

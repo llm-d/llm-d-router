@@ -1,6 +1,6 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/llm-d/llm-d-router)](https://goreportcard.com/report/github.com/llm-d/llm-d-router)
 [![Go Reference](https://pkg.go.dev/badge/github.com/llm-d/llm-d-router.svg)](https://pkg.go.dev/github.com/llm-d/llm-d-router)
-[![License](https://img.shields.io/github/license/llm-d/llm-d-router)](/LICENSE)
+[![License](https://img.shields.io/github/license/llm-d/llm-d-router)](./LICENSE)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://llm-d.slack.com/archives/C08SBNRRSBD)
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_shield)
 
@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > **API & Code Consolidation**: Core Endpoint Picker (EPP) code and the `InferenceObjective` and `InferenceModelRewrite` APIs have been merged into this repository from [Gateway API Inference Extension (GIE)]. The GIE repository now exclusively hosts the `InferencePool` API—an extension of the [Kubernetes Gateway API]—and defines the Endpoint Picker Protocol.
 
-The **llm-d Router** is the intelligent entry point for inference traffic, delivering LLM load and prefix-cache aware routing, request prioritization, and advanced flow control across diverse request formats to fulfill complex serving objectives. It supports a flexible deployment model: it can run in **Standalone Mode** (where a self-managed Envoy proxy runs alongside the EPP in the same pod) or integrate with L7 load balancers—including self-managed instances (e.g., Istio, AgentGateway) and cloud-managed services (e.g., Google Cloud's Application Load Balancer)—via the Kubernetes Gateway API. 
+The **llm-d Router** is the intelligent entry point for inference traffic, delivering LLM load and prefix-cache aware routing, request prioritization, and advanced flow control across diverse request formats to fulfill complex serving objectives. It supports a flexible deployment model: it can run in **Standalone Mode**, where a self-managed Envoy proxy runs either alongside the EPP or as a separate service, or integrate with L7 load balancers—including self-managed instances (e.g., Istio, AgentGateway) and cloud-managed services (e.g., Google Cloud's Application Load Balancer)—via the Kubernetes Gateway API.
 
 The router achieves its intelligence through an **Endpoint Picker (EPP)** that integrates with production-grade proxies (such as [Envoy]) via the [ext-proc] protocol, injecting real-time signals into the data plane to optimize request placement.
 
@@ -35,12 +35,17 @@ This repository hosts the following core components:
 The llm-d Router supports two primary deployment modes as specified in the [Kubernetes Gateway API Inference Extensions]:
 
 ### 1. Standalone Mode
-A lightweight deployment where a self-managed Envoy proxy runs alongside the EPP in the same pod. This mode is ideal for clusters without Gateway API infrastructure or for basic testing and local evaluations.
+A deployment with a self-managed Envoy proxy that does not require Gateway API infrastructure. The standalone Helm chart supports two Envoy proxy topologies:
+
+- **Sidecar mode** (default): The proxy runs in the EPP pod. This topology is suited to basic testing and local evaluations.
+- **Service mode**: The proxy runs as a separate, horizontally scalable Deployment and Service and reaches EPP through the EPP Service. Set `router.proxy.mode=service` to scale the proxy independently from EPP.
+
+See the [Helm chart documentation] for configuration examples.
 
 ### 2. Gateway Mode (Inference Gateway)
 The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
 
-For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide].
+For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide]. The [OpenTelemetry JSON stdout logs] document describes the log record format used by the EPP and routing sidecar. The [TLS Documentation] covers the serving and metrics TLS flags of the EPP, the routing sidecar and the coordinator.
 
 ---
 
@@ -63,12 +68,15 @@ To ensure clarity across the project, we use the following standard terminology:
 [Architecture Documentation]:docs/architecture.md
 [Disaggregation Documentation]:docs/disaggregation.md
 [EPP Container Sizing Guide]:docs/operations.md
+[TLS Documentation]:docs/tls.md
+[OpenTelemetry JSON stdout logs]:docs/otel-json-stdout.md
 [InferencePool]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Gateway API Inference Extension (GIE)]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Kubernetes Gateway API Inference Extensions]:https://github.com/kubernetes-sigs/gateway-api-inference-extension
 [Gateway API]:https://github.com/kubernetes-sigs/gateway-api
 [Envoy]:https://github.com/envoyproxy/envoy
 [ext-proc]:https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter
+[Helm chart documentation]:config/charts/README.md
 
 ## Contributing
 
@@ -92,6 +100,8 @@ Contributions are welcome!
 [Meeting Notes]:https://docs.google.com/document/d/1Pf3x7ZM8nNpU56nt6CzePAOmFZ24NXDeXyaYb565Wq4
 [#sig-router]:https://llm-d.slack.com/?redir=%2Fmessages%2Fsig-router
 
+## Security
+See [SECURITY.md](SECURITY.md) for vulnerability reporting. Published container images carry a signed provenance attestation and an SBOM (software bill of materials). See [Verifying Published Artifacts](docs/verifying-releases.md) for how to check them.
 
 ## License
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fllm-d%2Fllm-d-router?ref=badge_large)

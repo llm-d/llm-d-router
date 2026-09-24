@@ -78,11 +78,25 @@ func logRequestResponse(next http.Handler) http.Handler {
 	})
 }
 
+// RouteRegistrar is implemented by pipeline steps that serve auxiliary HTTP
+// endpoints from the coordinator listener, beyond the built-in inference
+// routes (for example, result retrieval for a queueing step). RegisterRoutes
+// is called once per implementing step at server construction, after the
+// built-in routes are registered. chi keeps the last handler registered for
+// a pattern, so a step registering a path the server already owns would
+// silently take over that route: steps must use paths of their own.
+type RouteRegistrar interface {
+	RegisterRoutes(r chi.Router)
+}
+
 type Server struct {
 	httpServer         *http.Server
 	pipeline           *pipeline.Pipeline
 	maxRequestBodySize int64
 	passthrough        *passthroughHandler
+	secureServing      bool
+	certPath           string
+	tls                tlsProfile
 }
 
 func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
@@ -106,10 +120,17 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	if err != nil {
 		return nil, err
 	}
+	profile, err := parseTLSProfile(cfg.TLSMinVersion, cfg.TLSCipherSuites)
+	if err != nil {
+		return nil, err
+	}
 	s := &Server{
 		pipeline:           p,
 		maxRequestBodySize: maxBodySize,
 		passthrough:        passthrough,
+		secureServing:      cfg.SecureServing,
+		certPath:           cfg.CertPath,
+		tls:                profile,
 	}
 
 	r := chi.NewRouter()
@@ -118,12 +139,19 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Use(middleware.Recoverer)
 	r.Use(logRequestResponse)
 
-	r.Post(gateway.PathChatCompletions, s.handleInference)
-	r.Post(gateway.PathCompletions, s.handleInference)
-	r.Post(gateway.DefaultGeneratePath, s.handleInference)
+	r.Post(reqcommon.PathChatCompletions, s.handleInference)
+	r.Post(reqcommon.PathCompletions, s.handleInference)
+	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
+	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/readyz", s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
+
+	for _, step := range p.Steps() {
+		if rr, ok := step.(RouteRegistrar); ok {
+			rr.RegisterRoutes(r)
+		}
+	}
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,
@@ -135,12 +163,34 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	return s, nil
 }
 
-func (s *Server) ListenAndServe() error {
-	return s.httpServer.ListenAndServe()
+// ListenAndServe binds cfg.ListenAddr and serves until shutdown. With secure
+// serving enabled the listener speaks TLS; ctx bounds the certificate
+// reloader.
+func (s *Server) ListenAndServe(ctx context.Context) error {
+	if !s.secureServing {
+		return s.httpServer.ListenAndServe()
+	}
+	tlsConfig, err := s.listenerTLSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	s.httpServer.TLSConfig = tlsConfig
+	return s.httpServer.ListenAndServeTLS("", "")
 }
 
-func (s *Server) Serve(l net.Listener) error {
-	return s.httpServer.Serve(l)
+// Serve accepts on the already bound listener l instead of binding
+// cfg.ListenAddr itself. With secure serving enabled the listener speaks
+// TLS; ctx bounds the certificate reloader.
+func (s *Server) Serve(ctx context.Context, l net.Listener) error {
+	if !s.secureServing {
+		return s.httpServer.Serve(l)
+	}
+	tlsConfig, err := s.listenerTLSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	s.httpServer.TLSConfig = tlsConfig
+	return s.httpServer.ServeTLS(l, "", "")
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

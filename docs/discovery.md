@@ -239,6 +239,7 @@ endpoints:
     namespace: <string>         # optional -- defaults to "default"
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
+    rankIndex: <int>            # optional -- defaults to 0, must be >= 0
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
@@ -282,10 +283,32 @@ endpoints:
       job: tp-job-42
 ```
 
+Example with multiple ranks co-located on one pod IP, each on
+`basePort + rank`. `rankIndex` identifies each endpoint's pod-local rank so
+data producers that offset a well-known port by rank (for example the
+precise-prefix-cache KV-events socket) dial the correct port for each
+endpoint instead of only rank 0:
+
+```yaml
+endpoints:
+  - name: tp-rank-0
+    namespace: inference
+    address: "192.168.1.10"
+    port: "8000"
+    rankIndex: 0
+
+  - name: tp-rank-1
+    namespace: inference
+    address: "192.168.1.10"
+    port: "8001"
+    rankIndex: 1
+```
+
 **Constraints:**
 
 - `address` must be a literal IPv4 address (IPv6 is not supported).
 - `port` must be a decimal integer in the range 1-65535.
+- `rankIndex` must be an integer greater than or equal to 0.
 - The file must not exceed 1 MiB.
 - Duplicate names within the same namespace result in the last `Upsert`
   winning (the file is processed top-to-bottom).

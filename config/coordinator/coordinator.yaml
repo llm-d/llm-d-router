@@ -17,9 +17,10 @@
 # A compromised log store would expose them.
 log_level: 2
 
-# ---------------------------------------------------------------------------
-# server: HTTP listener for incoming OpenAI-compatible requests.
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
+# server: listener for incoming OpenAI-compatible requests. Serves TLS unless
+# secure_serving is false.
+# -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
@@ -29,6 +30,38 @@ server:
   # overrides this.
   # env: COORDINATOR_SERVER_METRICS_PORT
   # metrics_port: 9090
+
+  # metrics_cert_dir is the directory containing tls.crt and tls.key for the
+  # metrics endpoint. Empty serves metrics over HTTP. If set, missing or invalid
+  # files stop the coordinator. The metrics listener does not fall back to HTTP.
+  # The --metrics-cert-dir CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_METRICS_CERT_DIR
+  # metrics_cert_dir: ""
+
+  # secure_serving serves the inference listener over TLS. Default true.
+  # The --secure-serving CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_SECURE_SERVING
+  # secure_serving: true
+
+  # cert_path is the directory containing tls.crt and tls.key for the inference
+  # listener. Empty generates a self-signed certificate, which is only suitable
+  # for testing. Certificate changes are picked up without a restart.
+  # The --cert-path CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_CERT_PATH
+  # cert_path: ""
+
+  # tls_min_version is the minimum TLS version the inference listener accepts,
+  # for example VersionTLS12 or VersionTLS13. Empty uses VersionTLS12.
+  # The --tls-min-version CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_MIN_VERSION
+  # tls_min_version: ""
+
+  # tls_cipher_suites are the cipher suites the inference listener accepts, by
+  # Go crypto/tls name. Empty uses the crypto/tls default. Only effective for
+  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.
+  # The --tls-cipher-suites CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_CIPHER_SUITES
+  # tls_cipher_suites: []
 
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
@@ -99,11 +132,66 @@ pipeline:
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
 
+  # Carries selected response headers from each upstream phase into every
+  # later phase. Only listed headers are forwarded. This allows EPP-stamped
+  # scheduling metadata to constrain later roles in a disaggregated pipeline.
+  # Client-supplied values for listed headers are discarded until an upstream
+  # phase returns a replacement value. When this setting is omitted, it
+  # defaults to x-llm-d-disagg-revision. Declaring the setting replaces that
+  # default; use an empty list to disable response-header forwarding.
+  # forward_response_headers:
+  #   - x-llm-d-disagg-revision
+  #   - x-disagg-slice
+
   steps:
     # -------------------------------------------------------------------
-    # replace-media-urls: first step. Downloads any http(s) image_url
-    # references, base64-inlines them as data: URIs, and seeds
-    # MultimodalEntries on the request context.
+    # async-broker: optional, and when enabled it must run first. Bridges
+    # the coordinator to the llm-d-async broker. A request that carries the
+    # mode header (default X-AP-Mode: passthrough | enqueue | wait) opts
+    # into async serving: passthrough labels it (quota classification,
+    # objective and fairness headers) and lets the pipeline continue;
+    # enqueue answers 202 with the request id; wait holds the connection
+    # until the result lands or the wait cap expires. Without the mode
+    # header the step is a no-op. It also serves GET/DELETE
+    # /v1/requests/{id}.
+    # All params and their defaults are documented in
+    # pkg/coordinator/steps/asyncbroker/config.go.
+    # -------------------------------------------------------------------
+    # - type: async-broker
+    #   params:
+    #     # The Redis holding the async processor's queues. Required.
+    #     redis_url: "redis://redis:6379"
+    #     # Routes select the broker queue and tier per (model, tenant);
+    #     # first match wins, empty fields match anything.
+    #     routes:
+    #       - model: "my-model"
+    #         queue: "team-a-queue"
+    #         tier: "interactive"
+    #     # Objectives stamped on passthrough requests by tier, selected
+    #     # by quota classification (reserved vs overflow).
+    #     objectives:
+    #       interactive:
+    #         reserved: "interactive-reserved"
+    #         overflow: "interactive-overflow"
+    #     # Reserved concurrency per tenant; tenants without an entry are
+    #     # always classified reserved. Counters are shared with the AP's
+    #     # redis-quota gate.
+    #     quota:
+    #       limits:
+    #         team-a: 8
+    #     # wait_cap_seconds bounds held wait connections, ending the hold
+    #     # with the 202 response. Holds otherwise run to the request
+    #     # deadline.
+    #     # wait_cap_seconds: 55
+    #     # fetch_grace_seconds is the mailbox TTL applied after a delivered
+    #     # fetch. Zero deletes the result on delivery.
+    #     # fetch_grace_seconds: 60
+
+    # -------------------------------------------------------------------
+    # replace-media-urls: an optional step executed prior to request
+    # content processing. Downloads any http(s) image_url references,
+    # base64-inlines them as data: URIs, and seeds MultimodalEntries on
+    # the request context.
     # -------------------------------------------------------------------
     - type: replace-media-urls
       params:
@@ -184,11 +272,6 @@ pipeline:
     # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
-    #   params:
-    #     # use_openai_format mirrors gateway.use_openai_format but lets the
-    #     # step override per-pipeline if you want a different wire format
-    #     # for the text-only fast path.
-    #     use_openai_format: true
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -220,7 +303,10 @@ pipeline:
     # -------------------------------------------------------------------
     - type: prefill
       # params:
-      #   use_openai_format: true   # see notes above
+      #   use_openai_format mirrors gateway.use_openai_format but lets the
+      #   step override per-pipeline if you want a different wire format
+      #   for the text-only fast path.
+      #   use_openai_format: true
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
 
@@ -229,5 +315,4 @@ pipeline:
     # -------------------------------------------------------------------
     - type: decode
       # params:
-      #   use_openai_format: true   # see notes above
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector

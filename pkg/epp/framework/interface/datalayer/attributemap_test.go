@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -125,6 +126,19 @@ func TestKeysWithDifferentProducersAreDistinct(t *testing.T) {
 	got, ok := attrs.Get(keyA)
 	assert.True(t, ok)
 	assert.Equal(t, "foo", got.(*dummy).Text, "expected the original entry to be untouched")
+}
+
+func TestPutIsolatesFromCallerMutation(t *testing.T) {
+	attrs := NewAttributes()
+	original := &dummy{"before"}
+	attrs.Put(keyA, original)
+
+	// Mutate the value the caller passed to Put after the call returns.
+	original.Text = "after"
+
+	got, ok := attrs.Get(keyA)
+	assert.True(t, ok, "expected key to exist")
+	assert.Equal(t, "before", got.(*dummy).Text, "expected stored value to be unaffected by caller mutation")
 }
 
 func TestDynamicAttribute(t *testing.T) {

@@ -176,60 +176,65 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 	require.NoError(t, router.Listen(endpoint))
 	t.Cleanup(func() { router.Close() })
 
+	// A send failure means only that this client hung up, so it abandons the
+	// response rather than the loop: subscribers close a replay socket as soon
+	// as their attempt idle timer fires, and later requests must still be served.
+	serve := func(msg zmq4.Msg) {
+		buffer.requests.Add(1)
+		if len(msg.Frames) != 3 {
+			return
+		}
+		clientID := msg.Frames[0]
+		if buffer.fail.Load() {
+			_ = router.Send(zmq4.NewMsgFrom(clientID, []byte{}, []byte("malformed")))
+			return
+		}
+
+		startSeq := binary.BigEndian.Uint64(msg.Frames[2])
+		buffer.lastStartSeq.Store(startSeq)
+		buffer.mu.RLock()
+		messages := append([]replayMessage(nil), buffer.messages...)
+		messageDelay := buffer.messageDelay
+		silent := buffer.silent
+		partialAfter := buffer.partialAfter
+		buffer.mu.RUnlock()
+		if silent {
+			return
+		}
+		partial := buffer.partialOnce.CompareAndSwap(true, false)
+		sent := 0
+		for _, replay := range messages {
+			if replay.seq < startSeq {
+				continue
+			}
+			if messageDelay > 0 {
+				time.Sleep(messageDelay)
+			}
+			if err := router.Send(zmq4.NewMsgFrom(
+				clientID, []byte{}, topic, seqFrame(replay.seq), replay.payload,
+			)); err != nil {
+				return
+			}
+			sent++
+			if partial && sent == partialAfter {
+				break
+			}
+		}
+		if partial && sent == partialAfter {
+			return
+		}
+		_ = router.Send(zmq4.NewMsgFrom(
+			clientID, []byte{}, []byte{}, seqFrame(math.MaxUint64), []byte{},
+		))
+	}
+
 	go func() {
 		for {
 			msg, err := router.Recv()
 			if err != nil {
 				return
 			}
-			buffer.requests.Add(1)
-			if len(msg.Frames) != 3 {
-				continue
-			}
-			clientID := msg.Frames[0]
-			if buffer.fail.Load() {
-				_ = router.Send(zmq4.NewMsgFrom(clientID, []byte{}, []byte("malformed")))
-				continue
-			}
-
-			startSeq := binary.BigEndian.Uint64(msg.Frames[2])
-			buffer.lastStartSeq.Store(startSeq)
-			buffer.mu.RLock()
-			messages := append([]replayMessage(nil), buffer.messages...)
-			messageDelay := buffer.messageDelay
-			silent := buffer.silent
-			partialAfter := buffer.partialAfter
-			buffer.mu.RUnlock()
-			if silent {
-				continue
-			}
-			partial := buffer.partialOnce.CompareAndSwap(true, false)
-			sent := 0
-			for _, replay := range messages {
-				if replay.seq < startSeq {
-					continue
-				}
-				if messageDelay > 0 {
-					time.Sleep(messageDelay)
-				}
-				if err := router.Send(zmq4.NewMsgFrom(
-					clientID, []byte{}, topic, seqFrame(replay.seq), replay.payload,
-				)); err != nil {
-					return
-				}
-				sent++
-				if partial && sent == partialAfter {
-					break
-				}
-			}
-			if partial && sent == partialAfter {
-				continue
-			}
-			if err := router.Send(zmq4.NewMsgFrom(
-				clientID, []byte{}, []byte{}, seqFrame(math.MaxUint64), []byte{},
-			)); err != nil {
-				return
-			}
+			serve(msg)
 		}
 	}()
 
@@ -300,7 +305,8 @@ func TestZMQSubscriber_ReceivesMessages(t *testing.T) {
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	// Start subscriber — remote=false means it binds (Listen).
@@ -342,7 +348,8 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	subManager := kvevents.NewSubscriberManager(pool)
@@ -423,7 +430,8 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	// Pick an available ephemeral port to avoid conflicts with parallel tests or CI.
@@ -489,7 +497,8 @@ func newReplayHarnessWithBehavior(
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	pubEndpoint := availableEndpoint(t, ctx)

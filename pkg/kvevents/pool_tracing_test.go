@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kvevents //nolint:testpackage // tests drive unexported processRawMessage
 
 import (
@@ -15,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
@@ -56,7 +73,9 @@ func newTracingPool(t *testing.T) *Pool {
 
 	cfg := DefaultConfig()
 	cfg.Tracing = true
-	return NewPool(cfg, idx, tp, nil)
+	pool, err := NewPool(cfg, idx, tp, nil)
+	require.NoError(t, err)
+	return pool
 }
 
 func eventSpanAttrs(span sdktrace.ReadOnlySpan) map[attribute.Key]attribute.Value {
@@ -89,19 +108,19 @@ func TestProcessRawMessage_EmitsProcessAndDecodeSpans(t *testing.T) {
 
 	process := findEventSpan(t, recorder, "events_process")
 	pAttrs := eventSpanAttrs(process)
-	assert.Equal(t, "kv@10.0.0.1:8000@test-model", pAttrs["llm_d.kv_cache.events.topic"].AsString())
-	assert.Equal(t, int64(1), pAttrs["llm_d.kv_cache.events.payload_size_bytes"].AsInt64())
-	assert.Equal(t, int64(1), pAttrs["llm_d.kv_cache.events.event_count"].AsInt64())
+	assert.Equal(t, "kv@10.0.0.1:8000@test-model", pAttrs[semconv.LLMDKVCacheEventsTopicKey].AsString())
+	assert.Equal(t, int64(1), pAttrs[semconv.LLMDKVCacheEventsPayloadSizeBytesKey].AsInt64())
+	assert.Equal(t, int64(1), pAttrs[semconv.LLMDKVCacheEventsEventCountKey].AsInt64())
 	// The subscriber's endpoint wins over the adapter-parsed one.
-	assert.Equal(t, "10.0.0.1:8003", pAttrs["llm_d.kv_cache.events.pod_id"].AsString())
+	assert.Equal(t, "10.0.0.1:8003", pAttrs[semconv.LLMDKVCacheEventsPodIDKey].AsString())
 
 	decode := findEventSpan(t, recorder, "events_decode")
 	dAttrs := eventSpanAttrs(decode)
-	assert.Equal(t, "test-model", dAttrs["gen_ai.request.model"].AsString())
+	assert.Equal(t, "test-model", dAttrs[semconv.GenAIRequestModelKey].AsString())
 	// pod_id carries the effective pod and belongs on events_process alone, so
 	// a query on it cannot return the pre-override value.
-	assert.NotContains(t, dAttrs, attribute.Key("llm_d.kv_cache.events.pod_id"))
-	assert.NotContains(t, dAttrs, attribute.Key("llm_d.kv_cache.events.event_count"))
+	assert.NotContains(t, dAttrs, semconv.LLMDKVCacheEventsPodIDKey)
+	assert.NotContains(t, dAttrs, semconv.LLMDKVCacheEventsEventCountKey)
 
 	// decode nests under process
 	assert.Equal(t, process.SpanContext().SpanID(), decode.Parent().SpanID())
@@ -181,7 +200,8 @@ func TestNewPool_EmitsDecodeSpan(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Tracing = true
-	pool := NewPool(cfg, idx, tokenProcessor, &sourceEndpointAdapter{})
+	pool, err := NewPool(cfg, idx, tokenProcessor, &sourceEndpointAdapter{})
+	require.NoError(t, err)
 	pool.processRawMessage(ctx, &RawMessage{
 		Topic:   "kv@10.0.0.1:8000@test-model",
 		Payload: []byte{1},
@@ -225,7 +245,8 @@ func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 
 	require.False(t, DefaultConfig().Tracing, "event tracing must default off")
 
-	pool := NewPool(DefaultConfig(), idx, tp, &sourceEndpointAdapter{})
+	pool, err := NewPool(DefaultConfig(), idx, tp, &sourceEndpointAdapter{})
+	require.NoError(t, err)
 	z := newZMQSubscriber(pool, "pod-1", "", "tcp://x", "", "kv@", false)
 
 	z.addTask(context.Background(), "kv@10.0.0.1:8000@test-model", 1, []byte{1})
@@ -236,7 +257,8 @@ func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 
 // The default path must not pay for spans it never records.
 func TestStartSpan_DisabledPathAllocatesNothing(t *testing.T) {
-	pool := NewPool(DefaultConfig(), nil, nil, nil)
+	pool, err := NewPool(DefaultConfig(), nil, nil, nil)
+	require.NoError(t, err)
 	require.Nil(t, pool.tracer, "event tracing must default off")
 
 	ctx := context.Background()
@@ -256,7 +278,8 @@ func TestStartSpan_DisabledPathAllocatesNothing(t *testing.T) {
 // BenchmarkPipelineSpans_Disabled measures the per-message span cost carried by
 // the default configuration: one receive, one process, one decode.
 func BenchmarkPipelineSpans_Disabled(b *testing.B) {
-	pool := NewPool(DefaultConfig(), nil, nil, nil)
+	pool, err := NewPool(DefaultConfig(), nil, nil, nil)
+	require.NoError(b, err)
 	ctx := context.Background()
 
 	b.ReportAllocs()

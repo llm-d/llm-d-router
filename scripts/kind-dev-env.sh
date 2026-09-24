@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# Copyright 2025 The llm-d Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 # This shell script deploys a kind cluster with an Istio-based Gateway API
 # implementation fully configured. It deploys the vllm simulator, which it
 # exposes with a Gateway -> HTTPRoute -> InferencePool. The Gateway is
@@ -67,6 +82,7 @@ export SIDECAR_IMAGE
 export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
 export VLLM_RENDER_PORT="${VLLM_RENDER_PORT:-8082}"
 export VLLM_RENDER_URL="${VLLM_RENDER_URL:-http://vllm-render:${VLLM_RENDER_PORT}}"
+export VLLM_RENDER_MAX_MODEL_LEN="${VLLM_RENDER_MAX_MODEL_LEN:-131072}"
 
 # Set the inference pool name for the deployment
 export POOL_NAME="${POOL_NAME:-${MODEL_NAME_SAFE}-inference-pool}"
@@ -411,7 +427,7 @@ export ENABLE_LEADER_ELECTION=false
 # Deploy Istio base (shared infrastructure)
 kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
-  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
+  ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${VLLM_RENDER_MAX_MODEL_LEN} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
   ${EPP_REPLICA_COUNT} ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} \
   ${VLLM_DATA_PARALLEL_SIZE} ${ENABLE_LEADER_ELECTION}' \
   | kubectl --context ${KUBE_CONTEXT} apply -f -

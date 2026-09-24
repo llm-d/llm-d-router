@@ -3,8 +3,18 @@ extraServicePorts: []
 # Kubernetes cluster DNS domain, used to build in-cluster Service FQDNs.
 clusterDomain: cluster.local
 
+# Secrets holding credentials for pulling images from private registries
+imagePullSecrets: []
+
 epp:
   replicas: 1
+
+  # Pod-level securityContext, inherited by every container in the EPP pod. The
+  # latency predictor images declare no user and run as root unless runAsUser is
+  # set here.
+  podSecurityContext: {}
+  # Container-level securityContext for the EPP container.
+  securityContext: {}
 
   # Overrides the EPP Deployment's spec.strategy. Unset means `type: Recreate`,
   # which is the recommended default for the stateful single-active-replica pattern.
@@ -53,6 +63,10 @@ epp:
   env: []
   
   pluginsConfigFile: "default-plugins.yaml"
+  # Structured EPP configuration rendered into pluginsConfigFile. Maps merge
+  # across values files; lists are replaced according to Helm's merge rules.
+  pluginsConfig: {}
+  # Additional raw ConfigMap entries keyed by file name.
   pluginsCustomConfig: {}
   
   # Define additional container ports
@@ -61,7 +75,7 @@ epp:
   # Example defining a custom EPP config file
   # pluginsCustomConfig:
   #   custom-plugins.yaml: |
-  #     apiVersion: inference.networking.x-k8s.io/v1alpha1
+  #     apiVersion: llm-d.ai/v1
   #     kind: EndpointPickerConfig
   #     plugins:
   #     - type: custom-scorer
@@ -92,12 +106,16 @@ epp:
 proxy:
   enabled: false    
 
-# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` and exposes
-# `/render` over loopback HTTP to EPP. modelName is passed as the first
+# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
+# `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
+# `/v1/chat/completions/render` over loopback HTTP to EPP. modelName is passed as the first
 # positional arg to the render command (required when enabled). EPP is wired to
 # the sidecar via `router.epp.pluginsCustomConfig`.
+# When flavor is "rust", router.tokenizer.image must be set to an image containing the vllm-rs binary.
 tokenizer:
   enabled: false
+  # Backend renderer flavor: "python" (default, runs vllm launch render) or "rust" (runs vllm-rs render; requires an image that includes vllm-rs).
+  flavor: "python"
   modelName: ""
   image:
     registry: docker.io
@@ -186,6 +204,7 @@ latencyPredictor:
   enabled: false
   # Training Server Configuration
   trainingServer:
+    securityContext: {}
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-training-server-dev
@@ -227,6 +246,7 @@ latencyPredictor:
   predictionServers:
     count: 1
     startPort: 8001
+    securityContext: {}
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-prediction-server-dev

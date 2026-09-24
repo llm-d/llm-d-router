@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -127,14 +128,10 @@ func (p *SchedulerProfile) String() string {
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
-		// Filters draining a non-empty candidate set means the pool is busy, not
-		// broken: an empty pool is rejected in the director before scheduling
-		// runs. Report it with the same status and drop-reason vocabulary as a
-		// flow control capacity rejection.
 		return nil, errcommon.Error{
-			Code:    errcommon.ResourceExhausted,
+			Code:    errcommon.ServiceUnavailable,
 			Msg:     "no endpoints available for the given request",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
 	// if we got here, there is at least one endpoint to score
@@ -162,7 +159,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 	defer span.End()
 	tracingActive := span.IsRecording()
 	if tracingActive {
-		span.SetAttributes(attribute.Int("llm_d.epp.filter.candidate_endpoints", len(endpoints)))
+		span.SetAttributes(semconv.LLMDEPPFilterCandidateEndpoints(len(endpoints)))
 		span.SetAttributes(requestSpanAttributes(request)...)
 	}
 
@@ -191,7 +188,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		}
 	}
 	if tracingActive {
-		span.SetAttributes(attribute.Int("llm_d.epp.filter.filtered_endpoints", len(filteredEndpoints)))
+		span.SetAttributes(semconv.LLMDEPPFilterFilteredEndpoints(len(filteredEndpoints)))
 	}
 	if verboseEnabled {
 		verbose.Info("Completed running filter plugins", "remainingEndpoints", len(filteredEndpoints))
@@ -230,8 +227,8 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	tracingActive := span.IsRecording()
 	if tracingActive {
 		span.SetAttributes(
-			attribute.Int("llm_d.epp.scorer.count", len(p.scorers)),
-			attribute.Int("llm_d.epp.scoring.candidate_endpoints", len(endpoints)),
+			semconv.LLMDEPPScorerCount(len(p.scorers)),
+			semconv.LLMDEPPScoringCandidateEndpoints(len(endpoints)),
 		)
 		span.SetAttributes(requestSpanAttributes(request)...)
 	}
@@ -367,7 +364,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	defer span.End()
 
 	if span.IsRecording() {
-		span.SetAttributes(attribute.Int("llm_d.epp.picker.candidate_endpoints", len(scoredEndpoints)))
+		span.SetAttributes(semconv.LLMDEPPPickerCandidateEndpoints(len(scoredEndpoints)))
 		// The picker almost always returns a single target, so its count carries
 		// little signal. The score distribution across the strongest candidates is
 		// what explains why an endpoint was chosen, so record the highest-scoring
@@ -375,8 +372,8 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		// pickers reorder scoredEndpoints in place.
 		if names, scores := topScoredEndpoints(scoredEndpoints, maxTracedEndpointScores); len(names) > 0 {
 			span.SetAttributes(
-				attribute.StringSlice("llm_d.epp.picker.top_endpoints", names),
-				attribute.Float64Slice("llm_d.epp.picker.top_scores", scores),
+				semconv.LLMDEPPPickerTopEndpoints(names),
+				semconv.LLMDEPPPickerTopScores(scores),
 			)
 		}
 		span.SetAttributes(requestSpanAttributes(request)...)

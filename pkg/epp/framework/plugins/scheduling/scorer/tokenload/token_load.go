@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -94,8 +95,10 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
 
+	debugLogger := logger.V(logutil.DEBUG)
+	debugEnabled := debugLogger.Enabled()
+
 	for _, endpoint := range endpoints {
-		endpointID := endpoint.GetMetadata().ID.String()
 		tokenLoad := 0.0
 
 		// Read both accumulated in-flight load and the projected impact of the
@@ -123,7 +126,13 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 			score = 1.0 - (tokenLoad / s.queueThresholdTokens)
 		}
 		scores[endpoint] = score
-		logger.V(logutil.DEBUG).Info("TokenLoadScorer scoring", "endpoint", endpointID, "tokenLoad", tokenLoad, "score", score)
+		if debugEnabled {
+			endpointID := ""
+			if md := endpoint.GetMetadata(); md != nil {
+				endpointID = md.ID.String()
+			}
+			debugLogger.Info("TokenLoadScorer scoring", "endpoint", endpointID, "tokenLoad", tokenLoad, "score", score)
+		}
 	}
 
 	return scores

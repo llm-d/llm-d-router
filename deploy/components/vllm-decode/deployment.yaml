@@ -25,7 +25,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - "--port=8000"
-        - "--secure-proxy=false"
+        - "--secure-serving=false"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
         ports:
         - name: sidecar-http

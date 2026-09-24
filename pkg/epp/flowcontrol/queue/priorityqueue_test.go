@@ -390,7 +390,7 @@ func TestPriorityQueue_Concurrency(t *testing.T) {
 	for _, item := range drained {
 		require.True(t, item.Handle().IsInvalidated(), "every drained handle must be invalidated")
 	}
-	assert.Equal(t, int(initialItems)+int(adds.Load())-int(removes.Load()), len(drained),
+	assert.Equal(t, int(initialItems)+int(adds.Load())-int(removes.Load()), len(drained), // #nosec G115 -- test data, counters are small
 		"drained count must equal initial + adds - removes")
 	assert.Zero(t, q.Len())
 	assert.Zero(t, q.ByteSize())

@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -81,12 +82,12 @@ type (
 		// Can be any engine name from EngineConfigs. Defaults to "vllm".
 		DefaultEngine string `json:"defaultEngine"`
 		// EngineConfigs defines metric specifications for specific engine types.
-		// Built-in configs (vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
+		// Built-in configs (vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, triton) are automatically appended if not explicitly defined.
 		EngineConfigs []engineConfigParams `json:"engineConfigs"`
 	}
 )
 
-// Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
+// Default engine configurations for vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
 		Name:                "vllm",
@@ -107,6 +108,14 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheNumBlocksSpec:  "sglang:num_pages",
 	},
 	{
+		Name:                "atom",
+		QueuedRequestsSpec:  "atom:requests_waiting",
+		RunningRequestsSpec: "atom:requests_running",
+		KVUsageSpec:         "atom:kv_cache_usage_ratio",
+		LoRASpec:            "",
+		CacheInfoSpec:       "atom:cache_config_info",
+	},
+	{
 		Name:                "trtllm-serve",
 		QueuedRequestsSpec:  "trtllm_num_requests_waiting",
 		RunningRequestsSpec: "trtllm_num_requests_running",
@@ -125,6 +134,20 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "",
 		CacheBlockSizeSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}",
 		CacheNumBlocksSpec:  "nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}",
+	},
+	{
+		Name:                "tokenspeed",
+		QueuedRequestsSpec:  "tokenspeed:num_requests_waiting",
+		RunningRequestsSpec: "tokenspeed:num_requests_running",
+		KVUsageSpec:         "tokenspeed:kv_cache_usage_perc",
+		// TokenSpeed does not expose a cache_config_info family, a tokens-per-block
+		// gauge, or any LoRA metrics, so all four optional specs stay empty and the
+		// prefix cache scorer falls back to its configured block size.
+		LoRASpec:      "",
+		CacheInfoSpec: "",
+		// TokenSpeed describes kv_cache_usage_perc as a 0-1 fraction
+		// (collector.py:190-193), which is the unit KVCacheUtilizationScorer
+		// assumes when it scores 1 - KVCacheUsagePercent.
 	},
 	// "triton" defines standard Triton Inference Server metrics configuration for non-LLM workloads
 	// (e.g. classic ML/DL models serving KServe v2 protocols).

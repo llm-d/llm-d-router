@@ -65,6 +65,8 @@ test_cases_llm_d_router_gateway["basic"]="--set router.modelServers.matchLabels.
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
 # Run the install command in case this script runs from a different bash
 # source (such as in the verify-all script)
@@ -104,6 +106,19 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
     fi
   fi
 
+  if [ "${key}" == "tokenizer-rust" ]; then
+    if ! grep -q "vllm-rs" "${output_dir}/llm-d-router-gateway/templates/epp.yaml"; then
+      echo "Validation failed: vllm-rs not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "tokenizer-python" ]; then
+    if ! grep -q "vllm" "${output_dir}/llm-d-router-gateway/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-gateway/templates/epp.yaml"; then
+      echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
   echo "Test case ${key} passed validation."
 done
 
@@ -118,6 +133,24 @@ if ! grep -q -- '^kind: ServiceMonitor$' "${gke_monitoring_render_output}"; then
 fi
 if grep -q -- '^kind: PodMonitoring$' "${gke_monitoring_render_output}"; then
   echo "GKE Gateway monitoring unexpectedly rendered PodMonitoring when the monitoring provider was unset"
+  exit 1
+fi
+if grep -Eq -- '^kind: ClusterRole(Binding)?$' "${gke_monitoring_render_output}"; then
+  echo "GKE Gateway monitoring unexpectedly rendered cluster RBAC when Prometheus authentication was disabled"
+  exit 1
+fi
+
+echo "Verifying Prometheus authentication renders cluster RBAC..."
+prometheus_auth_render_output="${TEMP_DIR}/llm-d-router-gateway-prometheus-auth-render.yaml"
+prometheus_auth_render_command="${HELM} template prometheus-auth ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=true > ${prometheus_auth_render_output}"
+echo "Executing: ${prometheus_auth_render_command}"
+eval "${prometheus_auth_render_command}"
+if ! grep -q -- '^kind: ClusterRole$' "${prometheus_auth_render_output}"; then
+  echo "Prometheus authentication did not render a ClusterRole"
+  exit 1
+fi
+if ! grep -q -- '^kind: ClusterRoleBinding$' "${prometheus_auth_render_output}"; then
+  echo "Prometheus authentication did not render a ClusterRoleBinding"
   exit 1
 fi
 
@@ -146,6 +179,8 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
+test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
 
 echo "Processing dependencies for llm-d-router-standalone chart..."
@@ -173,7 +208,77 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     echo "Kubectl validation failed for test: ${key}"
     exit 1
   fi
+  if [ "${key}" == "tokenizer-rust" ]; then
+    if ! grep -q "vllm-rs" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
+      echo "Validation failed: vllm-rs not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "tokenizer-python" ]; then
+    if ! grep -q "vllm" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
+      echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
   echo "Test case ${key} passed validation."
+done
+
+echo "Verifying leader-election RBAC..."
+verify_leader_election_rbac() {
+  local chart="$1" expected="$2"
+  shift 2
+  local output="${TEMP_DIR}/${chart}-leader-election.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template leader-election "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace election-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    "${args[@]}" "$@" > "${output}"; then
+    echo "Leader-election rendering failed for ${chart}: $*"
+    exit 1
+  fi
+  local name actual
+  for name in leader-election-epp-leader-election leader-election-epp-leader-election-binding; do
+    if grep -q -- "^  name: ${name}$" "${output}"; then
+      actual=true
+    else
+      actual=false
+    fi
+    if [ "${actual}" != "${expected}" ]; then
+      echo "${chart}: expected ${name} present=${expected}, got ${actual}; flags: $*"
+      exit 1
+    fi
+  done
+  if [ "${expected}" == "true" ]; then
+    if ! grep -Fq -- 'resources: [ "leases" ]' "${output}"; then
+      echo "${chart}: leader-election Role is missing lease permissions"
+      exit 1
+    fi
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  verify_leader_election_rbac "${chart}" false
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2 --set router.epp.flags.ha-enable-leader-election=false
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=1 --set router.epp.flags.ha-enable-leader-election=true
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=1 --set router.epp.flags.ha-enable-leader-election=false
+  for value in true True TRUE t T 1; do
+    verify_leader_election_rbac "${chart}" true --set-string "router.epp.flags.ha-enable-leader-election=${value}"
+  done
+  for value in false False FALSE f F 0; do
+    verify_leader_election_rbac "${chart}" false --set-string "router.epp.flags.ha-enable-leader-election=${value}"
+  done
+  if [ "${chart}" == "llm-d-router-gateway" ]; then
+    mode_flags=(--set provider.name=gke --set provider.gke.preferredBackends.enabled=true)
+  else
+    mode_flags=(--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.inferencePool.create=false)
+  fi
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 "${mode_flags[@]}"
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2 "${mode_flags[@]}" --set router.epp.flags.ha-enable-leader-election=true
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 "${mode_flags[@]}" --set router.epp.flags.ha-enable-leader-election=false
+  echo "Leader-election RBAC checks passed for ${chart}."
 done
 
 echo "Running llm-d-router-standalone negative validation tests..."
@@ -240,6 +345,13 @@ if eval "${invalid_priority_routing_health_checking_command}"; then
   exit 1
 fi
 
+invalid_tokenizer_flavor_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model --set router.tokenizer.flavor=invalid >/dev/null"
+echo "Executing: ${invalid_tokenizer_flavor_command}"
+if eval "${invalid_tokenizer_flavor_command}"; then
+  echo "Helm template unexpectedly succeeded for invalid router.tokenizer.flavor"
+  exit 1
+fi
+
 echo "Verifying llm-d-router-standalone extra flags render as --flag=value..."
 flag_render_output="${TEMP_DIR}/llm-d-router-standalone-flag-render.yaml"
 flag_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string router.epp.flags.secure-serving=false > ${flag_render_output}"
@@ -247,6 +359,11 @@ echo "Executing: ${flag_render_command}"
 eval "${flag_render_command}"
 if ! grep -q -- '--secure-serving=false' "${flag_render_output}"; then
   echo "Helm template did not render extra flags as --flag=value"
+  exit 1
+fi
+
+if ! HELM="${HELM}" bash "${SCRIPT_ROOT}/hack/verify-plugins-config.sh"; then
+  echo "Structured plugins configuration validation failed"
   exit 1
 fi
 

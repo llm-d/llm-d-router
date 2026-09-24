@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
@@ -50,6 +52,8 @@ type zmqSubscriber struct {
 	replayEndpoint string
 	remote         bool
 	topicFilter    string
+	queueMu        sync.Mutex
+	retired        bool
 
 	// Replay state persists across reconnections within subscriber lifetime.
 	lastSeq           uint64
@@ -77,6 +81,8 @@ func newZMQSubscriber(
 }
 
 // parseEventFrame validates and extracts a live or replayed event frame.
+// The returned sequence number is vLLM's per-pod event counter, which never
+// approaches int64 overflow.
 //
 //nolint:gocritic // unnamedResult conflicts with nonamedreturns
 func parseEventFrame(frames [][]byte) (string, uint64, []byte, bool) {
@@ -185,7 +191,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			logger.Info("Detected event sequence reset, rebuilding index",
 				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
-			z.pool.resetForSource(topic, z.sourceEndpoint)
+			z.resetForSource(topic)
 			z.lastSeq = 0
 			z.hasLastSeq = false
 			z.lastReplayFailure = time.Time{}
@@ -255,14 +261,16 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
 	defer span.End()
 	if span.IsRecording() {
+		//nolint:gosec // seq is vLLM's per-pod event counter; see parseEventFrame doc
+		seqAttr := int64(seq)
 		attrs := []attribute.KeyValue{
-			attribute.String("llm_d.kv_cache.events.topic", topic),
-			attribute.Int64("llm_d.kv_cache.events.sequence", int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
-			attribute.Int("llm_d.kv_cache.events.payload_size_bytes", len(payload)),
+			semconv.LLMDKVCacheEventsTopic(topic),
+			semconv.LLMDKVCacheEventsSequence(seqAttr),
+			semconv.LLMDKVCacheEventsPayloadSizeBytes(len(payload)),
 		}
 		// Empty unless the subscriber was created by pod discovery.
 		if z.sourceEndpoint != "" {
-			attrs = append(attrs, attribute.String("llm_d.kv_cache.events.source_endpoint", z.sourceEndpoint))
+			attrs = append(attrs, semconv.LLMDKVCacheEventsSourceEndpoint(z.sourceEndpoint))
 		}
 		span.SetAttributes(attrs...)
 	}
@@ -280,7 +288,33 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		carried := sc
 		msg.SpanContext = &carried
 	}
+	z.enqueue(msg)
+}
+
+func (z *zmqSubscriber) enqueue(msg *RawMessage) {
+	z.queueMu.Lock()
+	defer z.queueMu.Unlock()
+	if z.retired {
+		return
+	}
 	z.pool.AddTask(msg)
+}
+
+func (z *zmqSubscriber) resetForSource(topic string) {
+	z.enqueue(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true})
+}
+
+// retire prevents any later messages from this subscriber from being queued.
+// When resetSource is true, it queues a reset after all messages accepted before
+// retirement. The pool shards both messages and the reset by source endpoint,
+// so the worker processes them in that order.
+func (z *zmqSubscriber) retire(resetSource bool) {
+	z.queueMu.Lock()
+	defer z.queueMu.Unlock()
+	z.retired = true
+	if resetSource && z.sourceEndpoint != "" {
+		z.pool.resetForSource(z.topicFilter, z.sourceEndpoint)
+	}
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {
@@ -288,7 +322,7 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
-	z.pool.resetForSource(topic, z.sourceEndpoint)
+	z.resetForSource(topic)
 	z.lastSeq = 0
 	z.hasLastSeq = false
 	z.lastReplayFailure = time.Now()

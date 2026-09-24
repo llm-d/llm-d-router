@@ -24,10 +24,13 @@ import (
 
 // Metrics holds the latest metrics snapshot scraped from a pod.
 type Metrics struct {
-	// ActiveModels is a set of models(including LoRA adapters) that are currently cached to GPU.
-	ActiveModels  map[string]int
+	// ActiveModels holds only adapters that have at least one running or queued request.
+	ActiveModels map[string]int
+	// WaitingModels is intended to track adapters with only queued requests,
+	// but current vLLM populates it with the same adapters as in ActiveModels.
+	// Not useful until vLLM replaces it with a residency signal.
 	WaitingModels map[string]int
-	// MaxActiveModels is the maximum number of models that can be loaded to GPU.
+	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
 	MaxActiveModels         int
 	RunningRequestsSize     int
 	WaitingQueueSize        int
@@ -39,7 +42,13 @@ type Metrics struct {
 	CacheNumBlocks int
 
 	// UpdateTime records the last time when the metrics were updated.
+	// The zero value means no scrape has written this snapshot.
 	UpdateTime time.Time
+}
+
+// Updated reports whether a scrape has written this snapshot.
+func (m *Metrics) Updated() bool {
+	return m != nil && !m.UpdateTime.IsZero()
 }
 
 // NewMetrics initializes a new empty Metrics object.

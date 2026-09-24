@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -159,6 +160,8 @@ type ActiveFlowConnection interface {
 	GetDataPlane() FlowRegistryDataPlane
 	// FlowKey returns the immutable identity of the flow this connection is pinned to.
 	FlowKey() flowcontrol.FlowKey
+	// DefaultRequestTTL returns the queue-wait bound configured for the leased priority band and whether it was set.
+	DefaultRequestTTL() (time.Duration, bool)
 }
 
 // ManagedQueue defines the interface for a flow's queue.

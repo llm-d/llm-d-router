@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -181,8 +182,8 @@ func TestRefreshPrometheusMetricsAvgValues(t *testing.T) {
 		return 0
 	}
 
-	avgRunning := findGauge("inference_pool_average_running_requests")
-	avgQueue := findGauge("inference_pool_average_queue_size")
+	avgRunning := findGauge("llm_d_epp_average_running_requests")
+	avgQueue := findGauge("llm_d_epp_average_queue_size")
 
 	assert.InDelta(t, 0.5, avgRunning, 0.001, "average running requests should be 0.5, not truncated to 0")
 	assert.InDelta(t, 1.5, avgQueue, 0.001, "average queue size should be 1.5, not truncated to 1")

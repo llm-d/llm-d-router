@@ -63,7 +63,7 @@ See [`deploy/config/probabilistic-admitter-epp-config.yaml`](../../../../../../.
 key snippet:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: probabilistic-admitter

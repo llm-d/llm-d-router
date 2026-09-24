@@ -218,7 +218,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict verify-boilerplate
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -335,7 +335,7 @@ test-e2e-responses: ## Run only the OpenResponses compliance e2e specs (simulato
 bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
 	@printf "\033[33;1m==== Running Tokenizer Benchmark ====\033[0m\n"
 	@printf "Ensure the kind cluster is running with the KV cache config.\n"
-	@printf "Run 'KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
+	@printf "Run 'KV_CACHE_ENABLED=true VLLM_EXTRA_ARGS_D=\"--max-model-len=131072 --kv-cache-size=8192\" make env-dev-kind' first.\n\n"
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke
@@ -351,6 +351,10 @@ post-deploy-test: ## Run post deployment tests
 .PHONY: verify-manifests
 verify-manifests: kubectl-validate ## Validate deployment manifests.
 	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
+.PHONY: verify-boilerplate
+verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
+	hack/copyright.sh verify
 
 ##@ Helm
 

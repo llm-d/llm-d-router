@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -12,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,7 +36,9 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -30,10 +49,14 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		return err
 	}
 
-	ln, err := net.Listen("tcp", ":"+s.config.Port)
-	if err != nil {
-		s.logger.Error(err, "Failed to start")
-		return err
+	ln := s.HTTPListener
+	var err error
+	if ln == nil {
+		ln, err = net.Listen("tcp", ":"+s.config.Port)
+		if err != nil {
+			s.logger.Error(err, "Failed to start")
+			return err
+		}
 	}
 	s.addr = ln.Addr()
 	close(s.readyCh)
@@ -61,16 +84,16 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if s.config.SecureServing {
 		var tempCert tls.Certificate
 		if s.config.CertPath != "" {
-			certFile := s.config.CertPath + "/tls.crt"
-			keyFile := s.config.CertPath + "/tls.key"
+			certFile := filepath.Join(s.config.CertPath, "tls.crt")
+			keyFile := filepath.Join(s.config.CertPath, "tls.key")
 			tempCert, err = tls.LoadX509KeyPair(certFile, keyFile)
 			if err != nil {
-				return fmt.Errorf("failed to load TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+				return fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 			}
 		} else {
-			tempCert, err = CreateSelfSignedTLSCertificate()
+			tempCert, err = tlsutil.CreateSelfSignedTLSCertificate(s.logger)
 			if err != nil {
-				return fmt.Errorf("failed to generate self-signed TLS certificate: %w", err)
+				return fmt.Errorf("create self-signed certificate: %w", err)
 			}
 		}
 		cert = &tempCert
@@ -83,27 +106,28 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		if s.config.CertPath != "" {
 			reloader, err := common.NewCertReloader(ctx, s.config.CertPath, cert)
 			if err != nil {
-				return fmt.Errorf("failed to start reloader: %w", err)
+				return fmt.Errorf("start certificate reloader: %w", err)
 			}
 			getCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				return reloader.Get(), nil
 			}
 		}
 
+		// MinVersion is a literal so gosec/CodeQL can resolve it statically;
+		// Options.Complete already rejects a configured version below TLS 1.2.
+		// An empty suite list leaves CipherSuites nil, which selects the
+		// crypto/tls default, matching the coordinator and EPP.
+		minVersion := uint16(tls.VersionTLS12)
+		if s.config.TLSMinVersion > tls.VersionTLS12 {
+			minVersion = s.config.TLSMinVersion
+		}
 		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			},
+			MinVersion:     minVersion,
+			CipherSuites:   s.config.TLSCipherSuites,
 			GetCertificate: getCertificate,
 		}
-		s.logger.Info("server TLS configured")
 	}
+	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
 	// Setup graceful termination (not strictly needed for sidecars)
 	go func() {
@@ -164,25 +188,89 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 }
 
 func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
-	defer func() { _ = r.Body.Close() }()
+	defer r.Body.Close()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	parsed, err := decodeRequestBody(raw)
+	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
 	}
 	return raw, parsed, nil
 }
 
+// inspectedRequestFields lists the top-level request fields the sidecar reads
+// as Go values. decodeRequestBody decodes only these; every other field stays
+// a json.RawMessage so its bytes are forwarded unchanged. encoding/json sorts
+// map keys at every depth on Marshal, which would reorder free-form content
+// such as tools[].function.parameters that chat templates render into the
+// prompt verbatim.
+var inspectedRequestFields = map[string]struct{}{
+	requestFieldKVTransferParams:     {},
+	requestFieldECTransferParams:     {},
+	requestFieldMaxTokens:            {},
+	requestFieldMaxCompletionTokens:  {},
+	requestFieldMaxOutputTokens:      {},
+	requestFieldMinTokens:            {},
+	requestFieldSamplingParams:       {},
+	requestFieldStream:               {},
+	requestFieldStreamOptions:        {},
+	requestFieldCacheHitThreshold:    {},
+	requestFieldContinueFinalMessage: {},
+	requestFieldAddGenerationPrompt:  {},
+}
+
+// requestMessages returns the request's messages, decoding the array on first
+// use and keeping each element as raw bytes so that re-marshaling the request
+// preserves the key order inside every message. An absent field yields a nil
+// slice and no error.
+func requestMessages(req map[string]any) ([]json.RawMessage, error) {
+	switch v := req[requestFieldMessages].(type) {
+	case nil:
+		return nil, nil
+	case []json.RawMessage:
+		return v, nil
+	case json.RawMessage:
+		var messages []json.RawMessage
+		if err := json.Unmarshal(v, &messages); err != nil {
+			return nil, err
+		}
+		return messages, nil
+	default:
+		return nil, fmt.Errorf("messages is %T, want a JSON array", v)
+	}
+}
+
+// decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
+func decodeRequestBody(raw []byte) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("request body is not a JSON object")
+	}
+	parsed := make(map[string]any, len(fields))
+	for k, v := range fields {
+		if _, ok := inspectedRequestFields[k]; !ok {
+			parsed[k] = v
+			continue
+		}
+		var decoded any
+		if err := json.Unmarshal(v, &decoded); err != nil {
+			return nil, err
+		}
+		parsed[k] = decoded
+	}
+	return parsed, nil
+}
+
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		if !errors.Is(err, errInvalidJSON) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(err.Error()))
-		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
@@ -234,4 +322,10 @@ func isRetryableStatus(statusCode int) bool {
 	return statusCode == http.StatusBadGateway ||
 		statusCode == http.StatusServiceUnavailable ||
 		statusCode == http.StatusGatewayTimeout
+}
+
+// WriteAll writes b to w, discarding the error. The caller has already sent
+// headers and status, so there is no recovery action for a write failure.
+func WriteAll(w io.Writer, b []byte) {
+	_, _ = w.Write(b)
 }

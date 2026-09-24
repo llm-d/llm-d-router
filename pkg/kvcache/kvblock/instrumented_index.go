@@ -26,10 +26,22 @@ type instrumentedIndex struct {
 	next Index
 }
 
-// NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict, and
-// Lookup.
+// instrumentedWalker carries the KeyWalker capability of the wrapped index.
+type instrumentedWalker struct {
+	*instrumentedIndex
+	walker KeyWalker
+}
+
+// NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict,
+// Lookup, and WalkKeys. The wrapper is a KeyWalker exactly when next is one.
+// Read metrics count and time Lookup and WalkKeys calls; contiguous-chain
+// hit metrics are recorded by the kvcache matcher.
 func NewInstrumentedIndex(next Index) Index {
-	return &instrumentedIndex{next: next}
+	m := &instrumentedIndex{next: next}
+	if walker, ok := next.(KeyWalker); ok {
+		return &instrumentedWalker{instrumentedIndex: m, walker: walker}
+	}
+	return m
 }
 
 func (m *instrumentedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
@@ -54,16 +66,19 @@ func (m *instrumentedIndex) Lookup(
 
 	metrics.LookupRequests.Inc()
 
-	pods, err := m.next.Lookup(ctx, requestKeys, podIdentifierSet)
-	if err != nil {
-		return nil, err
-	}
+	return m.next.Lookup(ctx, requestKeys, podIdentifierSet)
+}
 
-	// Synchronous: callers own requestKeys and the result map after return,
-	// so a deferred fold would race their reuse.
-	recordHitMetrics(requestKeys, pods)
+// WalkKeys forwards the walk as a lookup request.
+func (m *instrumentedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
+	visit func(pos int, found bool, entries []EntryRef) bool,
+) error {
+	timer := prometheus.NewTimer(metrics.LookupLatency)
+	defer timer.ObserveDuration()
 
-	return pods, nil
+	metrics.LookupRequests.Inc()
+
+	return m.walker.WalkKeys(ctx, requestKeys, visit)
 }
 
 func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
@@ -72,58 +87,4 @@ func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHa
 
 func (m *instrumentedIndex) Clear(ctx context.Context, podIdentifier string) error {
 	return m.next.Clear(ctx, podIdentifier)
-}
-
-func recordHitMetrics(requestKeys []BlockHash, keyToPods map[BlockHash][]PodEntry) {
-	maxHit := maxContiguousPodHits(requestKeys, keyToPods)
-	metrics.MaxPodHitCount.Add(float64(maxHit))
-	metrics.LookupHits.Add(float64(maxHit))
-}
-
-// maxContiguousPodHits returns the longest contiguous prefix chain any single
-// pod holds, counting from the first request key. One state map serves the
-// whole fold; a pod stays in the chain while its last-seen key is the
-// preceding one, and duplicate device tiers at a key count once.
-func maxContiguousPodHits(requestKeys []BlockHash, keyToPods map[BlockHash][]PodEntry) int {
-	if len(requestKeys) == 0 {
-		return 0
-	}
-	type podState struct {
-		lastKey int
-		count   int
-	}
-	state := make(map[string]podState, len(keyToPods[requestKeys[0]]))
-	best := 0
-	for i, key := range requestKeys {
-		entries := keyToPods[key]
-		if len(entries) == 0 {
-			break // no pod holds this key: every chain from key 0 ends here
-		}
-		advanced := false
-		for _, e := range entries {
-			s, ok := state[e.PodIdentifier]
-			switch {
-			case i == 0 && !ok:
-				state[e.PodIdentifier] = podState{lastKey: 0, count: 1}
-				advanced = true
-				if best == 0 {
-					best = 1
-				}
-			case ok && s.lastKey == i-1:
-				s.lastKey = i
-				s.count++
-				state[e.PodIdentifier] = s
-				advanced = true
-				if s.count > best {
-					best = s.count
-				}
-			default:
-				// Duplicate tier at this key, or a pod outside the chain.
-			}
-		}
-		if !advanced {
-			break // no chain advanced at this key; later keys cannot either
-		}
-	}
-	return best
 }

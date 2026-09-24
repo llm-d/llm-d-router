@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package disagg provides profile handler plugins for the epp.
 package disagg
 
@@ -9,7 +25,6 @@ import (
 	"net"
 	"strings"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -316,7 +331,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 		span.SetAttributes(
 			semconv.LLMDEPPProfileHandlerDecision("complete"),
-			attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
+			semconv.LLMDEPPProfileHandlerDecodeFailed(true),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}
@@ -372,7 +387,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 		if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 			span.SetAttributes(
 				semconv.LLMDEPPProfileHandlerDecision("complete"),
-				attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
+				semconv.LLMDEPPProfileHandlerDecodeFailed(true),
 			)
 			return map[string]scheduling.SchedulerProfile{}
 		}
@@ -480,17 +495,17 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 
 	if request == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.disagg.reason", "request_is_nil"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPDisaggReason("request_is_nil"),
 		)
 		return nil
 	}
 	if schedulingResult == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.disagg.reason", "scheduling_result_is_nil"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPDisaggReason("scheduling_result_is_nil"),
 		)
 		return nil
 	}
@@ -507,22 +522,22 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	switch {
 	case prefillProfileRunResult == nil:
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_result"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPPDReason("no_prefill_profile_result"),
 		)
 	case len(prefillProfileRunResult.TargetEndpoints) == 0:
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_target_endpoints"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPPDReason("no_prefill_profile_target_endpoints"),
 		)
 	default:
 		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
 		request.Headers[routing.PrefillEndpointHeader] = prefillHostPort
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", true),
-			attribute.String("llm_d.epp.pd.prefill_pod_address", targetPod.Address),
-			attribute.String("llm_d.epp.pd.prefill_pod_port", targetPod.Port),
+			semconv.LLMDEPPPDDisaggregationUsed(true),
+			semconv.LLMDEPPPDPrefillPodAddress(targetPod.Address),
+			semconv.LLMDEPPPDPrefillPodPort(targetPod.Port),
 		)
 	}
 
@@ -531,8 +546,8 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	encodeProfileRunResult := schedulingResult.ProfileResults[h.encodeProfile]
 	if encodeProfileRunResult == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_result"),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeReason("no_encode_profile_result"),
 		)
 		return nil
 	}
@@ -545,16 +560,16 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	}
 	if len(encodeHostPorts) == 0 {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_target_endpoints"),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeReason("no_encode_profile_target_endpoints"),
 		)
 		return nil
 	}
 
 	request.Headers[routing.EncoderEndpointsHeader] = strings.Join(encodeHostPorts, ",")
 	span.SetAttributes(
-		attribute.Bool("llm_d.epp.encode.disaggregation_used", true),
-		attribute.String("llm_d.epp.encode.endpoints", strings.Join(encodeHostPorts, ",")),
+		semconv.LLMDEPPEncodeDisaggregationUsed(true),
+		semconv.LLMDEPPEncodeEndpoints(strings.Join(encodeHostPorts, ",")),
 	)
 	return nil
 }

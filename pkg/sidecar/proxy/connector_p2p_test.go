@@ -28,6 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -42,11 +43,11 @@ var _ = Describe("P2P Connector", func() {
 		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 	})
 
-	It("should send both legs with correct PD Multi Tier kv_transfer_params", func() {
+	It("should send both requests with correct PD Multi Tier kv_transfer_params", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		body := chatCompletionsRequestBodyWithMaxCompletionTokens
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		body := chatCompletionsRequestBodyWithMaxCompletionCap
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -59,12 +60,12 @@ var _ = Describe("P2P Connector", func() {
 			Fail(string(bp))
 		}
 
-		// The prefill leg completes before the response is returned.
+		// The prefill request completes before the response is returned.
 		Eventually(func() int {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
 
-		// Prefill leg: kv_transfer_params.remote_decoder carries only kv_request_id,
+		// Prefill request: kv_transfer_params.remote_decoder carries only kv_request_id,
 		// with no peer address.
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
 		Expect(prefillReqs).To(HaveLen(1))
@@ -86,7 +87,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
 		Expect(preq[requestFieldStream]).To(BeFalse())
 
-		// Decode leg: kv_transfer_params.remote_prefiller carries the prefiller's
+		// Decode request: kv_transfer_params.remote_prefiller carries the prefiller's
 		// OffloadingConnector P2P tier address plus the matching kv_request_id.
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
@@ -111,8 +112,41 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not dispatch the decode leg until the prefill leg has returned", func() {
-		// The decode leg pulls KV from the prefiller's secondary tier. If it is
+	It("should strip min_tokens from the prefill request and restore it in decode", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		body := chatCompletionsRequestBodyWithMinCap
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		if resp.StatusCode != 200 {
+			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			Fail(string(bp))
+		}
+
+		Eventually(func() int {
+			return len(testInfo.prefillHandler.GetCompletionRequests())
+		}).Should(Equal(1))
+
+		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
+		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).ToNot(HaveKey(requestFieldMinTokens))
+
+		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
+		dreq := testInfo.decodeHandler.GetCompletionRequests()[0]
+		Expect(dreq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should not dispatch the decode request until the prefill request has returned", func() {
+		// The decode request pulls KV from the prefiller's secondary tier. If it is
 		// dispatched first, its fetch arrives before any blocks are stored and
 		// burns the connector's load deadline waiting for KV that does not exist.
 		proxyBaseAddr := testInfo.startProxy()
@@ -136,8 +170,8 @@ var _ = Describe("P2P Connector", func() {
 		}))
 		defer blockingPrefill.Close()
 
-		body := chatCompletionsRequestBodyWithMaxCompletionTokens
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		body := chatCompletionsRequestBodyWithMaxCompletionCap
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, blockingPrefill.URL[len("http://"):])
 
@@ -175,8 +209,8 @@ var _ = Describe("P2P Connector", func() {
 		}))
 		defer failingPrefill.Close()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath,
-			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionTokens)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
+			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionCap)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, failingPrefill.URL[len("http://"):])
 
@@ -195,10 +229,10 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should not add max_completion_tokens to the prefill leg when absent from the original request", func() {
+	It("should add max_completion_tokens=1 to the prefill request even when absent from the original request", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -217,7 +251,14 @@ var _ = Describe("P2P Connector", func() {
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
 		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
+		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should cap sampling_params in the prefill request and restore originals in decode", func() {
+		expectGenerateRequestTokenLimits(testInfo)
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

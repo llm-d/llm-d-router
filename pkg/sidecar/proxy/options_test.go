@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -55,7 +56,7 @@ enable-tls:
 - decoder
 tls-insecure-skip-verify:
 - prefiller
-secure-proxy: false
+secure-serving: false
 cert-path: "/etc/certificates-file"
 inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
@@ -98,7 +99,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		enable-p2p-pull: true,
 		enable-tls: ['prefiller', 'decoder'],
 		tls-insecure-skip-verify: ['decoder'],
-		secure-proxy: false,
+		secure-serving: false,
 		cert-path: '/etc/certificates-inline',
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
@@ -422,6 +423,44 @@ func TestSidecarConfiguration(t *testing.T) {
 			compareOptions(t, expected, opts)
 		})
 	}
+}
+
+func TestSecureServingFlag(t *testing.T) {
+	_, fs := newTestOptions(t)
+
+	require.NotNil(t, fs.Lookup(secureServing))
+	require.NotNil(t, fs.Lookup(secureProxy))
+	require.Equal(t, "use --secure-serving instead", fs.Lookup(secureProxy).Deprecated)
+}
+
+func TestDeprecatedSecureProxyFlag(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	setFlag(t, fs, secureProxy, false)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
+}
+
+func TestDeprecatedSecureProxyYAML(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	yaml := "{secure-proxy: false}"
+	setFlag(t, fs, inlineConfiguration, &yaml)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
+}
+
+func TestSecureServingFlagBeatsYAML(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	yaml := "{secure-serving: true}"
+	setFlag(t, fs, inlineConfiguration, &yaml)
+	setFlag(t, fs, secureProxy, false)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
 }
 
 func newTestOptions(t *testing.T) (*Options, *pflag.FlagSet) {
@@ -1018,7 +1057,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 }
 
 // TestCompleteWideEPValidation drives the Wide-EP validation through
-// Options.Complete() to confirm BOTH host-list legs are checked and a valid
+// Options.Complete() to confirm BOTH host lists are checked and a valid
 // 2P2D config passes end-to-end.
 func TestCompleteWideEPValidation(t *testing.T) {
 	// Skip when MoRI-IO feature is dormant since all test cases set MoRI-IO
@@ -1035,7 +1074,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 		wantErr     string
 	}{
 		{
-			name:        "valid 2P2D DP16 both legs",
+			name:        "valid 2P2D DP16 both lists",
 			remoteHosts: []string{testLocalHostname, testLocalHostname},
 			decodeHosts: []string{testLocalHostname, testLocalHostname},
 			dpSize:      16,
@@ -1051,7 +1090,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 			wantErr:     "",
 		},
 		{
-			name:        "remote-hosts leg invalid",
+			name:        "remote-hosts list invalid",
 			remoteHosts: []string{testPrefillHostIP1, testPrefillHostIP2},
 			decodeHosts: nil,
 			dpSize:      16,
@@ -1059,7 +1098,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 			wantErr:     "--moriio-remote-hosts",
 		},
 		{
-			name:        "decode-hosts leg invalid",
+			name:        "decode-hosts list invalid",
 			remoteHosts: nil,
 			decodeHosts: []string{testDecodeHostIP, testDecodeHostIP2, testDecodeHostIP3},
 			dpSize:      16,
@@ -1204,6 +1243,28 @@ func TestModelServerPortFlagBeatsYAML(t *testing.T) {
 	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
 }
 
+func TestMetricsCertDirYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-dir: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/metrics-certs", opts.MetricsCertDir)
+}
+
+// A CLI flag overrides the metrics-cert-dir YAML key.
+func TestMetricsCertDirFlagBeatsYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-dir: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	setFlag(t, testPFlagSet, metricsCertDir, "/etc/cli-flag-certs")
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/cli-flag-certs", opts.MetricsCertDir)
+}
+
 func TestCompleteTLSConfiguration(t *testing.T) {
 	tests := []struct {
 		name                         string
@@ -1304,6 +1365,77 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 
 		})
 	}
+}
+
+func TestCompleteTLSServingProfile(t *testing.T) {
+	tests := []struct {
+		name                 string
+		flags                []string
+		expectedMinVersion   uint16
+		expectedCipherSuites []uint16
+		expectedError        string
+	}{
+		{
+			name: "valid profile",
+			flags: []string{
+				"--tls-min-version=VersionTLS13",
+				"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			},
+			expectedMinVersion: tls.VersionTLS13,
+			expectedCipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:          "invalid minimum version",
+			flags:         []string{"--tls-min-version=VersionTLS14"},
+			expectedError: `invalid tls-min-version "VersionTLS14"`,
+		},
+		{
+			name:          "TLS 1.0 below the floor",
+			flags:         []string{"--tls-min-version=VersionTLS10"},
+			expectedError: `below the TLS 1.2 minimum`,
+		},
+		{
+			name:          "TLS 1.1 below the floor",
+			flags:         []string{"--tls-min-version=VersionTLS11"},
+			expectedError: `below the TLS 1.2 minimum`,
+		},
+		{
+			name:          "invalid cipher suite",
+			flags:         []string{"--tls-cipher-suites=FAKE_CIPHER_SUITE"},
+			expectedError: `invalid tls-cipher-suites: unknown cipher suite "FAKE_CIPHER_SUITE"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, flagSet := newTestOptions(t)
+			require.NoError(t, flagSet.Parse(tt.flags))
+
+			err := opts.Complete()
+			if tt.expectedError != "" {
+				require.ErrorContains(t, err, tt.expectedError)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedMinVersion, opts.TLSMinVersion)
+			require.Equal(t, tt.expectedCipherSuites, opts.TLSCipherSuites)
+		})
+	}
+}
+
+func TestCompleteTLSServingProfileFromYAML(t *testing.T) {
+	opts, flagSet := newTestOptions(t)
+	require.NoError(t, flagSet.Parse([]string{
+		`--configuration={tls-min-version: VersionTLS12, tls-cipher-suites: [TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]}`,
+	}))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, uint16(tls.VersionTLS12), opts.TLSMinVersion)
+	require.Equal(t, []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, opts.TLSCipherSuites)
 }
 
 // TestResolveHostsToIPs tests the DNS resolution helper function that

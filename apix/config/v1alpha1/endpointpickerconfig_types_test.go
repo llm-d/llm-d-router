@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -63,13 +64,17 @@ func TestStringers(t *testing.T) {
 				MaxBytes:          resource.NewQuantity(1024, resource.DecimalSI),
 				DefaultRequestTTL: &metav1.Duration{Duration: 30 * time.Second},
 				PriorityBands: []PriorityBandConfig{
-					{Priority: 10, MaxBytes: resource.NewQuantity(512, resource.DecimalSI)},
+					{
+						Priority:          10,
+						MaxBytes:          resource.NewQuantity(512, resource.DecimalSI),
+						DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Second},
+					},
 				},
 				SaturationDetector: &SaturationDetectorConfig{
 					PluginRef: "test-plugin",
 				},
 			},
-			want: "{MaxBytes: 1024, MaxRequests: unlimited, DefaultRequestTTL: 30s, PriorityBands: [{Priority: 10, MaxBytes: 512}], SaturationDetector: {PluginRef: test-plugin}}",
+			want: "{MaxBytes: 1024, MaxRequests: unlimited, DefaultRequestTTL: 30s, PriorityBands: [{Priority: 10, MaxBytes: 512, DefaultRequestTTL: 5s}], SaturationDetector: {PluginRef: test-plugin}}",
 		},
 		{
 			name: "RequestHandlerConfig",
