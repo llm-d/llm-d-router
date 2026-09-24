@@ -517,20 +517,19 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	return mgr, ds, nil
 }
 
+// metricsEndpointPath is where controller-runtime mounts the metrics handler.
+const metricsEndpointPath = "/metrics"
+
 // openMetricsFilterProvider builds the metrics server's FilterProvider.
 //
-// It exists because exemplars are only representable in the OpenMetrics
-// exposition format, and controller-runtime builds its /metrics handler with
-// a hardcoded promhttp.HandlerOpts that does not set EnableOpenMetrics. That
-// handler cannot be replaced through Options: ExtraHandlers explicitly refuses
-// to override /metrics, and there is no field for handler options. The filter
-// hook is the only seam, so the filter discards the handler it is given and
-// substitutes an equivalent one with OpenMetrics negotiation enabled.
+// Exemplars only exist in the OpenMetrics format, and controller-runtime builds
+// its /metrics handler without EnableOpenMetrics. ExtraHandlers can't override
+// /metrics and there is no option for handler settings, so the filter is the
+// only place to swap in the same handler with OpenMetrics enabled.
 //
-// The substituted handler serves the same registry with the same error
-// handling, so the only behavioral difference is that a scraper sending
-// "Accept: application/openmetrics-text" now receives exemplars. Any
-// authentication filter is applied on top, exactly as before.
+// controller-runtime runs this filter over every handler it mounts, pprof and
+// /debug/plugins/state included, so only /metrics is swapped. Auth, when
+// enabled, wraps the result as before.
 func openMetricsFilterProvider(authEnabled bool) func(*rest.Config, *http.Client) (metricsserver.Filter, error) {
 	return func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
 		var authFilter metricsserver.Filter
@@ -542,10 +541,18 @@ func openMetricsFilterProvider(authEnabled bool) func(*rest.Config, *http.Client
 			}
 		}
 
-		return func(log logr.Logger, _ http.Handler) (http.Handler, error) {
-			handler := promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{
-				ErrorHandling:     promhttp.HTTPErrorOnError,
-				EnableOpenMetrics: true,
+		openMetricsHandler := promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{
+			ErrorHandling:     promhttp.HTTPErrorOnError,
+			EnableOpenMetrics: true,
+		})
+
+		return func(log logr.Logger, next http.Handler) (http.Handler, error) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == metricsEndpointPath {
+					openMetricsHandler.ServeHTTP(w, r)
+					return
+				}
+				next.ServeHTTP(w, r)
 			})
 			if authFilter == nil {
 				return handler, nil

@@ -194,32 +194,45 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fai
 	return true
 }
 
-// observeWithTraceExemplar records an observation, attaching the request's trace
-// and span IDs as a Prometheus exemplar so a point on a latency graph can be
-// opened as the trace that produced it.
+// Exemplar label names. Grafana links exemplars to traces by the trace_id label
+// name, so don't rename it.
+const (
+	exemplarTraceIDLabel = "trace_id"
+	exemplarSpanIDLabel  = "span_id"
+)
+
+// observeWithTraceExemplar records an observation and attaches the request's
+// trace as a Prometheus exemplar, so a point on a latency graph links to its trace.
 //
-// The exemplar is attached only when the span is sampled. An unsampled span still
-// carries a trace ID, but no trace was ever exported for it, so attaching one
-// would give dashboards links that resolve to nothing.
+// Nothing is attached for unsampled spans: they have a trace ID, but no trace was
+// exported, so the link would go nowhere.
 //
-// Exemplars are only carried by the OpenMetrics exposition format; see
-// openMetricsFilterProvider in cmd/epp/runner for how the endpoint negotiates it.
+// span_id is only added when the span is recording, meaning the EPP started it.
+// With EPP tracing off the context still holds the caller's span, which isn't
+// the EPP's, so only trace_id is attached.
+//
+// Exemplars only reach the wire over OpenMetrics; see openMetricsFilterProvider
+// in cmd/epp/runner.
 func observeWithTraceExemplar(ctx context.Context, observer prometheus.Observer, value float64) {
-	sc := trace.SpanContextFromContext(ctx)
-	if sc.IsSampled() {
-		if exemplarObserver, ok := observer.(prometheus.ExemplarObserver); ok {
-			// Both IDs fit comfortably inside OpenMetrics' 128-rune exemplar
-			// label budget (63 runes), and the span ID lets a traces backend
-			// open the span that observed this latency rather than only the
-			// trace containing it.
-			exemplarObserver.ObserveWithExemplar(value, prometheus.Labels{
-				"trace_id": sc.TraceID().String(),
-				"span_id":  sc.SpanID().String(),
-			})
-			return
-		}
+	exemplarObserver, ok := observer.(prometheus.ExemplarObserver)
+	if !ok {
+		observer.Observe(value)
+		return
 	}
-	observer.Observe(value)
+
+	span := trace.SpanFromContext(ctx)
+	spanCtx := span.SpanContext()
+	if !spanCtx.IsSampled() {
+		observer.Observe(value)
+		return
+	}
+
+	// trace_id + span_id is 63 runes, under OpenMetrics' 128-rune exemplar limit.
+	labels := prometheus.Labels{exemplarTraceIDLabel: spanCtx.TraceID().String()}
+	if span.IsRecording() {
+		labels[exemplarSpanIDLabel] = spanCtx.SpanID().String()
+	}
+	exemplarObserver.ObserveWithExemplar(value, labels)
 }
 
 // RecordResponseSizes records the response sizes.

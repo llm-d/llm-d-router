@@ -86,7 +86,7 @@ lifecycle handled by the router.
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority` | Total requests. |
 | `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `error_code` | Errored requests. |
-| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. |
+| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Request body size. |
 | `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Response body size. |
 | `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Input token count. |
@@ -97,6 +97,32 @@ lifecycle handled by the router.
 | `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `streaming` | Time to first token. |
 | `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Time per output token for streaming. |
 | `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Inter-token latency for streaming. |
+
+#### Exemplars
+
+`llm_d_epp_request_duration_seconds` attaches the request's trace context to each
+observation as a Prometheus exemplar, so a point on a latency graph can be opened as
+the trace behind it.
+
+| Exemplar label | Present when |
+|---|---|
+| `trace_id` | The request's trace is sampled. |
+| `span_id` | EPP tracing is on. With it off, only `trace_id` is attached. |
+
+Two things are needed to see them:
+
+- **Prometheus must store exemplars.** They are dropped unless it runs with
+  `--enable-feature=exemplar-storage`.
+- **The scrape must use OpenMetrics.** Exemplars have no representation in the classic
+  text format. Prometheus requests OpenMetrics by default, so its scrapes of the EPP
+  switch to OpenMetrics with no scrape config change. No series is renamed, since every
+  counter already ends in `_total`. On Prometheus 2.x, whole-number histogram bounds are
+  ingested as `le="1.0"` rather than `le="1"` (Prometheus 3 normalizes both to `1.0`),
+  which only matters to queries matching `le` exactly. Scrapers that do not ask for
+  OpenMetrics keep receiving the classic format.
+
+Grafana turns the exemplar into a link to the trace when the Prometheus data source has
+an exemplar link configured to a traces backend.
 
 ### Inference pool
 

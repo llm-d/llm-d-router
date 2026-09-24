@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -69,21 +70,39 @@ func ctxWithSpan(t *testing.T, sampled bool) context.Context {
 	}))
 }
 
-func TestObserveWithTraceExemplar_SampledSpanAttachesTraceID(t *testing.T) {
+// ctxWithRecordingSpan returns a context with a real SDK span, like the one the
+// EPP starts per request.
+func ctxWithRecordingSpan(t *testing.T) (context.Context, trace.Span) {
+	t.Helper()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+	return tp.Tracer("exemplar-test").Start(context.Background(), "request")
+}
+
+// exemplarLabels returns an exemplar's labels as a map.
+func exemplarLabels(e *dto.Exemplar) map[string]string {
+	labels := map[string]string{}
+	for _, l := range e.Label {
+		labels[l.GetName()] = l.GetValue()
+	}
+	return labels
+}
+
+func TestObserveWithTraceExemplar_RecordingSpanAttachesBothIDs(t *testing.T) {
 	h := newHistogram()
 
-	observeWithTraceExemplar(ctxWithSpan(t, true), h, 0.5)
+	ctx, span := ctxWithRecordingSpan(t)
+	defer span.End()
+	observeWithTraceExemplar(ctx, h, 0.5)
 
 	exemplars := collectExemplars(t, h)
 	require.Len(t, exemplars, 1, "a sampled span should attach exactly one exemplar")
 
-	labels := map[string]string{}
-	for _, l := range exemplars[0].Label {
-		labels[l.GetName()] = l.GetValue()
-	}
+	sc := span.SpanContext()
+	labels := exemplarLabels(exemplars[0])
 	require.Equal(t, map[string]string{
-		"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-		"span_id":  "0102030405060708",
+		exemplarTraceIDLabel: sc.TraceID().String(),
+		exemplarSpanIDLabel:  sc.SpanID().String(),
 	}, labels)
 
 	// OpenMetrics caps an exemplar's whole label set at 128 runes; exceeding it
@@ -94,6 +113,21 @@ func TestObserveWithTraceExemplar_SampledSpanAttachesTraceID(t *testing.T) {
 	}
 	require.LessOrEqual(t, runes, prometheus.ExemplarMaxRunes)
 	require.InDelta(t, 0.5, exemplars[0].GetValue(), 1e-9)
+}
+
+// TestObserveWithTraceExemplar_PropagatedSpanAttachesTraceIDOnly covers EPP
+// tracing off with the caller's trace sampled: only trace_id is attached, since
+// the span belongs to the caller.
+func TestObserveWithTraceExemplar_PropagatedSpanAttachesTraceIDOnly(t *testing.T) {
+	h := newHistogram()
+
+	observeWithTraceExemplar(ctxWithSpan(t, true), h, 0.5)
+
+	exemplars := collectExemplars(t, h)
+	require.Len(t, exemplars, 1, "a sampled trace still links, even without an EPP span")
+	require.Equal(t, map[string]string{
+		exemplarTraceIDLabel: "4bf92f3577b34da6a3ce929d0e0e4736",
+	}, exemplarLabels(exemplars[0]), "the span ID would name a span the EPP never created")
 }
 
 func TestObserveWithTraceExemplar_UnsampledSpanAttachesNothing(t *testing.T) {
