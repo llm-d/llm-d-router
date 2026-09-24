@@ -46,7 +46,7 @@ const (
 	snapshotReplyBytes    = 256 << 20
 	retryInitial          = time.Second
 	retryMaximum          = 30 * time.Second
-	maxConcurrentRecovery = 4
+	maxConcurrentRecovery = 16
 	// Snapshot generations use one entry per publisher, tier, and cache group.
 	// Keep the shared index well above the ordinary request index's small
 	// per-key routing cache so recovery never silently drops publishers.
@@ -353,15 +353,8 @@ func (s *snapshotSubscriber) run(ctx context.Context) {
 	defer close(s.done)
 	backoff := retryInitial
 	for ctx.Err() == nil {
-		select {
-		case s.manager.recoverySlots <- struct{}{}:
-		case <-ctx.Done():
-			return
-		}
-		release := sync.OnceFunc(func() { <-s.manager.recoverySlots })
 		successes := s.successes.Load()
-		err := s.consume(ctx, release)
-		release()
+		err := s.consume(ctx)
 		if ctx.Err() != nil {
 			return
 		}
@@ -448,8 +441,7 @@ func follow(ctx context.Context, take func(time.Duration) (snapshotLive, error),
 	}
 }
 
-func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete func()) error {
-	bootstrapStarted := time.Now()
+func (s *snapshotSubscriber) consume(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
 	generation := s.generationID
 	defer func() {
@@ -530,16 +522,9 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 			return snapshotLive{}, errHeartbeatTimeout
 		}
 	}
-	// The first frame shows whether the engine serves snapshots. Only
-	// snapshot-enabled engines heartbeat, so a publisher silent for a heartbeat
-	// interval waits for its first frame without holding a recovery slot.
-	first, err := take(heartbeatTimeout)
-	if errors.Is(err, errHeartbeatTimeout) {
-		recoveryComplete()
-		if first, err = take(0); err == nil && first.snapshotEnabled() {
-			return errPublisherSnapshotEnabled
-		}
-	}
+	// The first frame shows whether the engine serves snapshots. Publishers
+	// without a snapshot endpoint send no heartbeats and may stay silent.
+	first, err := take(0)
 	if err != nil {
 		return err
 	}
@@ -567,7 +552,6 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 			return err
 		}
 		log.FromContext(ctx).Info("KV publisher has no snapshot endpoint, indexing live events only", "endpoint", s.endpoint)
-		recoveryComplete()
 		index := func(msg snapshotLive) error {
 			if msg.snapshotEnabled() {
 				return errPublisherSnapshotEnabled
@@ -587,6 +571,37 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 	if !strings.HasPrefix(first.topic, "kv@") || strings.Count(first.topic, "@") != 2 {
 		return fmt.Errorf("snapshot recovery requires kv@<address:port>@<model> topic")
 	}
+	buffered := []snapshotLive{first}
+	bufferBytes := len(first.payload)
+	keep := func(msg snapshotLive) error {
+		queuedBytes.Add(-int64(len(msg.payload)))
+		bufferBytes += len(msg.payload)
+		if bufferBytes > snapshotBufferBytes || len(buffered) >= 4096 {
+			return fmt.Errorf("bootstrap buffer exhausted")
+		}
+		buffered = append(buffered, msg)
+		return nil
+	}
+	// A slot bounds concurrent snapshot transfers and replays. Waiting for it
+	// keeps draining live frames so a busy publisher cannot overflow them.
+slot:
+	for {
+		select {
+		case s.manager.recoverySlots <- struct{}{}:
+			break slot
+		case msg := <-live:
+			if err := keep(msg); err != nil {
+				return err
+			}
+		case err := <-failures:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	release := sync.OnceFunc(func() { <-s.manager.recoverySlots })
+	defer release()
+	bootstrapStarted := time.Now()
 	reqCtx, reqCancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer reqCancel()
 	req := zmq.NewReq(reqCtx, zmq.WithDialerMaxRetries(0), zmq.WithDialerTimeout(time.Second), zmq.WithTimeout(snapshotTimeout))
@@ -603,8 +618,6 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 	}
 	replies := make(chan reply, 1)
 	go func() { msg, err := req.Recv(); replies <- reply{msg, err} }()
-	buffered := []snapshotLive{first}
-	bufferBytes := len(first.payload)
 	var response zmq.Msg
 waiting:
 	for {
@@ -616,12 +629,9 @@ waiting:
 			response = r.msg
 			break waiting
 		case msg := <-live:
-			queuedBytes.Add(-int64(len(msg.payload)))
-			bufferBytes += len(msg.payload)
-			if bufferBytes > snapshotBufferBytes || len(buffered) >= 4096 {
-				return fmt.Errorf("bootstrap buffer exhausted")
+			if err := keep(msg); err != nil {
+				return err
 			}
-			buffered = append(buffered, msg)
 		case <-reqCtx.Done():
 			return reqCtx.Err()
 		}
@@ -633,7 +643,32 @@ waiting:
 	// Signed -1 is the initial empty cut; -2 and lower mean unavailable.
 	cut := int64(binary.BigEndian.Uint64(f[0]))
 	if cut < -1 {
-		return fmt.Errorf("snapshot unavailable (%d)", cut)
+		// vLLM reports unavailable from the first recorder failure until the
+		// engine restarts, which changes the publisher identity. Index this
+		// identity from live events rather than leave the rank without affinity.
+		pool.strict, pool.staged = false, false
+		if err := s.activate(ctx, generation, true); err != nil {
+			return err
+		}
+		release()
+		metrics.SnapshotRecoveries.WithLabelValues("live_only", "unavailable").Inc()
+		log.FromContext(ctx).Info("KV snapshot unavailable, indexing live events only until the publisher restarts",
+			"endpoint", s.endpoint, "cut", cut)
+		index := func(msg snapshotLive) error {
+			if msg.topic != first.topic || !bytes.Equal(msg.epoch, first.epoch) {
+				return fmt.Errorf("publisher identity changed")
+			}
+			if err := apply(msg); err != nil {
+				log.FromContext(ctx).Error(err, "Failed to apply KV event batch", "endpoint", s.endpoint)
+			}
+			return nil
+		}
+		for _, msg := range buffered {
+			if err := index(msg); err != nil {
+				return err
+			}
+		}
+		return follow(ctx, take, heartbeatTimeout, index)
 	}
 	if !bytes.Equal(f[1], first.epoch) {
 		return fmt.Errorf("publisher changed during bootstrap")
@@ -693,7 +728,7 @@ waiting:
 	}
 	metrics.SnapshotRecoveries.WithLabelValues("success", "none").Inc()
 	metrics.SnapshotBootstrapDuration.Observe(time.Since(bootstrapStarted).Seconds())
-	recoveryComplete()
+	release()
 	return follow(ctx, take, heartbeatTimeout, advance)
 }
 

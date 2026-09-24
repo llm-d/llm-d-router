@@ -90,8 +90,9 @@ Each recovery generation keeps at most 1,048,576 engine-to-canonical mappings
 so publishers cannot overwrite each other's reconstruction metadata. If a live
 event references mapping history older than this bound, that generation is
 removed from routing and rebuilt from a fresh snapshot.
-At most four publishers fetch and install snapshots concurrently; additional
-publishers remain non-routable until a recovery slot is available.
+At most 16 publishers fetch and install snapshots concurrently. A publisher
+takes a recovery slot after its first live frame, buffers live frames while it
+waits, and remains non-routable until its snapshot installs.
 
 ```yaml
 - type: precise-prefix-cache-producer
@@ -129,11 +130,9 @@ publisher identity to the sequence number, and heartbeats, only when
 `snapshot_endpoint` is set. A publisher with 8-byte sequence frames is indexed
 from live events alone, as without `snapshotPort`: its cache affinity is usable
 immediately, idle periods are allowed, and sequence gaps are not recovered. A
-publisher silent for the heartbeat interval gives up its recovery slot while it
-waits for its first frame. A
 change of frame format restarts the subscriber in the other mode, so engines and
 the router can be upgraded or rolled back in any order.
-`kv_cache_events_live_only_publishers` counts these publishers.
+`kv_cache_events_live_only_publishers` counts publishers indexed from live events alone.
 
 GPU resets preserve CPU residency. Duplicate stores retain their reference
 counts, and tokenless offload events preserve every router block covered by an
@@ -143,9 +142,12 @@ Snapshot requests time out after 10 seconds. A publisher is unavailable after
 5 seconds without a live message. Recovery retries start after 1 second and use
 jittered exponential backoff capped at 30 seconds. Bootstrap buffering is
 bounded to 4,096 messages and 64 MiB; the receive queue is bounded to 256
-messages and 64 MiB. Snapshot replies are limited to 256 MiB. An unavailable
-snapshot produces no cache affinity; if the engine recorder is invalid, the
-publisher must be restarted to restore snapshots.
+messages and 64 MiB. Snapshot replies are limited to 256 MiB. vLLM reports a
+snapshot unavailable from the first recorder failure until the engine restarts,
+so an unavailable reply moves that publisher to live-only indexing until its
+identity changes: blocks stored before the fallback have no cache affinity,
+later blocks do, and `kv_cache_events_snapshot_recoveries_total` records
+`result="live_only"`.
 
 The cross-language regression starts the real vLLM publisher and recorder from
 an installed feature checkout. It generates KV events without loading a model:

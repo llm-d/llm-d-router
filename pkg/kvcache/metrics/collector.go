@@ -178,7 +178,7 @@ var (
 	LiveOnlyPublishers = prometheus.NewGauge(prometheus.GaugeOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only_publishers",
 		Help: metricsutil.HelpMsgWithStability(
-			"Number of publishers without a snapshot endpoint served from live events only",
+			"Number of publishers served from live events only: no snapshot endpoint, or snapshots unavailable",
 			compbasemetrics.ALPHA),
 	})
 	SnapshotRecoveries = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -190,7 +190,7 @@ var (
 	SnapshotBootstrapDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_bootstrap_duration_seconds",
 		Help: metricsutil.HelpMsgWithStability(
-			"Duration of successful snapshot recovery bootstraps in seconds",
+			"Duration of successful snapshot recovery bootstraps in seconds, from recovery slot to activation",
 			compbasemetrics.ALPHA),
 		Buckets: prometheus.DefBuckets,
 	})

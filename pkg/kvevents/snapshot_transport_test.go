@@ -123,7 +123,7 @@ func TestSilentPublishersDoNotHoldRecoverySlots(t *testing.T) {
 	}
 	// Engines without a snapshot endpoint send nothing while idle; more of them
 	// than recovery slots must not keep an active publisher from connecting.
-	for i := range 4 {
+	for i := range 17 {
 		_, endpoint := listen()
 		require.NoError(t, manager.EnsureSubscriber(ctx, fmt.Sprintf("idle-%d", i), fmt.Sprintf("idle-%d:8000", i), endpoint, "", "kv@", true))
 	}

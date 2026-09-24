@@ -220,20 +220,36 @@ func TestSnapshotRecoveryGatesRealScorer(t *testing.T) {
 		})
 	}
 	t.Run("unavailable", func(t *testing.T) {
+		requests := func() int { server.mu.Lock(); defer server.mu.Unlock(); return server.requests }
 		server.mu.Lock()
 		server.unavailable = true
 		server.seq++
 		server.send(server.empty)
 		before := server.requests
 		server.mu.Unlock()
-		check(t, 0)
-		require.Equal(t, 1.0, prefix.Score(ctx, req, []scheduling.Endpoint{stable})[stable], "unaffected publisher must remain routable with cache affinity")
-		require.Eventually(t, func() bool { server.mu.Lock(); defer server.mu.Unlock(); return server.requests >= before+2 }, 4*time.Second, 20*time.Millisecond)
-		require.Equal(t, 0.0, score())
+		// A failed recorder stays unavailable for the publisher's lifetime: the
+		// router indexes that identity from live events and stops asking.
+		require.Eventually(t, func() bool { return p.snapshots.Status().LiveOnly == 1 }, 7*time.Second, 20*time.Millisecond)
+		require.Equal(t, before+1, requests())
+		require.Equal(t, 0.0, score(), "blocks stored before the fallback are unknown")
+		fresh := &scheduling.InferenceRequest{TargetModel: "test-model", Body: &rh.InferenceRequestBody{TokenizedRequest: &rh.TokenizedRequest{Prompts: []rh.PromptTokens{{TokenIDs: []uint32{9, 10, 11, 12}}}}}}
+		server.mu.Lock()
+		server.send(snapshotBatch(t, map[string]any{"type": "BlockStored", "block_hashes": []uint64{303}, "parent_block_hash": nil, "token_ids": []uint32{9, 10, 11, 12}, "block_size": 4}))
+		server.mu.Unlock()
+		require.Eventually(t, func() bool {
+			require.NoError(t, p.Produce(ctx, fresh, []scheduling.Endpoint{ep}))
+			return prefix.Score(ctx, fresh, []scheduling.Endpoint{ep})[ep] == 1
+		}, 3*time.Second, 20*time.Millisecond)
+		require.Never(t, func() bool { return requests() != before+1 }, 2*time.Second, 50*time.Millisecond)
+		// An engine restart changes the identity and brings snapshot recovery back.
 		server.mu.Lock()
 		server.unavailable = false
+		server.epoch++
+		server.seq = 0
+		server.send(server.empty)
 		server.mu.Unlock()
 		check(t, 1)
+		require.Eventually(t, func() bool { status := p.snapshots.Status(); return status.Ready == 2 && status.LiveOnly == 0 }, 3*time.Second, 20*time.Millisecond)
 	})
 }
 
