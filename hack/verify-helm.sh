@@ -460,9 +460,9 @@ if ! grep -q -- 'transport_socket_match_criteria' "${proxy_service_render_output
 fi
 
 # The proxy Deployment drains connections before SIGTERM: Envoy exits on the signal, so without
-# a preStop delay and a connection age limit its in-flight streams are cut.
-if ! grep -q -- 'max_connection_duration: 10s' "${proxy_service_render_output}"; then
-  echo "Proxy service mode does not bound client connection age for shutdown drain"
+# a preStop delay and a per-connection request limit its in-flight streams are cut.
+if ! grep -q -- 'max_requests_per_connection: 1' "${proxy_service_render_output}"; then
+  echo "Proxy service mode does not close client connections for shutdown drain"
   exit 1
 fi
 if ! grep -q -- 'terminationGracePeriodSeconds: 45' "${proxy_service_render_output}"; then
