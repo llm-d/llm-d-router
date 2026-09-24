@@ -22,10 +22,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -164,10 +167,9 @@ func TestExtractMMItems(t *testing.T) {
 			apiType:  reqcommon.APITypeResponses,
 			expected: 1,
 		},
-		// A part referencing a file_id cannot reach extractMMItems, because
-		// RejectStatefulResponsesFields refuses the request at the entry
-		// point. The reachable no-URL shapes are a nested object, which is
-		// chat's spelling of the field, and an absent image_url.
+		// The no-URL shapes: chat's nested object, an absent image_url, and a
+		// file_id nested under image_url, which RejectStatefulResponsesFields
+		// does not refuse because it only checks part-level keys.
 		{
 			name: "responses input_image with a nested image_url is skipped",
 			request: map[string]any{
@@ -230,9 +232,6 @@ func TestExtractMMItems(t *testing.T) {
 			apiType:  reqcommon.APITypeChatCompletions,
 			expected: 0,
 		},
-		// input_image is a Responses content part. Extracting it from a chat
-		// request would build an encoder body vLLM's chat API rejects, failing
-		// the fanout for a request that used to succeed.
 		{
 			name: "chat completions input_image part is not extracted",
 			request: map[string]any{
@@ -273,10 +272,6 @@ func TestExtractMMItems(t *testing.T) {
 			apiType:  reqcommon.APITypeChatCompletions,
 			expected: 1,
 		},
-		// image_url, audio_url and video_url nest the URL under a same-named
-		// object, a shape the Responses schema does not define. Extracting one
-		// from a Responses request would build an encoder body vLLM's
-		// Responses API rejects, failing the fanout for the whole request.
 		{
 			name: "responses image_url part is not extracted",
 			request: map[string]any{
@@ -339,8 +334,6 @@ func TestExtractMMItems(t *testing.T) {
 			apiType:  reqcommon.APITypeResponses,
 			expected: 1,
 		},
-		// input_audio carries the same inline data and format payload on both
-		// APIs, so neither shape gates it.
 		{
 			name: "responses input_audio part is extracted",
 			request: map[string]any{
@@ -372,6 +365,70 @@ func TestExtractMMItems(t *testing.T) {
 			assert.Equal(t, tt.expected, len(items), "unexpected number of MM items")
 		})
 	}
+}
+
+// TestExtractMMItemsDropsAreLogged pins the drop count to default verbosity. A
+// dropped part never becomes an item, so it never reaches the ec-nixl item
+// count that the partial-coverage warning compares against: this line is the
+// only signal that the encoder was not primed for content the client sent.
+func TestExtractMMItemsDropsAreLogged(t *testing.T) {
+	tests := []struct {
+		name    string
+		request map[string]any
+		apiType reqcommon.APIType
+		wantLog bool
+	}{
+		{
+			name:    "responses input_image with no fetchable URL",
+			request: map[string]any{"input": []any{userContent(map[string]any{"type": "input_image", "detail": "high"})}},
+			apiType: reqcommon.APITypeResponses,
+			wantLog: true,
+		},
+		{
+			name:    "chat request carrying a Responses input_image part",
+			request: map[string]any{"messages": []any{userContent(map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"})}},
+			apiType: reqcommon.APITypeChatCompletions,
+			wantLog: true,
+		},
+		{
+			name:    "responses request carrying a chat image_url part",
+			request: map[string]any{"input": []any{userContent(map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/img.jpg"}})}},
+			apiType: reqcommon.APITypeResponses,
+			wantLog: true,
+		},
+		{
+			name:    "nothing dropped stays quiet",
+			request: map[string]any{"input": []any{userContent(inputImageItem("https://example.com/img.jpg"))}},
+			apiType: reqcommon.APITypeResponses,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(tt.request)
+			require.NoError(t, err)
+			parsed, err := decodeRequestBody(body)
+			require.NoError(t, err)
+
+			var logged []string
+			logger := funcr.New(func(_, args string) {
+				logged = append(logged, args)
+			}, funcr.Options{Verbosity: 0})
+
+			extractMMItems(logger, parsed, tt.apiType)
+
+			matched := slices.ContainsFunc(logged, func(e string) bool {
+				return strings.Contains(e, "skipped multimodal content parts")
+			})
+			assert.Equal(t, tt.wantLog, matched, "logged=%v", logged)
+		})
+	}
+}
+
+// userContent wraps content parts in a user-role turn, the shape both a
+// chat messages element and a Responses input item take.
+func userContent(parts ...map[string]any) map[string]any {
+	return map[string]any{"role": "user", "content": parts}
 }
 
 func TestMMItemURL(t *testing.T) {
@@ -608,16 +665,27 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 			apiType:       reqcommon.APITypeChatCompletions,
 			expectedCalls: 2,
 		},
-		// One URL at two detail levels is two distinct encoder inputs, so
-		// keying the dedup on the URL alone would drop the second.
+		// chat completions nests detail inside image_url, where the engine
+		// reads only url, so the two parts are one encoder input. Keying the
+		// whole part instead would post the same work twice, and any sibling
+		// field a client adds would defeat the dedup entirely.
 		{
-			name: "duplicate image URLs with different detail are both sent",
+			name: "duplicate image URLs with different detail are one request",
 			request: userMessageRequest(
 				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/same.jpg", "detail": "low"}},
 				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/same.jpg", "detail": "high"}},
 			),
 			apiType:       reqcommon.APITypeChatCompletions,
-			expectedCalls: 2,
+			expectedCalls: 1,
+		},
+		{
+			name: "duplicate image URLs with a differing sibling are one request",
+			request: userMessageRequest(
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/same.jpg"}},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/same.jpg"}, "cache_control": "no-store"},
+			),
+			apiType:       reqcommon.APITypeChatCompletions,
+			expectedCalls: 1,
 		},
 		{
 			name: "responses input_image URLs with different detail are both sent",

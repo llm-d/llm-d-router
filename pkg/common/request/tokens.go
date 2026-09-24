@@ -66,7 +66,10 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // and forwarding it is harmless regardless since it defaults to true.
 //
 // body may hold its values decoded or as json.RawMessage, so a caller that
-// decodes only the fields it reads passes its body as-is.
+// decodes only the fields it reads passes its body as-is. An input that reads
+// as neither an array nor a string is refused too: the file_id walk cannot run
+// on it, and answering "no file_id" for an input that was never inspected would
+// forward the request the walk exists to catch.
 func RejectStatefulResponsesFields(body map[string]any) error {
 	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
 		if _, set := fieldValue(body, field); set {
@@ -76,18 +79,21 @@ func RejectStatefulResponsesFields(body map[string]any) error {
 	if backgroundRequested(body) {
 		return fmt.Errorf("field %q is not supported by the router", FieldBackground)
 	}
-	if inputReferencesFile(arrayFromAny(body[FieldInput])) {
+	items, readable := arrayFromAny(body[FieldInput])
+	if !readable {
+		return fmt.Errorf("field %q could not be read as a JSON array or string", FieldInput)
+	}
+	if inputReferencesFile(items) {
 		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
 	}
 	return nil
 }
 
-// fieldValue resolves body[field], reporting whether the client set it. A
-// field the caller left as raw JSON bytes is decoded here. An explicit null is
-// not set, since SDKs serialize an unset optional that way and refusing it
-// would name a field the client believes it omitted. Bytes that do not decode
-// report set with a nil value, so a field that cannot be read is refused
-// rather than passed on.
+// fieldValue resolves body[field], reporting whether the client set it. An
+// explicit null is not set: SDKs serialize an unset optional that way, and
+// refusing it would name a field the client believes it omitted. Bytes that do
+// not decode report set with a nil value, so a field that cannot be read is
+// refused rather than passed on.
 func fieldValue(body map[string]any, field string) (any, bool) {
 	v, ok := body[field]
 	if !ok {
@@ -102,9 +108,9 @@ func fieldValue(body map[string]any, field string) (any, bool) {
 }
 
 // backgroundRequested reports whether body asks for a background response.
-// Only an unset field or a value reading as false counts as not asking: vLLM
-// validates background with pydantic, which coerces 1, "true" and "yes" to
-// true, so a value this package cannot read as false is refused.
+// Only an unset field or a JSON bool false counts as not asking. vLLM coerces
+// background through pydantic, so any other value could arrive there as true;
+// refusing all of them avoids reimplementing that coercion.
 func backgroundRequested(body map[string]any) bool {
 	v, set := fieldValue(body, FieldBackground)
 	if !set {
@@ -114,21 +120,28 @@ func backgroundRequested(body map[string]any) bool {
 	return !isBool || background
 }
 
-// arrayFromAny coerces a JSON-decoded value into a []any, accepting the raw-bytes
-// form the sidecar proxy leaves behind for the fields it does not decode. A value
-// that is absent, not an array (a Responses input is a string or an array), or
-// bytes that do not decode all yield nil, which a caller walks as empty.
-func arrayFromAny(v any) []any {
+// arrayFromAny coerces a JSON-decoded value into a []any, accepting the
+// json.RawMessage form a caller that decodes selectively leaves behind. An
+// absent value, and a Responses input sent as a string, yield a nil slice a
+// caller walks as empty.
+//
+// Raw bytes that decode as neither report false, so a caller refuses an input it
+// could not inspect rather than reading the failure as "nothing found": every
+// number in an array decodes through float64, so one value out of that range
+// (1e999) fails the whole array while leaving the enclosing document valid.
+func arrayFromAny(v any) ([]any, bool) {
 	switch t := v.(type) {
 	case []any:
-		return t
+		return t, true
 	case json.RawMessage:
 		var decoded []any
 		if json.Unmarshal(t, &decoded) == nil {
-			return decoded
+			return decoded, true
 		}
+		var text string
+		return nil, json.Unmarshal(t, &text) == nil
 	}
-	return nil
+	return nil, true
 }
 
 // inputReferencesFile reports whether a Responses input array contains a

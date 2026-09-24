@@ -422,9 +422,34 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 			name: "input string as raw bytes has nothing to walk",
 			body: map[string]any{FieldInput: json.RawMessage(`"hi"`)},
 		},
+		// An input the walk cannot decode is refused rather than reported as
+		// carrying no file_id: every number in a []any decodes through
+		// float64, so one value outside that range fails the whole array
+		// while the enclosing document stays valid JSON and reaches here.
 		{
-			name: "undecodable input bytes do not panic",
-			body: map[string]any{FieldInput: json.RawMessage(`[{"role":`)},
+			name:      "input bytes that decode as neither array nor string are refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":`)},
+			wantField: FieldInput,
+		},
+		{
+			name:      "file_id hidden behind an out-of-range number is still refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]},1e999]`)},
+			wantField: FieldInput,
+		},
+		{
+			name:      "out-of-range number nested in the content part is refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file-123","detail":1e999}]}]`)},
+			wantField: FieldInput,
+		},
+		{
+			name:      "input as a bare number is refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`42`)},
+			wantField: FieldInput,
+		},
+		{
+			name:      "input as an object is refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`{"role":"user"}`)},
+			wantField: FieldInput,
 		},
 	}
 

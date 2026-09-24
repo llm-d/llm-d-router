@@ -216,9 +216,7 @@ var _ = Describe("readJSONBody", func() {
 		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
 	})
 
-	// input stays a json.RawMessage in parsed, so these two cover
-	// rejectStatefulResponses decoding it into a shallow copy for the
-	// helper's file_id walk.
+	// input stays raw in parsed, so the file_id walk decodes the array itself.
 	It("rejects a file_id nested in an input content part", func() {
 		w := httptest.NewRecorder()
 		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]}]}`
@@ -255,6 +253,20 @@ var _ = Describe("readJSONBody", func() {
 		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
 	})
 
+	// decodeRequestBody leaves input raw, so the file_id walk decodes the array
+	// itself. An out-of-range number fails that decode while the enclosing
+	// document stays valid, which would otherwise read as "no file_id here".
+	It("rejects an input the file_id walk cannot decode", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]},1e999]}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldInput))
+	})
+
 	It("forwards an input array with no file_id", func() {
 		w := httptest.NewRecorder()
 		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
@@ -263,6 +275,22 @@ var _ = Describe("readJSONBody", func() {
 
 		Expect(ok).To(BeTrue())
 		Expect(parsed).To(HaveKey(reqcommon.FieldInput))
+	})
+
+	// Unlike a malformed body, this refusal is the router overriding a request
+	// the model server would have served, so an operator has to see it without
+	// raising verbosity first.
+	It("logs the Responses refusal at default verbosity", func() {
+		logged := captureLogs(proxy, 0)
+
+		_, _, ok := proxy.readJSONBody(
+			httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), httptest.NewRecorder())
+
+		Expect(ok).To(BeFalse())
+		Expect(*logged).To(ContainElement(And(
+			ContainSubstring("rejecting unsupported responses field"),
+			ContainSubstring(reqcommon.FieldPreviousResponseID),
+		)))
 	})
 })
 

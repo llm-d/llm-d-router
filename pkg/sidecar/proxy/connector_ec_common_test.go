@@ -34,9 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// TestRequestInput pins requestInput's own contract. extractMMItems discards
-// the error and returns an empty slice on both the no-error and the error
-// paths, so no test reaching through that caller can tell them apart.
+// TestRequestInput pins requestInput's own contract: extractMMItems returns an
+// empty slice on the error path too, so a caller-level test cannot tell a
+// malformed input from an absent one.
 func TestRequestInput(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -379,15 +379,11 @@ func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
 }
 
 // TestBuildEncoderRequest_OnlyModelAndInput locks in that buildEncoderRequest
-// builds the encoder request from scratch rather than copying the client's
-// request, even when the encoder is addressed with the client's own API
-// (Responses here): copying the client's own input or max_output_tokens
-// would leak every other multimodal item or an uncapped output limit, and
-// stateful fields (previous_response_id, conversation, store, background)
-// and tools/tool_choice/instructions have no place on a per-item encoder
-// request. store is the one stateful field that does appear, forced to
-// false regardless of the client's own value, so the priming request
-// leaves no stored response object on the encoder pod.
+// builds from scratch rather than copying the client's request, even when the
+// encoder is addressed with the client's own API: no stateful field, tool or
+// uncapped limit belongs on a per-item priming request, and the input must
+// carry only the one item being primed. store is the exception that does
+// appear, pinned to false whatever the client sent.
 func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",
@@ -417,13 +413,15 @@ func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
 	assert.Equal(t, "test-model", encoderRequest["model"])
 	assert.Equal(t, false, encoderRequest["store"])
 	assert.ElementsMatch(t, []string{"model", "input", "store", "max_output_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
+	// The key set alone cannot see a per-field leak: handing the client's own
+	// input straight through keeps every key identical and ships img2 as well.
+	assert.Equal(t, []map[string]any{
+		{"role": "user", "content": []map[string]any{mmItem}},
+	}, encoderRequest["input"])
 }
 
 // TestBuildEncoderRequest_OnlyModelAndMessages is the chat completions
-// counterpart of TestBuildEncoderRequest_OnlyModelAndInput. The value-level
-// cap assertions cannot see whether the encoder request was built fresh or
-// copied from the client, because CapSingleToken produces the same caps
-// either way; only the exact key set does.
+// counterpart of TestBuildEncoderRequest_OnlyModelAndInput.
 func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
 	originalRequest := map[string]any{
 		"model": "test-model",
@@ -516,9 +514,6 @@ func TestBuildEncoderRequest_MinTokens(t *testing.T) {
 	assert.NotContains(t, encoderRequest, "min_tokens")
 }
 
-// TestECPipelineResponsesImage is an end-to-end test asserting that a
-// /v1/responses request carrying an input_image part, routed through the
-// EC connector, reaches the encoder.
 func TestECPipelineResponsesImage(t *testing.T) {
 	for _, connector := range []string{ECExampleConnector, ECConnectorNIXL} {
 		t.Run(connector, func(t *testing.T) {
