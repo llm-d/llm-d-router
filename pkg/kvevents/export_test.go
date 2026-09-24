@@ -52,3 +52,15 @@ func ReplaySnapshotForTest(ctx context.Context, index kvblock.Index, tokens kvbl
 	}
 	return keys, nil
 }
+
+// HoldRecoverySlotsForTest occupies every recovery slot until release is called.
+func (m *SnapshotManager) HoldRecoverySlotsForTest() (release func()) {
+	for range cap(m.recoverySlots) {
+		m.recoverySlots <- struct{}{}
+	}
+	return func() {
+		for range cap(m.recoverySlots) {
+			<-m.recoverySlots
+		}
+	}
+}
