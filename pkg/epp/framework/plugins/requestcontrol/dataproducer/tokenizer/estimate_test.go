@@ -744,11 +744,11 @@ func TestAudioEstimator_WAVByteRateFromHeader(t *testing.T) {
 }
 
 // TestAudioEstimator_NonWAVUsesByteRate asserts a payload that is not a WAV is
-// converted through bytesPerSecond: 32000 bytes at the default 16000 B/s is 2s.
+// converted through the byte rate: 48000 bytes at the default 16000 B/s is 3s.
 func TestAudioEstimator_NonWAVUsesByteRate(t *testing.T) {
-	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(rawAudioBase64(32000), "mp3"))
+	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(rawAudioBase64(48000), "mp3"))
 	require.NoError(t, err)
-	assert.Equal(t, audioTokens(2), tp.Prompts[0].MultiModalFeatures[0].Length)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestAudioEstimator_DefaultBytesPerSecond asserts the configured default byte
