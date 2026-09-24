@@ -55,6 +55,7 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "sglang generate", path: PathSGLangGenerate, want: APITypeSGLangGenerate},
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
+		{name: "prefixed responses", path: "/prefix" + PathResponses, want: APITypeResponses},
 		{name: "prefixed messages", path: "/prefix" + PathMessages, want: APITypeMessages},
 		{name: "prefixed generate", path: "/prefix" + PathVLLMGenerate, want: APITypeVLLMGenerate},
 		{name: "prefixed sglang generate", path: "/prefix" + PathSGLangGenerate, want: APITypeSGLangGenerate},

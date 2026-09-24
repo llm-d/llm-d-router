@@ -17,12 +17,11 @@ limitations under the License.
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,7 +94,7 @@ func TestRequestInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := map[string]any{}
 			if !tt.absent {
-				request[requestFieldInput] = tt.input
+				request[reqcommon.FieldInput] = tt.input
 			}
 
 			items, err := requestInput(request)
@@ -131,7 +130,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 			name:        "responses",
 			apiType:     reqcommon.APITypeResponses,
 			path:        reqcommon.PathResponses,
-			body:        `{"model":"m","input":"hello","max_output_tokens":800}`,
+			body:        `{"model":"m","input":"hello","max_output_tokens":800,"store":true}`,
 			tokenFields: []string{reqcommon.FieldMaxOutputTokens},
 		},
 		{
@@ -235,6 +234,13 @@ func TestECPipelineTokenLimits(t *testing.T) {
 					delete(limits, reqcommon.FieldMinTokens)
 					wantPrefill[reqcommon.FieldStream] = false
 					wantPrefill[reqcommon.FieldCacheHitThreshold] = float64(0)
+					if tt.apiType == reqcommon.APITypeResponses {
+						// The synthetic prefill leg pins store so it leaves no
+						// stored response object behind. The responses case sends
+						// store: true, so the wantDecode compare below pins that
+						// the decode leg forwards the client's own value.
+						wantPrefill[reqcommon.FieldStore] = false
+					}
 					delete(prefillBody, reqcommon.FieldKVTransferParams)
 					assert.Equal(t, wantPrefill, prefillBody)
 
@@ -245,273 +251,6 @@ func TestECPipelineTokenLimits(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestBuildEncoderRequest(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"messages": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{
-						"type": "text",
-						"text": "What's in this image?",
-					},
-					map[string]any{
-						"type": "image_url",
-						"image_url": map[string]any{
-							"url": "https://example.com/image.jpg",
-						},
-					},
-				},
-			},
-		},
-		"max_tokens": 100,
-		"stream":     true,
-	}
-
-	mmItem := map[string]any{
-		"type": "image_url",
-		"image_url": map[string]any{
-			"url": "https://example.com/image.jpg",
-		},
-	}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
-
-	// Verify encoder request modifications
-	assert.Equal(t, 1, encoderRequest["max_tokens"])
-	assert.Equal(t, false, encoderRequest["stream"])
-	_, hasStreamOptions := encoderRequest["stream_options"]
-	assert.False(t, hasStreamOptions)
-
-	// Verify messages contain only the MM item
-	messages, ok := encoderRequest["messages"].([]map[string]any)
-	assert.True(t, ok)
-	assert.Equal(t, 1, len(messages))
-
-	content, ok := messages[0]["content"].([]map[string]any)
-	assert.True(t, ok)
-	assert.Equal(t, 1, len(content))
-	assert.Equal(t, "image_url", content[0]["type"])
-}
-
-// TestBuildEncoderRequest_MaxCompletionTokens is a regression test: a shallow
-// copy previously left the client's max_completion_tokens value untouched
-// alongside the newly-capped max_tokens=1, so a reasoning-model client's
-// large max_completion_tokens would survive uncapped into the encoder request.
-func TestBuildEncoderRequest_MaxCompletionTokens(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"messages": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{
-						"type": "image_url",
-						"image_url": map[string]any{
-							"url": "https://example.com/image.jpg",
-						},
-					},
-				},
-			},
-		},
-		"max_tokens":            50,
-		"max_completion_tokens": 100,
-	}
-
-	mmItem := map[string]any{
-		"type": "image_url",
-		"image_url": map[string]any{
-			"url": "https://example.com/image.jpg",
-		},
-	}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
-
-	assert.Equal(t, 1, encoderRequest["max_tokens"])
-	assert.Equal(t, 1, encoderRequest["max_completion_tokens"])
-}
-
-// TestBuildEncoderRequest_ResponsesInputImage locks in that a Responses
-// input_image item is forwarded to the encoder unmodified, under a native
-// Responses-shaped request (input, not messages), rather than reshaped into
-// chat completions' image_url nesting: vLLM's chat-completions engine
-// ignores a detail hint nested there, so only a native Responses request
-// carries it through to the encoder.
-func TestBuildEncoderRequest_ResponsesInputImage(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"input": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{
-						"type":      "input_image",
-						"image_url": "https://example.com/image.jpg",
-						"detail":    "high",
-					},
-				},
-			},
-		},
-	}
-
-	mmItem := map[string]any{
-		"type":      "input_image",
-		"image_url": "https://example.com/image.jpg",
-		"detail":    "high",
-	}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
-
-	input, ok := encoderRequest["input"].([]map[string]any)
-	require.True(t, ok)
-	require.Len(t, input, 1)
-
-	content, ok := input[0]["content"].([]map[string]any)
-	require.True(t, ok)
-	require.Len(t, content, 1)
-
-	assert.Equal(t, "input_image", content[0]["type"])
-	assert.Equal(t, "https://example.com/image.jpg", content[0]["image_url"])
-	assert.Equal(t, "high", content[0]["detail"])
-}
-
-// TestBuildEncoderRequest_OnlyModelAndInput locks in that buildEncoderRequest
-// builds from scratch rather than copying the client's request, even when the
-// encoder is addressed with the client's own API: no stateful field, tool or
-// uncapped limit belongs on a per-item priming request, and the input must
-// carry only the one item being primed. store is the exception that does
-// appear, pinned to false whatever the client sent.
-func TestBuildEncoderRequest_OnlyModelAndInput(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"input": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"},
-					map[string]any{"type": "input_image", "image_url": "https://example.com/img2.jpg"},
-				},
-			},
-		},
-		"previous_response_id": "resp-123",
-		"conversation":         "conv-123",
-		"store":                true,
-		"background":           true,
-		"max_output_tokens":    500,
-		"instructions":         "be nice",
-		"tools":                []any{map[string]any{"type": "function", "name": "f", "parameters": map[string]any{}}},
-		"tool_choice":          map[string]any{"type": "function", "name": "f"},
-	}
-
-	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img1.jpg"}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
-
-	assert.Equal(t, "test-model", encoderRequest["model"])
-	assert.Equal(t, false, encoderRequest["store"])
-	assert.ElementsMatch(t, []string{"model", "input", "store", "max_output_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
-	// The key set alone cannot see a per-field leak: handing the client's own
-	// input straight through keeps every key identical and ships img2 as well.
-	assert.Equal(t, []map[string]any{
-		{"role": "user", "content": []map[string]any{mmItem}},
-	}, encoderRequest["input"])
-}
-
-// TestBuildEncoderRequest_OnlyModelAndMessages is the chat completions
-// counterpart of TestBuildEncoderRequest_OnlyModelAndInput.
-func TestBuildEncoderRequest_OnlyModelAndMessages(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"messages": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{
-						"type":      "image_url",
-						"image_url": map[string]any{"url": "https://example.com/img1.jpg"},
-					},
-				},
-			},
-		},
-		"temperature":     0.7,
-		"n":               4,
-		"response_format": map[string]any{"type": "json_object"},
-		"logit_bias":      map[string]any{"123": -100},
-		"stream_options":  map[string]any{"include_usage": true},
-		"tools":           []any{map[string]any{"type": "function", "function": map[string]any{"name": "f", "parameters": map[string]any{}}}},
-		"tool_choice":     map[string]any{"type": "function", "function": map[string]any{"name": "f"}},
-	}
-
-	mmItem := map[string]any{
-		"type":      "image_url",
-		"image_url": map[string]any{"url": "https://example.com/img1.jpg"},
-	}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
-
-	assert.Equal(t, "test-model", encoderRequest["model"])
-	assert.ElementsMatch(t, []string{"model", "messages", "max_tokens", "max_completion_tokens", "stream"}, slices.Collect(maps.Keys(encoderRequest)))
-}
-
-// TestBuildEncoderRequest_NoModel locks in that an absent client model stays
-// absent on the encoder request rather than becoming an explicit JSON null,
-// which vLLM's request validation would reject differently than a missing
-// field.
-func TestBuildEncoderRequest_NoModel(t *testing.T) {
-	originalRequest := map[string]any{
-		"input": []any{
-			map[string]any{
-				"role":    "user",
-				"content": []any{map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"}},
-			},
-		},
-	}
-
-	mmItem := map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeResponses)
-
-	_, hasModel := encoderRequest["model"]
-	assert.False(t, hasModel)
-}
-
-// TestBuildEncoderRequest_MinTokens is a regression test for stripping a
-// client-supplied min_tokens from the encoder request; reqcommon.CapSingleToken
-// documents why.
-func TestBuildEncoderRequest_MinTokens(t *testing.T) {
-	originalRequest := map[string]any{
-		"model": "test-model",
-		"messages": []any{
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{
-						"type": "image_url",
-						"image_url": map[string]any{
-							"url": "https://example.com/image.jpg",
-						},
-					},
-				},
-			},
-		},
-		"max_tokens": 50,
-		"min_tokens": 5,
-	}
-
-	mmItem := map[string]any{
-		"type": "image_url",
-		"image_url": map[string]any{
-			"url": "https://example.com/image.jpg",
-		},
-	}
-
-	encoderRequest := buildEncoderRequest(originalRequest, mmItem, reqcommon.APITypeChatCompletions)
-
-	assert.Equal(t, 1, encoderRequest["max_tokens"])
-	assert.NotContains(t, encoderRequest, "min_tokens")
 }
 
 func TestECPipelineResponsesImage(t *testing.T) {
@@ -546,7 +285,11 @@ func TestECPipelineResponsesImage(t *testing.T) {
 			}))
 			defer encoder.Close()
 
+			var prefillECParams any
 			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				prefillECParams = body[requestFieldECTransferParams]
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"kv_transfer_params":{}}`))
 			}))
@@ -574,67 +317,75 @@ func TestECPipelineResponsesImage(t *testing.T) {
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			assert.Equal(t, int32(1), encoderCalls.Load(), "the encoder must be called for a Responses request carrying an image")
 			assert.Equal(t, int32(1), decodeCalls.Load(), "the pipeline must still reach the decoder after the encoder/prefill stages")
-		})
-	}
-}
 
-// TestBuildEncoderRequest_ForwardsMMProcessingFields locks in that the client
-// fields which change how a multimodal item is preprocessed reach the encoder.
-// vLLM folds mm_processor_kwargs into the multimodal hash
-// (ProcessorInputs.get_mm_hashes), so an encoder primed at the deployment
-// default stores its entry under a different hash than the one the prefiller
-// looks up: a silent cache miss and a recompute, with nothing reporting it.
-func TestBuildEncoderRequest_ForwardsMMProcessingFields(t *testing.T) {
-	mmKwargs := map[string]any{"min_pixels": 3136, "max_pixels": 313600}
-	mediaKwargs := map[string]any{"video": map[string]any{"num_frames": 8}}
-
-	for _, tc := range []struct {
-		name     string
-		apiType  reqcommon.APIType
-		mmItem   map[string]any
-		contentK string
-	}{
-		{"responses", reqcommon.APITypeResponses, map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"}, requestFieldInput},
-		{"chat", reqcommon.APITypeChatCompletions, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/img.jpg"}}, requestFieldMessages},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			originalRequest := map[string]any{
-				"model":                       "test-model",
-				requestFieldMMProcessorKwargs: mmKwargs,
-				requestFieldMediaIOKwargs:     mediaKwargs,
-				// Not a preprocessing field: salts the KV cache, not the
-				// multimodal hash, and the priming call's blocks are never read.
-				"cache_salt": "some-salt",
+			// Merging the encoder's params into the prefill body is what the
+			// ec-nixl connector exists to do: without this the pipeline can
+			// reach every stage in order and still prime nothing the prefiller
+			// can look up. ec-example primes by status alone and merges nothing.
+			if connector == ECConnectorNIXL {
+				assert.Equal(t,
+					map[string]any{"hash-0": map[string]any{"peer_host": "10.0.0.1"}},
+					prefillECParams,
+					"the encoder's ec_transfer_params must reach the prefiller")
+			} else {
+				assert.Nil(t, prefillECParams, "ec-example must not synthesize ec_transfer_params")
 			}
-
-			encoderRequest := buildEncoderRequest(originalRequest, tc.mmItem, tc.apiType)
-
-			assert.Equal(t, mmKwargs, encoderRequest[requestFieldMMProcessorKwargs])
-			assert.Equal(t, mediaKwargs, encoderRequest[requestFieldMediaIOKwargs])
-			assert.NotContains(t, encoderRequest, "cache_salt")
-			assert.Contains(t, encoderRequest, tc.contentK)
 		})
 	}
 }
 
-// TestBuildEncoderRequest_ForwardsRawMMProcessorKwargs covers the form the
-// fields actually arrive in: neither is in inspectedRequestFields, so the
-// sidecar hands them over as raw bytes that have to survive to the wire.
-func TestBuildEncoderRequest_ForwardsRawMMProcessorKwargs(t *testing.T) {
-	originalRequest := map[string]any{
-		"model":                       json.RawMessage(`"test-model"`),
-		requestFieldMMProcessorKwargs: json.RawMessage(`{"max_pixels":313600}`),
+// TestHandleEC_EncoderErrorStatus pins what a failed fanout answers the client
+// and that it dispatches nothing. The encoder's status is not relayed: the
+// client addressed the gateway, and which of the encoders behind it refused the
+// priming leg is not a distinction the client can act on.
+func TestHandleEC_EncoderErrorStatus(t *testing.T) {
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType){
+		"ec-nixl":           (*Server).handleECNIXL,
+		"ec-shared-storage": (*Server).handleECSharedStorage,
+	}
+	tests := []struct {
+		name        string
+		encoderCode int
+		wantClient  int
+	}{
+		{"encoder rejects the body", http.StatusBadRequest, http.StatusBadGateway},
+		{"encoder finds the body unprocessable", http.StatusUnprocessableEntity, http.StatusBadGateway},
+		{"encoder does not serve the route", http.StatusNotFound, http.StatusBadGateway},
+		{"encoder is at capacity", http.StatusTooManyRequests, http.StatusBadGateway},
+		{"encoder is unavailable", http.StatusServiceUnavailable, http.StatusBadGateway},
+		{"encoder fails internally", http.StatusInternalServerError, http.StatusBadGateway},
 	}
 
-	encoderRequest := buildEncoderRequest(originalRequest,
-		map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"},
-		reqcommon.APITypeResponses)
+	for name, handle := range handlers {
+		for _, tt := range tests {
+			t.Run(name+"/"+tt.name, func(t *testing.T) {
+				encoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tt.encoderCode)
+					_, _ = w.Write([]byte(`{"error":"nope"}`))
+				}))
+				defer encoder.Close()
 
-	body, err := json.Marshal(encoderRequest)
-	require.NoError(t, err)
+				encoderURL, err := url.Parse(encoder.URL)
+				require.NoError(t, err)
+				srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+				srv.logger = log.Log
 
-	var roundTripped map[string]any
-	require.NoError(t, json.Unmarshal(body, &roundTripped))
-	assert.Equal(t, map[string]any{"max_pixels": float64(313600)}, roundTripped[requestFieldMMProcessorKwargs])
-	assert.Equal(t, "test-model", roundTripped["model"])
+				var dispatched bool
+				srv.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {
+					dispatched = true
+				}
+
+				body, err := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+				require.NoError(t, err)
+				req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
+				rw := httptest.NewRecorder()
+
+				handle(srv, rw, req, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+
+				assert.False(t, dispatched, "a failed fanout must not reach the P/D connector")
+				assert.Equal(t, tt.wantClient, rw.Code, "body=%s", rw.Body.String())
+			})
+		}
+	}
 }

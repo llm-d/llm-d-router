@@ -110,6 +110,133 @@ func TestFanoutEncoderCollectAggregates(t *testing.T) {
 	}
 }
 
+// TestFanoutEncoderCollectPrimesEachItem pins which content part each encoder
+// request carries. Counting requests cannot see a fanout that primes one item
+// repeatedly, and for ec-nixl that keys ec_transfer_params to an image the
+// encoder never processed: a silent cache miss, or another image's features
+// reaching the prefiller. The encoder here derives its params key from the part
+// it was handed, so the merged map names the parts actually primed.
+func TestFanoutEncoderCollectPrimesEachItem(t *testing.T) {
+	const sameURL = "https://example.com/same.jpg"
+	tests := []struct {
+		name      string
+		request   map[string]any
+		apiType   reqcommon.APIType
+		wantParts []map[string]any
+	}{
+		{
+			name:    "chat primes each distinct image URL",
+			request: userMessageRequest(imageURLItem("https://example.com/img1.jpg"), imageURLItem("https://example.com/img2.jpg")),
+			apiType: reqcommon.APITypeChatCompletions,
+			wantParts: []map[string]any{
+				imageURLItem("https://example.com/img1.jpg"),
+				imageURLItem("https://example.com/img2.jpg"),
+			},
+		},
+		{
+			// One URL at two detail levels is two encoder inputs, so each
+			// request carries its own detail rather than the first one twice.
+			name: "responses primes each input_image detail level",
+			request: responsesInputRequest(
+				map[string]any{"type": "input_image", "image_url": sameURL, "detail": "low"},
+				map[string]any{"type": "input_image", "image_url": sameURL, "detail": "high"},
+			),
+			apiType: reqcommon.APITypeResponses,
+			wantParts: []map[string]any{
+				{"type": "input_image", "image_url": sameURL, "detail": "low"},
+				{"type": "input_image", "image_url": sameURL, "detail": "high"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var gotParts []map[string]any
+			encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				part := primedPart(t, body, tt.apiType)
+				mu.Lock()
+				gotParts = append(gotParts, part)
+				mu.Unlock()
+
+				resp, err := json.Marshal(map[string]any{
+					requestFieldECTransferParams: map[string]any{
+						partKey(t, part): map[string]any{"peer_host": "10.0.0.1"},
+					},
+				})
+				assert.NoError(t, err)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(resp)
+			}))
+			defer encoderBackend.Close()
+
+			encoderURL, err := url.Parse(encoderBackend.URL)
+			assert.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+			srv.logger = log.Log
+
+			params, contributed, total, err := srv.fanoutEncoderCollect(
+				context.Background(), tt.request, []string{encoderURL.Host}, "test-req-id", tt.apiType)
+			assert.NoError(t, err)
+			assert.Equal(t, len(tt.wantParts), total, "one encoder request per extracted part")
+			assert.Equal(t, len(tt.wantParts), contributed)
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.ElementsMatch(t, tt.wantParts, gotParts, "each encoder request must carry its own part")
+
+			// Priming one part twice collapses the merged map onto a single
+			// key, which the counts above cannot see.
+			wantKeys := make([]string, 0, len(tt.wantParts))
+			for _, part := range tt.wantParts {
+				wantKeys = append(wantKeys, partKey(t, part))
+			}
+			gotKeys := make([]string, 0, len(params))
+			for k := range params {
+				gotKeys = append(gotKeys, k)
+			}
+			assert.ElementsMatch(t, wantKeys, gotKeys, "params must name every primed part")
+		})
+	}
+}
+
+// primedPart returns the single content part an encoder priming body carries,
+// read from whichever carrier the API uses.
+func primedPart(t *testing.T, body map[string]any, apiType reqcommon.APIType) map[string]any {
+	t.Helper()
+	carrier := reqcommon.FieldMessages
+	if apiType == reqcommon.APITypeResponses {
+		carrier = reqcommon.FieldInput
+	}
+	turns, ok := body[carrier].([]any)
+	if !assert.Truef(t, ok && len(turns) == 1, "want one turn under %s, got %#v", carrier, body[carrier]) {
+		return nil
+	}
+	turn, ok := turns[0].(map[string]any)
+	if !assert.Truef(t, ok, "turn is %#v", turns[0]) {
+		return nil
+	}
+	content, ok := turn[reqcommon.FieldContent].([]any)
+	if !assert.Truef(t, ok && len(content) == 1, "want one content part, got %#v", turn[reqcommon.FieldContent]) {
+		return nil
+	}
+	part, ok := content[0].(map[string]any)
+	if !assert.Truef(t, ok, "content part is %#v", content[0]) {
+		return nil
+	}
+	return part
+}
+
+// partKey names a content part so an encoder response can be traced back to it.
+func partKey(t *testing.T, part map[string]any) string {
+	t.Helper()
+	key, err := json.Marshal(part)
+	assert.NoError(t, err)
+	return string(key)
+}
+
 // TestFanoutEncoderCollectMissingField verifies the warn-and-continue
 // behaviour: an encoder response without ec_transfer_params yields a nil
 // slot but does NOT fail the request. Mirrors NIXLv2's tolerance for

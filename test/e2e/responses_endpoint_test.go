@@ -76,7 +76,10 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 				"input": []any{map[string]any{
 					"role": "user",
 					"content": []any{map[string]any{
-						"type": "input_image", reqcommon.FieldFileID: "file-e2e-123",
+						// detail keeps the part valid apart from file_id, so the
+						// refusal is attributable to file_id alone.
+						"type": "input_image", "detail": "auto",
+						reqcommon.FieldFileID: "file-e2e-123",
 					}},
 				}},
 			}},
@@ -149,7 +152,10 @@ var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", gink
 		ginkgo.By(fmt.Sprintf("encode request count before: %d", encodeBefore))
 
 		// A Responses input_image carries its URL as a bare string on the part,
-		// unlike chat completions' nested image_url object.
+		// where chat completions nests it in an image_url object. The part is
+		// primed as the client sent it, so it carries detail: the Responses
+		// input content union marks that field required, and whether a server
+		// supplies a default for an omitted one is left to the server.
 		ginkgo.By("POST /v1/responses with an input_image part")
 		resp, raw := doResponses(map[string]any{
 			"model": simModelName,
@@ -157,7 +163,7 @@ var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", gink
 				"role": "user",
 				"content": []any{
 					map[string]any{"type": "input_text", "text": "Describe what you see."},
-					map[string]any{"type": "input_image", "image_url": testImageURL},
+					map[string]any{"type": "input_image", "image_url": testImageURL, "detail": "auto"},
 				},
 			}},
 			"max_output_tokens": 20,

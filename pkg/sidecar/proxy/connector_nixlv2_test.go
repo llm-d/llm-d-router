@@ -559,12 +559,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(prefillReq).To(HaveKeyWithValue("max_output_tokens", BeNumerically("==", 1)))
 
+		By("verifying prefill request pins store=false so it leaves no stored response object")
+		Expect(prefillReq).To(HaveKeyWithValue("store", false))
+
 		By("verifying decode request has original max_output_tokens=100")
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 
 		Expect(decodeReq).To(HaveKeyWithValue("max_output_tokens", BeNumerically("==", 100)))
+
+		By("verifying decode request carries no store, the pin being prefill-only")
+		Expect(decodeReq).ToNot(HaveKey("store"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -610,12 +616,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(prefillReq).To(HaveKeyWithValue("max_output_tokens", BeNumerically("==", 1)))
 
+		By("verifying prefill request pins store=false so it leaves no stored response object")
+		Expect(prefillReq).To(HaveKeyWithValue("store", false))
+
 		By("verifying decode request does not have max_output_tokens since it wasn't in original request")
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 
 		Expect(decodeReq).ToNot(HaveKey("max_output_tokens"))
+
+		By("verifying decode request carries no store, the pin being prefill-only")
+		Expect(decodeReq).ToNot(HaveKey("store"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

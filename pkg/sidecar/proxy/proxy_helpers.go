@@ -274,11 +274,13 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		}
 		return nil, nil, false
 	}
-	if r.URL.Path == reqcommon.PathResponses {
+	// createRoutes registers one route per path in DetectAPIType's mapping and
+	// derives each route's apiType from the same call, so a path added to that
+	// list is guarded here without a second edit. Coverage stops at the
+	// registered routes: a request on any other path reaches the decoder proxy
+	// through the catch-all and its body is never read.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
-			// The router refuses a request vLLM would have accepted, so the
-			// refusal is the only record that the client's own error was not
-			// the model server's. Once per refused request.
 			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
 			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 				s.logger.Error(writeErr, "failed to send error response to client")
