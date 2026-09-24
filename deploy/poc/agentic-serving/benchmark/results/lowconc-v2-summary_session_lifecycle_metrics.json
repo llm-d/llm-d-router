@@ -1,0 +1,188 @@
+{
+ "num_sessions": 16,
+ "num_sessions_succeeded": 12,
+ "num_sessions_failed": 4,
+ "failures": {
+  "count": 4,
+  "by_label": {
+   "request_failed": {
+    "count": 3,
+    "messages": [
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 4031 output tokens and your prompt contains at least 258114 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=258114)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace6_05658118df5d398eec4703ce4fafe679ab30"
+      ]
+     },
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 230 output tokens and your prompt contains at least 261915 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261915)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace19_0d75185d4e958ad360c16451eaa95d508edf"
+      ]
+     },
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 4799 output tokens and your prompt contains at least 257346 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=257346)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace7_05c7c0ff6c473d474125f1c96436e7e3ebaa"
+      ]
+     }
+    ]
+   },
+   "predecessor_wait_failed": {
+    "count": 1,
+    "messages": [
+     {
+      "message": "predecessor wait failed: TimeoutError",
+      "session_ids": [
+       "wekatrace11_07fc71985fbafc8e1abb181b7d28b8349f45"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "total_events": 3588,
+ "total_events_completed": 2094,
+ "total_events_cancelled": 1490,
+ "sessions_with_recorded_substitution": 0,
+ "total_recorded_substitutions": {
+  "count": 0,
+  "messages": []
+ },
+ "sessions_per_second": 0.0016193848637184652,
+ "session_duration_sec": {
+  "mean": 3494.2095278948545,
+  "min": 930.8043220043182,
+  "max": 8922.97589802742,
+  "p0.1": 931.201414090395,
+  "p1": 934.7752428650856,
+  "p5": 950.6589263081551,
+  "p10": 1207.3915215730667,
+  "p25": 1717.1513560414314,
+  "median": 2892.1484171152115,
+  "p75": 4644.422138929367,
+  "p90": 6611.84695661068,
+  "p95": 8124.752945303917,
+  "p99": 8763.331307482718,
+  "p99.9": 8907.011438972952
+ },
+ "num_events": {
+  "mean": 224.25,
+  "min": 24.0,
+  "max": 1418.0,
+  "p0.1": 24.06,
+  "p1": 24.6,
+  "p5": 27.0,
+  "p10": 30.0,
+  "p25": 44.0,
+  "median": 84.5,
+  "p75": 226.5,
+  "p90": 420.5,
+  "p95": 742.25,
+  "p99": 1282.8499999999997,
+  "p99.9": 1404.485000000001
+ },
+ "num_events_cancelled": {
+  "mean": 93.125,
+  "min": 0.0,
+  "max": 1344.0,
+  "p0.1": 0.0,
+  "p1": 0.0,
+  "p5": 0.0,
+  "p10": 0.0,
+  "p25": 0.0,
+  "median": 0.0,
+  "p75": 5.5,
+  "p90": 62.0,
+  "p95": 407.25,
+  "p99": 1156.6499999999996,
+  "p99.9": 1325.2650000000015
+ },
+ "total_input_tokens": {
+  "mean": 12631357.375,
+  "min": 1743871.0,
+  "max": 38065151.0,
+  "p0.1": 1749203.275,
+  "p1": 1797193.75,
+  "p5": 2010484.75,
+  "p10": 2471715.5,
+  "p25": 2883831.5,
+  "median": 9586193.0,
+  "p75": 22020773.0,
+  "p90": 25163918.0,
+  "p95": 28760375.0,
+  "p99": 36204195.8,
+  "p99.9": 37879055.48000001
+ },
+ "total_output_tokens": {
+  "mean": 149787.875,
+  "min": 9548.0,
+  "max": 666136.0,
+  "p0.1": 9647.765,
+  "p1": 10545.65,
+  "p5": 14536.25,
+  "p10": 16955.0,
+  "p25": 42490.0,
+  "median": 96271.5,
+  "p75": 183810.5,
+  "p90": 299383.0,
+  "p95": 399940.75,
+  "p99": 612896.9499999998,
+  "p99.9": 660812.0950000004
+ },
+ "total_cached_tokens": null,
+ "total_cacheable_input_tokens": null,
+ "sessions_with_cache_info": 0,
+ "kv_cache_hit_percent": null,
+ "kv_cache_hit_per_session_percent": null,
+ "tfut_sec": {
+  "mean": 769.5709203936167,
+  "min": 0.10412418202031404,
+  "max": 5146.177244926977,
+  "p0.1": 0.10424149682483402,
+  "p1": 0.10529733006551396,
+  "p5": 0.10998992224631365,
+  "p10": 0.12749109999276698,
+  "p25": 0.1563287722383393,
+  "median": 0.198425316484645,
+  "p75": 883.546744155261,
+  "p90": 2535.4228934514686,
+  "p95": 3826.0077711634513,
+  "p99": 4882.143350174271,
+  "p99.9": 5119.773855451709
+ },
+ "sessions_with_tfut": 16,
+ "tfut_none_reasons": null,
+ "num_user_facing_events": {
+  "mean": 224.25,
+  "min": 24.0,
+  "max": 1418.0,
+  "p0.1": 24.06,
+  "p1": 24.6,
+  "p5": 27.0,
+  "p10": 30.0,
+  "p25": 44.0,
+  "median": 84.5,
+  "p75": 226.5,
+  "p90": 420.5,
+  "p95": 742.25,
+  "p99": 1282.8499999999997,
+  "p99.9": 1404.485000000001
+ },
+ "num_structured_output_excluded": {
+  "mean": 0.0,
+  "min": 0.0,
+  "max": 0.0,
+  "p0.1": 0.0,
+  "p1": 0.0,
+  "p5": 0.0,
+  "p10": 0.0,
+  "p25": 0.0,
+  "median": 0.0,
+  "p75": 0.0,
+  "p90": 0.0,
+  "p95": 0.0,
+  "p99": 0.0,
+  "p99.9": 0.0
+ }
+}

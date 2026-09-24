@@ -108,6 +108,8 @@ import (
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/kvcachehint"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/kvcachehintv2"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
@@ -723,6 +725,11 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
+
+	// register KV-cache hint plugins
+	// Alpha
+	fwkplugin.Register(kvcachehint.PluginType, fwkplugin.StabilityAlpha, kvcachehint.Factory)
+	fwkplugin.Register(kvcachehintv2.PluginType, fwkplugin.StabilityAlpha, kvcachehintv2.Factory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {

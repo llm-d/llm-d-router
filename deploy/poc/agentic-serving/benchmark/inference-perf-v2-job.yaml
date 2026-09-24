@@ -1,0 +1,57 @@
+# Third benchmark arm: same patched client and load as the treatment arm
+# (ConfigMaps inference-perf-treatment-config and inference-perf-client-patch
+# from inference-perf.yaml), against the EPP running kv-cache-hint-v2 with
+# epp-config-hint-v2.yaml. Reset the vLLM prefix cache before launching.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inference-perf-treatment-v2
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: inference-perf
+        arm: treatment-v2
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: inference-perf
+        image: quay.io/inference-perf/inference-perf:v0.7.0
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          python inference_perf/main.py --config_file /etc/inference-perf/config.yml
+          ec=$?
+          for f in $(find /workspace -name '*.json' 2>/dev/null | sort); do
+            echo "===REPORT=== $f"
+            cat "$f"; echo
+          done
+          exit $ec
+        env:
+        - name: HF_HOME
+          value: /tmp/hf
+        volumeMounts:
+        - name: config
+          mountPath: /etc/inference-perf
+        - name: client-patch
+          mountPath: /workspace/inference_perf/client/modelserver/openai_client.py
+          subPath: openai_client.py
+        - name: client-patch
+          mountPath: /workspace/.venv/lib/python3.12/site-packages/inference_perf/client/modelserver/openai_client.py
+          subPath: openai_client.py
+        resources:
+          requests:
+            cpu: 8
+            memory: 24Gi
+            ephemeral-storage: 20Gi
+          limits:
+            memory: 28Gi
+            ephemeral-storage: 40Gi
+      volumes:
+      - name: config
+        configMap:
+          name: inference-perf-treatment-config
+      - name: client-patch
+        configMap:
+          name: inference-perf-client-patch

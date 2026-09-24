@@ -1,0 +1,66 @@
+# Routes the existing GKE inference gateway (llm-d-inference-gateway) to the
+# vllm-qwen3-coder-30b pods through the POC endpoint picker.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: qwen3-coder-30b
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen3-coder-30b
+  targetPorts:
+  - number: 8200
+  endpointPickerRef:
+    name: qwen3-coder-30b-epp
+    kind: Service
+    port:
+      number: 9002
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen3-coder-30b-route
+spec:
+  parentRefs:
+  - name: llm-d-inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: qwen3-coder-30b
+---
+# The GKE default health check probes GET / on the serving port; vLLM answers
+# 404 there, so point the check at /health.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: qwen3-coder-30b-hc
+spec:
+  targetRef:
+    group: inference.networking.k8s.io
+    kind: InferencePool
+    name: qwen3-coder-30b
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8200
+        requestPath: /health
+---
+# The GCP backend service default timeout is 30s, which cuts off long
+# streaming responses; long-context agentic turns need far more.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: qwen3-coder-30b-timeout
+spec:
+  targetRef:
+    group: inference.networking.k8s.io
+    kind: InferencePool
+    name: qwen3-coder-30b
+  default:
+    timeoutSec: 600

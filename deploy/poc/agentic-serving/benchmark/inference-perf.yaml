@@ -1,0 +1,215 @@
+# inference-perf trace-replay benchmark for the KV-cache retention POC.
+#
+# Two arms, run sequentially (reset the vLLM prefix cache between arms):
+#   baseline:  no session-id header -> session-id-producer publishes nothing,
+#              kv-cache-hint passes every request through untouched.
+#   treatment: x-session-id per trace -> inter-turn predictor + kv-cache-hint
+#              emit retention_directives to the vLLM retention API.
+# The arms share base_seed, dataset slice, and timing knobs so sessions pair
+# across arms.
+#
+# Sizing is for one TP=2 replica with a 2,196,848-token fp8 KV cache:
+# 16 concurrent sessions from the 256K-filtered corpus keep roughly
+# 1.5-2M context tokens live, and the 32-session pool (~3M+ tokens of
+# distinct prefixes) forces eviction as sessions turn over.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-perf-baseline-config
+data:
+  config.yml: |
+    load:
+      type: trace_session_replay
+      stages:
+        - concurrent_sessions: 16
+          num_sessions: 32
+      num_workers: 8
+      worker_max_concurrency: 100
+      request_timeout: 600
+      base_seed: 20260910
+    api:
+      type: chat
+      streaming: true
+    server:
+      type: vllm
+      model_name: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+      base_url: http://35.208.188.17
+    tokenizer:
+      pretrained_model_name_or_path: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+    data:
+      type: weka_trace_replay
+      weka_trace_replay:
+        hf_dataset_path: "semianalysisai/cc-traces-weka-with-subagents-060826-256k"
+        num_dataset_entries: 40
+        use_static_model: true
+        static_model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+        default_block_size: 64
+        skip_invalid_files: true
+        trace_idle_gap_cap_seconds: 30.0
+        max_wait_ms: 30000
+    report:
+      request_lifecycle:
+        summary: true
+        per_stage: true
+        per_request: true
+        per_request_fields:
+          request: false
+          response: false
+          response_chunks: false
+          info: true
+          computed_metrics: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-perf-treatment-config
+data:
+  config.yml: |
+    load:
+      type: trace_session_replay
+      stages:
+        - concurrent_sessions: 16
+          num_sessions: 32
+      num_workers: 8
+      worker_max_concurrency: 100
+      request_timeout: 600
+      base_seed: 20260910
+    api:
+      type: chat
+      streaming: true
+      # One stable ID per trace (parent + subagents share it). Feeds the
+      # session-id-producer -> inter-turn predictor -> kv-cache-hint chain.
+      session_id_header_key: x-session-id
+    server:
+      type: vllm
+      model_name: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+      base_url: http://35.208.188.17
+    tokenizer:
+      pretrained_model_name_or_path: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+    data:
+      type: weka_trace_replay
+      weka_trace_replay:
+        hf_dataset_path: "semianalysisai/cc-traces-weka-with-subagents-060826-256k"
+        num_dataset_entries: 40
+        use_static_model: true
+        static_model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+        default_block_size: 64
+        skip_invalid_files: true
+        trace_idle_gap_cap_seconds: 30.0
+        max_wait_ms: 30000
+    report:
+      request_lifecycle:
+        summary: true
+        per_stage: true
+        per_request: true
+        per_request_fields:
+          request: false
+          response: false
+          response_chunks: false
+          info: true
+          computed_metrics: true
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inference-perf-baseline
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: inference-perf
+        arm: baseline
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: inference-perf
+        image: quay.io/inference-perf/inference-perf:v0.7.0
+        command: ["/bin/sh", "-c"]
+        # Print report JSONs to the Job log so they survive pod deletion.
+        args:
+        - |
+          python inference_perf/main.py --config_file /etc/inference-perf/config.yml
+          ec=$?
+          for f in $(find /workspace -name '*.json' 2>/dev/null | sort); do
+            echo "===REPORT=== $f"
+            cat "$f"; echo
+          done
+          exit $ec
+        env:
+        - name: HF_HOME
+          value: /tmp/hf
+        volumeMounts:
+        - name: config
+          mountPath: /etc/inference-perf
+        resources:
+          requests:
+            cpu: 8
+            memory: 24Gi
+            ephemeral-storage: 20Gi
+          limits:
+            memory: 28Gi
+            ephemeral-storage: 40Gi
+      volumes:
+      - name: config
+        configMap:
+          name: inference-perf-baseline-config
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inference-perf-treatment
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: inference-perf
+        arm: treatment
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: inference-perf
+        image: quay.io/inference-perf/inference-perf:v0.7.0
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          python inference_perf/main.py --config_file /etc/inference-perf/config.yml
+          ec=$?
+          for f in $(find /workspace -name '*.json' 2>/dev/null | sort); do
+            echo "===REPORT=== $f"
+            cat "$f"; echo
+          done
+          exit $ec
+        env:
+        - name: HF_HOME
+          value: /tmp/hf
+        volumeMounts:
+        - name: config
+          mountPath: /etc/inference-perf
+        # patch/openai_client.py (ConfigMap inference-perf-client-patch,
+        # created from that file) adds x-session-type: main on main-agent
+        # turns only, so the EPP tracks the main session and ignores
+        # subagent fan-out. The image holds two copies of the module;
+        # overlay both since either can win import resolution.
+        - name: client-patch
+          mountPath: /workspace/inference_perf/client/modelserver/openai_client.py
+          subPath: openai_client.py
+        - name: client-patch
+          mountPath: /workspace/.venv/lib/python3.12/site-packages/inference_perf/client/modelserver/openai_client.py
+          subPath: openai_client.py
+        resources:
+          requests:
+            cpu: 8
+            memory: 24Gi
+            ephemeral-storage: 20Gi
+          limits:
+            memory: 28Gi
+            ephemeral-storage: 40Gi
+      volumes:
+      - name: config
+        configMap:
+          name: inference-perf-treatment-config
+      - name: client-patch
+        configMap:
+          name: inference-perf-client-patch

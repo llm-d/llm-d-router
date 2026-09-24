@@ -1,0 +1,3 @@
+vllm:prefix_cache_queries_total{engine="0",model_name="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"} 1.591238932e+09
+vllm:prefix_cache_hits_total{engine="0",model_name="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"} 1.397827024e+09
+vllm:num_preemptions_total{engine="0",model_name="Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"} 0.0

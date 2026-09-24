@@ -1,0 +1,199 @@
+{
+ "num_sessions": 32,
+ "num_sessions_succeeded": 22,
+ "num_sessions_failed": 10,
+ "failures": {
+  "count": 10,
+  "by_label": {
+   "predecessor_wait_failed": {
+    "count": 6,
+    "messages": [
+     {
+      "message": "predecessor wait failed: TimeoutError",
+      "session_ids": [
+       "wekatrace29_16a79fdbe42a805e5bc856b9281e9c6a4c83",
+       "wekatrace39_1ec7f23f1ca1449b1758b86dba91df97cf1a",
+       "wekatrace6_05658118df5d398eec4703ce4fafe679ab30",
+       "wekatrace27_13b35551e37237bef8f401da90e3e6bf53ff",
+       "wekatrace11_07fc71985fbafc8e1abb181b7d28b8349f45",
+       "wekatrace13_09a5d415a7157ed48a5a6fa2711f2d8565c1"
+      ]
+     }
+    ]
+   },
+   "request_failed": {
+    "count": 4,
+    "messages": [
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 688 output tokens and your prompt contains at least 261457 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261457)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace36_1d52c891bba8f47980ab604cb293e91056ef"
+      ]
+     },
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 230 output tokens and your prompt contains at least 261915 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261915)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace19_0d75185d4e958ad360c16451eaa95d508edf"
+      ]
+     },
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 991 output tokens and your prompt contains at least 261154 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261154)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace37_1d52e24446ecdb36d1351d53094d8a67f621"
+      ]
+     },
+     {
+      "message": "Exception: HTTP Error 400: {\"error\":{\"message\":\"This model's maximum context length is 262144 tokens. However, you requested 8630 output tokens and your prompt contains at least 253515 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=253515)\",\"type\":\"BadRequestError\",\"param\":\"input_tokens\",\"code\":400}}",
+      "session_ids": [
+       "wekatrace5_04b25fe5b2ffa5e7ec9890426cce59838a05"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "total_events": 5935,
+ "total_events_completed": 3505,
+ "total_events_cancelled": 2420,
+ "sessions_with_recorded_substitution": 0,
+ "total_recorded_substitutions": {
+  "count": 0,
+  "messages": []
+ },
+ "sessions_per_second": 0.0027324485110058125,
+ "session_duration_sec": {
+  "mean": 3648.7151487097144,
+  "min": 389.7153413295746,
+  "max": 10748.91062283516,
+  "p0.1": 391.77666704297064,
+  "p1": 410.3285984635353,
+  "p5": 562.5197557449341,
+  "p10": 820.716334104538,
+  "p25": 1528.7327132225037,
+  "median": 3378.0652375221252,
+  "p75": 4715.924718618393,
+  "p90": 6774.280301856996,
+  "p95": 9234.354917395114,
+  "p99": 10343.059813802243,
+  "p99.9": 10708.325541931874
+ },
+ "num_events": {
+  "mean": 185.46875,
+  "min": 18.0,
+  "max": 1418.0,
+  "p0.1": 18.062,
+  "p1": 18.62,
+  "p5": 21.65,
+  "p10": 24.2,
+  "p25": 33.25,
+  "median": 77.5,
+  "p75": 199.5,
+  "p90": 506.9000000000002,
+  "p95": 622.1499999999999,
+  "p99": 1192.940000000001,
+  "p99.9": 1395.4940000000036
+ },
+ "num_events_cancelled": {
+  "mean": 75.625,
+  "min": 0.0,
+  "max": 1365.0,
+  "p0.1": 0.0,
+  "p1": 0.0,
+  "p5": 0.0,
+  "p10": 0.0,
+  "p25": 0.0,
+  "median": 0.0,
+  "p75": 10.25,
+  "p90": 102.80000000000007,
+  "p95": 373.4999999999999,
+  "p99": 1079.800000000001,
+  "p99.9": 1336.4800000000043
+ },
+ "total_input_tokens": {
+  "mean": 10456930.40625,
+  "min": 855454.0,
+  "max": 66135242.0,
+  "p0.1": 864104.643,
+  "p1": 941960.4299999999,
+  "p5": 1146959.55,
+  "p10": 1223462.7,
+  "p25": 2235626.0,
+  "median": 6356101.0,
+  "p75": 10732430.0,
+  "p90": 25077493.300000012,
+  "p95": 34794866.74999999,
+  "p99": 57370033.85000004,
+  "p99.9": 65258721.18500014
+ },
+ "total_output_tokens": {
+  "mean": 114702.90625,
+  "min": 8580.0,
+  "max": 666136.0,
+  "p0.1": 8610.008,
+  "p1": 8880.08,
+  "p5": 10503.35,
+  "p10": 16263.6,
+  "p25": 29716.25,
+  "median": 84822.0,
+  "p75": 144784.25,
+  "p90": 204906.50000000003,
+  "p95": 306862.25,
+  "p99": 561370.5700000004,
+  "p99.9": 655659.4570000016
+ },
+ "total_cached_tokens": null,
+ "total_cacheable_input_tokens": null,
+ "sessions_with_cache_info": 0,
+ "kv_cache_hit_percent": null,
+ "kv_cache_hit_per_session_percent": null,
+ "tfut_sec": {
+  "mean": 923.8842761319029,
+  "min": 0.13446936098625883,
+  "max": 8497.468704855011,
+  "p0.1": 0.1345300830107881,
+  "p1": 0.13507658123155125,
+  "p5": 0.14143497792247217,
+  "p10": 0.16521637061960065,
+  "p25": 0.19877359847305343,
+  "median": 105.79047854448436,
+  "p75": 907.4993522462464,
+  "p90": 3035.008596019497,
+  "p95": 3750.966460449603,
+  "p99": 7217.373668937624,
+  "p99.9": 8369.459201263291
+ },
+ "sessions_with_tfut": 32,
+ "tfut_none_reasons": null,
+ "num_user_facing_events": {
+  "mean": 185.46875,
+  "min": 18.0,
+  "max": 1418.0,
+  "p0.1": 18.062,
+  "p1": 18.62,
+  "p5": 21.65,
+  "p10": 24.2,
+  "p25": 33.25,
+  "median": 77.5,
+  "p75": 199.5,
+  "p90": 506.9000000000002,
+  "p95": 622.1499999999999,
+  "p99": 1192.940000000001,
+  "p99.9": 1395.4940000000036
+ },
+ "num_structured_output_excluded": {
+  "mean": 0.0,
+  "min": 0.0,
+  "max": 0.0,
+  "p0.1": 0.0,
+  "p1": 0.0,
+  "p5": 0.0,
+  "p10": 0.0,
+  "p25": 0.0,
+  "median": 0.0,
+  "p75": 0.0,
+  "p90": 0.0,
+  "p95": 0.0,
+  "p99": 0.0,
+  "p99.9": 0.0
+ }
+}

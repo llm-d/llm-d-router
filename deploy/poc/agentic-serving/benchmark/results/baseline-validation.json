@@ -1,0 +1,38 @@
+{
+ "global": {
+  "warnings": [],
+  "errors": []
+ },
+ "reports": {
+  "summary_lifecycle_metrics.json": {
+   "warnings": [
+    {
+     "check": "summary.token_mismatches",
+     "severity": "warning",
+     "message": "1346 request(s) where the client-side token count disagrees with the server-reported completion_tokens",
+     "report": "summary_lifecycle_metrics.json"
+    }
+   ],
+   "errors": []
+  },
+  "stage_0_lifecycle_metrics.json": {
+   "warnings": [
+    {
+     "check": "per_stage.token_mismatches",
+     "severity": "warning",
+     "message": "1346 request(s) where the client-side token count disagrees with the server-reported completion_tokens",
+     "report": "stage_0_lifecycle_metrics.json"
+    }
+   ],
+   "errors": []
+  },
+  "per_request_lifecycle_metrics.json": {
+   "warnings": [],
+   "errors": []
+  },
+  "inference-perf.partial.stage_0.yaml": {
+   "warnings": [],
+   "errors": []
+  }
+ }
+}

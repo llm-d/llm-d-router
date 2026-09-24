@@ -1,0 +1,204 @@
+# Endpoint picker for the KV-cache retention POC, modeled on the llm-d
+# agentic-serving guide router config. The image is built from the
+# capri-xiyue/sea-cache-poc branch: session-id-producer feeds the
+# session-interturn-latency-producer (per-session inter-turn latency
+# predictor), whose predictions drive the kv-cache-hint plugin. The hint is
+# written into the request body as retention_directives/retention_scope for
+# the vLLM Context-Aware KV-Cache Retention API (vllm-project/vllm#38514).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: qwen3-coder-30b-epp
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: qwen3-coder-30b-epp
+rules:
+- apiGroups:
+  - "inference.networking.x-k8s.io"
+  resources:
+  - "inferencepools"
+  - "inferenceobjectives"
+  - "inferencemodelrewrites"
+  verbs:
+  - "get"
+  - "watch"
+  - "list"
+- apiGroups:
+  - "inference.networking.k8s.io"
+  resources:
+  - "inferencepools"
+  verbs:
+  - "get"
+  - "watch"
+  - "list"
+- apiGroups:
+  - "llm-d.ai"
+  resources:
+  - "inferenceobjectives"
+  - "inferencemodelrewrites"
+  verbs:
+  - "get"
+  - "watch"
+  - "list"
+- apiGroups:
+  - ""
+  resources:
+  - "pods"
+  verbs:
+  - "get"
+  - "watch"
+  - "list"
+- apiGroups:
+  - "authentication.k8s.io"
+  resources:
+  - "tokenreviews"
+  verbs:
+  - "create"
+- apiGroups:
+  - "authorization.k8s.io"
+  resources:
+  - "subjectaccessreviews"
+  verbs:
+  - "create"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qwen3-coder-30b-epp-binding
+subjects:
+- kind: ServiceAccount
+  name: qwen3-coder-30b-epp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qwen3-coder-30b-epp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen3-coder-30b-epp-config
+data:
+  epp-config.yaml: |
+    apiVersion: llm-d.ai/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: session-id-producer
+      parameters:
+        headerName: x-session-id
+    # Track main-agent turns only. The patched inference-perf client sends
+    # x-session-type: main on main-session turns and no session-type header
+    # on subagent requests, so subagents match no queue: their timing never
+    # feeds the estimator and they get no retention hint. Seed is the
+    # agentic prior (~10s median inter-turn gap); the estimator adapts
+    # online per session.
+    - type: session-interturn-latency-producer
+      parameters:
+        sessionTypeHeader: x-session-type
+        queues:
+        - sessionType: main
+          initialLogMean: 2.28
+          initialLogStd: 1.34
+    # Retain defaults: quantile 0.9, minTTL 1s, maxTTL 10m, priority 70.
+    - type: kv-cache-hint
+      parameters:
+        queues:
+        - sessionType: main
+    - type: inflight-load-producer
+    - type: token-load-scorer
+    - type: approx-prefix-cache-producer
+      parameters:
+        maxPrefixTokensToMatch: 262144
+        blockSizeTokens: 256
+    - type: prefix-cache-affinity-filter
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: prefix-cache-affinity-filter
+      - pluginRef: token-load-scorer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-coder-30b-epp
+  labels:
+    app: qwen3-coder-30b-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3-coder-30b-epp
+  template:
+    metadata:
+      labels:
+        app: qwen3-coder-30b-epp
+    spec:
+      serviceAccountName: qwen3-coder-30b-epp
+      terminationGracePeriodSeconds: 130
+      containers:
+      - name: epp
+        image: us-central1-docker.pkg.dev/xiyue-gke-dev-new/prefix-cache-plugin/llm-d-router-endpoint-picker:sea-cache-poc
+        imagePullPolicy: Always
+        args:
+        - --pool-name
+        - "qwen3-coder-30b"
+        - --pool-namespace
+        - "default"
+        - --v
+        - "4"
+        - --zap-encoder
+        - "json"
+        - --grpc-port
+        - "9002"
+        - --grpc-health-port
+        - "9003"
+        - --config-file
+        - "/etc/epp/epp-config.yaml"
+        - --allow-experimental-plugins=true
+        - --ha-enable-leader-election=false
+        ports:
+        - containerPort: 9002
+        - containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        livenessProbe:
+          grpc:
+            port: 9003
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 9003
+            service: envoy.service.ext_proc.v3.ExternalProcessor
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: epp-config
+          mountPath: /etc/epp
+      volumes:
+      - name: epp-config
+        configMap:
+          name: qwen3-coder-30b-epp-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-coder-30b-epp
+  labels:
+    app: qwen3-coder-30b-epp
+spec:
+  selector:
+    app: qwen3-coder-30b-epp
+  ports:
+  - name: grpc-ext-proc
+    protocol: TCP
+    port: 9002
+    targetPort: 9002
+    appProtocol: http2
+  - name: metrics
+    protocol: TCP
+    port: 9090
+    targetPort: 9090
+  type: ClusterIP

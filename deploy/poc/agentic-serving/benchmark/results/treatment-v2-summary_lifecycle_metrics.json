@@ -1,0 +1,321 @@
+{
+ "benchmark_time_seconds": 11711.105842679972,
+ "load_summary": {
+  "count": 3515,
+  "schedule_delay": {
+   "mean": 3751.3647714650288,
+   "min": 0.007771852950099856,
+   "max": 10744.991177347023,
+   "p0.1": 0.031941519793123006,
+   "p1": 23.078991988960187,
+   "p5": 194.78721538891554,
+   "p10": 417.75810103598053,
+   "p25": 1118.2589578514744,
+   "median": 3016.5712734929984,
+   "p75": 5835.227650786517,
+   "p90": 8675.373405197413,
+   "p95": 9320.039114242407,
+   "p99": 10328.101112270973,
+   "p99.9": 10724.880553888544
+  }
+ },
+ "successes": {
+  "count": 3511,
+  "latency": {
+   "request_latency": {
+    "mean": 22.38001948976835,
+    "min": 0.19480172998737544,
+    "max": 462.5885656820028,
+    "p0.1": 0.255866058167303,
+    "p1": 0.3588078935747035,
+    "p5": 0.4857764895132277,
+    "p10": 1.100044185994193,
+    "p25": 2.9079471669974737,
+    "median": 8.309899355983362,
+    "p75": 23.751680395012954,
+    "p90": 54.9201053029974,
+    "p95": 94.39671333850129,
+    "p99": 195.00420511449948,
+    "p99.9": 315.32754740254217
+   },
+   "normalized_time_per_output_token": {
+    "mean": 0.027557827408763044,
+    "min": 0.005880027751695236,
+    "max": 0.8338761686422264,
+    "p0.1": 0.006204462817276621,
+    "p1": 0.006975833993191132,
+    "p5": 0.00805355335415114,
+    "p10": 0.009210358648392824,
+    "p25": 0.016060511883332962,
+    "median": 0.02107650130209601,
+    "p75": 0.02891478791493196,
+    "p90": 0.04384653635705555,
+    "p95": 0.06436127467666092,
+    "p99": 0.1249717949839708,
+    "p99.9": 0.5276299814951387
+   },
+   "time_per_output_token": {
+    "mean": 0.019770017057241625,
+    "min": 1.9786600023508073e-05,
+    "max": 0.443474670604337,
+    "p0.1": 9.20387819642201e-05,
+    "p1": 0.001783456823322922,
+    "p5": 0.005731472062157432,
+    "p10": 0.006968015763799057,
+    "p25": 0.011058868860651161,
+    "median": 0.018236637963827795,
+    "p75": 0.022790710414902812,
+    "p90": 0.030989191937982285,
+    "p95": 0.03821437622125906,
+    "p99": 0.07455907150155834,
+    "p99.9": 0.27841028508073723
+   },
+   "time_to_first_token": {
+    "mean": 1.1260178073883182,
+    "min": 0.0468172209803015,
+    "max": 25.352244645007886,
+    "p0.1": 0.06692095198610332,
+    "p1": 0.1340123709058389,
+    "p5": 0.20392871601507068,
+    "p10": 0.23901817598380148,
+    "p25": 0.3227565599954687,
+    "median": 0.4554509269655682,
+    "p75": 0.7833783574751578,
+    "p90": 2.093652027018834,
+    "p95": 4.693584592518164,
+    "p99": 13.259538038040109,
+    "p99.9": 20.921095012927072
+   },
+   "inter_token_latency": {
+    "mean": 0.02157223656143825,
+    "min": 0.0,
+    "max": 3.227773861028254,
+    "p0.1": 0.0,
+    "p1": 0.0011837968626059597,
+    "p5": 0.006462157401256263,
+    "p10": 0.007357868610415608,
+    "p25": 0.011833180993562564,
+    "median": 0.016808226995635778,
+    "p75": 0.020692621503258124,
+    "p90": 0.02569329260149971,
+    "p95": 0.03342450151103548,
+    "p99": 0.19650758835603493,
+    "p99.9": 0.8167407382171484
+   }
+  },
+  "throughput": {
+   "input_tokens_per_sec": 28573.029523864767,
+   "output_tokens_per_sec": 313.4198468792972,
+   "total_tokens_per_sec": 28886.449370744063,
+   "requests_per_sec": 0.2998008938835226,
+   "images_per_sec": 0.0,
+   "videos_per_sec": 0.0,
+   "audios_per_sec": 0.0
+  },
+  "request_size_bytes": {
+   "mean": 385152.10623753915,
+   "min": 804.0,
+   "max": 1116594.0,
+   "p0.1": 1669.81,
+   "p1": 5080.300000000001,
+   "p5": 29352.0,
+   "p10": 120730.0,
+   "p25": 222413.0,
+   "median": 355784.0,
+   "p75": 505279.0,
+   "p90": 720214.0,
+   "p95": 865593.5,
+   "p99": 1016722.5,
+   "p99.9": 1076937.7900000005
+  },
+  "image": {
+   "count": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "p0.1": 0.0,
+    "p1": 0.0,
+    "p5": 0.0,
+    "p10": 0.0,
+    "p25": 0.0,
+    "median": 0.0,
+    "p75": 0.0,
+    "p90": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "p99.9": 0.0
+   },
+   "pixels": null,
+   "bytes": null,
+   "aspect_ratio": null
+  },
+  "video": {
+   "count": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "p0.1": 0.0,
+    "p1": 0.0,
+    "p5": 0.0,
+    "p10": 0.0,
+    "p25": 0.0,
+    "median": 0.0,
+    "p75": 0.0,
+    "p90": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "p99.9": 0.0
+   },
+   "frames": null,
+   "pixels": null,
+   "bytes": null,
+   "aspect_ratio": null
+  },
+  "audio": {
+   "count": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "p0.1": 0.0,
+    "p1": 0.0,
+    "p5": 0.0,
+    "p10": 0.0,
+    "p25": 0.0,
+    "median": 0.0,
+    "p75": 0.0,
+    "p90": 0.0,
+    "p95": 0.0,
+    "p99": 0.0,
+    "p99.9": 0.0
+   },
+   "seconds": null,
+   "bytes": null
+  },
+  "prompt_tokens": {
+   "total": 334621773.0,
+   "cached": 0.0,
+   "uncached": 334621773.0,
+   "mean": 95306.68555966961,
+   "min": 139.0,
+   "max": 261335.0,
+   "p0.1": 391.51,
+   "p1": 1060.8,
+   "p5": 6795.5,
+   "p10": 30468.0,
+   "p25": 55223.0,
+   "median": 86520.0,
+   "p75": 125017.5,
+   "p90": 174501.0,
+   "p95": 216369.5,
+   "p99": 248676.30000000005,
+   "p99.9": 259227.8100000001
+  },
+  "output_len": {
+   "mean": 1045.4266590714897,
+   "min": 4.0,
+   "max": 21804.0,
+   "p0.1": 6.0,
+   "p1": 6.0,
+   "p5": 14.0,
+   "p10": 76.0,
+   "p25": 147.0,
+   "median": 409.0,
+   "p75": 1121.5,
+   "p90": 2683.0,
+   "p95": 4422.5,
+   "p99": 8851.900000000007,
+   "p99.9": 13426.210000000101
+  },
+  "output_tokens": {
+   "total": 3670493.0,
+   "mean": 1045.4266590714897,
+   "min": 4.0,
+   "max": 21804.0,
+   "p0.1": 6.0,
+   "p1": 6.0,
+   "p5": 14.0,
+   "p10": 76.0,
+   "p25": 147.0,
+   "median": 409.0,
+   "p75": 1121.5,
+   "p90": 2683.0,
+   "p95": 4422.5,
+   "p99": 8851.900000000007,
+   "p99.9": 13426.210000000101
+  },
+  "token_count_mismatches": 1327,
+  "client_fallback_requests": {
+   "prompt": 0,
+   "output": 0
+  }
+ },
+ "failures": {
+  "count": 4,
+  "request_latency": {
+   "mean": 0.6912718612584285,
+   "min": 0.6370560160139576,
+   "max": 0.722105422988534,
+   "p0.1": 0.6372461668739561,
+   "p1": 0.638957524613943,
+   "p5": 0.6465635590138845,
+   "p10": 0.6560711020138115,
+   "p25": 0.6845937310135923,
+   "median": 0.7029630030156113,
+   "p75": 0.7096411332604475,
+   "p90": 0.7171197070972994,
+   "p95": 0.7196125650429167,
+   "p99": 0.7216068513994105,
+   "p99.9": 0.7220555658296216
+  },
+  "prompt_tokens": {
+   "total": 0.0,
+   "cached": 0.0,
+   "uncached": 0.0,
+   "mean": 0.0,
+   "min": 0.0,
+   "max": 0.0,
+   "p0.1": 0.0,
+   "p1": 0.0,
+   "p5": 0.0,
+   "p10": 0.0,
+   "p25": 0.0,
+   "median": 0.0,
+   "p75": 0.0,
+   "p90": 0.0,
+   "p95": 0.0,
+   "p99": 0.0,
+   "p99.9": 0.0
+  },
+  "by_label": {
+   "400 - Context Window": {
+    "count": 4,
+    "messages": [
+     {
+      "message": "This model's maximum context length is 262144 tokens. However, you requested 688 output tokens and your prompt contains at least 261457 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261457)",
+      "session_ids": [
+       "wekatrace36_1d52c891bba8f47980ab604cb293e91056ef"
+      ]
+     },
+     {
+      "message": "This model's maximum context length is 262144 tokens. However, you requested 230 output tokens and your prompt contains at least 261915 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261915)",
+      "session_ids": [
+       "wekatrace19_0d75185d4e958ad360c16451eaa95d508edf"
+      ]
+     },
+     {
+      "message": "This model's maximum context length is 262144 tokens. However, you requested 991 output tokens and your prompt contains at least 261154 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=261154)",
+      "session_ids": [
+       "wekatrace37_1d52e24446ecdb36d1351d53094d8a67f621"
+      ]
+     },
+     {
+      "message": "This model's maximum context length is 262144 tokens. However, you requested 8630 output tokens and your prompt contains at least 253515 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=253515)",
+      "session_ids": [
+       "wekatrace5_04b25fe5b2ffa5e7ec9890426cce59838a05"
+      ]
+     }
+    ]
+   }
+  }
+ }
+}

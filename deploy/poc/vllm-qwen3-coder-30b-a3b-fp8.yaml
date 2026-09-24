@@ -1,0 +1,192 @@
+# vLLM deployment for the KV-cache retention POC.
+#
+# Runs vllm-project/vllm PR #38514 (Context-Aware KV-Cache Retention API,
+# https://github.com/vllm-project/vllm/pull/38514) from the contributor fork
+# moreh-dev/vllm, branch retention-api-bench. The branch is based on vLLM main
+# 34 commits before the v0.19.0 tag, so the container image is
+# ghcr.io/llm-d/llm-d-cuda:v0.7.0, which ships vLLM v0.19.1: torch and
+# precompiled-wheel dependencies match, and the PR touches only Python code,
+# so VLLM_USE_PRECOMPILED=1 editable install works.
+#
+# Model: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 (MoE, 30B total / 3B active,
+# FP8 weights). TP=2, 262144 max context, FP8 KV cache.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3-coder-30b
+  labels:
+    app: vllm-qwen3-coder-30b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-qwen3-coder-30b
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen3-coder-30b
+    spec:
+      containers:
+        - name: vllm
+          image: ghcr.io/llm-d/llm-d-cuda:v0.7.0
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RAWIO
+            runAsGroup: 0
+            runAsUser: 0
+          imagePullPolicy: Always
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |-
+              # Clear /dev/shm on start to prevent running out of space when crashes occur
+              # https://github.com/llm-d/llm-d/issues/352
+              find /dev/shm -type f -delete
+
+              export LIBRARY_PATH=/usr/local/nvidia/lib64:$LIBRARY_PATH
+
+              # Install the PR branch in editable mode on top of the container's
+              # precompiled vLLM. Works as long as the branch base and the image's
+              # vLLM share the same torch dependencies (both are v0.19.x here).
+              set -e
+              export PARENT_DIR="/var/cache/huggingface"
+              export REPO_DIR="$PARENT_DIR/vllm"
+
+              mkdir -p "$PARENT_DIR"
+              cd "$PARENT_DIR"
+
+              if [ ! -d "$REPO_DIR/.git" ]; then
+                  echo "--- Repository not found. Cloning... ---"
+                  git clone "$VLLM_REPO" vllm
+                  cd vllm
+                  git checkout "$VLLM_BRANCH"
+              else
+                  echo "--- Repository exists. Entering and updating... ---"
+                  cd vllm
+
+                  # Clean up any failed locks from previous crashes
+                  rm -f .git/index.lock
+
+                  git remote set-url origin "$VLLM_REPO"
+                  git fetch origin "$VLLM_BRANCH"
+                  git checkout "$VLLM_BRANCH"
+                  git pull origin "$VLLM_BRANCH"
+              fi
+
+              export VLLM_USE_PRECOMPILED=1
+              uv pip install --system -e .
+              python3 -c "import vllm; print(vllm.__version__); print(vllm.__file__)"
+
+              echo "--- Starting vLLM from $(pwd) ---"
+
+              # The python entry point is required: the vllm shortcut still points
+              # to the unforked vLLM in the container image.
+              exec python3 -m vllm.entrypoints.openai.api_server \
+                --model Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
+                --port 8200 \
+                --disable-uvicorn-access-log \
+                --tensor-parallel-size 2 \
+                --max-model-len 262144 \
+                --kv-cache-dtype fp8 \
+                --gpu-memory-utilization 0.88
+          env:
+            - name: VLLM_REPO
+              value: "https://github.com/moreh-dev/vllm.git"
+            - name: VLLM_BRANCH
+              value: "retention-api-bench"
+            - name: TRITON_LIBCUDA_PATH
+              value: /usr/lib64
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            # Use cache directories from the mounted volume under one easy to mount
+            # root directory.
+            - name: CUDA_CACHE_PATH
+              value: /var/cache/vllm/cuda
+            - name: CCACHE_DIR
+              value: /var/cache/vllm/ccache
+            - name: VLLM_CACHE_ROOT
+              value: /var/cache/vllm/vllm
+            - name: FLASHINFER_WORKSPACE_BASE
+              value: /var/cache/vllm/flashinfer
+            # HuggingFace is likely to be quite a bit larger, give it its own cache
+            - name: HF_HUB_CACHE
+              value: /var/cache/huggingface
+            # Enables some additional vLLM features
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "1800" # 30 minutes
+          ports:
+            - containerPort: 8200
+              name: vllm
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: vllm
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            timeoutSeconds: 5
+            failureThreshold: 2700
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: vllm
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: vllm
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              ephemeral-storage: 256Gi
+              memory: 128Gi
+              nvidia.com/gpu: "2"
+            requests:
+              cpu: 16
+              ephemeral-storage: 256Gi
+              memory: 128Gi
+              nvidia.com/gpu: "2"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: hf-cache
+              mountPath: /var/cache/huggingface
+            - name: jit-cache
+              mountPath: /var/cache/vllm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        # Swap these for persistentVolumeClaim entries to keep the model
+        # download and the vLLM checkout across pod restarts.
+        - name: hf-cache
+          emptyDir:
+            sizeLimit: 128Gi
+        - name: jit-cache
+          emptyDir:
+            sizeLimit: 32Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen3-coder-30b
+  labels:
+    app: vllm-qwen3-coder-30b
+spec:
+  selector:
+    app: vllm-qwen3-coder-30b
+  ports:
+    - name: vllm
+      port: 8200
+      targetPort: vllm
+      protocol: TCP
