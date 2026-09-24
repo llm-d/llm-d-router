@@ -141,6 +141,20 @@ func TestSnapshotVLLMPublisher(t *testing.T) {
 	check(0, 0, 0)
 	command("restart")
 	check(1, 2, 0)
+	// A failed recorder answers unavailable until the engine restarts: a new
+	// producer indexes the publisher from live events, then recovers snapshots
+	// once the restarted engine has a new identity.
+	command("fail-recorder")
+	p.subscribersManager.Shutdown(ctx)
+	p = start()
+	discover()
+	require.Eventually(t, func() bool { return p.snapshots.Status().LiveOnly == 1 }, 8*time.Second, 25*time.Millisecond)
+	check(0, 0, 0)
+	command("store-gpu")
+	check(1, 2, 0)
+	command("restart")
+	require.Eventually(t, func() bool { status := p.snapshots.Status(); return status.Ready == 1 && status.LiveOnly == 0 }, 8*time.Second, 25*time.Millisecond)
+	check(1, 2, 0)
 	require.NoError(t, p.Extract(ctx, dl.EndpointEvent{Type: dl.EventDelete, Endpoint: dl.NewEndpoint(ep.GetMetadata(), nil)}))
 	check(0, 0, 0)
 }

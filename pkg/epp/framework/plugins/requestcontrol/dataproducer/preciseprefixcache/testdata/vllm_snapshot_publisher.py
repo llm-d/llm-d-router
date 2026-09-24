@@ -48,6 +48,11 @@ try:
             emit([store("CPU", []), store("CPU", []), AllBlocksCleared()])
         elif action in ("remove-one-copy", "remove-last-copy"):
             emit([BlockRemoved(block_hashes=hashes, medium="CPU")])
+        elif action == "store-gpu":
+            emit([store("GPU", list(range(1, 9)))])
+        elif action == "fail-recorder":
+            # The state a recorder reaches on any internal failure.
+            publisher._snapshot_recorder._failed.set()
         elif action == "stop":
             publisher.shutdown()
             publisher = None
