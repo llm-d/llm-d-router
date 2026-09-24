@@ -208,8 +208,8 @@ latencyPredictor:
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-training-server
-      tag: "0.9.0"
-      pullPolicy: IfNotPresent
+      tag: latest
+      pullPolicy: Always
     command: []
     args: []
     port: 8000
@@ -252,8 +252,8 @@ latencyPredictor:
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-prediction-server
-      tag: "0.9.0"
-      pullPolicy: IfNotPresent
+      tag: latest
+      pullPolicy: Always
     command: ["uvicorn"]
     args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]
     resources:
