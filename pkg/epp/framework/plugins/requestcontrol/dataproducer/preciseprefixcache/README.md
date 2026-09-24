@@ -113,10 +113,11 @@ model name must match the model requested through the EPP. Endpoint attribution
 uses the discovered serving address. The live and snapshot ports must be
 reachable from the EPP.
 
-The producer subscribes before requesting a snapshot and builds a hidden
-publisher generation in the shared index. It applies consecutive buffered live
-events after the snapshot cut and activates the generation only after
-reconstruction succeeds. A sequence gap, publisher UUID
+The producer subscribes before requesting a snapshot and reconstructs the
+publisher generation outside the shared index, so concurrent recoveries do not
+contend on index writes. It applies consecutive buffered live events after the
+snapshot cut, then publishes the generation to the shared index and activates it
+only after reconstruction succeeds. A sequence gap, publisher UUID
 change, malformed event, missing reconstruction metadata, or heartbeat timeout
 removes that publisher's cache affinity and triggers another snapshot request.
 Other publishers remain independently available. Endpoint deletion removes its

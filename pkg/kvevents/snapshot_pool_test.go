@@ -181,3 +181,51 @@ func TestLiveOnlyGenerationCleanupPreservesOtherPublishers(t *testing.T) {
 		require.Equal(t, []kvblock.PodEntry{{PodIdentifier: "generation-snapshot", DeviceTier: "gpu"}}, entries[key])
 	}
 }
+
+func TestStagedSnapshotMatchesDirectApplication(t *testing.T) {
+	ctx := context.Background()
+	events := &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{101, 102}, Tokens: []uint32{1, 2, 3, 4, 5, 6, 7, 8}, BlockSize: 4, DeviceTier: "GPU"},
+		&BlockStoredEvent{BlockHashes: []uint64{103}, ParentHash: 102, Tokens: []uint32{9, 10, 11, 12}, BlockSize: 4, DeviceTier: "GPU"},
+		&BlockStoredEvent{BlockHashes: []uint64{101, 102}, BlockSize: 4, DeviceTier: "CPU"},
+		&BlockRemovedEvent{BlockHashes: []uint64{102}, DeviceTier: "GPU"},
+		&BlockStoredEvent{BlockHashes: []uint64{201}, Tokens: []uint32{21, 22, 23, 24}, BlockSize: 4, DeviceTier: "GPU"},
+		&AllBlocksClearedEvent{},
+		&BlockStoredEvent{BlockHashes: []uint64{301}, Tokens: []uint32{31, 32, 33, 34}, BlockSize: 4, DeviceTier: "GPU"},
+		&BlockRemovedEvent{BlockHashes: []uint64{101}, DeviceTier: "CPU"},
+	}}
+	direct, directIndex, _ := newTestPool(t, 4)
+	direct.strict, direct.ownsEntries = true, true
+	require.NoError(t, direct.processEventBatch(ctx, events, "generation", "model"))
+
+	staged, stagedIndex, _ := newTestPool(t, 4)
+	staged.strict, staged.ownsEntries, staged.staged = true, true, true
+	require.NoError(t, staged.processEventBatch(ctx, events, "generation", "model"))
+	require.Equal(t, direct.snapshotEntries, staged.snapshotEntries)
+	for owned := range staged.snapshotEntries {
+		entries, err := stagedIndex.Lookup(ctx, []kvblock.BlockHash{owned.key}, nil)
+		require.NoError(t, err)
+		require.Empty(t, entries[owned.key], "staged entries reached the shared index before publish")
+	}
+
+	require.NoError(t, staged.publishStaged(ctx))
+	require.NotEmpty(t, direct.snapshotEntries)
+	for owned := range direct.snapshotEntries {
+		want, err := directIndex.Lookup(ctx, []kvblock.BlockHash{owned.key}, nil)
+		require.NoError(t, err)
+		got, err := stagedIndex.Lookup(ctx, []kvblock.BlockHash{owned.key}, nil)
+		require.NoError(t, err)
+		require.ElementsMatch(t, want[owned.key], got[owned.key])
+	}
+
+	// After publish the pool writes through, and cleanup removes everything.
+	require.NoError(t, staged.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{401}, Tokens: []uint32{41, 42, 43, 44}, BlockSize: 4, DeviceTier: "GPU"},
+	}}, "generation", "model"))
+	require.NoError(t, staged.clearSnapshotGeneration(ctx))
+	for owned := range direct.snapshotEntries {
+		got, err := stagedIndex.Lookup(ctx, []kvblock.BlockHash{owned.key}, nil)
+		require.NoError(t, err)
+		require.Empty(t, got[owned.key])
+	}
+}

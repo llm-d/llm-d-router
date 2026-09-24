@@ -54,6 +54,8 @@ const (
 	// Eviction is fail closed: a later event that references metadata older than
 	// this bounded history deactivates the generation and starts a fresh snapshot.
 	snapshotEngineMappings = 1 << 20
+	// Bounds how long one bulk publish holds the index-wide write lock.
+	snapshotPublishKeys = 4096
 )
 
 // SnapshotManager owns a shared index with replaceable publisher generations.
@@ -581,6 +583,7 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 		return follow(ctx, take, 0, index)
 	}
 	pool.strict = true
+	pool.staged = true
 	if !strings.HasPrefix(first.topic, "kv@") || strings.Count(first.topic, "@") != 2 {
 		return fmt.Errorf("snapshot recovery requires kv@<address:port>@<model> topic")
 	}
@@ -682,6 +685,9 @@ waiting:
 			return err
 		}
 	}
+	if err := pool.publishStaged(ctx); err != nil {
+		return err
+	}
 	if err := s.activate(ctx, generation, false); err != nil {
 		return err
 	}
@@ -721,7 +727,7 @@ func (p *Pool) clearSnapshotGPU(ctx context.Context, pod string) error {
 			return err
 		}
 		for _, requestKey := range requestKeys {
-			if err := p.index.Evict(ctx, requestKey, kvblock.RequestKey, []kvblock.PodEntry{entry}); err != nil {
+			if err := p.indexEvict(ctx, requestKey, kvblock.RequestKey, []kvblock.PodEntry{entry}); err != nil {
 				return err
 			}
 		}
@@ -790,10 +796,45 @@ func (p *Pool) untrackSnapshotStore(keys []kvblock.BlockHash, entries []kvblock.
 
 func (p *Pool) clearSnapshotGeneration(ctx context.Context) error {
 	for owned := range p.snapshotEntries {
-		if err := p.index.Evict(ctx, owned.key, kvblock.RequestKey, []kvblock.PodEntry{owned.entry}); err != nil {
+		if err := p.indexEvict(ctx, owned.key, kvblock.RequestKey, []kvblock.PodEntry{owned.entry}); err != nil {
 			return err
 		}
 	}
 	clear(p.snapshotEntries)
+	return nil
+}
+
+func (p *Pool) indexAdd(ctx context.Context, engineKeys, requestKeys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+	if p.staged {
+		return nil
+	}
+	return p.index.Add(ctx, engineKeys, requestKeys, entries)
+}
+
+func (p *Pool) indexEvict(ctx context.Context, key kvblock.BlockHash, keyType kvblock.KeyType, entries []kvblock.PodEntry) error {
+	if p.staged {
+		return nil
+	}
+	return p.index.Evict(ctx, key, keyType, entries)
+}
+
+// publishStaged installs a staged generation's owned entries in the shared
+// index. Every index write takes one index-wide lock, so a snapshot applied
+// write by write contends with every other publisher; bulk writes do not, and
+// entries the snapshot stores and then removes never reach the index.
+func (p *Pool) publishStaged(ctx context.Context) error {
+	byEntry := make(map[kvblock.PodEntry][]kvblock.BlockHash)
+	for owned := range p.snapshotEntries {
+		byEntry[owned.entry] = append(byEntry[owned.entry], owned.key)
+	}
+	p.staged = false
+	for entry, keys := range byEntry {
+		for start := 0; start < len(keys); start += snapshotPublishKeys {
+			end := min(start+snapshotPublishKeys, len(keys))
+			if err := p.index.Add(ctx, nil, keys[start:end], []kvblock.PodEntry{entry}); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
