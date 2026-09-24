@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"math/rand/v2"
@@ -33,6 +34,28 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"golang.org/x/time/rate"
 )
+
+// testRunningMarker signals to an external observer that this load-test binary is active.
+const testRunningMarker = "/tmp/test_running"
+
+// createRunningMarker creates path exclusively so a pre-existing symlink in the shared
+// tmp directory cannot redirect the write. A leftover marker from a previous crashed
+// run is removed and the exclusive create retried once.
+func createRunningMarker(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		if rmErr := os.Remove(path); rmErr != nil {
+			return rmErr
+		}
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString("running")
+	return err
+}
 
 type TestMetrics struct {
 	TotalRequests         int64
@@ -88,7 +111,7 @@ func main() {
 	coalesceWindowMs := parseEnvInt("COALESCE_WINDOW_MS", 5)
 	maxCoalescedCallers := parseEnvInt("MAX_COALESCED_CALLERS", 50)
 
-	if err := os.WriteFile("/tmp/test_running", []byte("running"), 0644); err != nil {
+	if err := createRunningMarker(testRunningMarker); err != nil {
 		log.Printf("Warning: could not create test_running marker: %v", err)
 	}
 	// Removed defer — cleaned up explicitly before all exit points to satisfy gocritic.
@@ -127,7 +150,7 @@ func main() {
 
 	if err := predictor.Start(testCtx); err != nil {
 		cancel()
-		os.Remove("/tmp/test_running")
+		os.Remove(testRunningMarker)
 		logger.Error(err, "Failed to start predictor")
 		return
 	}
@@ -418,11 +441,11 @@ func main() {
 
 	if failedReq > 0 {
 		logger.Info("WARNING: Test had failed prediction requests", "failed_count", failedReq)
-		os.Remove("/tmp/test_running")
+		os.Remove(testRunningMarker)
 		os.Exit(1)
 	}
 
-	os.Remove("/tmp/test_running")
+	os.Remove(testRunningMarker)
 	logger.Info("Test completed successfully!")
 }
 
