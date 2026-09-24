@@ -577,3 +577,64 @@ func TestECPipelineResponsesImage(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildEncoderRequest_ForwardsMMProcessingFields locks in that the client
+// fields which change how a multimodal item is preprocessed reach the encoder.
+// vLLM folds mm_processor_kwargs into the multimodal hash
+// (ProcessorInputs.get_mm_hashes), so an encoder primed at the deployment
+// default stores its entry under a different hash than the one the prefiller
+// looks up: a silent cache miss and a recompute, with nothing reporting it.
+func TestBuildEncoderRequest_ForwardsMMProcessingFields(t *testing.T) {
+	mmKwargs := map[string]any{"min_pixels": 3136, "max_pixels": 313600}
+	mediaKwargs := map[string]any{"video": map[string]any{"num_frames": 8}}
+
+	for _, tc := range []struct {
+		name     string
+		apiType  reqcommon.APIType
+		mmItem   map[string]any
+		contentK string
+	}{
+		{"responses", reqcommon.APITypeResponses, map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"}, requestFieldInput},
+		{"chat", reqcommon.APITypeChatCompletions, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/img.jpg"}}, requestFieldMessages},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			originalRequest := map[string]any{
+				"model":                       "test-model",
+				requestFieldMMProcessorKwargs: mmKwargs,
+				requestFieldMediaIOKwargs:     mediaKwargs,
+				// Not a preprocessing field: salts the KV cache, not the
+				// multimodal hash, and the priming call's blocks are never read.
+				"cache_salt": "some-salt",
+			}
+
+			encoderRequest := buildEncoderRequest(originalRequest, tc.mmItem, tc.apiType)
+
+			assert.Equal(t, mmKwargs, encoderRequest[requestFieldMMProcessorKwargs])
+			assert.Equal(t, mediaKwargs, encoderRequest[requestFieldMediaIOKwargs])
+			assert.NotContains(t, encoderRequest, "cache_salt")
+			assert.Contains(t, encoderRequest, tc.contentK)
+		})
+	}
+}
+
+// TestBuildEncoderRequest_ForwardsRawMMProcessorKwargs covers the form the
+// fields actually arrive in: neither is in inspectedRequestFields, so the
+// sidecar hands them over as raw bytes that have to survive to the wire.
+func TestBuildEncoderRequest_ForwardsRawMMProcessorKwargs(t *testing.T) {
+	originalRequest := map[string]any{
+		"model":                       json.RawMessage(`"test-model"`),
+		requestFieldMMProcessorKwargs: json.RawMessage(`{"max_pixels":313600}`),
+	}
+
+	encoderRequest := buildEncoderRequest(originalRequest,
+		map[string]any{"type": "input_image", "image_url": "https://example.com/img.jpg"},
+		reqcommon.APITypeResponses)
+
+	body, err := json.Marshal(encoderRequest)
+	require.NoError(t, err)
+
+	var roundTripped map[string]any
+	require.NoError(t, json.Unmarshal(body, &roundTripped))
+	assert.Equal(t, map[string]any{"max_pixels": float64(313600)}, roundTripped[requestFieldMMProcessorKwargs])
+	assert.Equal(t, "test-model", roundTripped["model"])
+}
