@@ -25,6 +25,9 @@ spec:
       annotations:
         checksum/config: {{ include "llm-d-router.proxyConfigMapData" . | sha256sum }}
     spec:
+      {{- with .Values.router.proxy.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
       {{- if .Values.router.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
@@ -62,6 +65,12 @@ spec:
         {{- with $proxy.startupProbe }}
           startupProbe:
           {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $.Values.router.proxy.preStopSleepSeconds }}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ . }}
         {{- end }}
         {{- with $proxy.securityContext }}
           securityContext:

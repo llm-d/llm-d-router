@@ -459,6 +459,21 @@ if ! grep -q -- 'transport_socket_match_criteria' "${proxy_service_render_output
   exit 1
 fi
 
+# The proxy Deployment drains connections before SIGTERM: Envoy exits on the signal, so without
+# a preStop delay and a connection age limit its in-flight streams are cut.
+if ! grep -q -- 'max_connection_duration: 10s' "${proxy_service_render_output}"; then
+  echo "Proxy service mode does not bound client connection age for shutdown drain"
+  exit 1
+fi
+if ! grep -q -- 'terminationGracePeriodSeconds: 45' "${proxy_service_render_output}"; then
+  echo "Proxy service mode does not give the proxy Deployment a drain grace period"
+  exit 1
+fi
+if ! grep -A2 -- 'preStop:' "${proxy_service_render_output}" | grep -q -- 'seconds: 25'; then
+  echo "Proxy service mode does not delay proxy SIGTERM with a preStop sleep"
+  exit 1
+fi
+
 echo "Verifying the ext_proc health check follows a custom EPP health port and plaintext serving..."
 health_port_output="${TEMP_DIR}/llm-d-router-standalone-health-port-render.yaml"
 health_port_command="${HELM} template hp ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false > ${health_port_output}"

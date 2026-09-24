@@ -22,6 +22,16 @@ router:
     # Replica count for the proxy Deployment when mode=service.
     replicas: 2
 
+    # Shutdown drain for the proxy Deployment when mode=service. Envoy exits on SIGTERM, so
+    # the pod first leaves the Service endpoints for preStopSleepSeconds while Envoy closes
+    # each client connection once it is maxConnectionDuration old, letting in-flight streams
+    # finish. Keep preStopSleepSeconds above maxConnectionDuration plus a typical request, and
+    # terminationGracePeriodSeconds above preStopSleepSeconds. Streams longer than that are
+    # still cut.
+    maxConnectionDuration: "10s"
+    preStopSleepSeconds: 25
+    terminationGracePeriodSeconds: 45
+
     # Whether the proxy passes traffic through (fail-open) when EPP is
     # unreachable, for active/passive resiliency.
     failOpen: true
@@ -188,6 +198,9 @@ router:
                               server_header_transformation: PASS_THROUGH
                               common_http_protocol_options:
                                 headers_with_underscores_action: REJECT_REQUEST
+                                {{- with .Values.router.proxy.maxConnectionDuration }}
+                                max_connection_duration: {{ . }}
+                                {{- end }}
                               path_with_escaped_slashes_action: UNESCAPE_AND_REDIRECT
                               access_log:
                                 - name: envoy.access_loggers.file
