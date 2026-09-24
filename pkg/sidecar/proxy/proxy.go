@@ -68,6 +68,8 @@ const (
 	requestFieldInput                = reqcommon.FieldInput
 	requestFieldStore                = "store"
 	requestFieldModel                = "model"
+	requestFieldMMProcessorKwargs    = "mm_processor_kwargs"
+	requestFieldMediaIOKwargs        = "media_io_kwargs"
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).

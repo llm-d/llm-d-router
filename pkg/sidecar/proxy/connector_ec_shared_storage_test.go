@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -716,6 +717,72 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 			err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id", tt.apiType)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCalls, requestCount.Load())
+		})
+	}
+}
+
+// TestFanoutEncoderForwardsMMProcessorKwargs drives a client body through the
+// same decode the sidecar uses and asserts mm_processor_kwargs reaches the
+// encoder on the wire. The unit coverage in
+// TestBuildEncoderRequest_ForwardsMMProcessingFields stops at the map; this
+// covers the decode and marshal in between, where the field is raw bytes.
+func TestFanoutEncoderForwardsMMProcessorKwargs(t *testing.T) {
+	const mmKwargs = `{"min_pixels":3136,"max_pixels":313600}`
+
+	tests := []struct {
+		name    string
+		body    string
+		apiType reqcommon.APIType
+	}{
+		{
+			name:    "chat completions request",
+			body:    `{"model":"m","mm_processor_kwargs":` + mmKwargs + `,"media_io_kwargs":{"video":{"num_frames":8}},"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.jpg"}}]}]}`,
+			apiType: reqcommon.APITypeChatCompletions,
+		},
+		{
+			name:    "responses request",
+			body:    `{"model":"m","mm_processor_kwargs":` + mmKwargs + `,"media_io_kwargs":{"video":{"num_frames":8}},"input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/image.jpg"}]}]}`,
+			apiType: reqcommon.APITypeResponses,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBodies [][]byte
+			var mu sync.Mutex
+			encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				mu.Lock()
+				gotBodies = append(gotBodies, raw)
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer encoderBackend.Close()
+
+			encoderURL, err := url.Parse(encoderBackend.URL)
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+			srv.logger = log.Log
+
+			parsed, err := decodeRequestBody([]byte(tt.body))
+			require.NoError(t, err)
+
+			require.NoError(t, srv.fanoutEncoderPrimer(context.Background(), parsed,
+				[]string{encoderURL.Host}, "test-req-id", tt.apiType))
+
+			mu.Lock()
+			defer mu.Unlock()
+			require.Len(t, gotBodies, 1)
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(gotBodies[0], &got))
+			assert.Equal(t, map[string]any{"min_pixels": float64(3136), "max_pixels": float64(313600)},
+				got[requestFieldMMProcessorKwargs])
+			assert.Equal(t, map[string]any{"video": map[string]any{"num_frames": float64(8)}},
+				got[requestFieldMediaIOKwargs])
 		})
 	}
 }
