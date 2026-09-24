@@ -321,6 +321,15 @@ test-e2e-run: image-pull ## Ensure images are present, then run e2e tests
 test-e2e: image-build-builder image-build ## Build images and run e2e tests
 	$(MAKE) test-e2e-run
 
+.PHONY: test-e2e-responses
+test-e2e-responses: ## Run only the OpenResponses compliance e2e specs (simulator backend, no image build required)
+	@printf "\033[33;1m==== Running OpenResponses compliance e2e tests ====\033[0m\n"
+	$(CONTAINER_RUNTIME) run $(BUILDER_RUN_FLAGS) $(BUILDER_E2E_FLAGS) \
+		-e VLLM_RENDER_IMAGE=$(VLLM_IMAGE) \
+		-e LOAD_VLLM_RENDER_IMAGE=false \
+		-e E2E_NUM_PROCS=1 \
+		$(BUILDER_IMAGE) ./test/scripts/test-e2e-responses.sh
+
 
 .PHONY: bench-tokenizer
 bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
