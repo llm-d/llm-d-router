@@ -81,6 +81,7 @@ type snapshotSubscriber struct {
 	mu                                      sync.RWMutex
 	generationID                            string
 	activeID                                string
+	liveOnly                                bool
 	lastReceive                             atomic.Int64
 	successes                               atomic.Uint64
 }
@@ -188,12 +189,14 @@ func (m *SnapshotManager) Shutdown(_ context.Context) {
 	}
 	metrics.SubscriberActive.Set(0)
 	metrics.SnapshotReady.Set(0)
+	metrics.LiveOnlyPublishers.Set(0)
 }
 
 // SnapshotStatus reports publisher recovery states.
 type SnapshotStatus struct {
 	Registered int
 	Ready      int
+	LiveOnly   int
 	Recovering int
 	Stale      int
 }
@@ -204,14 +207,12 @@ func (m *SnapshotManager) Status() SnapshotStatus {
 	defer m.mu.RUnlock()
 	status := SnapshotStatus{Registered: len(m.subscribers)}
 	for _, s := range m.subscribers {
-		s.mu.RLock()
-		active := s.activeID != ""
-		fresh := time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout
-		s.mu.RUnlock()
-		switch {
-		case active && fresh:
+		switch state, _ := s.state(); state {
+		case publisherReady:
 			status.Ready++
-		case active:
+		case publisherLiveOnly:
+			status.LiveOnly++
+		case publisherStale:
 			status.Stale++
 		default:
 			status.Recovering++
@@ -223,7 +224,9 @@ func (m *SnapshotManager) Status() SnapshotStatus {
 func (m *SnapshotManager) updateReadyMetric() {
 	m.metricsMu.Lock()
 	defer m.metricsMu.Unlock()
-	metrics.SnapshotReady.Set(float64(m.Status().Ready))
+	status := m.Status()
+	metrics.SnapshotReady.Set(float64(status.Ready))
+	metrics.LiveOnlyPublishers.Set(float64(status.LiveOnly))
 }
 
 func (m *SnapshotManager) updateSubscriberMetric() {
@@ -252,10 +255,7 @@ func (m *SnapshotManager) GetReadySubscribers() ([]string, []string) {
 	defer m.mu.RUnlock()
 	ids, endpoints := []string{}, []string{}
 	for id, s := range m.subscribers {
-		s.mu.RLock()
-		ready := s.activeID != "" && time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout
-		s.mu.RUnlock()
-		if !ready {
+		if state, _ := s.state(); !state.routable() {
 			continue
 		}
 		ids = append(ids, id)
@@ -271,11 +271,9 @@ func (m *SnapshotManager) MatchBlockKeys(ctx context.Context, keys []kvblock.Blo
 		if pods.Len() > 0 && !pods.Has(s.sourceEndpoint) {
 			continue
 		}
-		s.mu.RLock()
-		if s.activeID != "" && time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout {
-			active[s.activeID] = s.sourceEndpoint
+		if state, generation := s.state(); state.routable() {
+			active[generation] = s.sourceEndpoint
 		}
-		s.mu.RUnlock()
 	}
 	m.mu.RUnlock()
 	if len(active) == 0 {
@@ -292,11 +290,55 @@ func (m *SnapshotManager) MatchBlockKeys(ctx context.Context, keys []kvblock.Blo
 	return result, nil
 }
 
+type publisherState int
+
+const (
+	publisherRecovering publisherState = iota
+	// publisherReady has a complete snapshot generation and a recent heartbeat.
+	publisherReady
+	// publisherLiveOnly has no snapshot endpoint and is indexed from live events.
+	publisherLiveOnly
+	// publisherStale has a snapshot generation without a recent heartbeat.
+	publisherStale
+)
+
+func (p publisherState) routable() bool { return p == publisherReady || p == publisherLiveOnly }
+
+// state reports the publisher's lookup state and its active generation.
+func (s *snapshotSubscriber) state() (publisherState, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch {
+	case s.activeID == "":
+		return publisherRecovering, ""
+	case s.liveOnly:
+		return publisherLiveOnly, s.activeID
+	case time.Since(time.Unix(0, s.lastReceive.Load())) <= heartbeatTimeout:
+		return publisherReady, s.activeID
+	}
+	return publisherStale, s.activeID
+}
+
+func (s *snapshotSubscriber) activate(ctx context.Context, generation string, liveOnly bool) error {
+	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.activeID = generation
+	s.liveOnly = liveOnly
+	s.successes.Add(1)
+	s.mu.Unlock()
+	s.manager.updateReadyMetric()
+	return nil
+}
+
 func (s *snapshotSubscriber) deactivate(generation string) {
 	s.mu.Lock()
 	changed := false
 	if s.activeID == generation {
 		s.activeID = ""
+		s.liveOnly = false
 		changed = true
 	}
 	s.mu.Unlock()
@@ -364,11 +406,39 @@ type snapshotLive struct {
 	payload  []byte
 }
 
+// snapshotEnabled reports whether the publisher serves snapshots: vLLM appends
+// its 16-byte identity to the sequence frame, and heartbeats, only then.
+func (m snapshotLive) snapshotEnabled() bool { return m.epoch != nil }
+
 func decodeSnapshotLive(msg zmq.Msg) (snapshotLive, error) {
-	if len(msg.Frames) != 3 || len(msg.Frames[1]) != 24 {
-		return snapshotLive{}, fmt.Errorf("expected snapshot-enabled live frames")
+	if len(msg.Frames) != 3 {
+		return snapshotLive{}, fmt.Errorf("malformed live frames")
 	}
-	return snapshotLive{string(msg.Frames[0]), binary.BigEndian.Uint64(msg.Frames[1][:8]), msg.Frames[1][8:], msg.Frames[2]}, nil
+	switch len(msg.Frames[1]) {
+	case 8:
+		return snapshotLive{string(msg.Frames[0]), binary.BigEndian.Uint64(msg.Frames[1]), nil, msg.Frames[2]}, nil
+	case 24:
+		return snapshotLive{string(msg.Frames[0]), binary.BigEndian.Uint64(msg.Frames[1][:8]), msg.Frames[1][8:], msg.Frames[2]}, nil
+	}
+	return snapshotLive{}, fmt.Errorf("malformed live sequence frame (%d bytes)", len(msg.Frames[1]))
+}
+
+// follow applies live messages until the stream fails or step rejects one.
+func follow(ctx context.Context, take func(time.Duration) (snapshotLive, error), timeout time.Duration,
+	step func(snapshotLive) error,
+) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		msg, err := take(timeout)
+		if err != nil {
+			return err
+		}
+		if err := step(msg); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete func()) error {
@@ -428,7 +498,12 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 			}
 		}
 	}()
-	take := func() (snapshotLive, error) {
+	// take waits for the next live message; a zero timeout waits indefinitely.
+	take := func(timeout time.Duration) (snapshotLive, error) {
+		var expired <-chan time.Time
+		if timeout > 0 {
+			expired = time.After(timeout)
+		}
 		select {
 		case msg := <-live:
 			queuedBytes.Add(-int64(len(msg.payload)))
@@ -437,14 +512,52 @@ func (s *snapshotSubscriber) consume(parent context.Context, recoveryComplete fu
 			return snapshotLive{}, err
 		case <-ctx.Done():
 			return snapshotLive{}, ctx.Err()
-		case <-time.After(heartbeatTimeout):
+		case <-expired:
 			return snapshotLive{}, fmt.Errorf("publisher heartbeat timeout")
 		}
 	}
-	first, err := take()
+	// The first frame shows whether the engine serves snapshots. Only
+	// snapshot-enabled engines heartbeat, so it has no deadline.
+	first, err := take(0)
 	if err != nil {
 		return err
 	}
+	pool, err := newGenerationPool(s.manager.index, s.manager.tokens, s.manager.adapter)
+	if err != nil {
+		return err
+	}
+	defer pool.queues[0].ShutDown()
+	defer func() {
+		if err := pool.clearSnapshotGeneration(context.Background()); err != nil {
+			log.FromContext(parent).Error(err, "Failed to clear KV snapshot generation", "endpoint", s.endpoint)
+		}
+	}()
+	apply := func(msg snapshotLive) error {
+		_, model, batch, err := s.manager.adapter.ParseMessage(&RawMessage{Topic: msg.topic, Payload: msg.payload})
+		if err != nil {
+			return err
+		}
+		return pool.processEventBatch(ctx, &batch, generation, model)
+	}
+	if !first.snapshotEnabled() {
+		// Without a snapshot endpoint there is nothing to recover: index live
+		// events as they arrive, as live mode does, and allow idle periods.
+		if err := s.activate(ctx, generation, true); err != nil {
+			return err
+		}
+		log.FromContext(ctx).Info("KV publisher has no snapshot endpoint, indexing live events only", "endpoint", s.endpoint)
+		recoveryComplete()
+		return follow(ctx, take, 0, func(msg snapshotLive) error {
+			if msg.snapshotEnabled() {
+				return fmt.Errorf("publisher changed to snapshot-enabled frames")
+			}
+			if err := apply(msg); err != nil {
+				log.FromContext(ctx).Error(err, "Failed to apply KV event batch", "endpoint", s.endpoint)
+			}
+			return nil
+		})
+	}
+	pool.strict = true
 	if !strings.HasPrefix(first.topic, "kv@") || strings.Count(first.topic, "@") != 2 {
 		return fmt.Errorf("snapshot recovery requires kv@<address:port>@<model> topic")
 	}
@@ -506,29 +619,11 @@ waiting:
 	if size > snapshotReplyBytes {
 		return fmt.Errorf("snapshot reply limit exceeded")
 	}
-	pool, err := NewPool(&Config{Concurrency: 1}, s.manager.index, s.manager.tokens, s.manager.adapter)
-	if err != nil {
-		return err
-	}
-	defer pool.queues[0].ShutDown()
-	pool.strict = true
-	defer func() {
-		if err := pool.clearSnapshotGeneration(context.Background()); err != nil {
-			log.FromContext(parent).Error(err, "Failed to clear KV snapshot generation", "endpoint", s.endpoint)
-		}
-	}()
-	apply := func(payload []byte) error {
-		_, model, batch, err := s.manager.adapter.ParseMessage(&RawMessage{Topic: first.topic, Payload: payload})
-		if err != nil {
-			return err
-		}
-		return pool.processEventBatch(ctx, &batch, generation, model)
-	}
 	for _, chunk := range f[2:] {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := apply(chunk); err != nil {
+		if err := apply(snapshotLive{topic: first.topic, payload: chunk}); err != nil {
 			return err
 		}
 	}
@@ -543,7 +638,7 @@ waiting:
 		if msg.sequence != next {
 			return fmt.Errorf("live sequence gap: got %d, want %d", msg.sequence, next)
 		}
-		if err := apply(msg.payload); err != nil {
+		if err := apply(msg); err != nil {
 			return err
 		}
 		next++
@@ -556,7 +651,7 @@ waiting:
 	}
 	// A finite cut prevents a busy publisher from indefinitely delaying install.
 	for remaining := len(live); remaining > 0; remaining-- {
-		msg, err := take()
+		msg, err := take(heartbeatTimeout)
 		if err != nil {
 			return err
 		}
@@ -564,34 +659,24 @@ waiting:
 			return err
 		}
 	}
-	s.mu.Lock()
-	if ctx.Err() != nil {
-		s.mu.Unlock()
-		return ctx.Err()
+	if err := s.activate(ctx, generation, false); err != nil {
+		return err
 	}
-	s.activeID = generation
-	s.successes.Add(1)
-	s.mu.Unlock()
-	s.manager.updateReadyMetric()
 	metrics.SnapshotRecoveries.WithLabelValues("success", "none").Inc()
 	metrics.SnapshotBootstrapDuration.Observe(time.Since(bootstrapStarted).Seconds())
 	recoveryComplete()
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		msg, err := take()
-		if err != nil {
-			return err
-		}
-		err = advance(msg)
-		if err != nil {
-			s.deactivate(generation)
-		}
-		if err != nil {
-			return err
-		}
+	return follow(ctx, take, heartbeatTimeout, advance)
+}
+
+// newGenerationPool returns a single-worker pool whose index entries belong to
+// one publisher generation and are removed by clearSnapshotGeneration.
+func newGenerationPool(index kvblock.Index, tokens kvblock.TokenProcessor, adapter EngineAdapter) (*Pool, error) {
+	pool, err := NewPool(&Config{Concurrency: 1}, index, tokens, adapter)
+	if err != nil {
+		return nil, err
 	}
+	pool.ownsEntries = true
+	return pool, nil
 }
 
 // GPU resets preserve offloaded residency and its reconstruction mappings.

@@ -50,8 +50,10 @@ type recoveryPublisher struct {
 	empty                  []byte
 	paused                 bool
 	unavailable            bool
-	hold                   <-chan struct{}
-	requests               int
+	// liveOnly emulates an engine without a snapshot endpoint: 8-byte sequence frames, no heartbeats.
+	liveOnly bool
+	hold     <-chan struct{}
+	requests int
 }
 
 func newRecoveryPublisher(ctx context.Context, t *testing.T, host string, livePort, snapshotPort int) *recoveryPublisher {
@@ -75,7 +77,7 @@ func newRecoveryPublisher(ctx context.Context, t *testing.T, host string, livePo
 				return
 			case <-ticker.C:
 				p.mu.Lock()
-				if !p.paused {
+				if !p.paused && !p.liveOnly {
 					p.send(p.empty)
 				}
 				p.mu.Unlock()
@@ -132,8 +134,12 @@ func snapshotBatch(t *testing.T, events ...any) []byte {
 func (p *recoveryPublisher) send(payload []byte) {
 	p.seq++
 	seq := make([]byte, 24)
+	if p.liveOnly {
+		seq = make([]byte, 8)
+	} else {
+		seq[8] = p.epoch
+	}
 	binary.BigEndian.PutUint64(seq, p.seq)
-	seq[8] = p.epoch
 	_ = p.pub.Send(zmq.NewMsgFrom([]byte(p.topic), seq, payload))
 }
 
@@ -199,6 +205,7 @@ func TestSnapshotRecoveryGatesRealScorer(t *testing.T) {
 			server.mu.Unlock()
 			check(t, 0)
 			require.Equal(t, 1.0, prefix.Score(ctx, req, []scheduling.Endpoint{stable})[stable], "unaffected publisher must remain routable with cache affinity")
+			require.Zero(t, p.snapshots.Status().LiveOnly, "a stalled snapshot publisher must recover, not fall back to live-only")
 			// Rebuilds must not expose partial cache affinity.
 			require.Never(t, func() bool { return score() != 0 }, 100*time.Millisecond, 10*time.Millisecond)
 			server.mu.Lock()
@@ -227,5 +234,64 @@ func TestSnapshotRecoveryGatesRealScorer(t *testing.T) {
 		server.unavailable = false
 		server.mu.Unlock()
 		check(t, 1)
+	})
+}
+
+func TestSnapshotModeServesPublishersWithoutSnapshotEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := newRecoveryPublisher(ctx, t, "127.0.0.1", snapshotTestPort(t), snapshotTestPort(t))
+	server.mu.Lock()
+	server.liveOnly = true
+	server.mu.Unlock()
+	t.Cleanup(cancel)
+	cfg := kvevents.DefaultConfig()
+	cfg.SnapshotPort = server.snapshotPort
+	cfg.PodDiscoveryConfig.SocketPort = server.livePort
+	cfg.PodDiscoveryConfig.PodLabelSelector = ""
+	indexCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	p, err := New(ctx, "live-only", PluginConfig{IndexerConfig: indexCfg, KVEventsConfig: cfg, TokenProcessorConfig: &kvblock.TokenProcessorConfig{BlockSizeTokens: 4}})
+	require.NoError(t, err)
+	defer p.subscribersManager.Shutdown(ctx)
+	ep := scheduling.NewEndpoint(&dl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod"}, Address: "127.0.0.1", Port: "8000"}, nil, nil)
+	require.NoError(t, p.Extract(ctx, dl.EndpointEvent{Type: dl.EventAddOrUpdate, Endpoint: dl.NewEndpoint(ep.GetMetadata(), nil)}))
+	req := &scheduling.InferenceRequest{TargetModel: "test-model", Body: &rh.InferenceRequestBody{TokenizedRequest: &rh.TokenizedRequest{Prompts: []rh.PromptTokens{{TokenIDs: []uint32{1, 2, 3, 4}}}}}}
+	prefix, err := scorer.New(ctx, "prefix", "live-only")
+	require.NoError(t, err)
+	score := func() float64 {
+		require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{ep}))
+		return prefix.Score(ctx, req, []scheduling.Endpoint{ep})[ep]
+	}
+	requests := func() int { server.mu.Lock(); defer server.mu.Unlock(); return server.requests }
+	publish := func() { server.mu.Lock(); server.send(server.chunks[0]); server.mu.Unlock() }
+	// Until the first frame the publisher's mode is unknown and it has no affinity.
+	require.Never(t, func() bool { return p.snapshots.Status().LiveOnly != 0 || score() != 0 }, time.Second, 50*time.Millisecond)
+	// An 8-byte sequence frame means no snapshot endpoint; live events give affinity at once.
+	require.Eventually(t, func() bool { publish(); return score() == 1 }, 3*time.Second, 50*time.Millisecond)
+	require.Equal(t, 1, p.snapshots.Status().LiveOnly)
+	// Idle engines send nothing without a snapshot endpoint; affinity must survive the heartbeat window.
+	require.Never(t, func() bool { return score() != 1 }, 6*time.Second, 100*time.Millisecond)
+	require.Zero(t, requests(), "a publisher without a snapshot endpoint must not be asked for snapshots")
+	require.Equal(t, 0, p.snapshots.Status().Ready)
+
+	t.Run("upgraded-in-place", func(t *testing.T) {
+		server.mu.Lock()
+		server.liveOnly = false
+		server.mu.Unlock()
+		require.Eventually(t, func() bool { return requests() > 0 }, 8*time.Second, 20*time.Millisecond)
+		require.Eventually(t, func() bool {
+			status := p.snapshots.Status()
+			return status.Ready == 1 && status.LiveOnly == 0 && score() == 1
+		}, 8*time.Second, 20*time.Millisecond)
+	})
+	t.Run("rolled-back", func(t *testing.T) {
+		server.mu.Lock()
+		server.liveOnly = true
+		server.mu.Unlock()
+		before := requests()
+		require.Eventually(t, func() bool { publish(); return p.snapshots.Status().LiveOnly == 1 && score() == 1 }, 15*time.Second, 50*time.Millisecond)
+		require.Never(t, func() bool { return score() != 1 }, 6*time.Second, 100*time.Millisecond)
+		require.Equal(t, before, requests())
 	})
 }

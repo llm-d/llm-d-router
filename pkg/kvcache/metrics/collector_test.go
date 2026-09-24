@@ -56,6 +56,7 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"KVEventRemovalsSkipped", KVEventRemovalsSkipped},
 		{"SubscriberActive", SubscriberActive},
 		{"SnapshotReady", SnapshotReady},
+		{"LiveOnlyPublishers", LiveOnlyPublishers},
 		{"SnapshotRecoveries", SnapshotRecoveries},
 		{"SnapshotBootstrapDuration", SnapshotBootstrapDuration},
 		{"SubscriberReconnections", SubscriberReconnections},
@@ -78,7 +79,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	kvevents := []prometheus.Collector{
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
-		SubscriberActive, SnapshotReady, SnapshotRecoveries, SnapshotBootstrapDuration,
+		SubscriberActive, SnapshotReady, LiveOnlyPublishers, SnapshotRecoveries, SnapshotBootstrapDuration,
 		SubscriberReconnections, MessagesReceived,
 		ZMQErrors, PoolQueueDepth, PoolCapacity,
 	}
@@ -89,6 +90,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	// Emit a sample for each labeled metric so it appears in the gather output.
 	SubscriberActive.Set(1)
 	SnapshotReady.Set(1)
+	LiveOnlyPublishers.Set(1)
 	SnapshotRecoveries.WithLabelValues("success", "none").Inc()
 	SnapshotBootstrapDuration.Observe(0.1)
 	SubscriberReconnections.WithLabelValues("pod-a").Inc()

@@ -28,6 +28,7 @@ func TestSnapshotOffloadPreservesEveryCanonicalBlock(t *testing.T) {
 	ctx := context.Background()
 	pool, index, tokens := newTestPool(t, 4)
 	pool.strict = true
+	pool.ownsEntries = true
 	prompt := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
 	require.NoError(t, pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
 		&BlockStoredEvent{BlockHashes: []uint64{101}, Tokens: prompt, BlockSize: 8, DeviceTier: "GPU"},
@@ -49,7 +50,9 @@ func TestSnapshotGenerationCleanupPreservesOtherPublishers(t *testing.T) {
 	poolB, err := NewPool(DefaultConfig(), index, tokens, nil)
 	require.NoError(t, err)
 	poolA.strict = true
+	poolA.ownsEntries = true
 	poolB.strict = true
+	poolB.ownsEntries = true
 	events := &EventBatch{Events: []GenericEvent{
 		&BlockStoredEvent{BlockHashes: []uint64{101}, Tokens: []uint32{1, 2, 3, 4}, BlockSize: 4, DeviceTier: "GPU"},
 	}}
@@ -70,7 +73,9 @@ func TestSnapshotEngineMetadataIsGenerationLocal(t *testing.T) {
 	poolB, err := NewPool(DefaultConfig(), index, tokens, nil)
 	require.NoError(t, err)
 	poolA.strict = true
+	poolA.ownsEntries = true
 	poolB.strict = true
+	poolB.ownsEntries = true
 	promptA := []uint32{1, 2, 3, 4}
 	promptB := []uint32{5, 6, 7, 8}
 	require.NoError(t, poolA.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
@@ -112,6 +117,7 @@ func TestSnapshotGenerationCleanupAfterOffloadAndReset(t *testing.T) {
 	ctx := context.Background()
 	pool, index, tokens := newTestPool(t, 4)
 	pool.strict = true
+	pool.ownsEntries = true
 	prompt := []uint32{1, 2, 3, 4}
 	require.NoError(t, pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
 		&BlockStoredEvent{BlockHashes: []uint64{101}, Tokens: prompt, BlockSize: 4, DeviceTier: "GPU"},
@@ -136,6 +142,7 @@ func TestStrictSnapshotRejectsStoreWithoutEngineHashesBeforeIndexing(t *testing.
 	ctx := context.Background()
 	pool, index, tokens := newTestPool(t, 4)
 	pool.strict = true
+	pool.ownsEntries = true
 	prompt := []uint32{1, 2, 3, 4}
 	err := pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
 		&BlockStoredEvent{Tokens: prompt, BlockSize: 4, DeviceTier: "GPU"},
@@ -148,4 +155,29 @@ func TestStrictSnapshotRejectsStoreWithoutEngineHashesBeforeIndexing(t *testing.
 	require.NoError(t, err)
 	require.Empty(t, entries[keys[0]])
 	require.Empty(t, pool.snapshotEntries)
+}
+
+func TestLiveOnlyGenerationCleanupPreservesOtherPublishers(t *testing.T) {
+	ctx := context.Background()
+	_, index, tokens := newTestPool(t, 4)
+	liveOnly, err := newGenerationPool(index, tokens, nil)
+	require.NoError(t, err)
+	snapshot, err := newGenerationPool(index, tokens, nil)
+	require.NoError(t, err)
+	snapshot.strict = true
+	events := &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{BlockHashes: []uint64{101}, Tokens: []uint32{1, 2, 3, 4}, BlockSize: 4, DeviceTier: "GPU"},
+		&BlockStoredEvent{BlockHashes: []uint64{102}, ParentHash: 101, Tokens: []uint32{5, 6, 7, 8}, BlockSize: 4, DeviceTier: "GPU"},
+	}}
+	require.NoError(t, liveOnly.processEventBatch(ctx, events, "generation-live", "model"))
+	require.NoError(t, snapshot.processEventBatch(ctx, events, "generation-snapshot", "model"))
+	require.NoError(t, liveOnly.clearSnapshotGeneration(ctx))
+
+	keys, err := tokens.TokensToKVBlockKeys(0, []uint32{1, 2, 3, 4, 5, 6, 7, 8}, "model", nil)
+	require.NoError(t, err)
+	entries, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	for _, key := range keys {
+		require.Equal(t, []kvblock.PodEntry{{PodIdentifier: "generation-snapshot", DeviceTier: "gpu"}}, entries[key])
+	}
 }

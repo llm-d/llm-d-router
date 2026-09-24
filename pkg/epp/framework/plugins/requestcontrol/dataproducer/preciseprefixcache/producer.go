@@ -268,6 +268,7 @@ type precisePrefixState struct {
 	MaxSubscribers          int      `json:"maxSubscribers"`
 	SnapshotRegistered      int      `json:"snapshotRegistered,omitempty"`
 	SnapshotReady           int      `json:"snapshotReady,omitempty"`
+	SnapshotLiveOnly        int      `json:"snapshotLiveOnly,omitempty"`
 	SnapshotRecovering      int      `json:"snapshotRecovering,omitempty"`
 	SnapshotStale           int      `json:"snapshotStale,omitempty"`
 	SpeculativeIndexing     bool     `json:"speculativeIndexing"`
@@ -309,6 +310,7 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 		MaxSubscribers:          maxDumpSubscribers,
 		SnapshotRegistered:      snapshotStatus.Registered,
 		SnapshotReady:           snapshotStatus.Ready,
+		SnapshotLiveOnly:        snapshotStatus.LiveOnly,
 		SnapshotRecovering:      snapshotStatus.Recovering,
 		SnapshotStale:           snapshotStatus.Stale,
 		SpeculativeIndexing:     p.speculativeEnabled,

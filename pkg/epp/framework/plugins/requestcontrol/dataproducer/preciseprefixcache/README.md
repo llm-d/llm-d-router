@@ -122,6 +122,16 @@ removes that publisher's cache affinity and triggers another snapshot request.
 Other publishers remain independently available. Endpoint deletion removes its
 snapshot state. Ordinary routing remains available during recovery.
 
+Snapshot recovery applies per publisher, only where the engine serves a
+snapshot endpoint. The first live frame decides: vLLM appends its 16-byte
+publisher identity to the sequence number, and heartbeats, only when
+`snapshot_endpoint` is set. A publisher with 8-byte sequence frames is indexed
+from live events alone, as without `snapshotPort`: its cache affinity is usable
+immediately, idle periods are allowed, and sequence gaps are not recovered. A
+change of frame format restarts the subscriber in the other mode, so engines and
+the router can be upgraded or rolled back in any order.
+`kv_cache_events_live_only_publishers` counts these publishers.
+
 GPU resets preserve CPU residency. Duplicate stores retain their reference
 counts, and tokenless offload events preserve every router block covered by an
 engine block. The prefix scorer retains its configured device-tier weights.
