@@ -448,6 +448,32 @@ if ! grep -q -- 'llm-d-router-proxy: proxy-svc-proxy' "${proxy_service_render_ou
   exit 1
 fi
 
+# Envoy must health-check EPP on its health port, which reports NOT_SERVING while EPP drains,
+# not on the ext_proc port, whose health service stays SERVING until the process exits.
+if ! grep -q -- 'port_value: 9003' "${proxy_service_render_output}"; then
+  echo "Proxy service mode does not health-check EPP on the grpc health port"
+  exit 1
+fi
+if ! grep -q -- 'transport_socket_match_criteria' "${proxy_service_render_output}"; then
+  echo "Proxy service mode health-checks the plaintext EPP health port over the ext_proc TLS socket"
+  exit 1
+fi
+
+echo "Verifying the ext_proc health check follows a custom EPP health port and plaintext serving..."
+health_port_output="${TEMP_DIR}/llm-d-router-standalone-health-port-render.yaml"
+health_port_command="${HELM} template hp ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false > ${health_port_output}"
+echo "Executing: ${health_port_command}"
+eval "${health_port_command}"
+health_port_count=$(grep -c -- 'port_value: 9100' "${health_port_output}")
+if [ "${health_port_count}" -ne 2 ]; then
+  echo "Priority routing rendered ${health_port_count} health checks on port 9100, expected one per EPP (2)"
+  exit 1
+fi
+if grep -q -- 'transport_socket_match_criteria' "${health_port_output}"; then
+  echo "Plaintext EPP still renders a plaintext health-check override"
+  exit 1
+fi
+
 echo "Verifying llm-d-router-standalone agentgateway in service mode reaches EPP over the Service..."
 agentgateway_service_mode_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-service-render.yaml"
 agentgateway_service_mode_command="${HELM} template ag-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace ag-ns --set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' > ${agentgateway_service_mode_output}"
