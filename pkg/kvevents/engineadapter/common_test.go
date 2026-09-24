@@ -47,17 +47,45 @@ func TestParseTopic_Plain(t *testing.T) {
 
 // TestGetHashAsUint64 tests hash format conversions.
 func TestGetHashAsUint64(t *testing.T) {
-	t.Run("uint64", func(t *testing.T) {
-		result, err := getHashAsUint64(uint64(42))
-		require.NoError(t, err)
-		assert.Equal(t, uint64(42), result)
-	})
+	positiveIntegers := []struct {
+		name string
+		raw  any
+		want uint64
+	}{
+		{name: "uint64", raw: uint64(42), want: 42},
+		{name: "uint32", raw: uint32(42), want: 42},
+		{name: "uint16", raw: uint16(42), want: 42},
+		{name: "uint8", raw: uint8(42), want: 42},
+		{name: "int64", raw: int64(42), want: 42},
+		{name: "int32", raw: int32(42), want: 42},
+		{name: "int16", raw: int16(42), want: 42},
+		{name: "int8", raw: int8(42), want: 42},
+	}
+	for _, tt := range positiveIntegers {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := getHashAsUint64(tt.raw)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, result)
+		})
+	}
 
-	t.Run("int64", func(t *testing.T) {
-		result, err := getHashAsUint64(int64(42))
-		require.NoError(t, err)
-		assert.Equal(t, uint64(42), result)
-	})
+	signedIntegers := []struct {
+		name string
+		raw  any
+		want uint64
+	}{
+		{name: "int64_negative", raw: int64(-1), want: ^uint64(0)},
+		{name: "int32_negative", raw: int32(-1), want: ^uint64(0)},
+		{name: "int16_negative", raw: int16(-1), want: ^uint64(0)},
+		{name: "int8_negative", raw: int8(-1), want: ^uint64(0)},
+	}
+	for _, tt := range signedIntegers {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := getHashAsUint64(tt.raw)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, result)
+		})
+	}
 
 	t.Run("bytes_8", func(t *testing.T) {
 		b := make([]byte, 8)
