@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -43,7 +44,13 @@ const (
 	// specPrefillTimeout bounds the background warm-up request so a slow or
 	// hung decoder cannot leak goroutines.
 	specPrefillTimeout = 30 * time.Second
+
+	// specPrefillMaxConcurrency keeps speculative prefill opportunistic: one
+	// warmup may run at a time, and additional warmups are skipped immediately.
+	specPrefillMaxConcurrency = 1
 )
+
+var specPrefillAdmission = make(chan struct{}, specPrefillMaxConcurrency)
 
 // speculativePrefillMiddleware wraps the chat-completions handler. When
 // speculative prefill is enabled and the request opts in via the
@@ -59,6 +66,13 @@ func (s *Server) speculativePrefillMiddleware(next http.HandlerFunc) http.Handle
 		}
 		// Router-only header: don't leak it to the model server.
 		r.Header.Del(routing.SpeculativePrefillHeader)
+		benchmarkValues := benchmarkLogValues(r)
+		release, ok := acquireSpeculativePrefillSlot()
+		if !ok {
+			s.logger.WithName("speculative-prefill").WithValues(benchmarkValues...).Info("skip speculative prefill: concurrency limit reached", "maxConcurrency", specPrefillMaxConcurrency)
+			next(w, r)
+			return
+		}
 
 		// Capture the P/D prefill target (set by EPP) before the downstream
 		// handler consumes it: in disaggregated mode the warmup must hit the
@@ -67,6 +81,7 @@ func (s *Server) speculativePrefillMiddleware(next http.HandlerFunc) http.Handle
 
 		raw, body, ok := s.readJSONBody(r, w)
 		if !ok {
+			release()
 			return
 		}
 		// Restore the body for the downstream handler, which reads it again.
@@ -77,11 +92,20 @@ func (s *Server) speculativePrefillMiddleware(next http.HandlerFunc) http.Handle
 
 		answer := accumulateAssistantText(tee.contentType(), tee.captured())
 		if answer == "" {
+			release()
 			return
 		}
 		// Detach from the request context so the warm-up survives the client
 		// connection closing after the turn completes.
-		go s.triggerSpeculativePrefill(context.WithoutCancel(r.Context()), body, answer, prefillHostPorts)
+		go s.triggerSpeculativePrefill(context.WithoutCancel(r.Context()), body, answer, prefillHostPorts, release, benchmarkValues)
+	}
+}
+
+func benchmarkLogValues(r *http.Request) []any {
+	return []any{
+		"benchmarkCase", r.Header.Get("X-Benchmark-Case"),
+		"benchmarkUser", r.Header.Get("X-Benchmark-User-ID"),
+		"benchmarkTurn", r.Header.Get("X-Benchmark-Turn"),
 	}
 }
 
@@ -98,8 +122,9 @@ func specPrefillRequested(r *http.Request) bool {
 // ends at the assistant answer, matching the cached portion the real next turn
 // will reuse. In P/D mode (prefillHostPorts set) the warmup targets the prefill
 // worker whose cache the next turn's prefill reuses; otherwise the local decoder.
-func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map[string]any, answer string, prefillHostPorts []string) {
-	logger := s.logger.WithName("speculative-prefill")
+func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map[string]any, answer string, prefillHostPorts []string, release func(), benchmarkValues []any) {
+	logger := s.logger.WithName("speculative-prefill").WithValues(benchmarkValues...)
+	defer release()
 
 	messages, err := requestMessages(originalBody)
 	if err != nil {
@@ -144,20 +169,42 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 	delete(prefillBody, requestFieldStreamOptions)
 	delete(prefillBody, requestFieldKVTransferParams)
 
+	// P/D: warm the prefill worker that served this turn (and that the next
+	// turn's prefill will reuse).
+	host := firstAllowedHostPort(s, prefillHostPorts)
+	logger.Info("start speculative prefill warmup", "messages", len(nextMessages), "answerChars", len(answer), "target", host, "viaPrefiller", host != "")
+	if host != "" && s.config.KVConnector == KVConnectorSGLang {
+		prefillBody = s.addSGLangBootstrapInfo(prefillBody, host, s.generateSGLangRoomID())
+	}
+
 	payload, err := json.Marshal(prefillBody)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("skip speculative prefill: cannot marshal body", "error", err)
 		return
 	}
 
-	// P/D: warm the prefill worker that served this turn (and that the next
-	// turn's prefill will reuse). Fall back to the local decoder in aggregated
-	// mode or when the target fails SSRF validation.
-	if host := firstAllowedHostPort(s, prefillHostPorts); host != "" {
+	// P/D normally warms only the selected prefill worker. SGLang bootstrap
+	// requires a matching decode peer, so it uses a paired P/D warmup.
+	if host != "" {
+		if s.config.KVConnector == KVConnectorSGLang {
+			s.sendPairedPDWarmup(ctx, logger, host, payload)
+			return
+		}
 		s.sendToPrefiller(ctx, logger, host, payload)
 		return
 	}
+	// Fall back to the local decoder in aggregated mode or when the target fails
+	// SSRF validation.
 	s.sendToDecoder(ctx, logger, payload)
+}
+
+func acquireSpeculativePrefillSlot() (func(), bool) {
+	select {
+	case specPrefillAdmission <- struct{}{}:
+		return func() { <-specPrefillAdmission }, true
+	default:
+		return nil, false
+	}
 }
 
 // firstAllowedHostPort returns the first prefill host:port that passes SSRF
@@ -197,6 +244,55 @@ func (s *Server) sendToPrefiller(ctx context.Context, logger logr.Logger, prefil
 	bw := &bufferedResponseWriter{}
 	handler.ServeHTTP(bw, req)
 	logger.V(logging.DEBUG).Info("speculative prefill warmed prefiller KV cache", "target", prefillHostPort, "status", bw.statusCode)
+}
+
+// sendPairedPDWarmup warms a disaggregated deployment by issuing a matched
+// prefill+decode pair with the same bootstrap room. Connectors that can warm a
+// prefiller without a decode peer should use sendToPrefiller instead.
+func (s *Server) sendPairedPDWarmup(ctx context.Context, logger logr.Logger, prefillHostPort string, payload []byte) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, specPrefillTimeout)
+	defer cancel()
+
+	prefillHandler, err := s.prefillerProxyHandler(prefillHostPort)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("speculative prefill: prefiller handler failed", "target", prefillHostPort, "error", err)
+		return
+	}
+
+	prefillReq, err := http.NewRequestWithContext(context.WithoutCancel(ctx), http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(payload))
+	if err != nil {
+		logger.V(logging.DEBUG).Info("speculative prefill: prefiller request build failed", "error", err)
+		return
+	}
+	prefillReq.Header.Set("Content-Type", "application/json")
+
+	decodeReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(payload))
+	if err != nil {
+		logger.V(logging.DEBUG).Info("speculative prefill: decoder request build failed", "error", err)
+		return
+	}
+	decodeReq.Header.Set("Content-Type", "application/json")
+
+	prefillWriter := &bufferedResponseWriter{}
+	decodeWriter := &bufferedResponseWriter{}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		prefillHandler.ServeHTTP(prefillWriter, prefillReq)
+	}()
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	wg.Wait()
+
+	if prefillWriter.statusCode >= http.StatusBadRequest {
+		logger.V(logging.DEBUG).Info("speculative prefill prefiller returned error", "target", prefillHostPort, "status", prefillWriter.statusCode)
+	}
+	if decodeWriter.statusCode >= http.StatusBadRequest {
+		logger.V(logging.DEBUG).Info("speculative prefill decoder returned error", "status", decodeWriter.statusCode)
+	}
+	logger.Info("speculative prefill warmed P/D KV cache", "target", prefillHostPort, "prefillStatus", prefillWriter.statusCode, "decodeStatus", decodeWriter.statusCode, "duration", time.Since(started).String(), "payloadBytes", len(payload))
 }
 
 // sendToDecoder posts the warm-up request to the local decoder and drains the
