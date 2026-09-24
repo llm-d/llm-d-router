@@ -195,11 +195,8 @@ func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
 }
 
-// TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields locks in
-// that a /v1/responses request with no prefill header, no encoder header,
-// and no P2P/data-parallel/chunked-decode routing (i.e. the plain decoder
-// passthrough) is refused for an unsupported stateful field, the same as
-// every other routing branch.
+// The plain decoder passthrough: no prefill, encoder, P2P or data-parallel
+// header, so nothing downstream reads the body.
 func TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
@@ -218,12 +215,8 @@ func TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields(t *testing.
 	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
-// TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields locks in
-// that a /v1/responses request routed by the (deprecated)
-// x-data-parallel-host-port header is refused for an unsupported stateful
-// field. dataParallelHandler forwards straight to another rank's decoder
-// proxy and never reads the body itself, so it depends entirely on
-// disaggregatedPrefillHandler refusing the request before calling it.
+// dataParallelHandler forwards straight to another rank and never reads the
+// body, so it depends entirely on the caller having refused the request.
 func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
@@ -245,11 +238,7 @@ func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing
 	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
-// TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields locks in that
-// a /v1/responses request carrying a KV cache source header, routed through
-// decodeWithP2PSource, is refused for an unsupported stateful field.
-// decodeWithP2PSource reads the body itself via readJSONBody, independently
-// of the check disaggregatedPrefillHandler already applied on this path.
+// decodeWithP2PSource reads the body itself, so this path checks twice.
 func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}
@@ -269,10 +258,8 @@ func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T)
 	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
-// TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody locks in
-// that the decoder-only passthrough's read of the body to check for stateful
-// fields fails closed: a client that drops the connection mid-body is
-// refused before dataParallelHandler or the decoder proxy ever runs.
+// The added body read fails closed: a client that drops the connection
+// mid-body is refused rather than forwarded unchecked.
 func TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}

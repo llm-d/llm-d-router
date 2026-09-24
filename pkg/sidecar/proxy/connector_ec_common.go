@@ -36,27 +36,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// mmTypeInputImage is the Responses spelling of an image content part. It
+// carries its URL as a bare string and its options as siblings, where the
+// chat-completions image_url nests both under one object.
+const mmTypeInputImage = "input_image"
+
 // Multimodal content types that need encoder processing. extractMMItems gates
-// each type on the request shape that defines it: the *_url types on chat
-// completions, input_image on Responses. input_audio is ungated because both
-// shapes define it with the same inline payload.
+// most of them on apiType; input_audio is inline on both APIs and needs none.
 var mmTypes = map[string]bool{
-	"image_url":   true,
-	"audio_url":   true,
-	"video_url":   true,
-	"input_audio": true,
-	"input_image": true,
+	"image_url":      true,
+	"audio_url":      true,
+	"video_url":      true,
+	"input_audio":    true,
+	mmTypeInputImage: true,
 }
 
-// requestInput returns the request's Responses input items, decoded the
-// same way requestMessages decodes messages. A bare JSON string (a single
-// text turn) and an explicit JSON null both yield a nil slice and no error,
-// the same as an absent field.
-//
-// Unlike requestMessages there is no []json.RawMessage case: input is absent
-// from inspectedRequestFields, so decodeRequestBody always leaves it raw, and
-// the chunked-decode path that caches a decoded slice under messages is gated
-// to chat completions.
+// requestInput returns the request's Responses input items. A bare JSON string
+// (a single text turn) and an explicit null both yield a nil slice and no
+// error, the same as an absent field. Nothing writes a decoded slice under
+// input, so unlike requestMessages there is no []json.RawMessage case.
 func requestInput(req map[string]any) ([]json.RawMessage, error) {
 	switch v := req[requestFieldInput].(type) {
 	case nil:
@@ -122,11 +120,12 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		return items
 	}
 
-	// Elements and parts that cannot carry multimodal content are skipped
-	// silently: a non-object element, a string content field (the ordinary
-	// text-only turn, which would log on nearly every request), and a part
-	// with no string type. A part whose type is multimodal but unusable logs
-	// instead.
+	// Anything that cannot carry multimodal content is skipped silently; the
+	// ordinary text-only turn would otherwise log on nearly every request. A
+	// part whose type is multimodal but unusable is counted instead: it is
+	// never primed, and because dropped parts never reach the caller's item
+	// count, the ec-nixl partial-coverage warning cannot report them.
+	dropped := 0
 	for _, raw := range wrapped {
 		var itemMap map[string]any
 		if err := json.Unmarshal(raw, &itemMap); err != nil {
@@ -154,23 +153,26 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			// request. The *_url types nest the URL under a same-named
 			// object, which the Responses schema does not define.
 			switch partType {
-			case "input_image":
+			case mmTypeInputImage:
 				if apiType != reqcommon.APITypeResponses {
 					logger.V(logging.DEBUG).Info("skipping content part the request's API does not define", "type", partType, "apiType", apiType)
+					dropped++
 					continue
 				}
 				if mmItemURL(partMap) == "" {
 					// input_image carries its URL as a bare string. Anything
 					// else, including chat's nested object, leaves nothing the
-					// encoder can fetch. A part referencing a file_id never
-					// reaches here: RejectStatefulResponsesFields refuses the
-					// request first.
+					// encoder can fetch. A file_id nested under image_url
+					// reaches here too: RejectStatefulResponsesFields only
+					// refuses a file_id set directly on the part.
 					logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL")
+					dropped++
 					continue
 				}
 			case "image_url", "audio_url", "video_url":
 				if apiType == reqcommon.APITypeResponses {
 					logger.V(logging.DEBUG).Info("skipping content part the request's API does not define", "type", partType, "apiType", apiType)
+					dropped++
 					continue
 				}
 			}
@@ -181,21 +183,25 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		}
 	}
 
+	if dropped > 0 {
+		logger.Info("skipped multimodal content parts the encoder cannot be primed with",
+			"count", dropped, "extracted", len(items), "apiType", apiType)
+	}
+
 	return items
 }
 
 // buildEncoderRequest builds a per-item encoder request from scratch: model
 // plus a single synthetic message wrapping mmItem, capped to one output
-// token with streaming disabled. It does not copy the client's request: a
-// client field with an incompatible schema on the encoder's own API (e.g.
-// chat completions' tools) would otherwise reach it as-is. The encoder is
-// addressed as Responses when the original request is Responses, so a
-// Responses input_image part (bare-string URL, sibling detail field) is
-// forwarded unmodified rather than reshaped into chat completions'
-// image_url nesting, which vLLM's chat-completions engine ignores detail
-// on. A Responses encoder request sets store to false: vLLM defaults an
-// absent store to true, and nothing ever reads or reaps the response object
-// that a stored per-item priming request would leave behind.
+// token. It does not copy the client's request: a client field with an
+// incompatible schema on the encoder's own API (chat completions' tools, say)
+// would otherwise reach it as-is.
+//
+// The encoder is addressed with the client's own API so an input_image part is
+// forwarded unmodified rather than reshaped into chat completions' image_url
+// nesting. A Responses encoder request pins store to false, since vLLM
+// defaults an absent store to true and nothing reaps the response object a
+// stored priming request leaves behind.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any, apiType reqcommon.APIType) map[string]any {
 	if apiType != reqcommon.APITypeResponses {
 		apiType = reqcommon.APITypeChatCompletions
@@ -231,7 +237,7 @@ func mmItemURL(item map[string]any) string {
 				return u
 			}
 		}
-	case "input_image":
+	case mmTypeInputImage:
 		if u, ok := item["image_url"].(string); ok {
 			return u
 		}
@@ -239,11 +245,29 @@ func mmItemURL(item map[string]any) string {
 	return ""
 }
 
+// mmItemDedupKey returns the key identifying the encoder work a URL-bearing
+// item implies. url is the item's already-resolved mmItemURL.
+//
+// An input_image keys on the whole item: options such as detail sit beside
+// image_url and reach the encoder, so one URL at two detail levels is two
+// distinct inputs. The *_url types nest their options inside the URL object,
+// which vLLM's chat-completions engine reads only the url from, so the URL
+// alone identifies the work and any sibling a client adds must not split the
+// key. json.Marshal is canonical because encoding/json sorts map keys at
+// every depth.
+func mmItemDedupKey(item map[string]any, url string) (string, error) {
+	if itemType, _ := item["type"].(string); itemType != mmTypeInputImage {
+		return url, nil
+	}
+	key, err := json.Marshal(item)
+	return string(key), err
+}
+
 // mmItemsForFanout extracts the multimodal items from a request body and
-// deduplicates the URL-bearing ones. Items carrying inline data are kept
-// verbatim: identical payloads are cheap to compare but the encoder treats
-// each as its own input. Returns nil when there is no multimodal content.
-// The caller should skip the encoder stage in that case.
+// deduplicates the URL-bearing ones. Items with no fetchable URL (inline
+// audio) skip the dedup, since mmItemURL yields nothing to key them on.
+// Returns nil when there is no multimodal content. The caller should skip
+// the encoder stage in that case.
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
 	raw := extractMMItems(s.logger, originalRequest, apiType)
 	if len(raw) == 0 {
@@ -257,22 +281,17 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 			items = append(items, item)
 			continue
 		}
-		// Two parts are one encoder request only when every field matches, not
-		// merely the URL: detail selects the resolution the encoder processes,
-		// so one URL at two detail levels is two distinct embeddings. Marshal
-		// is the canonical key because encoding/json sorts map keys at every
-		// depth.
-		key, err := json.Marshal(item)
+		key, err := mmItemDedupKey(item, url)
 		if err != nil {
 			s.logger.V(logging.DEBUG).Info("cannot key multimodal item, keeping it", "error", err, "url", url, "requestID", requestID)
 			items = append(items, item)
 			continue
 		}
-		if _, dup := seen[string(key)]; dup {
+		if _, dup := seen[key]; dup {
 			s.logger.V(logging.DEBUG).Info("skipping duplicate multimodal item", "url", url, "requestID", requestID)
 			continue
 		}
-		seen[string(key)] = struct{}{}
+		seen[key] = struct{}{}
 		items = append(items, item)
 	}
 	return items
@@ -287,8 +306,7 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 //
 // The first goroutine to fail cancels the group context so sibling encoder
 // requests are aborted at the transport layer. Every failure is logged before
-// propagating. errgroup records that first error before cancelling, so
-// grp.Wait returns the root cause rather than a sibling's context.Canceled.
+// propagating; grp.Wait returns the first non-nil error.
 func (s *Server) fanoutEncoder(
 	ctx context.Context,
 	originalRequest map[string]any,

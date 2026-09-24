@@ -458,12 +458,10 @@ var _ = Describe("Unreadable request body", func() {
 	)
 })
 
-// The stateful-Responses guard lives in readJSONBody, which every entry point
-// calls before it dispatches anything, so no path has to remember the check
-// itself. This table pins that: each entry point refuses the request and
-// reaches neither the prefill nor the decode upstream. Both upstreams here
-// record a dispatch instead of failing to dial, so a guard that stops running
-// shows up as a dispatched request rather than a connection error.
+// Each entry point refuses a stateful Responses request and reaches neither
+// the prefill nor the decode upstream. The dispatch assertion comes first: a
+// handler that forwards the request and only then answers 400 satisfies the
+// status assertions on their own.
 var _ = Describe("Stateful Responses fields", func() {
 	DescribeTable("are refused before any upstream is dispatched",
 		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request, string)) {
@@ -478,10 +476,18 @@ var _ = Describe("Stateful Responses fields", func() {
 			upstreamURL, err := url.Parse(upstream.URL)
 			Expect(err).ToNot(HaveOccurred())
 
+			// A guard that stops running must surface as a recorded dispatch,
+			// not a nil deref or a dial failure: the decode spans read
+			// DecoderURL, and handleMooncake queries a bootstrap endpoint on
+			// MooncakeBootstrapPort before it dispatches.
 			config.DecoderURL = upstreamURL
+			config.MooncakeBootstrapPort, err = strconv.Atoi(upstreamURL.Port())
+			Expect(err).ToNot(HaveOccurred())
+
 			proxy := NewProxy(config)
-			proxy.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			proxy.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				dispatched.Store(true)
+				w.WriteHeader(http.StatusOK)
 			})
 
 			w := httptest.NewRecorder()
@@ -489,9 +495,9 @@ var _ = Describe("Stateful Responses fields", func() {
 
 			handle(proxy, w, r, upstreamURL.Host)
 
+			Expect(dispatched.Load()).To(BeFalse(), "request reached an upstream despite an unsupported field")
 			Expect(w.Code).To(Equal(http.StatusBadRequest))
 			Expect(expectErrorEnvelope(w.Body.Bytes())).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
-			Expect(dispatched.Load()).To(BeFalse(), "request reached an upstream despite an unsupported field")
 		},
 		Entry("nixlv2", Config{Port: "0", KVConnector: KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
@@ -509,8 +515,6 @@ var _ = Describe("Stateful Responses fields", func() {
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleP2P(w, r, upstream, "", reqcommon.APITypeResponses)
 			}),
-		// handleSGLang takes no API type: it reads the path off the request,
-		// which is what the guard keys on too.
 		Entry("sglang", Config{Port: "0", KVConnector: KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleSGLang(w, r, upstream)

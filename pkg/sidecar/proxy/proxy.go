@@ -65,15 +65,9 @@ const (
 	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
 	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
 	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
-	// requestFieldInput is the Responses API's analog of requestFieldMessages
-	// for chat completions.
-	requestFieldInput = reqcommon.FieldInput
-
-	// requestFieldStore names the Responses field that buildEncoderRequest
-	// pins to false on the synthetic encoder request it builds. The field is
-	// never read off the client's request.
-	requestFieldStore = "store"
-	requestFieldModel = "model"
+	requestFieldInput                = reqcommon.FieldInput
+	requestFieldStore                = "store"
+	requestFieldModel                = "model"
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).

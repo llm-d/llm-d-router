@@ -276,7 +276,10 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	}
 	if r.URL.Path == reqcommon.PathResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
-			s.logger.V(logging.DEBUG).Info("rejecting unsupported responses field", "error", err)
+			// The router refuses a request vLLM would have accepted, so the
+			// refusal is the only record that the client's own error was not
+			// the model server's. Once per refused request.
+			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
 			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 				s.logger.Error(writeErr, "failed to send error response to client")
 			}
